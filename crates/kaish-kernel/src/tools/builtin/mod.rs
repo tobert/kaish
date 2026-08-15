@@ -122,19 +122,11 @@ use super::ToolRegistry;
 /// here. Shared by grep/glob `--ftype`/`--ftype-not`; mirrors sed's
 /// `collect_expressions` (see the repeatable-flag gotcha in `arch_repeatable_flags`).
 ///
-/// A non-string occurrence is a loud error, never a silent skip: the array
-/// arm's original `filter_map(v.as_str())` dropped one, and a filter that
-/// vanishes leaves the caller running unfiltered against real data — the
-/// caller believes it narrowed the search and it did not.
-///
-/// Binary never gets this far. It used to (GH #116): `push_repeatable_value`
-/// ran every value through `value_to_json`, which encodes a `Value::Bytes` as
-/// the base64 envelope, so this arm sniffed the JSON for that envelope shape to
-/// catch it. `flag_value_to_json` now stops binary at the binder (GH #223),
-/// which is both earlier and the only layer that can tell real bytes from a
-/// record that merely looks like the envelope. The sniff went with it: it could
-/// no longer fire on binary, and all it had left to do was misreport a
-/// user-built `{"_type":"bytes",…}` record as "binary data".
+/// A non-string occurrence is a loud error, never a silent skip — a dropped
+/// filter leaves the caller running unfiltered while believing it narrowed the
+/// search. Binary never reaches here: `flag_value_to_json` stops it at the
+/// binder (GH #223), which is the only layer that can tell real bytes from a
+/// record that merely looks like the envelope.
 pub(crate) fn read_repeatable_strings(
     args: &super::ToolArgs,
     key: &str,

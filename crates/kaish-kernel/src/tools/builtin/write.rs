@@ -109,16 +109,11 @@ impl Tool for Write {
         } else if let Some(v) = args.positional.get(1) {
             value_to_bytes(v)
         } else {
-            // Zero bytes only means "write an empty file" when something
-            // deliberately supplied them. An upstream stage did (`printf '' |
-            // write f`), and so did a redirect or an embedder-supplied buffer
-            // (`write f < empty`, `ExecuteOptions::with_stdin`) — those are
-            // truncate requests and stay exit 0. The session's own stdin did
-            // not: `write f` with the process reading from /dev/null or a
-            // closed fd is a missing operand, and treating it as empty content
-            // truncates the file and reports success. Capture which case this
-            // is BEFORE reading, since the read consumes the buffer that tells
-            // them apart.
+            // Zero bytes mean "write an empty file" only when something
+            // deliberately supplied them — an upstream stage, a redirect, an
+            // embedder buffer. The session's own stdin did not: `write f`
+            // reading from /dev/null is a missing operand, and writing it
+            // destroys the file it was pointed at.
             let content_was_offered = ctx.stdin.is_some()
                 || ctx.pipeline_position != crate::dispatch::PipelinePosition::Only;
             match ctx.read_stdin_to_bytes().await {

@@ -29,37 +29,21 @@ breaking entries are marked **BREAKING**.
   and an embedder's `ExecuteOptions::with_stdin(vec![])` are truncate requests.
   Interactive sessions were never affected — stdin is a TTY, so no pipe is
   bridged and the refusal already fired.
-- **A binary value bound to an accumulating flag exits 1 instead of binding the
-  base64 envelope as text** — `jq -n --arg x $bin '$x'` used to exit 0 with `$x`
-  set to the literal `{"_type":"bytes",…}` JSON, which looks like data and
-  reports success. Same wording and exit code as `printf`: decode with
-  base64/xxd, or redirect to a file. Covers `--arg`/`--argjson` (both operands)
-  and repeatable flags like `sed -e`, whose exit-2 error used to quote the
-  envelope back — the move to exit 1 is a deliberate correction to the fleet-wide
-  code, not a compatibility break, since exit 2 was only ever reachable through
-  the leak. An envelope-shaped record the user built stays a plain record: the
-  gate reads the value's type, never the JSON's shape.
+- **`write` with no stdin and no content operand errors instead of truncating the
+  file to zero bytes** — a missing operand destroyed an existing file and exited
+  0, and `set -o trash` did not cover it. An empty pipe or redirect still
+  truncates: that is an explicit request, a missing operand is not.
+- **A binary value bound to an accumulating flag exits 1 instead of binding its
+  base64 envelope as text** — `jq --arg`/`--argjson` and repeatable flags like
+  `sed -e` used to bind `{"_type":"bytes",…}` as data. Same message and code as
+  `printf`: decode with base64/xxd, or redirect to a file.
 - **`grep --ftype`, `awk -v`, and `env -u` no longer call an envelope-shaped
-  record "binary data"** — they sniffed repeatable flag values for the
-  `{"_type":"bytes",…}` shape, which the type gate above supersedes for real
-  bytes and which could only misclassify a record the user built. A non-string
-  value in those flags is now a loud type error rather than a silently dropped
+  record "binary data"** — they sniffed the JSON shape, which the type gate
+  above supersedes; a non-string value there is now a loud error, not a dropped
   filter.
-- **A failed stdin pipe read is an error instead of "no stdin"** — the
-  read-to-end path discarded the I/O error along with the bytes already read, so
-  a stream that died halfway reached the builtin as empty input; `read` already
-  reported that same failure from that same pipe.
-- **An assignment with no command name takes the exit status of the last
-  command substitution in its value, or 0 if there was none** (bash's rule,
-  re-probed) — the status used to be swallowed, so `x="$(cmd)" || x="FALLBACK"`
-  could never fire, `set -e` never tripped on a failed substitution, and
-  `false; x=5` left `$?` stale at 1. Applies to `local` assignments too:
-  kaish propagates the status where bash's `local` masks it.
-- **`if`/`while`/`for`/`case` set `$?` to 0 when no body statement runs** —
-  they used to leave the previous statement's status standing, so
-  `for f in $(grep pat file); do …; done` with no matches left `$?` at grep's
-  1 and a later `$?` read a failure that never happened. Only `$?` saw it:
-  `||` and `set -e` always read the statement's own result, which was correct.
+- **A failed stdin pipe read is an error instead of "no stdin"** — the read path
+  discarded the I/O error along with the bytes already read, so a stream that
+  died halfway arrived as empty input.
 
 ## [0.14.1] - 2026-08-14
 
