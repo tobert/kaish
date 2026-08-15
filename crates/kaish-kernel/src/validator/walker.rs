@@ -674,10 +674,11 @@ pub(crate) fn classify_command_name(
 
 /// Check if a command is a special built-in that we don't validate.
 fn is_special_command(name: &str) -> bool {
-    // `test`/`[`/`[[` are intentionally absent: `test` is a real builtin now
-    // (it validates via the registry like any other), and `[`/`[[` parse as
-    // `[[ … ]]` test expressions, never reaching here as a command name.
-    matches!(name, "true" | "false" | ":" | "readonly" | "local")
+    // `test`/`[`/`[[`/`:` are intentionally absent: `test` and `:` are real
+    // builtins now (they validate via the registry like any other), and
+    // `[`/`[[` parse as `[[ … ]]` test expressions, never reaching here as a
+    // command name.
+    matches!(name, "true" | "false" | "readonly" | "local")
 }
 
 /// Build ToolArgs from AST Args for validation purposes.

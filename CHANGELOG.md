@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`:` is the null command** — does nothing, exits 0, another spelling of
+  `true`, for the places a statement is required and none is wanted
+  (`if …; then :; fi`, `: > file`). It was already the literal `":"` in
+  argument position (`awk -F:`), so only the command-name position changed;
+  inside brackets and braces the colon stays structural.
+
 ### Fixed
 - **An assignment with no command name takes the exit status of the last
   command substitution in its value, or 0 if there was none** (bash's rule,

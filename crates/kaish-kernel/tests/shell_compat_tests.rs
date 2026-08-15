@@ -122,6 +122,62 @@ shell_compat! {
     eq: "exit code: 1",
 }
 
+// ---- `:` — the null command -----------------------------------------------
+// `:` does nothing and exits 0: another spelling of `true`. The two differ in
+// bash only under `set -o posix` (special- vs regular-builtin rules), and
+// kaish has neither a POSIX mode nor a special-builtin class, so every row
+// here agrees with bash.
+
+shell_compat! {
+    name: colon_exits_zero,
+    script: ": ; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_ignores_its_arguments,
+    script: ": one two three; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_stands_in_for_an_empty_branch,
+    script: "if false; then echo taken; else :; fi; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_stands_in_for_an_empty_loop_body,
+    script: "for i in a b; do :; done; echo done",
+    eq: "done",
+}
+
+shell_compat! {
+    name: colon_stands_in_for_an_empty_function_body,
+    script: "f() { :; }; f; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_runs_the_and_chain,
+    script: ": && echo AND",
+    eq: "AND",
+}
+
+// The colon stays an ordinary character everywhere a command name is not
+// expected — no quoting needed for `host:port`, `a:b`, or `awk -F:`.
+shell_compat! {
+    name: colon_inside_a_word_is_not_a_command,
+    script: "echo a:b",
+    eq: "a:b",
+}
+
+shell_compat! {
+    name: colon_in_an_assignment_value_is_not_a_command,
+    script: "x=host:8080; echo $x",
+    eq: "host:8080",
+}
+
 // ---- Command substitution -------------------------------------------------
 
 shell_compat! {

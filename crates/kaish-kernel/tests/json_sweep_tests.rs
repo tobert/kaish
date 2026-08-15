@@ -75,6 +75,8 @@ const SKIPS: &[Skip] = &[
 ];
 
 const CASES: &[Case] = &[
+    // The null command, like `true`: no output surface, so `--json` is empty.
+    Case { name: ":", setup: &[], cmd: ": --json", expect: Expect::Empty },
     Case { name: "alias", setup: &["alias g=grep"], cmd: "alias --json", expect: Expect::Array },
     Case { name: "assert", setup: &[], cmd: "assert 1 --json", expect: Expect::Empty },
     Case { name: "awk", setup: &[], cmd: r#"printf 'a b\nc d\n' | awk '{print $1}' --json"#, expect: Expect::String },
