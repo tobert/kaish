@@ -109,6 +109,17 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   review; `/code-review` on the diff or another agent/model also works. A few
   tokens on review goes a long way (this is what we ask outside contributors to do
   too; see README "Contributing").
+- **Merging to `main` is Amy's word, and an agent asks every time.** Default:
+  open the PR, get it reviewed, address the review, report it ready — then stop.
+  Amy reads the PR herself; that reading is the point of the gate, and a green
+  review is evidence for her decision, not a substitute for it. She may hand out
+  a merge word for a named piece of work ("fix x, y, z and merge when the kaibo
+  review is done and addressed") — that word is **ephemeral**: it covers the PRs
+  she named, and it expires with them. Never carry it to the next PR, and never
+  infer one from a clean review, a green CI, or a clearance given before.
+  Irreversible and outward-facing steps — `git tag` pushes, `cargo publish`,
+  release pages, anything posted to a repo we don't own — each need their own
+  word; a merge word does not cover them.
 - **PRs land as merge commits that use the PR title and body** — the convention is
   a merge commit (`gh pr merge --merge`), not squash or rebase, with the merge
   commit's subject and body kept as the PR title/body so the decisions captured in
