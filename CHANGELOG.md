@@ -24,6 +24,11 @@ breaking entries are marked **BREAKING**.
   could never fire, `set -e` never tripped on a failed substitution, and
   `false; x=5` left `$?` stale at 1. Applies to `local` assignments too:
   kaish propagates the status where bash's `local` masks it.
+- **`if`/`while`/`for`/`case` set `$?` to 0 when no body statement runs** —
+  they used to leave the previous statement's status standing, so
+  `for f in $(grep pat file); do …; done` with no matches left `$?` at grep's
+  1 and a later `$?` read a failure that never happened. Only `$?` saw it:
+  `||` and `set -e` always read the statement's own result, which was correct.
 
 ## [0.14.1] - 2026-08-14
 
