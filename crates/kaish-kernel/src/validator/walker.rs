@@ -24,37 +24,14 @@ pub struct Validator<'a> {
     registry: &'a ToolRegistry,
     /// User-defined tools.
     user_tools: &'a HashMap<String, ToolDef>,
-    /// The kernel's name-sorted schema catalog (GH #48/#254/#256). Empty when
-    /// the caller has none to offer (e.g. a standalone validation pass); a
-    /// binary-search miss falls back to `tool.schema()`, so an empty catalog
-    /// degrades to the pre-#256 behavior rather than failing.
-    ///
-    /// A correct hit leans on one invariant: `tool.name() == tool.schema().name`
-    /// for every registered tool — `ToolRegistry::register` keys the registry
-    /// by `tool.name()`, `ToolRegistry::schemas()` sorts the catalog by
-    /// `schema.name`, and nothing enforces the two agree, so a tool that
-    /// violated it would hand `validate_command` a different tool's schema
-    /// under its own name.
-    ///
-    /// Two distinct failure shapes, and only one is harmless:
-    /// - **Unsorted catalog**: `binary_search_by` only ever returns `Ok(i)`
-    ///   when `catalog[i]` compares equal to the name being searched for, so
-    ///   an out-of-order catalog can only produce a false *miss* — safe,
-    ///   because a miss falls back to `tool.schema()`.
-    /// - **Stale catalog**: an entry with the *right* name but out-of-date
-    ///   content (built before a tool was reconfigured, say) is a hit, and a
-    ///   hit is exactly what skips the `tool.schema()` fallback — so
-    ///   staleness is not self-correcting the way disorder is.
-    ///
-    /// The kernel is safe from both by construction, not by luck: the tool
-    /// registry (`self.tools` in `kernel.rs`) is private and frozen — built
-    /// once in `Kernel::assemble`, wrapped in an `Arc`, never mutated again —
-    /// before `exec_ctx.set_tool_schemas(tools.schemas())` snapshots it, so
-    /// there is no window where a tool could be added, removed, or replaced
-    /// after the catalog was taken from the same registry. The residual risk
-    /// is a standalone embedder who builds their own `ExecContext`, calls
-    /// `set_tool_schemas` with a hand-built catalog, and then mutates their
-    /// own registry afterward — nothing in this type stops that.
+    /// The kernel's name-sorted schema catalog (GH #256); `&[]` when there is
+    /// none. `binary_search_by` returns `Ok` only on an equal compare, so an
+    /// empty or unsorted catalog can only miss — and a miss falls back to
+    /// `tool.schema()`. A *stale* entry is different: it has the right name, so
+    /// it hits, and a hit is what skips the fallback. The kernel cannot go
+    /// stale — the registry is frozen before `set_tool_schemas` snapshots it —
+    /// but an embedder hand-building a catalog can. A hit also assumes
+    /// `tool.name() == tool.schema().name`, which nothing enforces.
     catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,

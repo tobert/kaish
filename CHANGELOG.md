@@ -18,14 +18,10 @@ breaking entries are marked **BREAKING**.
   inside brackets and braces the colon stays structural.
 
 ### Changed
-- **BREAKING (embedders):** `validator::Validator::new` takes a third
-  parameter, `catalog: &[ToolSchema]` (GH #256) — the validator now reads a
-  tool's schema from the kernel's name-sorted catalog instead of always
-  rebuilding it via `tool.schema()`, matching what dispatch already does
-  (GH #48/#254). Any embedder calling `Validator::new(&registry, &user_tools)`
-  directly stops compiling; pass the kernel's `ExecContext.tool_schemas` (or
-  `&[]` to keep the old always-rebuild behavior, e.g. for a standalone
-  validation pass with no catalog on hand).
+- **BREAKING (embedders):** `validator::Validator::new` takes a third argument,
+  `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
+  catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
+  `&[]` to keep the old behavior.
 
 ### Fixed
 - **An assignment with no command name takes the exit status of the last
