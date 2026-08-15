@@ -307,10 +307,14 @@ impl Filesystem for LocalFs {
         self.check_writable()?;
         let full_path = self.resolve(path)?;
         // `set_modified` calls futimens(2) on the fd. Run it on the blocking
-        // pool — std file I/O must not occupy an async worker. We open with
-        // write access because that is what POSIX touch-to-update requires.
+        // pool — std file I/O must not occupy an async worker. Open read-only:
+        // `.write(true)` fails to open a directory at all (EISDIR) before
+        // futimens ever runs, which broke `touch <dir>`. A read-only fd is
+        // sufficient for futimens with explicit times — the kernel checks file
+        // ownership/CAP_FOWNER, not the fd's access mode — and it opens both
+        // regular files and directories, matching GNU `touch <dir>`.
         tokio::task::spawn_blocking(move || {
-            let file = std::fs::OpenOptions::new().write(true).open(&full_path)?;
+            let file = std::fs::OpenOptions::new().read(true).open(&full_path)?;
             file.set_modified(mtime)
         })
         .await
