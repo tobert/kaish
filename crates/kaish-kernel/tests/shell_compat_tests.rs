@@ -313,6 +313,71 @@ shell_compat! {
     eq: "reached",
 }
 
+// ---- A compound statement writes `$?` even when it runs no body -----------
+// `if`/`while`/`for`/`case` are commands: each exits 0 when no body statement
+// ran, and the previous statement's status must not survive it. The stale
+// status was invisible in the statement's own result — `||` never fired and
+// `set -e` never tripped — so only `$?` could see it, which is exactly the
+// failure that does not announce itself. `$(printf '')` is the empty-list
+// source: deterministic, and no host path baked in.
+
+shell_compat! {
+    name: if_with_no_branch_taken_clears_stale_status,
+    script: "false; if false; then true; fi; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: while_with_zero_iterations_clears_stale_status,
+    script: "false; while false; do true; done; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: for_with_zero_iterations_clears_stale_status,
+    script: "false; for i in $(printf ''); do true; done; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: case_with_no_matching_branch_clears_stale_status,
+    script: "false; case a in b) true;; esac; echo $?",
+    eq: "0",
+}
+
+// `break` on the first iteration runs no body statement either.
+shell_compat! {
+    name: while_broken_on_first_iteration_clears_stale_status,
+    script: "false; while true; do break; done; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: for_broken_on_first_iteration_clears_stale_status,
+    script: "false; for i in a; do break; done; echo $?",
+    eq: "0",
+}
+
+// The other direction: a body that DID run still decides the status, so the
+// fix cannot be "compound statements are always 0".
+shell_compat! {
+    name: if_else_branch_status_survives,
+    script: "if false; then true; else false; fi; echo $?",
+    eq: "1",
+}
+
+shell_compat! {
+    name: for_body_status_survives,
+    script: "for i in a; do false; done; echo $?",
+    eq: "1",
+}
+
+shell_compat! {
+    name: case_matched_branch_status_survives,
+    script: "case a in a) false;; esac; echo $?",
+    eq: "1",
+}
+
 shell_compat! {
     name: cmd_subst_in_string,
     script: r#"echo "inner: $(echo nested)""#,
