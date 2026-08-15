@@ -225,6 +225,61 @@ shell_compat! {
     eq: "x=FALLBACK",
 }
 
+// `export x=$(false)` is a command named `export`, so it takes `export`'s
+// status, not the substitution's — the bash behavior SC2155 warns about, and
+// the counterweight to the `local` divergence in shell_bugs_tests.rs. Only a
+// BARE assignment consumes the substitution's status.
+shell_compat! {
+    name: export_assignment_takes_command_status,
+    script: "export x=$(false); echo $?",
+    eq: "0",
+}
+
+// A substitution body's own last statement decides the outer status, so
+// "outer wins" is not "outer is always 0" — these two rows differ only in the
+// body's final statement.
+shell_compat! {
+    name: assignment_subst_body_outer_statement_wins,
+    script: r#"x="$(y=$(false); true)"; echo $?"#,
+    eq: "0",
+}
+
+shell_compat! {
+    name: assignment_subst_body_failing_last_statement_wins,
+    script: r#"x="$(y=$(false); false)"; echo $?"#,
+    eq: "1",
+}
+
+// A substitution outside an assignment must not reach the next assignment's
+// status: `x=5` has no substitution of its own, so it is 0 whatever ran
+// before it.
+shell_compat! {
+    name: bare_subst_does_not_leak_into_later_assignment,
+    script: "echo $(false); x=5; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: pipeline_subst_does_not_leak_into_later_assignment,
+    script: r#"echo "$(false)" | cat; x=5; echo $?"#,
+    eq: "0",
+}
+
+// Substitutions in a word evaluate left to right and each one updates `$?`
+// as it completes, so a later `$?` in the SAME word sees the substitution
+// beside it — not the statement that ran before the word.
+shell_compat! {
+    name: subst_updates_exit_status_within_the_same_word,
+    script: r#"false; echo "$(true) $?""#,
+    eq: "0",
+}
+
+shell_compat! {
+    name: failed_subst_updates_exit_status_within_the_same_word,
+    script: r#"true; echo "$(false) $?""#,
+    eq: "1",
+}
+
 shell_compat! {
     name: cmd_subst_in_string,
     script: r#"echo "inner: $(echo nested)""#,

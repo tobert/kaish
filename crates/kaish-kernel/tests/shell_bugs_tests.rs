@@ -850,3 +850,49 @@ async fn test_local_assignment_or_fallback_fires() {
     assert_eq!(result.text_out().trim(), "FIRED");
 }
 
+// ============================================================================
+// Collection literals carry the substitution status too.
+//
+// `xs=[...]` and `r={...}` are kaish syntax with no bash spelling, so these
+// cannot be compat rows. The rule is the same one bare assignments follow:
+// the LAST substitution in the value decides the status.
+// ============================================================================
+
+#[tokio::test]
+async fn test_list_literal_last_subst_wins_success() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("xs=[$(false) $(true)]; echo $?")
+        .await
+        .unwrap();
+    assert_eq!(result.text_out().trim(), "0");
+}
+
+#[tokio::test]
+async fn test_list_literal_last_subst_wins_failure() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("xs=[$(true) $(false)]; echo $?")
+        .await
+        .unwrap();
+    assert_eq!(result.text_out().trim(), "1");
+}
+
+#[tokio::test]
+async fn test_list_literal_failed_subst_fires_or_fallback() {
+    // The status is not cosmetic: it has to reach `||`.
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("xs=[$(true) $(false)] || echo FIRED")
+        .await
+        .unwrap();
+    assert_eq!(result.text_out().trim(), "FIRED");
+}
+
+#[tokio::test]
+async fn test_record_literal_failed_subst_propagates() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("r={k: $(false)}; echo $?").await.unwrap();
+    assert_eq!(result.text_out().trim(), "1");
+}
+
