@@ -14,6 +14,8 @@ use crate::tools::{ToolArgs, ToolRegistry, ToolSchema};
 use kaish_types::CommandKind;
 
 use super::issue::{IssueCode, ValidationIssue};
+#[cfg(test)]
+use super::issue::Severity;
 use super::scope_tracker::ScopeTracker;
 
 /// AST validator that checks for issues before execution.
@@ -26,6 +28,15 @@ pub struct Validator<'a> {
     /// the caller has none to offer (e.g. a standalone validation pass); a
     /// binary-search miss falls back to `tool.schema()`, so an empty catalog
     /// degrades to the pre-#256 behavior rather than failing.
+    ///
+    /// Safety property this leans on: `binary_search_by` only ever returns
+    /// `Ok(i)` when `catalog[i]` compares equal to the name being searched
+    /// for, regardless of whether `catalog` is actually sorted. An unsorted
+    /// or stale catalog can therefore only produce a false *miss* (harmless —
+    /// it falls back to `tool.schema()`), never a wrong-tool *hit*. That is
+    /// what makes `ExecContext::set_tool_schemas` being a public setter safe:
+    /// a caller that hands it a badly-sorted `Vec` degrades performance, not
+    /// correctness.
     catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,
@@ -1028,6 +1039,63 @@ mod tests {
         let issues = validator.validate(&program);
         // echo should not produce an undefined command error
         assert!(!issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
+    }
+
+    /// GH #256's whole premise is that reading the catalog instead of calling
+    /// `tool.schema()` doesn't change a single validation outcome. Every other
+    /// test in this module passes `&[]` and only ever exercises the fallback
+    /// (`tool.schema()`) branch of `validate_command`'s binary search — this
+    /// is the one that actually populates the catalog and hits it, then
+    /// checks the two branches agree byte-for-byte on a schema-driven issue
+    /// (`echo` only knows `-n`/`--no-newline`/`--no_newline`, so an unrelated
+    /// long flag must trip `IssueCode::UnknownFlag` — a check that consults
+    /// `schema.params`, unlike `IssueCode::UndefinedCommand` above which never
+    /// touches the schema at all).
+    #[test]
+    fn catalog_hit_and_fallback_produce_identical_schema_driven_issues() {
+        let (registry, user_tools) = make_validator();
+        let catalog = registry.schemas();
+        assert!(
+            catalog.binary_search_by(|s| s.name.as_str().cmp("echo")).is_ok(),
+            "fixture assumption: `echo` must be in the catalog for this to be a real hit"
+        );
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "echo".to_string(),
+                args: vec![
+                    Arg::Positional(Expr::Literal(Value::String("hi".to_string()))),
+                    Arg::LongFlag("bogus-flag".to_string()),
+                ],
+                redirects: vec![],
+            })],
+        };
+
+        let fallback_issues =
+            Validator::new(&registry, &user_tools, &[]).validate(&program);
+        let catalog_issues =
+            Validator::new(&registry, &user_tools, &catalog).validate(&program);
+
+        // Prove the input is actually discriminating: a program both paths
+        // report zero issues on proves nothing about whether they agree.
+        assert!(
+            fallback_issues.iter().any(|i| i.code == IssueCode::UnknownFlag),
+            "test input should trip UnknownFlag via the fallback path; got {fallback_issues:?}"
+        );
+
+        fn render(issues: &[ValidationIssue]) -> Vec<(Severity, IssueCode, &str, Option<&str>)> {
+            issues
+                .iter()
+                .map(|i| (i.severity, i.code, i.message.as_str(), i.suggestion.as_deref()))
+                .collect()
+        }
+        assert_eq!(
+            render(&fallback_issues),
+            render(&catalog_issues),
+            "catalog-hit and tool.schema()-fallback validation must agree exactly \
+             (same codes, same messages, same order); fallback={fallback_issues:?} \
+             catalog={catalog_issues:?}"
+        );
     }
 
     #[test]
