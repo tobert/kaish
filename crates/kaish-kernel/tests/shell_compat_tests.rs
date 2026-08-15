@@ -383,6 +383,24 @@ shell_compat! {
     eq: "1",
 }
 
+// `while` needs its own body-status guard — the other three arms have one, and
+// without this a change that made `while` always report 0 would go unnoticed.
+// The condition has to stop on its own, so the body flips the variable it
+// tests.
+shell_compat! {
+    name: while_body_status_survives,
+    script: "x=0; while [[ $x -eq 0 ]]; do x=1; false; done; echo $?",
+    eq: "1",
+}
+
+// A branch that matches but is EMPTY runs no body statement either — the
+// matched-return site, not the no-match one.
+shell_compat! {
+    name: case_matched_empty_branch_clears_stale_status,
+    script: "false; case a in a) ;; esac; echo $?",
+    eq: "0",
+}
+
 shell_compat! {
     name: cmd_subst_in_string,
     script: r#"echo "inner: $(echo nested)""#,
