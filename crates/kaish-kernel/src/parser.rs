@@ -1703,7 +1703,8 @@ where
 }
 
 /// Command: `name args... [redirects...]`
-/// Command names can be identifiers, 'true', 'false', or '.' (source alias).
+/// Command names can be identifiers, 'true', 'false', ':' (null command), or
+/// '.' (source alias).
 fn command_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Command, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -2398,7 +2399,7 @@ where
     // [[ ]] test expression - wrap as Expr::Test
     let test_expr_condition = test_expr_stmt_parser().map(|test| Expr::Test(Box::new(test)));
 
-    // Command as condition (includes true/false as command names)
+    // Command as condition (includes true/false/: as command names)
     // The command's exit code determines truthiness (0 = true, non-zero = false)
     let command_condition = command_parser().map(Expr::Command);
 

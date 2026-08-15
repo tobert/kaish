@@ -621,7 +621,7 @@ pub(crate) fn is_static_command_name(name: &str) -> bool {
 /// command at runtime). See `Kernel::classify_command`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpecialForm {
-    /// `true` — always succeeds (exit 0).
+    /// `true` and its other spelling `:` — always succeed (exit 0).
     True,
     /// `false` — always fails (exit 1).
     False,
@@ -634,7 +634,12 @@ impl SpecialForm {
     /// name is resolved normally (alias/registry/`PATH`).
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
-            "true" => Some(Self::True),
+            // `:` short-circuits through the same arm as `true`, not through
+            // its registered tool. That is what makes them the SAME command
+            // rather than two that merely agree: an alias cannot shadow
+            // either, and neither clap-parses its operands, so `: -x` exits 0
+            // like bash instead of failing on an unknown flag.
+            "true" | ":" => Some(Self::True),
             "false" => Some(Self::False),
             "source" | "." => Some(Self::Source),
             _ => None,

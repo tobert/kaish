@@ -574,9 +574,9 @@ impl BackendDispatcher {
 #[async_trait]
 impl CommandDispatcher for BackendDispatcher {
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
-        // Handle built-in true/false
+        // Handle built-in true/false/: (`:` is another spelling of `true`)
         match cmd.name.as_str() {
-            "true" => return Ok(ExecResult::success("")),
+            "true" | ":" => return Ok(ExecResult::success("")),
             "false" => return Ok(ExecResult::failure(1, "")),
             _ => {}
         }

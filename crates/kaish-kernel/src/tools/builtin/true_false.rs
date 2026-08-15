@@ -13,6 +13,13 @@
 //! posix` (an assignment prefixing a special builtin persists; a redirection
 //! failure on one aborts the shell). kaish has no POSIX mode and no
 //! special-builtin class, so the distinction has nothing to attach to here.
+//!
+//! All three resolve as [`SpecialForm`](crate::validator::SpecialForm)s before
+//! the registry is consulted, so these `Tool` impls exist for their schemas —
+//! `help :`, `help true`, and the `--json` sweep read them — and do not run on
+//! the normal path. That indirection is load-bearing: it is why an alias
+//! cannot shadow them and why `: -x` exits 0 like bash instead of clap-failing
+//! on an unknown flag.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
