@@ -902,3 +902,124 @@ async fn push_binary_positional_value_is_not_rejected_by_to_argv() {
     assert!(result.ok(), "err={}", result.err);
     assert_eq!(result.text_out().trim(), "1", "push must append exactly one element");
 }
+
+// ---------------------------------------------------------------------------
+// Accumulating flag values (`jq --arg NAME VAL`, `sed -e EXPR`) — GH #223.
+//
+// These flag forms store their bound values as `serde_json::Value` rather than
+// keeping the kaish `Value`, and `value_to_json` renders a `Value::Bytes` as
+// the base64 envelope `{"_type":"bytes","encoding":"base64","data":…,"len":N}`.
+// Before the fix that envelope reached the tool as the bound value's literal
+// JSON *text*: `jq -n --arg x $b '$x'` printed the envelope and exited 0. That
+// is worse than the placeholder — it looks like data and reports success.
+// ---------------------------------------------------------------------------
+
+/// The envelope's discriminator. Its presence anywhere in a binding's output
+/// means the internal wire form leaked where the user's bytes belonged.
+const ENVELOPE_MARKER: &str = "_type";
+
+/// Assert a script is loud about binary AND that no envelope leaked.
+///
+/// `assert_loud_binary` above only guards the `[binary: N bytes]` placeholder;
+/// this flag path leaks the *envelope* instead, so the leak check needs its own
+/// marker. Both stdout and stderr are checked — an error message that quotes
+/// the envelope back (sed's old `-e expression must be a string, got {…}`) is
+/// still the internal form escaping to an agent.
+async fn assert_no_envelope_leak(script: &str) {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    match kernel.execute(script).await {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "binary at a flag value must be a nonzero exit: {script:?}");
+            assert!(
+                is_loud_binary_error(&r.err),
+                "error should name the binary problem, got err={:?} for {script:?}",
+                r.err
+            );
+            assert!(
+                !r.text_out().contains(ENVELOPE_MARKER) && !r.err.contains(ENVELOPE_MARKER),
+                "the bytes envelope must NOT leak to stdout or stderr: out={:?} err={:?}",
+                r.text_out(),
+                r.err
+            );
+        }
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            assert!(
+                is_loud_binary_error(&msg),
+                "execute error should name the binary problem, got {msg:?} for {script:?}"
+            );
+            assert!(
+                !msg.contains(ENVELOPE_MARKER),
+                "the bytes envelope must NOT leak into the error: {msg:?} for {script:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn jq_arg_binding_of_binary_is_loud_not_a_stringified_envelope() {
+    assert_no_envelope_leak("b=$(cat src.bin); jq -n --arg x $b '$x'").await;
+}
+
+#[tokio::test]
+async fn jq_argjson_binding_of_binary_is_loud_not_a_stringified_envelope() {
+    assert_no_envelope_leak("b=$(cat src.bin); jq -n --argjson x $b '$x'").await;
+}
+
+/// The NAME half of the `consumes=2` pair is gated too — a binary variable
+/// name is no more usable than a binary value, and the pair is collected in
+/// one loop.
+#[tokio::test]
+async fn jq_arg_binary_in_the_name_slot_is_loud() {
+    assert_no_envelope_leak("b=$(cat src.bin); jq -n --arg $b v '1'").await;
+}
+
+/// The repeatable single-value form (`sed -e EXPR`) flattens through the same
+/// `value_to_json` call. sed happened to type-check its `-e` operand and fail,
+/// but it quoted the whole envelope back at the agent while doing so; the gate
+/// now stops the value before any tool sees it.
+#[tokio::test]
+async fn sed_repeatable_expression_flag_with_binary_is_loud() {
+    assert_no_envelope_leak("b=$(cat src.bin); echo hi | sed -e $b").await;
+}
+
+/// The gate keys on the kaish `Value` being `Bytes`, never on the JSON's
+/// *shape* — kaish does not sniff JSON to decide a type. A record the user
+/// actually built that happens to look like an envelope stays a plain record
+/// and still binds, which is the behavior `fromjson` already guarantees.
+#[tokio::test]
+async fn envelope_shaped_record_still_binds_through_argjson() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(
+            r#"r=$(fromjson '{"_type":"bytes","encoding":"base64","data":"AQID","len":3}'); jq -n --argjson x $r '$x._type'"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok(), "envelope-shaped record must still bind: err={}", result.err);
+    assert_eq!(result.text_out().trim(), "\"bytes\"");
+}
+
+/// Text and numeric bindings are untouched by the gate.
+#[tokio::test]
+async fn ordinary_jq_bindings_are_unaffected() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let text = kernel.execute("jq -n --arg x hello '$x'").await.unwrap();
+    assert!(text.ok(), "err={}", text.err);
+    assert_eq!(text.text_out().trim(), "\"hello\"");
+
+    let num = kernel.execute("jq -n --argjson x 42 '$x + 1'").await.unwrap();
+    assert!(num.ok(), "err={}", num.err);
+    assert_eq!(num.text_out().trim(), "43");
+
+    let repeated = kernel
+        .execute("echo hi | sed -e 's/h/H/' -e 's/i/I/'")
+        .await
+        .unwrap();
+    assert!(repeated.ok(), "err={}", repeated.err);
+    assert_eq!(repeated.text_out().trim(), "HI");
+}

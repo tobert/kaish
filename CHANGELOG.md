@@ -18,6 +18,18 @@ breaking entries are marked **BREAKING**.
   inside brackets and braces the colon stays structural.
 
 ### Fixed
+- **A binary value bound to an accumulating flag exits 1 instead of binding the
+  base64 envelope as text** — `jq -n --arg x $bin '$x'` used to exit 0 with `$x`
+  set to the literal `{"_type":"bytes",…}` JSON, which looks like data and
+  reports success. Same wording and exit code as `printf`: decode with
+  base64/xxd, or redirect to a file. Covers `--arg`/`--argjson` (both operands)
+  and repeatable flags like `sed -e`, whose exit-2 error used to quote the
+  envelope back. An envelope-shaped record the user built stays a plain record —
+  the gate reads the value's type, never the JSON's shape.
+- **A failed stdin pipe read is an error instead of "no stdin"** — the
+  read-to-end path discarded the I/O error along with the bytes already read, so
+  a stream that died halfway reached the builtin as empty input; `read` already
+  reported that same failure from that same pipe.
 - **An assignment with no command name takes the exit status of the last
   command substitution in its value, or 0 if there was none** (bash's rule,
   re-probed) — the status used to be swallowed, so `x="$(cmd)" || x="FALLBACK"`

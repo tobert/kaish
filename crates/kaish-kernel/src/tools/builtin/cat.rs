@@ -122,7 +122,10 @@ impl Tool for Cat {
                 }
                 return ExecResult::with_output(OutputData::text(numbered));
             }
-            let stdin = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            let stdin = match ctx.read_stdin_to_bytes().await {
+                Ok(s) => s.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(1, format!("cat: {e}")),
+            };
             return ExecResult::success_text_or_bytes(stdin);
         }
         // Collect paths, expanding any glob patterns

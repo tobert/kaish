@@ -88,7 +88,10 @@ impl Tool for Wc {
 
         // If no files, read from stdin
         if paths.is_empty() {
-            let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            let input = match ctx.read_stdin_to_bytes().await {
+                Ok(i) => i.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(1, format!("wc: {e}")),
+            };
             let (lc, wc, cc, bc, invalid_utf8) = count_content(&input);
             if invalid_utf8 && (chars_only || words_only || show_all) {
                 return ExecResult::failure(1, format!("wc: {INVALID_UTF8_HINT}"));

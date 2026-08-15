@@ -155,7 +155,10 @@ impl Tool for Head {
         // Stdin byte mode: read raw bytes so piped binary survives intact (the
         // single-file case returned above; here paths is empty).
         if let Some(byte_count) = bytes {
-            let mut data = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            let mut data = match ctx.read_stdin_to_bytes().await {
+                Ok(d) => d.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(1, format!("head: {e}")),
+            };
             data.truncate(byte_count);
             return ExecResult::success_text_or_bytes(data);
         }

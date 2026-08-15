@@ -110,8 +110,9 @@ impl Tool for Write {
             value_to_bytes(v)
         } else {
             match ctx.read_stdin_to_bytes().await {
-                Some(bytes) => bytes,
-                None => return ExecResult::failure(1, "write: missing content argument"),
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return ExecResult::failure(1, "write: missing content argument"),
+                Err(e) => return ExecResult::failure(1, format!("write: {e}")),
             }
         };
 

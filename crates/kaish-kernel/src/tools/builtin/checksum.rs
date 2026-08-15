@@ -131,7 +131,10 @@ impl Tool for Checksum {
         if paths.is_empty() {
             // Hash stdin as raw bytes — a lossy decode would hash the wrong
             // bytes for binary input (e.g. `dd if=/dev/urandom | checksum`).
-            let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            let input = match ctx.read_stdin_to_bytes().await {
+                Ok(i) => i.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(1, format!("checksum: {e}")),
+            };
             let hash = compute_hash(&input, &algo);
             let text = format!("{}  -", hash);
             // Table convention (OutputData::to_json): first header binds to

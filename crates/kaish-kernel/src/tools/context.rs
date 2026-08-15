@@ -661,7 +661,7 @@ impl ExecContext {
     /// at all. The `Err` is a ready-to-use message; callers prefix their name.
     /// See `docs/binary-data.md`.
     pub async fn read_stdin_to_text(&mut self) -> Result<Option<String>, String> {
-        match self.read_stdin_to_bytes().await {
+        match self.read_stdin_to_bytes().await? {
             None => Ok(None),
             Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
                 "input is not valid UTF-8 (binary data?) — pipe through base64/xxd \
@@ -675,24 +675,35 @@ impl ExecContext {
     ///
     /// The byte-clean counterpart to [`Self::read_stdin_to_text`], for
     /// binary-aware builtins (`base64`, `xxd`, `checksum`, `wc -c`, `cmp`, …).
-    /// Returns `None` when there is no stdin at all (no pipe and no buffer);
-    /// an empty pipe yields `Some(vec![])`. The buffered source is already
-    /// bytes-typed (GH #176), so this is a plain move, never a re-encode.
-    /// See `docs/binary-data.md`.
+    /// Returns `Ok(None)` when there is no stdin at all (no pipe and no
+    /// buffer); an empty pipe yields `Ok(Some(vec![]))`. The buffered source is
+    /// already bytes-typed (GH #176), so this is a plain move, never a
+    /// re-encode. See `docs/binary-data.md`.
     ///
     /// Anything an earlier [`Self::read_stdin_line`] left behind comes first,
     /// then the rest of the pipe — `read x; cat` gives `cat` everything after
     /// the line `read` took, in order, and nothing twice.
-    pub async fn read_stdin_to_bytes(&mut self) -> Option<Vec<u8>> {
+    ///
+    /// A failed pipe read is `Err`, never `Ok(None)`. "The pipe broke" and
+    /// "there was no stdin" are different facts, and collapsing them hands the
+    /// builtin a short read dressed up as empty input — `wc` would report 0
+    /// lines and exit 0 on a stream that died halfway, and the bytes already
+    /// read would go with it. [`Self::read_stdin_line`] propagates this same
+    /// error from this same reader; the two now agree. The `Err` is a
+    /// ready-to-use message; callers prefix their name.
+    pub async fn read_stdin_to_bytes(&mut self) -> Result<Option<Vec<u8>>, String> {
         let leftover = self.stdin.take();
         match self.pipe_stdin.take() {
             Some(mut reader) => {
                 use tokio::io::AsyncReadExt;
                 let mut buf = leftover.unwrap_or_default();
-                reader.read_to_end(&mut buf).await.ok()?;
-                Some(buf)
+                reader
+                    .read_to_end(&mut buf)
+                    .await
+                    .map_err(|e| format!("reading stdin: {e}"))?;
+                Ok(Some(buf))
             }
-            None => leftover,
+            None => Ok(leftover),
         }
     }
 
