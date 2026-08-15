@@ -25,3 +25,7 @@ Thumbs.db
 
 # signoff.md — ephemeral, personal cross-session handoff; never commit.
 signoff.md
+
+# issues.md — kaish tracks open work in GitHub Issues and in Amy's local
+# exomemory, never in a committed repo file; a second list drifts from both.
+/issues.md
