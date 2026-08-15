@@ -707,7 +707,7 @@ async fn validation_issue_in_heredoc_body_carries_span() {
     let mut registry = ToolRegistry::new();
     register_builtins(&mut registry);
     let user_tools = HashMap::new();
-    let validator = Validator::new(&registry, &user_tools);
+    let validator = Validator::new(&registry, &user_tools, &[]);
     let issues = validator.validate(&program);
 
     // The body references UNDEFINED_VAR — validator should warn about it
@@ -752,7 +752,7 @@ async fn validation_issue_in_double_quoted_string_still_works() {
     let mut registry = ToolRegistry::new();
     register_builtins(&mut registry);
     let user_tools = HashMap::new();
-    let validator = Validator::new(&registry, &user_tools);
+    let validator = Validator::new(&registry, &user_tools, &[]);
     let issues = validator.validate(&program);
 
     let undef = issues
@@ -783,7 +783,7 @@ async fn validation_issue_in_heredoc_body_full_rendering_snapshot() {
     let mut registry = ToolRegistry::new();
     register_builtins(&mut registry);
     let user_tools = HashMap::new();
-    let validator = Validator::new(&registry, &user_tools);
+    let validator = Validator::new(&registry, &user_tools, &[]);
     let issues = validator.validate(&program);
 
     let undef = issues

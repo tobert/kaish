@@ -14,6 +14,8 @@ use crate::tools::{ToolArgs, ToolRegistry, ToolSchema};
 use kaish_types::CommandKind;
 
 use super::issue::{IssueCode, ValidationIssue};
+#[cfg(test)]
+use super::issue::Severity;
 use super::scope_tracker::ScopeTracker;
 
 /// AST validator that checks for issues before execution.
@@ -22,6 +24,15 @@ pub struct Validator<'a> {
     registry: &'a ToolRegistry,
     /// User-defined tools.
     user_tools: &'a HashMap<String, ToolDef>,
+    /// The kernel's name-sorted schema catalog (GH #256); `&[]` when there is
+    /// none. `binary_search_by` returns `Ok` only on an equal compare, so an
+    /// empty or unsorted catalog can only miss — and a miss falls back to
+    /// `tool.schema()`. A *stale* entry is different: it has the right name, so
+    /// it hits, and a hit is what skips the fallback. The kernel cannot go
+    /// stale — the registry is frozen before `set_tool_schemas` snapshots it —
+    /// but an embedder hand-building a catalog can. A hit also assumes
+    /// `tool.name() == tool.schema().name`, which nothing enforces.
+    catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,
     /// Current loop nesting depth.
@@ -34,10 +45,18 @@ pub struct Validator<'a> {
 
 impl<'a> Validator<'a> {
     /// Create a new validator.
-    pub fn new(registry: &'a ToolRegistry, user_tools: &'a HashMap<String, ToolDef>) -> Self {
+    ///
+    /// `catalog` is the kernel's name-sorted `Arc<[ToolSchema]>` (see
+    /// `ExecContext::tool_schemas`); pass `&[]` when none is available.
+    pub fn new(
+        registry: &'a ToolRegistry,
+        user_tools: &'a HashMap<String, ToolDef>,
+        catalog: &'a [ToolSchema],
+    ) -> Self {
         Self {
             registry,
             user_tools,
+            catalog,
             scope: ScopeTracker::new(),
             loop_depth: 0,
             function_depth: 0,
@@ -173,8 +192,23 @@ impl<'a> Validator<'a> {
         // otherwise a tool whose validate() reads positionals semantically (sed,
         // awk) misreads them (the schema-blind validation builder).
         if let Some(tool) = self.registry.get(&cmd.name) {
-            let schema = tool.schema();
-            let tool_args = build_tool_args_for_validation(&cmd.args, Some(&schema));
+            // Prefer the kernel's schema catalog over `tool.schema()` — same
+            // rationale as the dispatch path in kernel.rs (GH #48/#254): for a
+            // clap-derived builtin, `schema()` rebuilds the whole clap
+            // `Command`, and the catalog already holds exactly that, name-sorted.
+            // `owned` covers a catalog miss (empty catalog, or a tool registered
+            // after the catalog was built): the fallback calls `schema()` and is
+            // equivalent, just not free.
+            let owned;
+            let schema: &ToolSchema =
+                match self.catalog.binary_search_by(|s| s.name.as_str().cmp(cmd.name.as_str())) {
+                    Ok(i) => &self.catalog[i],
+                    Err(_) => {
+                        owned = tool.schema();
+                        &owned
+                    }
+                };
+            let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
             let tool_issues = tool.validate(&tool_args);
             self.issues.extend(tool_issues);
         } else if let Some(user_tool) = self.user_tools.get(&cmd.name) {
@@ -955,7 +989,7 @@ mod tests {
     #[test]
     fn validates_undefined_command() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -976,7 +1010,7 @@ mod tests {
     #[test]
     fn test_command_is_a_known_builtin() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -999,7 +1033,7 @@ mod tests {
     #[test]
     fn validates_known_command() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1016,6 +1050,76 @@ mod tests {
         assert!(!issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
     }
 
+    /// GH #256's whole premise is that reading the catalog instead of calling
+    /// `tool.schema()` doesn't change a single validation outcome. Every other
+    /// test in this module passes `&[]` and only ever exercises the fallback
+    /// (`tool.schema()`) branch of `validate_command`'s binary search — this
+    /// is the one that actually populates the catalog and hits it, then
+    /// checks the two branches agree byte-for-byte on a schema-driven issue.
+    ///
+    /// `jq`'s `filter` is the only *required* param anywhere in the builtin
+    /// catalog (checked by dumping every schema's `required` params while
+    /// writing this test) and jq's own `Tool::validate` override calls
+    /// `validate_against_schema(args, &self.schema())` first thing — so
+    /// `jq` with no args at all is guaranteed to trip `MissingRequiredArg`
+    /// via a real schema check, identically on both paths, with no need to
+    /// fabricate a corrupt schema to make it non-trivial.
+    ///
+    /// This was manually verified to be a *real*, falsifiable comparison, not
+    /// a vacuous one: temporarily corrupting the catalog's `jq` entry so `-r`
+    /// (a genuine bool flag) is misdeclared as value-consuming, and changing
+    /// the program to `jq -r .` (filter present), makes the two paths
+    /// disagree — the catalog-hit path swallows the filter positional `.` as
+    /// `-r`'s value and reports `MissingRequiredArg`, while the fallback path
+    /// (real schema, `-r` correctly bool) does not — and the `assert_eq!`
+    /// below fails as expected. Not committed as a permanent test (it would
+    /// pin a corruption, not a correctness invariant); this docstring is the
+    /// record of having done it.
+    #[test]
+    fn catalog_hit_and_fallback_produce_identical_schema_driven_issues() {
+        let (registry, user_tools) = make_validator();
+        let catalog = registry.schemas();
+        assert!(
+            catalog.binary_search_by(|s| s.name.as_str().cmp("jq")).is_ok(),
+            "fixture assumption: `jq` must be in the catalog for this to be a real hit"
+        );
+
+        let program = Program {
+            statements: vec![Stmt::Command(Command {
+                name: "jq".to_string(),
+                args: vec![],
+                redirects: vec![],
+            })],
+        };
+
+        let fallback_issues =
+            Validator::new(&registry, &user_tools, &[]).validate(&program);
+        let catalog_issues =
+            Validator::new(&registry, &user_tools, &catalog).validate(&program);
+
+        // Prove the input is actually discriminating: a program both paths
+        // report zero issues on proves nothing about whether they agree.
+        assert!(
+            fallback_issues.iter().any(|i| i.code == IssueCode::MissingRequiredArg),
+            "test input should trip MissingRequiredArg (`filter`) via the fallback path; \
+             got {fallback_issues:?}"
+        );
+
+        fn render(issues: &[ValidationIssue]) -> Vec<(Severity, IssueCode, &str, Option<&str>)> {
+            issues
+                .iter()
+                .map(|i| (i.severity, i.code, i.message.as_str(), i.suggestion.as_deref()))
+                .collect()
+        }
+        assert_eq!(
+            render(&fallback_issues),
+            render(&catalog_issues),
+            "catalog-hit and tool.schema()-fallback validation must agree exactly \
+             (same codes, same messages, same order); fallback={fallback_issues:?} \
+             catalog={catalog_issues:?}"
+        );
+    }
+
     #[test]
     fn glued_value_flags_dont_false_error_at_validation() {
         // Regression for the schema-blind validation builder:
@@ -1024,7 +1128,7 @@ mod tests {
         // to parsing the FILE PATH as the sed program — a path-dependent false
         // E006 (here `file.txt` → its leading `f` is an "unknown command").
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1049,7 +1153,7 @@ mod tests {
     #[test]
     fn validates_break_outside_loop() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Break(None)],
@@ -1062,7 +1166,7 @@ mod tests {
     #[test]
     fn validates_break_inside_loop() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::For(ForLoop {
@@ -1080,7 +1184,7 @@ mod tests {
     #[test]
     fn validates_undefined_variable() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1101,7 +1205,7 @@ mod tests {
     #[test]
     fn validates_defined_variable() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![
@@ -1131,7 +1235,7 @@ mod tests {
     #[test]
     fn skips_underscore_prefixed_vars() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1151,7 +1255,7 @@ mod tests {
     #[test]
     fn builtin_vars_are_defined() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1175,7 +1279,7 @@ mod tests {
     #[test]
     fn validates_scatter_without_gather() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Pipeline(Pipeline {
@@ -1201,7 +1305,7 @@ mod tests {
     #[test]
     fn allows_scatter_with_gather() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Pipeline(Pipeline {
@@ -1250,7 +1354,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry);
         let user_tools = make_user_tool_with_required_positional();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1278,7 +1382,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry);
         let user_tools = make_user_tool_with_required_positional();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {

@@ -307,10 +307,23 @@ impl Filesystem for LocalFs {
         self.check_writable()?;
         let full_path = self.resolve(path)?;
         // `set_modified` calls futimens(2) on the fd. Run it on the blocking
-        // pool — std file I/O must not occupy an async worker. We open with
-        // write access because that is what POSIX touch-to-update requires.
+        // pool — std file I/O must not occupy an async worker.
+        //
+        // No single open mode covers every target, so try read, then fall
+        // back to write:
+        //   - a directory can never be opened for write (EISDIR at open(2)),
+        //     but opens fine read-only, and futimens with explicit times only
+        //     needs ownership/CAP_FOWNER, not a writable fd — so read-only is
+        //     enough to then set the time;
+        //   - a write-only (e.g. mode 0200) file rejects a read-only open
+        //     (EACCES), so that case needs the write-only fallback.
+        // Read-only first because it is the one open mode that also covers
+        // directories; write-only never does.
         tokio::task::spawn_blocking(move || {
-            let file = std::fs::OpenOptions::new().write(true).open(&full_path)?;
+            let file = match std::fs::OpenOptions::new().read(true).open(&full_path) {
+                Ok(f) => f,
+                Err(_) => std::fs::OpenOptions::new().write(true).open(&full_path)?,
+            };
             file.set_modified(mtime)
         })
         .await

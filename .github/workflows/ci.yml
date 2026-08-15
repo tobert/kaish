@@ -36,8 +36,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      # KAISH_BASH_COMPAT gates the ~100 differential rows in shell_compat_tests.rs:
+      # each row's `::bash` half is a no-op without this var (see
+      # crates/kaish-kernel/tests/common/mod.rs, run_bash_if_enabled). Set here so
+      # the compat suite actually runs on every PR instead of only the kaish half.
       - name: Test
         run: cargo test --all --locked
+        env:
+          KAISH_BASH_COMPAT: 1
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all --all-targets --locked -- -D warnings

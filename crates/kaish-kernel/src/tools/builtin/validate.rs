@@ -138,7 +138,7 @@ impl Tool for Validate {
 
         // Validate the parsed AST
         let user_tools: HashMap<String, ToolDef> = HashMap::new();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &ctx.tool_schemas);
         let issues = validator.validate(&program);
 
         // Filter based on severity

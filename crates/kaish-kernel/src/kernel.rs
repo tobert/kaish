@@ -2136,8 +2136,11 @@ impl Kernel {
         // to the result's stderr at each return point below.
         let mut surfaced_warnings = String::new();
         if !self.skip_validation {
+            // Catalog first: neither guard should ride the other's await, and
+            // `validate()` is synchronous, so neither rides one after this.
+            let catalog = { self.exec_ctx.read().await.tool_schemas.clone() };
             let user_tools = self.user_tools.read().await;
-            let validator = Validator::new(&self.tools, &user_tools);
+            let validator = Validator::new(&self.tools, &user_tools, &catalog);
             let issues = validator.validate(&program);
 
             // Collect errors (warnings are logged but don't prevent execution)

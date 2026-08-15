@@ -17,18 +17,13 @@ breaking entries are marked **BREAKING**.
   argument position (`awk -F:`), so only the command-name position changed;
   inside brackets and braces the colon stays structural.
 
+### Changed
+- **BREAKING (embedders):** `validator::Validator::new` takes a third argument,
+  `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
+  catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
+  `&[]` to keep the old behavior.
+
 ### Fixed
-- **`write FILE` with no content no longer truncates FILE and reports success**
-  — data loss. Whenever the process's stdin was an exhausted pipe (`/dev/null`,
-  a closed fd, an empty pipe — what `kaish -c` normally hands the kernel), a
-  missing content operand read as zero bytes of content: the file was emptied
-  and `write` exited 0. **`set -o trash` did not protect it** — the file is
-  truncated in place, so there was no delete for trash to intercept. It now
-  exits 1 and leaves the file byte-identical. Zero bytes that something
-  deliberately supplied still truncate: `printf '' | write f`, `write f < empty`,
-  and an embedder's `ExecuteOptions::with_stdin(vec![])` are truncate requests.
-  Interactive sessions were never affected — stdin is a TTY, so no pipe is
-  bridged and the refusal already fired.
 - **`write` with no stdin and no content operand errors instead of truncating the
   file to zero bytes** — a missing operand destroyed an existing file and exited
   0, and `set -o trash` did not cover it. An empty pipe or redirect still
@@ -44,6 +39,22 @@ breaking entries are marked **BREAKING**.
 - **A failed stdin pipe read is an error instead of "no stdin"** — the read path
   discarded the I/O error along with the bytes already read, so a stream that
   died halfway arrived as empty input.
+- **An assignment with no command name takes the exit status of the last
+  command substitution in its value, or 0 if there was none** (bash's rule,
+  re-probed) — the status used to be swallowed, so `x="$(cmd)" || x="FALLBACK"`
+  could never fire, `set -e` never tripped on a failed substitution, and
+  `false; x=5` left `$?` stale at 1. Applies to `local` assignments too:
+  kaish propagates the status where bash's `local` masks it.
+- **`if`/`while`/`for`/`case` set `$?` to 0 when no body statement runs** —
+  they used to leave the previous statement's status standing, so
+  `for f in $(grep pat file); do …; done` with no matches left `$?` at grep's
+  1 and a later `$?` read a failure that never happened. Only `$?` saw it:
+  `||` and `set -e` always read the statement's own result, which was correct.
+- **`touch` on an existing directory, or on a write-only (mode 0200) file,
+  updates its timestamps and exits 0**, matching GNU `touch` — a directory
+  can only be opened read-only (write raised EISDIR) and a write-only file
+  can only be opened for write (read raised EACCES), so `LocalFs::set_mtime`
+  now tries read, then falls back to write, covering both.
 
 ## [0.14.1] - 2026-08-14
 
