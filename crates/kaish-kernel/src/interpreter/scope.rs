@@ -417,6 +417,13 @@ pub struct Scope {
     /// (GH #48, item 5). The box is reused in place by `set_last_result`, so the
     /// steady state is one allocation per `Scope`, not one per update.
     last_result: Box<ExecResult>,
+    /// Exit code of the last command substitution performed, noted as each
+    /// substitution completes. An assignment with no command name takes this
+    /// as its own status (or 0 when `None`) — bash's rule, re-probed: the
+    /// LAST substitution wins, not the first, not "any failed". The note is
+    /// cleared before evaluating an assignment's value so a substitution
+    /// from an earlier statement cannot leak in.
+    last_cmdsubst_code: Option<i64>,
     /// Script or tool name ($0).
     script_name: String,
     /// Positional arguments ($1-$9, $@, $#).
@@ -453,6 +460,7 @@ impl Scope {
             frames: Arc::new(vec![HashMap::new()]),
             exported: HashSet::new(),
             last_result: Box::new(ExecResult::default()),
+            last_cmdsubst_code: None,
             script_name: String::new(),
             positional: Vec::new(),
             error_exit: false,
@@ -556,6 +564,25 @@ impl Scope {
     /// Get the last command result.
     pub fn last_result(&self) -> &ExecResult {
         &self.last_result
+    }
+
+    /// Note the exit code of a command substitution that just completed.
+    /// Overwritten by each later substitution, so the last one performed
+    /// wins.
+    pub fn note_cmdsubst_code(&mut self, code: i64) {
+        self.last_cmdsubst_code = Some(code);
+    }
+
+    /// Forget any noted command-substitution code. Called before evaluating
+    /// an assignment's value so an earlier statement's substitution cannot
+    /// leak into this one's status.
+    pub fn clear_cmdsubst_code(&mut self) {
+        self.last_cmdsubst_code = None;
+    }
+
+    /// Take the noted command-substitution code, leaving none.
+    pub fn take_cmdsubst_code(&mut self) -> Option<i64> {
+        self.last_cmdsubst_code.take()
     }
 
     /// Set the positional parameters ($0, $1-$9, $@, $#).
