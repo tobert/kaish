@@ -52,12 +52,15 @@ async fn write_with_exhausted_session_stdin_refuses_and_leaves_the_file_intact()
         .await
         .unwrap();
 
-    assert_eq!(result.code, 1, "expected a refusal, got: {}", result.err);
+    // Bytes first: the data is the contract. A refusal that still truncated
+    // would pass an exit-code check and fail this one, which is the failure
+    // worth reading.
     assert_eq!(
         fs::read(&target).unwrap(),
         ORIGINAL,
         "the file must be byte-identical — an error that still truncates is the same bug"
     );
+    assert_eq!(result.code, 1, "expected a refusal, got: {}", result.err);
 }
 
 /// Same refusal with no stdin plumbing at all (the embedded path, and the
@@ -72,8 +75,8 @@ async fn write_with_no_stdin_at_all_refuses_and_leaves_the_file_intact() {
 
     let result = kernel.execute("write notes.md").await.unwrap();
 
-    assert_eq!(result.code, 1, "expected a refusal, got: {}", result.err);
     assert_eq!(fs::read(&target).unwrap(), ORIGINAL, "file must be untouched");
+    assert_eq!(result.code, 1, "expected a refusal, got: {}", result.err);
 }
 
 /// The refusal names the file and says it was left alone — an agent that reads
