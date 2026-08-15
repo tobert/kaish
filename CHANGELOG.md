@@ -17,6 +17,12 @@ breaking entries are marked **BREAKING**.
   argument position (`awk -F:`), so only the command-name position changed;
   inside brackets and braces the colon stays structural.
 
+### Changed
+- **BREAKING (embedders):** `validator::Validator::new` takes a third argument,
+  `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
+  catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
+  `&[]` to keep the old behavior.
+
 ### Fixed
 - **An assignment with no command name takes the exit status of the last
   command substitution in its value, or 0 if there was none** (bash's rule,
