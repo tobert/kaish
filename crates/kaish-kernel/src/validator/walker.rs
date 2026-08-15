@@ -22,6 +22,11 @@ pub struct Validator<'a> {
     registry: &'a ToolRegistry,
     /// User-defined tools.
     user_tools: &'a HashMap<String, ToolDef>,
+    /// The kernel's name-sorted schema catalog (GH #48/#254/#256). Empty when
+    /// the caller has none to offer (e.g. a standalone validation pass); a
+    /// binary-search miss falls back to `tool.schema()`, so an empty catalog
+    /// degrades to the pre-#256 behavior rather than failing.
+    catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,
     /// Current loop nesting depth.
@@ -34,10 +39,18 @@ pub struct Validator<'a> {
 
 impl<'a> Validator<'a> {
     /// Create a new validator.
-    pub fn new(registry: &'a ToolRegistry, user_tools: &'a HashMap<String, ToolDef>) -> Self {
+    ///
+    /// `catalog` is the kernel's name-sorted `Arc<[ToolSchema]>` (see
+    /// `ExecContext::tool_schemas`); pass `&[]` when none is available.
+    pub fn new(
+        registry: &'a ToolRegistry,
+        user_tools: &'a HashMap<String, ToolDef>,
+        catalog: &'a [ToolSchema],
+    ) -> Self {
         Self {
             registry,
             user_tools,
+            catalog,
             scope: ScopeTracker::new(),
             loop_depth: 0,
             function_depth: 0,
@@ -173,8 +186,23 @@ impl<'a> Validator<'a> {
         // otherwise a tool whose validate() reads positionals semantically (sed,
         // awk) misreads them (the schema-blind validation builder).
         if let Some(tool) = self.registry.get(&cmd.name) {
-            let schema = tool.schema();
-            let tool_args = build_tool_args_for_validation(&cmd.args, Some(&schema));
+            // Prefer the kernel's schema catalog over `tool.schema()` — same
+            // rationale as the dispatch path in kernel.rs (GH #48/#254): for a
+            // clap-derived builtin, `schema()` rebuilds the whole clap
+            // `Command`, and the catalog already holds exactly that, name-sorted.
+            // `owned` covers a catalog miss (empty catalog, or a tool registered
+            // after the catalog was built): the fallback calls `schema()` and is
+            // equivalent, just not free.
+            let owned;
+            let schema: &ToolSchema =
+                match self.catalog.binary_search_by(|s| s.name.as_str().cmp(cmd.name.as_str())) {
+                    Ok(i) => &self.catalog[i],
+                    Err(_) => {
+                        owned = tool.schema();
+                        &owned
+                    }
+                };
+            let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
             let tool_issues = tool.validate(&tool_args);
             self.issues.extend(tool_issues);
         } else if let Some(user_tool) = self.user_tools.get(&cmd.name) {
@@ -941,7 +969,7 @@ mod tests {
     #[test]
     fn validates_undefined_command() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -962,7 +990,7 @@ mod tests {
     #[test]
     fn test_command_is_a_known_builtin() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -985,7 +1013,7 @@ mod tests {
     #[test]
     fn validates_known_command() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1010,7 +1038,7 @@ mod tests {
         // to parsing the FILE PATH as the sed program — a path-dependent false
         // E006 (here `file.txt` → its leading `f` is an "unknown command").
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1035,7 +1063,7 @@ mod tests {
     #[test]
     fn validates_break_outside_loop() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Break(None)],
@@ -1048,7 +1076,7 @@ mod tests {
     #[test]
     fn validates_break_inside_loop() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::For(ForLoop {
@@ -1066,7 +1094,7 @@ mod tests {
     #[test]
     fn validates_undefined_variable() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1087,7 +1115,7 @@ mod tests {
     #[test]
     fn validates_defined_variable() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![
@@ -1117,7 +1145,7 @@ mod tests {
     #[test]
     fn skips_underscore_prefixed_vars() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1137,7 +1165,7 @@ mod tests {
     #[test]
     fn builtin_vars_are_defined() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1161,7 +1189,7 @@ mod tests {
     #[test]
     fn validates_scatter_without_gather() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Pipeline(Pipeline {
@@ -1187,7 +1215,7 @@ mod tests {
     #[test]
     fn allows_scatter_with_gather() {
         let (registry, user_tools) = make_validator();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Pipeline(Pipeline {
@@ -1236,7 +1264,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry);
         let user_tools = make_user_tool_with_required_positional();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
@@ -1264,7 +1292,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry);
         let user_tools = make_user_tool_with_required_positional();
-        let validator = Validator::new(&registry, &user_tools);
+        let validator = Validator::new(&registry, &user_tools, &[]);
 
         let program = Program {
             statements: vec![Stmt::Command(Command {

@@ -16,7 +16,7 @@
 //! use kaish_kernel::parser::parse;
 //!
 //! let program = parse("nonexistent_cmd arg")?;
-//! let validator = Validator::new(&registry, &user_tools);
+//! let validator = Validator::new(&registry, &user_tools, &[]);
 //! let issues = validator.validate(&program);
 //!
 //! for issue in &issues {
