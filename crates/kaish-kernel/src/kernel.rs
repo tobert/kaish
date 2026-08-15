@@ -2400,6 +2400,12 @@ impl Kernel {
                         }
                     }
                 }
+                // A compound statement is a command: it writes `$?` whether or
+                // not a body statement ran. Without this, `if false; then …; fi`
+                // leaves the PREVIOUS statement's status visible to `$?` — a
+                // failure that did not happen. Idempotent when a body did run:
+                // the body's own arm already wrote the same code.
+                self.update_last_result(&result).await;
                 Ok(ControlFlow::ok(result))
             }
             Stmt::For(for_loop) => {
@@ -2499,9 +2505,12 @@ impl Kernel {
                 'outer: for item in items {
                     // Cancellation checkpoint per iteration
                     if self.is_cancelled() {
-                        let mut scope = self.scope.write().await;
-                        scope.pop_frame();
+                        {
+                            let mut scope = self.scope.write().await;
+                            scope.pop_frame();
+                        }
                         result.code = 130;
+                        self.update_last_result(&result).await;
                         return Ok(ControlFlow::ok(result));
                     }
                     {
@@ -2568,6 +2577,10 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.pop_frame();
                 }
+                // Zero iterations still writes `$?` — see the `Stmt::If` arm.
+                // `for x in $(grep …)` with no matches must not leave grep's 1
+                // standing as the loop's status.
+                self.update_last_result(&result).await;
                 Ok(ControlFlow::ok(result))
             }
             Stmt::While(while_loop) => {
@@ -2578,6 +2591,7 @@ impl Kernel {
                     // Cancellation checkpoint per iteration
                     if self.is_cancelled() {
                         result.code = 130;
+                        self.update_last_result(&result).await;
                         return Ok(ControlFlow::ok(result));
                     }
 
@@ -2628,6 +2642,9 @@ impl Kernel {
                     }
                 }
 
+                // A condition that is false on the first evaluation runs no
+                // body — see the `Stmt::If` arm.
+                self.update_last_result(&result).await;
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Case(case_stmt) => {
@@ -2666,12 +2683,16 @@ impl Kernel {
                                 }
                             }
                         }
+                        self.update_last_result(&result).await;
                         return Ok(ControlFlow::ok(result));
                     }
                 }
 
-                // No match - return success with empty output (like sh)
-                Ok(ControlFlow::ok(ExecResult::success("")))
+                // No match - return success with empty output (like sh), and
+                // write it to `$?` — see the `Stmt::If` arm.
+                let result = ExecResult::success("");
+                self.update_last_result(&result).await;
+                Ok(ControlFlow::ok(result))
             }
             Stmt::Break(levels) => {
                 Ok(ControlFlow::break_n(levels.unwrap_or(1)))
