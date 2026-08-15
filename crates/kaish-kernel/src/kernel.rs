@@ -2136,11 +2136,14 @@ impl Kernel {
         // to the result's stderr at each return point below.
         let mut surfaced_warnings = String::new();
         if !self.skip_validation {
-            let user_tools = self.user_tools.read().await;
-            // No await runs between the catalog read and `validate()`
-            // (synchronous), so the Arc clone never rides an await — same
+            // Read the catalog first so its own `.read().await` never runs
+            // while `user_tools`'s guard is held — the two locks are
+            // independent, and no guard should ride an await it doesn't need
+            // to. Once both reads are done, `validate()` is synchronous, so
+            // neither guard rides an await after this point either — same
             // property `try_execute` preserves for dispatch (GH #48 item 7).
             let catalog = { self.exec_ctx.read().await.tool_schemas.clone() };
+            let user_tools = self.user_tools.read().await;
             let validator = Validator::new(&self.tools, &user_tools, &catalog);
             let issues = validator.validate(&program);
 

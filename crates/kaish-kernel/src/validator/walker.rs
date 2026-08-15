@@ -29,14 +29,32 @@ pub struct Validator<'a> {
     /// binary-search miss falls back to `tool.schema()`, so an empty catalog
     /// degrades to the pre-#256 behavior rather than failing.
     ///
-    /// Safety property this leans on: `binary_search_by` only ever returns
-    /// `Ok(i)` when `catalog[i]` compares equal to the name being searched
-    /// for, regardless of whether `catalog` is actually sorted. An unsorted
-    /// or stale catalog can therefore only produce a false *miss* (harmless —
-    /// it falls back to `tool.schema()`), never a wrong-tool *hit*. That is
-    /// what makes `ExecContext::set_tool_schemas` being a public setter safe:
-    /// a caller that hands it a badly-sorted `Vec` degrades performance, not
-    /// correctness.
+    /// A correct hit leans on one invariant: `tool.name() == tool.schema().name`
+    /// for every registered tool — `ToolRegistry::register` keys the registry
+    /// by `tool.name()`, `ToolRegistry::schemas()` sorts the catalog by
+    /// `schema.name`, and nothing enforces the two agree, so a tool that
+    /// violated it would hand `validate_command` a different tool's schema
+    /// under its own name.
+    ///
+    /// Two distinct failure shapes, and only one is harmless:
+    /// - **Unsorted catalog**: `binary_search_by` only ever returns `Ok(i)`
+    ///   when `catalog[i]` compares equal to the name being searched for, so
+    ///   an out-of-order catalog can only produce a false *miss* — safe,
+    ///   because a miss falls back to `tool.schema()`.
+    /// - **Stale catalog**: an entry with the *right* name but out-of-date
+    ///   content (built before a tool was reconfigured, say) is a hit, and a
+    ///   hit is exactly what skips the `tool.schema()` fallback — so
+    ///   staleness is not self-correcting the way disorder is.
+    ///
+    /// The kernel is safe from both by construction, not by luck: the tool
+    /// registry (`self.tools` in `kernel.rs`) is private and frozen — built
+    /// once in `Kernel::assemble`, wrapped in an `Arc`, never mutated again —
+    /// before `exec_ctx.set_tool_schemas(tools.schemas())` snapshots it, so
+    /// there is no window where a tool could be added, removed, or replaced
+    /// after the catalog was taken from the same registry. The residual risk
+    /// is a standalone embedder who builds their own `ExecContext`, calls
+    /// `set_tool_schemas` with a hand-built catalog, and then mutates their
+    /// own registry afterward — nothing in this type stops that.
     catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,
