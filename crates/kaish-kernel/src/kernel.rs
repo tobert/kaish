@@ -2284,6 +2284,15 @@ impl Kernel {
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
+                // An assignment with no command name takes the exit status of
+                // the last command substitution in its value, or 0 if there
+                // was none (bash's rule, re-probed). Clear the note first so
+                // a substitution from an earlier statement cannot leak in —
+                // `false; x=5` must be 0, not stale.
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.clear_cmdsubst_code();
+                }
                 // Use async evaluator to support command substitution
                 let value = self.eval_expr_async(&assign.value).await
                     .context("failed to evaluate assignment")?;
@@ -2311,8 +2320,26 @@ impl Kernel {
                 }
                 drop(scope);
 
-                // Assignments don't produce output (like sh)
-                Ok(ControlFlow::ok(ExecResult::success("")))
+                // Assignments don't produce output (like sh), but they are a
+                // command: they write `$?` and honor `set -e` (bash: `set -e;
+                // x=$(false)` exits). The code is the last substitution's, or
+                // 0 — this is what lets `x="$(cmd)" || x="FALLBACK"` fire.
+                let subst_code = {
+                    let mut scope = self.scope.write().await;
+                    scope.take_cmdsubst_code()
+                };
+                let result = match subst_code {
+                    None | Some(0) => ExecResult::success(""),
+                    Some(code) => ExecResult::failure(code, ""),
+                };
+                self.update_last_result(&result).await;
+                if !result.ok() {
+                    let scope = self.scope.read().await;
+                    if scope.error_exit_enabled() {
+                        return Ok(ControlFlow::exit_code(result.code));
+                    }
+                }
+                Ok(ControlFlow::ok(result))
             }
             Stmt::Command(cmd) => {
                 // Route single commands through execute_pipeline for a unified path.
@@ -3676,6 +3703,7 @@ impl Kernel {
                     *scope = *saved_scope;
                     if let Ok(ref r) = run_result {
                         scope.set_last_result(r.clone());
+                        scope.note_cmdsubst_code(r.code);
                     }
                 }
                 {
@@ -4071,6 +4099,7 @@ impl Kernel {
                     *scope = *saved_scope;
                     if let Ok(ref r) = run_result {
                         scope.set_last_result(r.clone());
+                        scope.note_cmdsubst_code(r.code);
                     }
                 }
                 {

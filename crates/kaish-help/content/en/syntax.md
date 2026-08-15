@@ -249,6 +249,11 @@ echo "got: $(printf 'x\ny')"      # one echo, newline preserved
 H=$(cd "$repo" && git rev-parse HEAD)
 B=$(printf a; printf b)           # "ab"
 
+# An assignment with no command name takes the exit status of the LAST
+# command substitution in its value, or 0 if there was none (bash's rule) —
+# so a failed substitution makes the assignment fail, and || and set -e see it:
+x="$(read-config)" || x="default"   # fallback fires when read-config fails
+
 # kaish-last prints the previous command's .data (or its stdout) as text:
 seq 1 5
 kaish-last | jq '.[2]'            # → 3

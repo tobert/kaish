@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **An assignment with no command name takes the exit status of the last
+  command substitution in its value, or 0 if there was none** (bash's rule,
+  re-probed) — the status used to be swallowed, so `x="$(cmd)" || x="FALLBACK"`
+  could never fire, `set -e` never tripped on a failed substitution, and
+  `false; x=5` left `$?` stale at 1. Applies to `local` assignments too:
+  kaish propagates the status where bash's `local` masks it.
+
 ## [0.14.1] - 2026-08-14
 
 ### Added

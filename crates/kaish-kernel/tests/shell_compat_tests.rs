@@ -148,6 +148,83 @@ shell_compat! {
     eq: "exit: 1",
 }
 
+// ---- Bare-assignment exit status: last command substitution wins ----------
+// An assignment with no command name takes the status of the LAST command
+// substitution performed in its value, or 0 if there was none. This is what
+// lets `x="$(cmd)" || x="FALLBACK"` work: a failed substitution must make the
+// assignment fail so `||` fires. Every row re-probed against bash.
+
+shell_compat! {
+    name: assignment_failed_subst_fires_or_fallback,
+    script: r#"x="$(false)" || echo FIRED"#,
+    eq: "FIRED",
+}
+
+shell_compat! {
+    name: assignment_ok_subst_holds_or_fallback,
+    script: r#"x="$(true)" || echo FIRED"#,
+    eq: "",
+}
+
+shell_compat! {
+    name: assignment_failed_subst_gates_and_chain,
+    script: r#"x="$(false)" && echo RAN"#,
+    eq: "",
+}
+
+shell_compat! {
+    name: assignment_plain_resets_stale_status,
+    script: "false; x=5; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: assignment_last_subst_wins_success,
+    script: r#"x="$(false)$(true)"; echo $?"#,
+    eq: "0",
+}
+
+shell_compat! {
+    name: assignment_last_subst_wins_failure,
+    script: r#"x="$(true)$(false)"; echo $?"#,
+    eq: "1",
+}
+
+shell_compat! {
+    name: assignment_nested_subst_outer_status_wins,
+    script: "x=$(echo $(false)); echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: assignment_subst_body_ends_in_failed_assignment,
+    // Quoted form: the bare `$(y=$(false))` spelling is a parse gap today —
+    // the grammar reachable inside an unquoted `$()` body has no assignment
+    // production (part of the GH #194 story). The quoted path re-parses the
+    // body with the full grammar, so it exercises the runtime semantics now.
+    script: r#"x="$(y=$(false))"; echo $?"#,
+    eq: "1",
+}
+
+shell_compat! {
+    name: assignment_with_command_name_takes_command_status,
+    script: "x=$(false) true; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: assignment_failed_subst_trips_errexit,
+    script: "set -e; x=$(false); echo unreachable",
+    absent: "unreachable",
+    exit: 1,
+}
+
+shell_compat! {
+    name: assignment_failed_subst_in_or_chain_skips_errexit,
+    script: "set -e; x=$(false) || x=FALLBACK; echo \"x=$x\"",
+    eq: "x=FALLBACK",
+}
+
 shell_compat! {
     name: cmd_subst_in_string,
     script: r#"echo "inner: $(echo nested)""#,

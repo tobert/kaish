@@ -820,3 +820,33 @@ async fn test_double_dash_allows_multiple_bareword_assignments() {
     assert_eq!(result.text_out().trim(), "a=b c=d");
 }
 
+// ============================================================================
+// `local x=$(false)` propagates the substitution's status.
+//
+// bash masks it: `local` is a command whose own success hides the failed
+// substitution (the SC2155 footgun). kaish's `local x = v` is an assignment,
+// not a command, and kaish fails loud: the assignment takes the status of
+// its last command substitution like any other, so `||` and `set -e` see it.
+// Deliberate divergence from bash — cannot live in shell_compat_tests.rs.
+// ============================================================================
+
+#[tokio::test]
+async fn test_local_assignment_propagates_subst_status() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("f() { local x=$(false) }; f; echo $?")
+        .await
+        .unwrap();
+    assert_eq!(result.text_out().trim(), "1");
+}
+
+#[tokio::test]
+async fn test_local_assignment_or_fallback_fires() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(r#"f() { local x="$(false)" || echo FIRED }; f"#)
+        .await
+        .unwrap();
+    assert_eq!(result.text_out().trim(), "FIRED");
+}
+
