@@ -235,9 +235,24 @@ shell_compat! {
     eq: "0",
 }
 
-// A substitution body's own last statement decides the outer status, so
-// "outer wins" is not "outer is always 0" — these two rows differ only in the
-// body's final statement.
+// …and that status is the one `||`/`&&` see, not just the one `$?` reports.
+shell_compat! {
+    name: export_assignment_holds_or_fallback,
+    script: "export x=$(false) || echo FIRED",
+    eq: "",
+}
+
+shell_compat! {
+    name: export_assignment_runs_and_chain,
+    script: "export x=$(false) && echo OK",
+    eq: "OK",
+}
+
+// A substitution body's own last statement decides the outer status. The two
+// rows are deliberately crossed — inner and final statement disagree in both
+// — so each one discriminates "last statement wins" from "the innermost
+// substitution wins" and from the old swallowed-status behavior. A pair that
+// agreed (`$(y=$(false); false)`) would pass under all three rules.
 shell_compat! {
     name: assignment_subst_body_outer_statement_wins,
     script: r#"x="$(y=$(false); true)"; echo $?"#,
@@ -246,16 +261,18 @@ shell_compat! {
 
 shell_compat! {
     name: assignment_subst_body_failing_last_statement_wins,
-    script: r#"x="$(y=$(false); false)"; echo $?"#,
+    script: r#"x="$(y=$(true); false)"; echo $?"#,
     eq: "1",
 }
 
 // A substitution outside an assignment must not reach the next assignment's
 // status: `x=5` has no substitution of its own, so it is 0 whatever ran
-// before it.
+// before it. The carrier is `true`, not `echo`, so both runners print nothing
+// but the `0` — `echo $(false)` would emit a bare newline in bash and nothing
+// in kaish, a real divergence that `eq:`'s trim would hide inside this row.
 shell_compat! {
     name: bare_subst_does_not_leak_into_later_assignment,
-    script: "echo $(false); x=5; echo $?",
+    script: "true $(false); x=5; echo $?",
     eq: "0",
 }
 
@@ -278,6 +295,22 @@ shell_compat! {
     name: failed_subst_updates_exit_status_within_the_same_word,
     script: r#"true; echo "$(false) $?""#,
     eq: "1",
+}
+
+// The ordering cuts one way only: a `$?` BEFORE a substitution in the same
+// word still reads the statement that ran before the word.
+shell_compat! {
+    name: exit_status_before_a_subst_in_the_same_word_is_the_prior_statement,
+    script: r#"true; echo "[$?:$(false)]""#,
+    eq: "[0:]",
+}
+
+// errexit fires on a failed substitution (pinned above); it must not fire on
+// a successful one.
+shell_compat! {
+    name: assignment_ok_subst_does_not_trip_errexit,
+    script: "set -e; x=$(true); echo reached",
+    eq: "reached",
 }
 
 shell_compat! {
