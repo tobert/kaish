@@ -29,11 +29,11 @@ breaking entries are marked **BREAKING**.
   `for f in $(grep pat file); do …; done` with no matches left `$?` at grep's
   1 and a later `$?` read a failure that never happened. Only `$?` saw it:
   `||` and `set -e` always read the statement's own result, which was correct.
-- **`touch` on an existing directory updates its timestamps and exits 0**,
-  matching GNU `touch` — it used to fail "is a directory" (exit 1) because
-  `LocalFs::set_mtime` opened the target for write, which cannot open a
-  directory at all; a read-only open is enough to change timestamps and
-  works on both files and directories.
+- **`touch` on an existing directory, or on a write-only (mode 0200) file,
+  updates its timestamps and exits 0**, matching GNU `touch` — a directory
+  can only be opened read-only (write raised EISDIR) and a write-only file
+  can only be opened for write (read raised EACCES), so `LocalFs::set_mtime`
+  now tries read, then falls back to write, covering both.
 
 ## [0.14.1] - 2026-08-14
 
