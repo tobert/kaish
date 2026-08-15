@@ -122,14 +122,19 @@ use super::ToolRegistry;
 /// here. Shared by grep/glob `--ftype`/`--ftype-not`; mirrors sed's
 /// `collect_expressions` (see the repeatable-flag gotcha in `arch_repeatable_flags`).
 ///
-/// Loud on binary (GH #116): a single binary occurrence lands in the bare
-/// `Some(other)` arm; a *repeated* binary occurrence lands inside the
-/// `Json(Array)` as a base64 byte envelope (`push_repeatable_value` runs every
-/// value through `value_to_json`, which encodes `Value::Bytes` that way) — the
-/// array arm's `filter_map(v.as_str())` used to silently DROP that entry
-/// instead of erroring, which is worse than a placeholder: the filter/pattern
-/// just vanished and the caller ran unfiltered against real data. Both shapes
-/// now error instead of silently stringifying or dropping.
+/// A non-string occurrence is a loud error, never a silent skip: the array
+/// arm's original `filter_map(v.as_str())` dropped one, and a filter that
+/// vanishes leaves the caller running unfiltered against real data — the
+/// caller believes it narrowed the search and it did not.
+///
+/// Binary never gets this far. It used to (GH #116): `push_repeatable_value`
+/// ran every value through `value_to_json`, which encodes a `Value::Bytes` as
+/// the base64 envelope, so this arm sniffed the JSON for that envelope shape to
+/// catch it. `flag_value_to_json` now stops binary at the binder (GH #223),
+/// which is both earlier and the only layer that can tell real bytes from a
+/// record that merely looks like the envelope. The sniff went with it: it could
+/// no longer fire on binary, and all it had left to do was misreport a
+/// user-built `{"_type":"bytes",…}` record as "binary data".
 pub(crate) fn read_repeatable_strings(
     args: &super::ToolArgs,
     key: &str,
@@ -141,18 +146,10 @@ pub(crate) fn read_repeatable_strings(
             for v in items {
                 match v.as_str() {
                     Some(s) => out.push(s.to_string()),
-                    // Not a string: check for a binary envelope before
-                    // silently skipping (the pre-existing behavior, preserved
-                    // below for any other JSON shape — out of this sweep's
-                    // scope).
                     None => {
-                        if let Some(bytes) = kaish_types::envelope_to_bytes(v) {
-                            return Err(format!(
-                                "binary data ({} bytes) cannot be used as a repeatable \
-                                 flag value — decode it (base64/xxd) or redirect to a file",
-                                bytes.len()
-                            ));
-                        }
+                        return Err(format!(
+                            "a repeatable flag value must be a string, got `{v}`"
+                        ))
                     }
                 }
             }

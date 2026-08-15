@@ -886,6 +886,16 @@ fn bind_value_or_flag(
     if consumes <= 1 {
         if let Some(v) = collected.into_iter().next() {
             if repeatable {
+                // Discarding this error is safe ONLY because no value reaching
+                // here can be binary. `expr_to_placeholder` passes literals
+                // through and renders everything dynamic as `<dynamic>`, and
+                // the parser cannot build a `Value::Bytes` literal — bytes only
+                // arise at runtime, from a capture the validator never runs. So
+                // the binder's binary gate (`flag_value_to_json`, GH #223)
+                // cannot fire here, and the only other error is the
+                // non-array-entry case, which a fresh `tool_args` cannot reach.
+                // Give the validator real evaluated values and this line starts
+                // swallowing that gate — propagate it then.
                 let _ = push_repeatable_value(tool_args, flag_name, canonical, v);
             } else {
                 tool_args.named.insert(canonical.to_string(), v);
@@ -894,6 +904,10 @@ fn bind_value_or_flag(
         return;
     }
     // Multi-consume: accumulate under named[canonical] as array-of-arrays.
+    // Deliberately the raw `value_to_json`, not the binder's `flag_value_to_json`:
+    // this is a validation-only twin over placeholders, so there is no binary to
+    // gate and nothing to report. Same caveat as above — it diverges from the
+    // binder the moment the validator evaluates for real.
     let occ: Vec<serde_json::Value> = collected
         .iter()
         .map(crate::interpreter::value_to_json)

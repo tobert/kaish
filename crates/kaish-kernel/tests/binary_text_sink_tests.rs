@@ -985,6 +985,112 @@ async fn sed_repeatable_expression_flag_with_binary_is_loud() {
     assert_no_envelope_leak("b=$(cat src.bin); echo hi | sed -e $b").await;
 }
 
+/// Pin the exact code, not just "nonzero". `sed -e $bin` used to exit 2 (sed's
+/// own usage error, reached only because the envelope got that far); the gate
+/// makes it 1, the code every other binary text sink uses. The CHANGELOG states
+/// that number, so a test owns it.
+#[tokio::test]
+async fn binary_at_a_flag_value_exits_exactly_one() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    for script in [
+        "b=$(cat src.bin); echo hi | sed -e $b",
+        "b=$(cat src.bin); jq -n --arg x $b '$x'",
+        "b=$(cat src.bin); jq -n --argjson x $b '$x'",
+    ] {
+        let result = kernel.execute(script).await.unwrap();
+        assert_eq!(
+            result.code, 1,
+            "binary at a flag value must exit exactly 1 (printf's code), got {} for {script:?}: {}",
+            result.code, result.err
+        );
+    }
+}
+
+// ── The gate reads the value's TYPE, never the JSON's shape (GH #223 follow-up).
+//
+// `read_repeatable_strings` used to sniff array entries for the envelope shape
+// (`envelope_to_bytes`) to catch binary that `value_to_json` had already
+// flattened. With the binder gating binary first, that sniff could no longer
+// fire on real bytes — its only remaining effect was to call a user-built
+// `{"_type":"bytes",…}` record "binary data". It was removed; these tests pin
+// both halves so neither can drift back.
+
+/// A record the user built that happens to look like the envelope is a RECORD.
+/// It must not be reported as binary by any builtin delegating to
+/// `read_repeatable_strings` — grep `--ftype`, awk `-v`, env `-u` all did.
+#[tokio::test]
+async fn envelope_shaped_record_is_not_reported_as_binary_by_repeatable_flags() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    const RECORD: &str =
+        r#"r=$(fromjson '{"_type":"bytes","encoding":"base64","data":"AQID","len":3}'); "#;
+    for script in [
+        "grep --ftype=$r pattern plain.txt",
+        "awk -v $r 'BEGIN{}'",
+        "env -u $r",
+    ] {
+        let full = format!("{RECORD}{script}");
+        let result = kernel.execute(&full).await.unwrap();
+        assert!(
+            !result.err.contains("binary data"),
+            "a user-built record must not be called binary data, got err={:?} for {script:?}",
+            result.err
+        );
+    }
+}
+
+/// The other half: real binary in those same flags is still loud — it just
+/// stops one layer earlier now, at the binder rather than the tool.
+#[tokio::test]
+async fn repeatable_flags_still_stop_real_binary_at_the_binder() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    for script in [
+        "b=$(cat src.bin); grep --ftype=$b pattern plain.txt",
+        "b=$(cat src.bin); awk -v $b 'BEGIN{}'",
+        "b=$(cat src.bin); env -u $b",
+    ] {
+        let result = kernel.execute(script).await.unwrap();
+        assert_eq!(result.code, 1, "expected exit 1 for {script:?}: {}", result.err);
+        assert!(
+            is_loud_binary_error(&result.err),
+            "error should name the binary problem, got err={:?} for {script:?}",
+            result.err
+        );
+        assert!(
+            !result.err.contains(ENVELOPE_MARKER),
+            "no envelope in the error: {:?} for {script:?}",
+            result.err
+        );
+    }
+}
+
+/// A non-string entry in a repeatable flag array is a loud type error, never
+/// dropped. The drop is the failure the sniff was originally added to stop: a
+/// filter that vanishes leaves the caller running unfiltered, believing it
+/// narrowed the search. Removing the sniff must not bring the drop back.
+#[tokio::test]
+async fn non_string_repeatable_flag_entry_is_loud_not_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(r#"r=$(fromjson '{"a":1}'); grep --ftype=$r --ftype=file hello plain.txt"#)
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "a non-string ftype must not be silently dropped");
+    assert!(
+        result.err.contains("must be a string"),
+        "error should name the type problem, got err={:?}",
+        result.err
+    );
+}
+
 /// The gate keys on the kaish `Value` being `Bytes`, never on the JSON's
 /// *shape* — kaish does not sniff JSON to decide a type. A record the user
 /// actually built that happens to look like an envelope stays a plain record

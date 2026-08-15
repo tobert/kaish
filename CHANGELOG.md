@@ -24,8 +24,16 @@ breaking entries are marked **BREAKING**.
   reports success. Same wording and exit code as `printf`: decode with
   base64/xxd, or redirect to a file. Covers `--arg`/`--argjson` (both operands)
   and repeatable flags like `sed -e`, whose exit-2 error used to quote the
-  envelope back. An envelope-shaped record the user built stays a plain record —
-  the gate reads the value's type, never the JSON's shape.
+  envelope back — the move to exit 1 is a deliberate correction to the fleet-wide
+  code, not a compatibility break, since exit 2 was only ever reachable through
+  the leak. An envelope-shaped record the user built stays a plain record: the
+  gate reads the value's type, never the JSON's shape.
+- **`grep --ftype`, `awk -v`, and `env -u` no longer call an envelope-shaped
+  record "binary data"** — they sniffed repeatable flag values for the
+  `{"_type":"bytes",…}` shape, which the type gate above supersedes for real
+  bytes and which could only misclassify a record the user built. A non-string
+  value in those flags is now a loud type error rather than a silently dropped
+  filter.
 - **A failed stdin pipe read is an error instead of "no stdin"** — the
   read-to-end path discarded the I/O error along with the bytes already read, so
   a stream that died halfway reached the builtin as empty input; `read` already
