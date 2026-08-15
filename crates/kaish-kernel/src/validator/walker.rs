@@ -1046,27 +1046,39 @@ mod tests {
     /// test in this module passes `&[]` and only ever exercises the fallback
     /// (`tool.schema()`) branch of `validate_command`'s binary search — this
     /// is the one that actually populates the catalog and hits it, then
-    /// checks the two branches agree byte-for-byte on a schema-driven issue
-    /// (`echo` only knows `-n`/`--no-newline`/`--no_newline`, so an unrelated
-    /// long flag must trip `IssueCode::UnknownFlag` — a check that consults
-    /// `schema.params`, unlike `IssueCode::UndefinedCommand` above which never
-    /// touches the schema at all).
+    /// checks the two branches agree byte-for-byte on a schema-driven issue.
+    ///
+    /// `jq`'s `filter` is the only *required* param anywhere in the builtin
+    /// catalog (checked by dumping every schema's `required` params while
+    /// writing this test) and jq's own `Tool::validate` override calls
+    /// `validate_against_schema(args, &self.schema())` first thing — so
+    /// `jq` with no args at all is guaranteed to trip `MissingRequiredArg`
+    /// via a real schema check, identically on both paths, with no need to
+    /// fabricate a corrupt schema to make it non-trivial.
+    ///
+    /// This was manually verified to be a *real*, falsifiable comparison, not
+    /// a vacuous one: temporarily corrupting the catalog's `jq` entry so `-r`
+    /// (a genuine bool flag) is misdeclared as value-consuming, and changing
+    /// the program to `jq -r .` (filter present), makes the two paths
+    /// disagree — the catalog-hit path swallows the filter positional `.` as
+    /// `-r`'s value and reports `MissingRequiredArg`, while the fallback path
+    /// (real schema, `-r` correctly bool) does not — and the `assert_eq!`
+    /// below fails as expected. Not committed as a permanent test (it would
+    /// pin a corruption, not a correctness invariant); this docstring is the
+    /// record of having done it.
     #[test]
     fn catalog_hit_and_fallback_produce_identical_schema_driven_issues() {
         let (registry, user_tools) = make_validator();
         let catalog = registry.schemas();
         assert!(
-            catalog.binary_search_by(|s| s.name.as_str().cmp("echo")).is_ok(),
-            "fixture assumption: `echo` must be in the catalog for this to be a real hit"
+            catalog.binary_search_by(|s| s.name.as_str().cmp("jq")).is_ok(),
+            "fixture assumption: `jq` must be in the catalog for this to be a real hit"
         );
 
         let program = Program {
             statements: vec![Stmt::Command(Command {
-                name: "echo".to_string(),
-                args: vec![
-                    Arg::Positional(Expr::Literal(Value::String("hi".to_string()))),
-                    Arg::LongFlag("bogus-flag".to_string()),
-                ],
+                name: "jq".to_string(),
+                args: vec![],
                 redirects: vec![],
             })],
         };
@@ -1079,8 +1091,9 @@ mod tests {
         // Prove the input is actually discriminating: a program both paths
         // report zero issues on proves nothing about whether they agree.
         assert!(
-            fallback_issues.iter().any(|i| i.code == IssueCode::UnknownFlag),
-            "test input should trip UnknownFlag via the fallback path; got {fallback_issues:?}"
+            fallback_issues.iter().any(|i| i.code == IssueCode::MissingRequiredArg),
+            "test input should trip MissingRequiredArg (`filter`) via the fallback path; \
+             got {fallback_issues:?}"
         );
 
         fn render(issues: &[ValidationIssue]) -> Vec<(Severity, IssueCode, &str, Option<&str>)> {
