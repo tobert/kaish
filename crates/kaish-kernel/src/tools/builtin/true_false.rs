@@ -1,10 +1,25 @@
-//! true/false — Boolean exit code builtins.
+//! true/false/`:` — Boolean exit code builtins.
 //!
 //! These builtins provide shell-compatible boolean semantics:
 //! - `true` exits with code 0 (success/truthy)
 //! - `false` exits with code 1 (failure/falsy)
+//! - `:` is the null command — another spelling of `true`
 //!
 //! Used in conditions like `if true; then` or `while false; do`.
+//!
+//! `:` and `true` are the same command in kaish, with nothing lost in the
+//! aliasing. bash classifies `:` as a POSIX *special* builtin and `true` as a
+//! regular one, but every behavior that distinguishes them needs `set -o
+//! posix` (an assignment prefixing a special builtin persists; a redirection
+//! failure on one aborts the shell). kaish has no POSIX mode and no
+//! special-builtin class, so the distinction has nothing to attach to here.
+//!
+//! All three resolve as [`SpecialForm`](crate::validator::SpecialForm)s before
+//! the registry is consulted, so these `Tool` impls exist for their schemas —
+//! `help :`, `help true`, and the `--json` sweep read them — and do not run on
+//! the normal path. That indirection is load-bearing: it is why an alias
+//! cannot shadow them and why `: -x` exits 0 like bash instead of clap-failing
+//! on an unknown flag.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -57,6 +72,62 @@ impl Tool for True {
         ) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("true: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        ExecResult::success("")
+    }
+}
+
+/// Null command `:`: always succeeds (exit code 0), same as `true`.
+pub struct Colon;
+
+/// clap-derived argv layer for `:`.
+#[derive(Parser, Debug)]
+#[command(name = ":", about = "Do nothing, exit 0 (the null command)")]
+struct ColonArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Ignored — `:` exits 0 whatever operands it is given.
+    // clap needs a positional to bind the `--`-terminated tail that
+    // `to_argv()` always emits.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
+#[async_trait]
+impl Tool for Colon {
+    fn name(&self) -> &str {
+        ":"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        schema_from_clap(
+            &ColonArgs::command(),
+            ":",
+            "Do nothing, exit 0 — another spelling of `true`",
+            [
+                (
+                    "Stand in for an empty branch",
+                    "if [[ -f log.txt ]]; then :; else touch log.txt; fi",
+                ),
+                ("Truncate a file to zero bytes", ": > log.txt"),
+            ],
+        )
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
+        let argv = match args.to_argv() {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!(": {e}")),
+        };
+        let parsed = match ColonArgs::try_parse_from(std::iter::once(":".to_string()).chain(argv)) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!(": {e}")),
         };
         parsed.global.apply(ctx);
 

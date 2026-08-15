@@ -717,6 +717,16 @@ fn parser_false_as_command() {
 }
 
 #[test]
+fn parser_colon_as_command() {
+    parse_and_snapshot("colon_as_command", ":");
+}
+
+#[test]
+fn parser_colon_with_operands() {
+    parse_and_snapshot("colon_with_operands", ": one two");
+}
+
+#[test]
 fn parser_dot_as_source_alias() {
     parse_and_snapshot("dot_as_source_alias", ". script.kai");
 }

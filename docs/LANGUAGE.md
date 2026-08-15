@@ -603,6 +603,27 @@ exit                            # exit script
 exit 1                          # exit with code
 ```
 
+### The null command — `:`
+
+`:` does nothing and exits 0. It is another spelling of `true`, for the places a
+statement is required and none is wanted:
+
+```sh
+if [[ -f log.txt ]]; then :; else touch log.txt; fi   # empty branch
+: > log.txt                                           # truncate to zero bytes
+```
+
+`:` and `true` are the same command here, and nothing is lost in the aliasing.
+bash classifies `:` as a POSIX *special* builtin and `true` as a regular one,
+but every behavior that distinguishes them requires `set -o posix` — an
+assignment prefixing a special builtin persists, and a redirection failure on
+one aborts the shell. kaish has no POSIX mode and no special-builtin class, so
+the distinction has nothing to attach to.
+
+Outside a command-name position the colon is an ordinary character: `awk -F:`
+and `host:8080` need no quoting, and inside brackets and braces it stays
+structural (record entries `{k: v}`, slices `${s[0:5]}`, character classes).
+
 ## Command Substitution
 
 ```sh

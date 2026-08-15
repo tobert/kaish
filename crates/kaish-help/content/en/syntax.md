@@ -223,6 +223,10 @@ case $VAR in
 esac
 
 break; continue; return [N]; exit [N]
+
+# `:` is the null command — does nothing, exits 0, another spelling of `true`:
+if [[ -f log.txt ]]; then :; else touch log.txt; fi   # empty branch
+: > log.txt                                           # truncate to zero bytes
 ```
 
 ## Command Substitution

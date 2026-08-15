@@ -122,6 +122,91 @@ shell_compat! {
     eq: "exit code: 1",
 }
 
+// ---- `:` — the null command -----------------------------------------------
+// `:` does nothing and exits 0: another spelling of `true`. The two differ in
+// bash only under `set -o posix` (special- vs regular-builtin rules), and
+// kaish has neither a POSIX mode nor a special-builtin class, so every row
+// here agrees with bash.
+
+shell_compat! {
+    name: colon_exits_zero,
+    script: ": ; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_ignores_its_arguments,
+    script: ": one two three; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_stands_in_for_an_empty_branch,
+    script: "if false; then echo taken; else :; fi; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_stands_in_for_an_empty_loop_body,
+    script: "for i in a b; do :; done; echo done",
+    eq: "done",
+}
+
+shell_compat! {
+    name: colon_stands_in_for_an_empty_function_body,
+    script: "f() { :; }; f; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: colon_runs_the_and_chain,
+    script: ": && echo AND",
+    eq: "AND",
+}
+
+// The colon stays an ordinary character everywhere a command name is not
+// expected — no quoting needed for `host:port`, `a:b`, or `awk -F:`.
+shell_compat! {
+    name: colon_inside_a_word_is_not_a_command,
+    script: "echo a:b",
+    eq: "a:b",
+}
+
+shell_compat! {
+    name: colon_in_an_assignment_value_is_not_a_command,
+    script: "x=host:8080; echo $x",
+    eq: "host:8080",
+}
+
+// `$()` has its own command-name production, so the null command needs its own
+// row there — the top-level rows do not reach it.
+shell_compat! {
+    name: colon_inside_command_substitution,
+    script: r#"echo "[$(:)]""#,
+    eq: "[]",
+}
+
+shell_compat! {
+    name: colon_as_a_pipeline_stage,
+    script: ": | cat; echo rc=$?",
+    eq: "rc=0",
+}
+
+shell_compat! {
+    name: colon_as_a_case_arm_body,
+    script: "case a in a) : ;; esac; echo $?",
+    eq: "0",
+}
+
+// Flag-shaped operands are ignored too — `:` resolves as a special form, so
+// nothing clap-parses its arguments. This is the row that would catch `:`
+// being demoted to an ordinary registry builtin.
+shell_compat! {
+    name: colon_ignores_flag_shaped_operands,
+    script: ": -x --nope; echo $?",
+    eq: "0",
+}
+
 // ---- Command substitution -------------------------------------------------
 
 shell_compat! {

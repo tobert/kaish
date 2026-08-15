@@ -1703,19 +1703,25 @@ where
 }
 
 /// Command: `name args... [redirects...]`
-/// Command names can be identifiers, 'true', 'false', or '.' (source alias).
+/// Command names can be identifiers, 'true', 'false', ':' (null command), or
+/// '.' (source alias).
 fn command_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Command, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Command name can be an identifier, path, 'true', 'false', '.' (source alias), or ./path
+    // Command name can be an identifier, path, 'true', 'false', ':' (null
+    // command), '.' (source alias), or ./path. A bare `:` reaches here only
+    // when nothing adjacent fused it into a word — inside brackets and braces
+    // the colon is structural (record entries, slices, character classes) and
+    // never reaches a command-name position.
     let command_name = choice((
         ident_parser(),
         path_parser(),
         select! { Token::DotSlashPath(s) => s },
         just(Token::True).to("true".to_string()),
         just(Token::False).to("false".to_string()),
+        just(Token::Colon).to(":".to_string()),
         just(Token::Dot).to(".".to_string()),
     ));
 
@@ -2393,7 +2399,7 @@ where
     // [[ ]] test expression - wrap as Expr::Test
     let test_expr_condition = test_expr_stmt_parser().map(|test| Expr::Test(Box::new(test)));
 
-    // Command as condition (includes true/false as command names)
+    // Command as condition (includes true/false/: as command names)
     // The command's exit code determines truthiness (0 = true, non-zero = false)
     let command_condition = command_parser().map(Expr::Command);
 
@@ -2692,11 +2698,11 @@ where
                 // `docs/LANGUAGE.md`, "Construction").
                 Token::Comma => Expr::Literal(Value::String(",".into())),
                 // Bare colon in argument position is the literal ":" — the
-                // `awk -F: '{print $1}'` / `--field-separator=:` idiom and
-                // the bash no-op `:` alias. In statement position the colon is
-                // the no-op command (handled by `command_parser`); here it is
-                // only reached after a command name has been parsed, so there
-                // is no ambiguity with the statement form.
+                // `awk -F: '{print $1}'` / `--field-separator=:` idiom. In
+                // command-name position the colon is the null command (see
+                // `command_name` in `command_parser`); here it is only reached
+                // after a command name has been parsed, so there is no
+                // ambiguity with that form.
                 Token::Colon => Expr::Literal(Value::String(":".into())),
                 Token::Tilde => Expr::Literal(Value::String("~".into())),
                 Token::TildePath(s) => Expr::Literal(Value::String(s)),
@@ -2804,11 +2810,13 @@ where
         positional,
     ));
 
-    // Command name parser - accepts identifiers and boolean keywords (true/false are builtins)
+    // Command name parser - accepts identifiers, the boolean keywords, and the
+    // null command (true/false/: are builtins)
     let command_name = choice((
         ident_parser(),
         just(Token::True).to("true".to_string()),
         just(Token::False).to("false".to_string()),
+        just(Token::Colon).to(":".to_string()),
     ));
 
     // Command parser. Trailing redirects (`> file`, `2> file`, `>> file`, …)
