@@ -220,7 +220,10 @@ impl Tool for Spawn {
         }
 
         // Handle stdin — forward raw bytes so binary survives into the child.
-        let stdin_data = ctx.read_stdin_to_bytes().await;
+        let stdin_data = match ctx.read_stdin_to_bytes().await {
+            Ok(d) => d,
+            Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
+        };
         cmd.stdin(if stdin_data.is_some() {
             std::process::Stdio::piped()
         } else {

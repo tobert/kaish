@@ -92,7 +92,10 @@ impl Tool for Tee {
 
         // Read raw bytes so binary passes through tee intact (to files and to
         // the next stage).
-        let input = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+        let input = match ctx.read_stdin_to_bytes().await {
+            Ok(i) => i.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(1, format!("tee: {e}")),
+        };
 
         // POSIX: tee writes stdin to every file AND to stdout. Continue past
         // per-file errors (matches POSIX `tee` semantics) and report every

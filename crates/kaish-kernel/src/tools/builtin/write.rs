@@ -109,9 +109,20 @@ impl Tool for Write {
         } else if let Some(v) = args.positional.get(1) {
             value_to_bytes(v)
         } else {
+            // Zero bytes mean "write an empty file" only when something
+            // deliberately supplied them — an upstream stage, a redirect, an
+            // embedder buffer. The session's own stdin did not: `write f`
+            // reading from /dev/null is a missing operand, and writing it
+            // destroys the file it was pointed at.
+            let content_was_offered = ctx.stdin.is_some()
+                || ctx.pipeline_position != crate::dispatch::PipelinePosition::Only;
             match ctx.read_stdin_to_bytes().await {
-                Some(bytes) => bytes,
-                None => return ExecResult::failure(1, "write: missing content argument"),
+                Ok(Some(bytes)) if bytes.is_empty() && !content_was_offered => {
+                    return ExecResult::failure(1, missing_content_error(&path))
+                }
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return ExecResult::failure(1, missing_content_error(&path)),
+                Err(e) => return ExecResult::failure(1, format!("write: {e}")),
             }
         };
 
@@ -123,6 +134,18 @@ impl Tool for Write {
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }
     }
+}
+
+/// The refusal when `write` was given no content by any route.
+///
+/// Says the file was left alone, because the failure this replaces did the
+/// opposite quietly: `write FILE` with nothing to write truncated FILE to zero
+/// bytes and exited 0. An agent reading only the exit code could not tell.
+fn missing_content_error(path: &str) -> String {
+    format!(
+        "write: no content to write — pass it as an operand (write {path} CONTENT), \
+         pipe it in, or redirect a file into it; '{path}' is unchanged"
+    )
 }
 
 /// Render a value as the raw bytes to write. `Bytes` is written verbatim;

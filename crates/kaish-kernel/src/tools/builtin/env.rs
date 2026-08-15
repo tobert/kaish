@@ -309,7 +309,11 @@ async fn execute_with_env(
 
     // Handle stdin. Forward raw bytes so binary piped into the child
     // (`… | env FOO=bar gzip`) isn't lossy-decoded.
-    if let Some(stdin_data) = ctx.read_stdin_to_bytes().await {
+    let stdin_data = match ctx.read_stdin_to_bytes().await {
+        Ok(d) => d,
+        Err(e) => return ExecResult::failure(1, format!("env: {e}")),
+    };
+    if let Some(stdin_data) = stdin_data {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());

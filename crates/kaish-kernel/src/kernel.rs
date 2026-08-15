@@ -5908,9 +5908,9 @@ async fn consume_flag_positionals(
 
     // Multi-consume: accumulate under named[canonical] as array-of-arrays.
     let occ: Vec<serde_json::Value> = collected
-        .into_iter()
-        .map(|v| crate::interpreter::value_to_json(&v))
-        .collect();
+        .iter()
+        .map(|v| flag_value_to_json(canonical, v))
+        .collect::<Result<Vec<_>>>()?;
     let entry = tool_args
         .named
         .entry(canonical.to_string())
@@ -6736,13 +6736,44 @@ fn is_shell_identifier(s: &str) -> bool {
 /// (`consume_flag_positionals`) and the `--flag=value` form (`Arg::Named`) — so
 /// `-e A -e B`, `--expression=A --expression=B`, and any mix all converge on one
 /// ordered array.
+/// Flatten a bound flag value to JSON, going LOUD on binary.
+///
+/// The accumulating flag forms (`jq --arg NAME VAL`, `sed -e EXPR -e EXPR`)
+/// store their values as `serde_json::Value` rather than keeping the kaish
+/// `Value`, and [`value_to_json`](crate::interpreter::value_to_json) renders a
+/// `Value::Bytes` as the base64 envelope
+/// (`{"_type":"bytes","encoding":"base64",…}`). That envelope is an internal
+/// wire form, not the user's data: bound into `--arg x`, the tool sees the
+/// envelope's literal JSON *text* where the bytes should be and reports
+/// success, which is silent corruption (GH #223). Binary stops here instead,
+/// with the same wording and exit 1 as every other text sink.
+///
+/// Valid-UTF-8 bytes coerce to their text, matching
+/// [`value_to_text_sink_named`](crate::interpreter::value_to_text_sink_named);
+/// in practice `Value::Bytes` only ever holds non-UTF-8, so this errors
+/// whenever binary reaches a flag value. Gating on the kaish `Value` (not on
+/// the envelope's JSON shape) is what keeps an envelope-shaped record the user
+/// actually built — `fromjson '{"_type":"bytes",…}'` — a plain record: kaish
+/// never sniffs JSON to decide a type.
+fn flag_value_to_json(canonical: &str, v: &Value) -> Result<serde_json::Value> {
+    match v {
+        Value::Bytes(_) => crate::interpreter::value_to_text_sink_named(
+            v,
+            &format!("the value of the {canonical} flag"),
+        )
+        .map(serde_json::Value::String)
+        .map_err(|e| anyhow::anyhow!("{e}")),
+        other => Ok(crate::interpreter::value_to_json(other)),
+    }
+}
+
 pub(crate) fn push_repeatable_value(
     tool_args: &mut ToolArgs,
     flag_name: &str,
     canonical: &str,
     v: Value,
 ) -> anyhow::Result<()> {
-    let occ = crate::interpreter::value_to_json(&v);
+    let occ = flag_value_to_json(canonical, &v)?;
     let entry = tool_args
         .named
         .entry(canonical.to_string())

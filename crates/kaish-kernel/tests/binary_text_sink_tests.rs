@@ -902,3 +902,230 @@ async fn push_binary_positional_value_is_not_rejected_by_to_argv() {
     assert!(result.ok(), "err={}", result.err);
     assert_eq!(result.text_out().trim(), "1", "push must append exactly one element");
 }
+
+// ---------------------------------------------------------------------------
+// Accumulating flag values (`jq --arg NAME VAL`, `sed -e EXPR`) — GH #223.
+//
+// These flag forms store their bound values as `serde_json::Value` rather than
+// keeping the kaish `Value`, and `value_to_json` renders a `Value::Bytes` as
+// the base64 envelope `{"_type":"bytes","encoding":"base64","data":…,"len":N}`.
+// Before the fix that envelope reached the tool as the bound value's literal
+// JSON *text*: `jq -n --arg x $b '$x'` printed the envelope and exited 0. That
+// is worse than the placeholder — it looks like data and reports success.
+// ---------------------------------------------------------------------------
+
+/// The envelope's discriminator. Its presence anywhere in a binding's output
+/// means the internal wire form leaked where the user's bytes belonged.
+const ENVELOPE_MARKER: &str = "_type";
+
+/// Assert a script is loud about binary AND that no envelope leaked.
+///
+/// `assert_loud_binary` above only guards the `[binary: N bytes]` placeholder;
+/// this flag path leaks the *envelope* instead, so the leak check needs its own
+/// marker. Both stdout and stderr are checked — an error message that quotes
+/// the envelope back (sed's old `-e expression must be a string, got {…}`) is
+/// still the internal form escaping to an agent.
+async fn assert_no_envelope_leak(script: &str) {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    match kernel.execute(script).await {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "binary at a flag value must be a nonzero exit: {script:?}");
+            assert!(
+                is_loud_binary_error(&r.err),
+                "error should name the binary problem, got err={:?} for {script:?}",
+                r.err
+            );
+            assert!(
+                !r.text_out().contains(ENVELOPE_MARKER) && !r.err.contains(ENVELOPE_MARKER),
+                "the bytes envelope must NOT leak to stdout or stderr: out={:?} err={:?}",
+                r.text_out(),
+                r.err
+            );
+        }
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            assert!(
+                is_loud_binary_error(&msg),
+                "execute error should name the binary problem, got {msg:?} for {script:?}"
+            );
+            assert!(
+                !msg.contains(ENVELOPE_MARKER),
+                "the bytes envelope must NOT leak into the error: {msg:?} for {script:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn jq_arg_binding_of_binary_is_loud_not_a_stringified_envelope() {
+    assert_no_envelope_leak("b=$(cat src.bin); jq -n --arg x $b '$x'").await;
+}
+
+#[tokio::test]
+async fn jq_argjson_binding_of_binary_is_loud_not_a_stringified_envelope() {
+    assert_no_envelope_leak("b=$(cat src.bin); jq -n --argjson x $b '$x'").await;
+}
+
+/// The NAME half of the `consumes=2` pair is gated too — a binary variable
+/// name is no more usable than a binary value, and the pair is collected in
+/// one loop.
+#[tokio::test]
+async fn jq_arg_binary_in_the_name_slot_is_loud() {
+    assert_no_envelope_leak("b=$(cat src.bin); jq -n --arg $b v '1'").await;
+}
+
+/// The repeatable single-value form (`sed -e EXPR`) flattens through the same
+/// `value_to_json` call. sed happened to type-check its `-e` operand and fail,
+/// but it quoted the whole envelope back at the agent while doing so; the gate
+/// now stops the value before any tool sees it.
+#[tokio::test]
+async fn sed_repeatable_expression_flag_with_binary_is_loud() {
+    assert_no_envelope_leak("b=$(cat src.bin); echo hi | sed -e $b").await;
+}
+
+/// Pin the exact code, not just "nonzero". `sed -e $bin` used to exit 2 (sed's
+/// own usage error, reached only because the envelope got that far); the gate
+/// makes it 1, the code every other binary text sink uses. The CHANGELOG states
+/// that number, so a test owns it.
+#[tokio::test]
+async fn binary_at_a_flag_value_exits_exactly_one() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    for script in [
+        "b=$(cat src.bin); echo hi | sed -e $b",
+        "b=$(cat src.bin); jq -n --arg x $b '$x'",
+        "b=$(cat src.bin); jq -n --argjson x $b '$x'",
+    ] {
+        let result = kernel.execute(script).await.unwrap();
+        assert_eq!(
+            result.code, 1,
+            "binary at a flag value must exit exactly 1 (printf's code), got {} for {script:?}: {}",
+            result.code, result.err
+        );
+    }
+}
+
+// ── The gate reads the value's TYPE, never the JSON's shape (GH #223 follow-up).
+//
+// `read_repeatable_strings` used to sniff array entries for the envelope shape
+// (`envelope_to_bytes`) to catch binary that `value_to_json` had already
+// flattened. With the binder gating binary first, that sniff could no longer
+// fire on real bytes — its only remaining effect was to call a user-built
+// `{"_type":"bytes",…}` record "binary data". It was removed; these tests pin
+// both halves so neither can drift back.
+
+/// A record the user built that happens to look like the envelope is a RECORD.
+/// It must not be reported as binary by any builtin delegating to
+/// `read_repeatable_strings` — grep `--ftype`, awk `-v`, env `-u` all did.
+#[tokio::test]
+async fn envelope_shaped_record_is_not_reported_as_binary_by_repeatable_flags() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    const RECORD: &str =
+        r#"r=$(fromjson '{"_type":"bytes","encoding":"base64","data":"AQID","len":3}'); "#;
+    for script in [
+        "grep --ftype=$r pattern plain.txt",
+        "awk -v $r 'BEGIN{}'",
+        "env -u $r",
+    ] {
+        let full = format!("{RECORD}{script}");
+        let result = kernel.execute(&full).await.unwrap();
+        assert!(
+            !result.err.contains("binary data"),
+            "a user-built record must not be called binary data, got err={:?} for {script:?}",
+            result.err
+        );
+    }
+}
+
+/// The other half: real binary in those same flags is still loud — it just
+/// stops one layer earlier now, at the binder rather than the tool.
+#[tokio::test]
+async fn repeatable_flags_still_stop_real_binary_at_the_binder() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    for script in [
+        "b=$(cat src.bin); grep --ftype=$b pattern plain.txt",
+        "b=$(cat src.bin); awk -v $b 'BEGIN{}'",
+        "b=$(cat src.bin); env -u $b",
+    ] {
+        let result = kernel.execute(script).await.unwrap();
+        assert_eq!(result.code, 1, "expected exit 1 for {script:?}: {}", result.err);
+        assert!(
+            is_loud_binary_error(&result.err),
+            "error should name the binary problem, got err={:?} for {script:?}",
+            result.err
+        );
+        assert!(
+            !result.err.contains(ENVELOPE_MARKER),
+            "no envelope in the error: {:?} for {script:?}",
+            result.err
+        );
+    }
+}
+
+/// A non-string entry in a repeatable flag array is a loud type error, never
+/// dropped. The drop is the failure the sniff was originally added to stop: a
+/// filter that vanishes leaves the caller running unfiltered, believing it
+/// narrowed the search. Removing the sniff must not bring the drop back.
+#[tokio::test]
+async fn non_string_repeatable_flag_entry_is_loud_not_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(r#"r=$(fromjson '{"a":1}'); grep --ftype=$r --ftype=file hello plain.txt"#)
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "a non-string ftype must not be silently dropped");
+    assert!(
+        result.err.contains("must be a string"),
+        "error should name the type problem, got err={:?}",
+        result.err
+    );
+}
+
+/// The gate keys on the kaish `Value` being `Bytes`, never on the JSON's
+/// *shape* — kaish does not sniff JSON to decide a type. A record the user
+/// actually built that happens to look like an envelope stays a plain record
+/// and still binds, which is the behavior `fromjson` already guarantees.
+#[tokio::test]
+async fn envelope_shaped_record_still_binds_through_argjson() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(
+            r#"r=$(fromjson '{"_type":"bytes","encoding":"base64","data":"AQID","len":3}'); jq -n --argjson x $r '$x._type'"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.ok(), "envelope-shaped record must still bind: err={}", result.err);
+    assert_eq!(result.text_out().trim(), "\"bytes\"");
+}
+
+/// Text and numeric bindings are untouched by the gate.
+#[tokio::test]
+async fn ordinary_jq_bindings_are_unaffected() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let text = kernel.execute("jq -n --arg x hello '$x'").await.unwrap();
+    assert!(text.ok(), "err={}", text.err);
+    assert_eq!(text.text_out().trim(), "\"hello\"");
+
+    let num = kernel.execute("jq -n --argjson x 42 '$x + 1'").await.unwrap();
+    assert!(num.ok(), "err={}", num.err);
+    assert_eq!(num.text_out().trim(), "43");
+
+    let repeated = kernel
+        .execute("echo hi | sed -e 's/h/H/' -e 's/i/I/'")
+        .await
+        .unwrap();
+    assert!(repeated.ok(), "err={}", repeated.err);
+    assert_eq!(repeated.text_out().trim(), "HI");
+}

@@ -76,7 +76,10 @@ impl Tool for File {
 
         // No paths: classify stdin. `-` is the conventional name in output.
         if args.positional.is_empty() {
-            let bytes = ctx.read_stdin_to_bytes().await.unwrap_or_default();
+            let bytes = match ctx.read_stdin_to_bytes().await {
+                Ok(b) => b.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(1, format!("file: {e}")),
+            };
             let id = Identity::of(&bytes);
             let text = render_line("-", &id.describe(parsed.mime), parsed.brief);
             return ExecResult::with_output_and_text(

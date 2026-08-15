@@ -106,7 +106,10 @@ impl Tool for Tail {
                         Err(e) => return ExecResult::failure(1, format!("tail: {}: {}", path, e)),
                     }
                 }
-                None => ctx.read_stdin_to_bytes().await.unwrap_or_default(),
+                None => match ctx.read_stdin_to_bytes().await {
+                    Ok(d) => d.unwrap_or_default(),
+                    Err(e) => return ExecResult::failure(1, format!("tail: {e}")),
+                },
             };
             let start = if from_start {
                 // `+N` is 1-based: byte 1 = index 0, byte N = index N-1.

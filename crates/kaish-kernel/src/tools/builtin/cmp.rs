@@ -241,7 +241,10 @@ fn cmp_whole_buffer(a: &[u8], b: &[u8], name1: &str, name2: &str, silent: bool) 
 /// Read an operand as raw bytes — a path through the VFS, or stdin for `-`.
 async fn read_operand(ctx: &mut ExecContext, name: &str) -> std::io::Result<Vec<u8>> {
     if name == "-" {
-        Ok(ctx.read_stdin_to_bytes().await.unwrap_or_default())
+        ctx.read_stdin_to_bytes()
+            .await
+            .map(Option::unwrap_or_default)
+            .map_err(std::io::Error::other)
     } else {
         let resolved = ctx.resolve_path(name);
         ctx.backend

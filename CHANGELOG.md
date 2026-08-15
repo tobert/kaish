@@ -24,6 +24,21 @@ breaking entries are marked **BREAKING**.
   `&[]` to keep the old behavior.
 
 ### Fixed
+- **`write` with no stdin and no content operand errors instead of truncating the
+  file to zero bytes** — a missing operand destroyed an existing file and exited
+  0, and `set -o trash` did not cover it. An empty pipe or redirect still
+  truncates: that is an explicit request, a missing operand is not.
+- **A binary value bound to an accumulating flag exits 1 instead of binding its
+  base64 envelope as text** — `jq --arg`/`--argjson` and repeatable flags like
+  `sed -e` used to bind `{"_type":"bytes",…}` as data. Same message and code as
+  `printf`: decode with base64/xxd, or redirect to a file.
+- **`grep --ftype`, `awk -v`, and `env -u` no longer call an envelope-shaped
+  record "binary data"** — they sniffed the JSON shape, which the type gate
+  above supersedes; a non-string value there is now a loud error, not a dropped
+  filter.
+- **A failed stdin pipe read is an error instead of "no stdin"** — the read path
+  discarded the I/O error along with the bytes already read, so a stream that
+  died halfway arrived as empty input.
 - **An assignment with no command name takes the exit status of the last
   command substitution in its value, or 0 if there was none** (bash's rule,
   re-probed) — the status used to be swallowed, so `x="$(cmd)" || x="FALLBACK"`

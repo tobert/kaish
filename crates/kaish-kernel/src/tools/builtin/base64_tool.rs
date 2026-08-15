@@ -103,7 +103,10 @@ impl Tool for Base64Tool {
                     Err(e) => return ExecResult::failure(1, format!("base64: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_bytes().await.unwrap_or_default(),
+            None => match ctx.read_stdin_to_bytes().await {
+                Ok(d) => d.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(1, format!("base64: {e}")),
+            },
         };
 
         if decode {
