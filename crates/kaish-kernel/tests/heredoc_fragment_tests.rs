@@ -483,3 +483,87 @@ fn a_planned_redirect_names_the_real_delimiter() {
     assert_eq!(redirect.kind, "<<");
     assert_eq!(redirect.target.display(), "'PY'");
 }
+
+// ───────── The address must mean the same thing at both ends ──────────
+
+/// `plan_program` numbers statements **before** dropping the empty ones, so a
+/// comment or a blank line leaves a gap in the published indices. A resolver
+/// that filtered first would read every address after the gap off by one and
+/// return a different statement's body, saying nothing.
+///
+/// A leading comment is the most ordinary thing in a script, which is what
+/// makes this worth a test of its own.
+#[test]
+fn a_leading_comment_does_not_shift_the_addresses() {
+    let source = "# what this does\ncat <<'A'\nbody_a\nA\ncat <<'B'\nbody_b\nB";
+    let plans = plan_program(source).expect("parses");
+
+    let addressed: Vec<(usize, String, Expansion)> = plans
+        .iter()
+        .flat_map(|p| p.plan.commands.iter().flat_map(move |c| {
+            c.heredocs.iter().map(move |h| {
+                let addr = FragmentAddr::new(p.index, h.index);
+                (
+                    p.index,
+                    h.body.display(),
+                    expand_fragment(source, addr, &[]).expect("expands"),
+                )
+            })
+        }))
+        .collect();
+
+    // The published index skips 0: that is the comment.
+    assert_eq!(addressed[0].0, 1);
+    for (statement, published, expanded) in addressed {
+        assert_eq!(
+            expanded,
+            Expansion::Complete(published.clone()),
+            "statement {statement} expanded to another statement's body",
+        );
+    }
+}
+
+/// Whitespace does not hide session state: the arithmetic evaluator skips it
+/// before every token, so `$( ( $ ? ) )` reads the exit code exactly as
+/// `$(($?))` does.
+#[test]
+fn spaced_session_state_inside_arithmetic_still_refuses() {
+    for body in ["n = $(( $ ? ))", "n = $(( ${ ? } ))", "n = $(( $ $ ))", "n = $(( $ 1 ))"] {
+        let source = format!("python3 <<PY\n{body}\nPY");
+        let err = expand_fragment(&source, FragmentAddr::new(0, 0), &[])
+            .expect_err("spacing must not hide session state");
+        assert!(
+            matches!(err, FragmentError::NeedsSessionState { .. }),
+            "{body} expanded instead of refusing: {err}"
+        );
+    }
+}
+
+/// `${?:-fallback}` reads the exit code through its *path* and never reaches
+/// the default, because an exit code is not empty. Checking only the default
+/// let it through as a confident `Complete`.
+#[test]
+fn an_exit_code_with_a_default_is_a_loud_error() {
+    let err = expand_fragment(
+        "python3 <<PY\nx = ${?:-fallback}\nPY",
+        FragmentAddr::new(0, 0),
+        &[],
+    )
+    .expect_err("the path reads session state whatever the default says");
+    assert!(
+        matches!(err, FragmentError::NeedsSessionState { .. }),
+        "got: {err}"
+    );
+}
+
+/// `${$}` and `${1}` are undefined *names*, not session state: kaish expands
+/// both to empty when it executes (verified against the binary), so refusing
+/// them would block a body that expands correctly. Only `${?}` resolves
+/// specially.
+#[test]
+fn braced_dollar_and_digit_roots_expand_like_execution() {
+    assert_eq!(
+        expand("python3 <<PY\na=[${1}] b=[${$}]\nPY", 0, &[]),
+        Expansion::Complete("a=[] b=[]\n".to_string())
+    );
+}

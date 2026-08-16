@@ -27,7 +27,7 @@ use kaish_types::plan::{Expansion, FragmentAddr, Hole};
 use kaish_types::Value;
 
 use crate::ast::plan::{heredoc_targets, plan_statement, render_expr};
-use crate::ast::{Expr, Stmt, StringPart, VarSegment};
+use crate::ast::{Expr, Stmt, StringPart, VarPath, VarSegment};
 use crate::interpreter::Evaluator;
 use crate::interpreter::Scope;
 use crate::parser::{self, ParseError};
@@ -98,16 +98,17 @@ pub fn expand_fragment(
     scope: &[(String, Value)],
 ) -> Result<Expansion, FragmentError> {
     let program = parser::parse(source).map_err(FragmentError::Parse)?;
-    let statements: Vec<&Stmt> = program
+    // Index the statements as parsed, because that is the position
+    // `plan_program` publishes — it numbers before dropping the empty ones, so
+    // a blank line or a comment shifts a filtered list out from under every
+    // address after it. An empty statement carries no heredoc and falls out as
+    // `NoSuchHeredoc` below.
+    let stmt = program
         .statements
-        .iter()
-        .filter(|s| !matches!(s, Stmt::Empty))
-        .collect();
-    let stmt = statements
         .get(addr.statement)
         .ok_or(FragmentError::NoSuchStatement {
             asked: addr.statement,
-            statements: statements.len(),
+            statements: program.statements.len(),
         })?;
 
     // The plan's own walk, so the index that resolves here is the index the
@@ -220,7 +221,10 @@ fn part_state(part: &StringPart) -> Option<String> {
         StringPart::Positional(n) => Some(format!("${n}")),
         StringPart::AllArgs => Some("$@".to_string()),
         StringPart::ArgCount => Some("$#".to_string()),
-        StringPart::VarWithDefault { default, .. } => default.iter().find_map(part_state),
+        // Both halves: `${?:-fallback}` reads the exit code through its path
+        // and never reaches the default, because an exit code is not empty.
+        StringPart::VarWithDefault { path, default } => var_path_state(path)
+            .or_else(|| default.iter().find_map(part_state)),
         // `$((…))` reads session state through spellings the interpolation
         // parser never turns into a part of its own — the arithmetic
         // evaluator resolves them itself.
@@ -229,49 +233,63 @@ fn part_state(part: &StringPart) -> Option<String> {
         // scope resolves its root specially. `?`, `$`, and a digit run are
         // not names a caller can supply, so naming them costs no false
         // positive.
-        StringPart::Var(path) | StringPart::VarLength(path) => {
-            let root = path.segments.first()?;
-            match root {
-                VarSegment::Field(name) if is_session_root(name) => Some(format!("${{{name}}}")),
-                _ => None,
-            }
-        }
+        StringPart::Var(path) | StringPart::VarLength(path) => var_path_state(path),
         _ => None,
     }
 }
 
-/// Whether a variable root names session state rather than a session
-/// variable. `?` is the exit code the scope resolves specially, `$` the pid,
-/// and a digit run a positional — none can be `set`, so none can arrive in a
-/// supplied scope.
-fn is_session_root(name: &str) -> bool {
-    name == "?" || name == "$" || (!name.is_empty() && name.chars().all(|c| c.is_ascii_digit()))
+/// The session state a variable path reads, if any.
+///
+/// `?` and only `?`: the scope resolves that root to the last exit code
+/// specially, so a fresh scope would answer 0 whatever the session did. Every
+/// other root goes through ordinary lookup — `${$}` and `${1}` are undefined
+/// names that expand to empty, exactly as they do when kaish executes, so
+/// refusing them would block a body that expands correctly.
+fn var_path_state(path: &VarPath) -> Option<String> {
+    match path.segments.first()? {
+        VarSegment::Field(name) if name == "?" => Some("${?}".to_string()),
+        _ => None,
+    }
 }
 
 /// The session state an arithmetic expression reads, if any.
 ///
-/// The evaluator's special cases are `$?`, `$$`, `${?}`, `${$}`, and a
-/// positional `$N`/`${N}` (see `arithmetic.rs`, the `Some('$')` arm). Every
-/// other `$name` is an ordinary variable a caller can supply, so it does not
-/// block. Keep this in step with that arm — a spelling missing here expands
-/// against a fresh session and invents a value.
+/// `$((…))` is evaluated by `arithmetic.rs`, which resolves `$?`, `$$`, and a
+/// positional `$N` itself — none of them ever becomes a `StringPart` this
+/// module could see, so the expression text is all there is to go on.
+///
+/// The rule is deliberately the **complement** of the safe case rather than a
+/// list of the unsafe ones: after `$` (and an optional `{`), an ordinary
+/// variable name starts with a letter or `_`, and a caller can supply those.
+/// Anything else — `?`, `$`, a digit, a spelling nobody has thought of yet —
+/// reads something a supplied scope cannot carry, so it refuses. Enumerating
+/// the unsafe spellings instead would make every one this misses expand
+/// against a fresh session and invent a value.
+///
+/// Whitespace is skipped at both points because the evaluator's own `peek`
+/// skips it, so `$( ( $ ? ) )` reads the exit code exactly as `$(($?))` does.
 fn arithmetic_state(expr: &str) -> Option<String> {
     let chars: Vec<char> = expr.chars().collect();
+    let skip_spaces = |mut i: usize| {
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        i
+    };
     for (i, c) in chars.iter().enumerate() {
         if *c != '$' {
             continue;
         }
-        // Look past an opening brace so `${?}` reads the same as `$?`.
-        let mut j = i + 1;
-        let braced = chars.get(j) == Some(&'{');
-        if braced {
-            j += 1;
+        let mut j = skip_spaces(i + 1);
+        if chars.get(j) == Some(&'{') {
+            j = skip_spaces(j + 1);
         }
         match chars.get(j) {
-            Some('?') => return Some("$?".to_string()),
-            Some('$') => return Some("$$".to_string()),
-            Some(d) if d.is_ascii_digit() => return Some(format!("${d}")),
-            _ => {}
+            // An ordinary name — the caller can supply it.
+            Some(c) if c.is_alphabetic() || *c == '_' => {}
+            // Nothing at all after the `$` is not a read.
+            None => {}
+            Some(c) => return Some(format!("${c}")),
         }
     }
     None
