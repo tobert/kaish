@@ -11,6 +11,9 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **Property tests over the parser** — `parse` answers rather than panicking for
+  any composition of shell fragments, planning agrees with parsing about what is
+  well-formed, and a plan's own `rendered` text parses back.
 - **`kaish --plan <command>` prints the statement plans as JSON** — command analysis
   was reachable only from Rust before this.
 - **`--plan` executes nothing and builds no kernel** — planning is a pure function of
