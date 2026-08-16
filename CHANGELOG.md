@@ -46,8 +46,21 @@ breaking entries are marked **BREAKING**.
   `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
   catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
   `&[]` to keep the old behavior.
+- **Parsing a `$(...)`-heavy script is ~20-25% slower per token** — the fix
+  below parses each substitution body through the full grammar via its own
+  recursive parse call instead of a narrower hand-rolled one.
+
+### Removed
+- **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
+  `AmbiguousBooleanLike` variants are gone — `LexerError` is public and not
+  `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
+  them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
+  before running, and `yes` could not even be named as a command.
+- **Only lowercase `true` and `false` are boolean literals** — unchanged, and the
+  rejection was never what made it so: `yes` was always a string.
 - **`write` with no stdin and no content operand errors instead of truncating the
   file to zero bytes** — a missing operand destroyed an existing file and exited
   0, and `set -o trash` did not cover it. An empty pipe or redirect still
@@ -79,6 +92,13 @@ breaking entries are marked **BREAKING**.
   can only be opened read-only (write raised EISDIR) and a write-only file
   can only be opened for write (read raised EACCES), so `LocalFs::set_mtime`
   now tries read, then falls back to write, covering both.
+- **`$(...)` accepts `if`/`for`/`while`/`case` unquoted, matching the quoted
+  form** — `x="$(for f in a b; do echo $f; done)"` already ran; the same body
+  without quotes was a parse error, because `cmd_subst_parser` carried its
+  own narrower pipeline/`&&`/`||` grammar with control structures declared
+  out of scope. The body now parses through the same full program grammar as
+  everywhere else, and a malformed body reports its error at the actual
+  failure point instead of a generic message anchored at `$(`.
 - **Unquoted barewords and paths accept any non-ASCII character** —
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an

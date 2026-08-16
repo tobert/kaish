@@ -182,17 +182,6 @@ fn run_lexer_error_variant(input: &str, expected: LexerError) {
     );
 }
 
-/// Like [`run_lexer_error_variant`] but matches against a predicate, for error
-/// variants that carry a payload (e.g. the ambiguous-boolean spellings).
-fn run_lexer_error_matching(input: &str, pred: impl Fn(&LexerError) -> bool, what: &str) {
-    let errors = tokenize(input).expect_err(&format!("expected error for input: {input:?}"));
-    assert!(
-        errors.iter().any(|e| pred(&e.token)),
-        "input {input:?}: expected {what}, got {:?}",
-        errors.iter().map(|e| &e.token).collect::<Vec<_>>(),
-    );
-}
-
 // =============================================================================
 // Keywords
 // =============================================================================
@@ -303,6 +292,16 @@ fn lexer_booleans(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+/// Only lowercase `true` and `false` are boolean literals. Everything that
+/// merely *looks* like one is an ordinary word.
+///
+/// The lexer used to reject these as ambiguous, which cost more than it
+/// bought: `yes | head -3` could not run the POSIX utility, `cat no` could
+/// not read a file named `no`, and `grep TRUE data.csv` could not search for
+/// a common CSV value. A lexer cannot see whether a boolean was wanted, so it
+/// rejected the word in every position to catch the one where it might have
+/// mattered — and it did not even do that consistently, since `1`, `0`, `on`,
+/// `off`, `y`, and `n` were always accepted.
 #[rstest]
 #[case::bool_upper_true("TRUE")]
 #[case::bool_upper_false("FALSE")]
@@ -311,17 +310,8 @@ fn lexer_booleans(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::bool_like_no("no")]
 #[case::bool_like_yes_upper("YES")]
 #[case::bool_like_no_upper("NO")]
-fn lexer_ambiguous_boolean_errors(#[case] input: &str) {
-    run_lexer_error_matching(
-        input,
-        |e| {
-            matches!(
-                e,
-                LexerError::AmbiguousBoolean(_) | LexerError::AmbiguousBooleanLike(_)
-            )
-        },
-        "an ambiguous-boolean error",
-    );
+fn boolean_lookalikes_are_ordinary_identifiers(#[case] input: &str) {
+    run_lexer_test(input, &[&format!("IDENT({input})")]);
 }
 
 // =============================================================================
