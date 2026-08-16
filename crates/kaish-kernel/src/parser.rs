@@ -324,6 +324,32 @@ fn is_name_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
 }
 
+
+/// The variable name a token spells, if it spells one.
+///
+/// Four tokens can carry a name: `$x`, `${x}`, `${#x}`, and an `Ident` that is
+/// the target of an assignment — which is why `next` is needed, since the same
+/// `Ident` in argument position is ordinary data and its bytes are its own.
+fn name_in_token<'a>(tok: &'a Token, next: Option<&Token>) -> Option<&'a str> {
+    match tok {
+        Token::SimpleVarRef(name) => Some(name.as_str()),
+        Token::VarLength(inner) => Some(root_of(inner)),
+        Token::VarRef(raw) => raw
+            .strip_prefix("${")
+            .and_then(|s| s.strip_suffix('}'))
+            .map(root_of),
+        Token::Ident(name) if matches!(next, Some(Token::Eq)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// The root of a variable path — everything before the first subscript or
+/// dotted field. Only the root is a name; a subscript is data.
+fn root_of(inner: &str) -> &str {
+    let end = inner.find(['[', '.', ':', '-']).unwrap_or(inner.len());
+    &inner[..end]
+}
+
 pub(crate) fn parse_varpath(raw: &str) -> VarPath {
     let segment_strs = lexer::parse_var_ref(raw).unwrap_or_default();
     let segments = segment_strs
@@ -1013,7 +1039,17 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // rejection inside `choice` loses its own message to a competing
     // alternative's. This shape needs to *teach* the bracket form, so it is
     // caught where nothing can outvote it.
-    for (tok, span) in &tokens {
+    //
+    // A name that does not read as what it is — one holding whitespace, a
+    // bidi control, or a zero-width character — is caught in the same scan and
+    // for the same reason: the message has to name a character the reader
+    // cannot see, so it must not lose to a competing alternative's.
+    for (i, (tok, span)) in tokens.iter().enumerate() {
+        if let Some(name) = name_in_token(tok, tokens.get(i + 1).map(|(t, _)| t)) {
+            if let Err(bad) = crate::name::validate(name) {
+                return Err(vec![ParseError { span: *span, message: bad.to_string() }]);
+            }
+        }
         let message = match tok {
             Token::VarRef(raw) => raw
                 .strip_prefix("${")

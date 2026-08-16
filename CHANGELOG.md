@@ -111,10 +111,15 @@ breaking entries are marked **BREAKING**.
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
   operator" word rule instead of an ASCII-only character class.
-- **Variable names accept any non-ASCII character too, and are NFC-normalized** —
-  `café=au-lait; echo $café` works, and a name spelled with a combining mark and
+- **Variable names are identifiers in any script plus emoji, and are NFC-normalized** —
+  `café=au-lait` and `😁=grin` work, and a name spelled with a combining mark and
   one spelled precomposed reach the same variable. Diverges from bash, which
   restricts names to `[a-zA-Z_][a-zA-Z0-9_]*`.
+- **A name holding a character that does not show itself is a loud error naming the
+  codepoint** — whitespace (`U+00A0`), zero-width characters (`U+200B`), and bidi
+  controls (`U+202E`) make a name read as something other than what it is. The
+  zero-width joiner stays legal between emoji, which is what makes a multi-glyph
+  emoji one character.
 - **Flag names stay ASCII-only** — `--café` is ambiguous between a flag and a
   literal word, so it is a loud lexer error naming the fix, rather than the
   generic "unexpected character" it was before.
