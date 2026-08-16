@@ -42,15 +42,61 @@ fn a_failed_parse_does_not_disturb_the_next_one() {
 /// Error spans stay byte offsets into the source. The cached parser reads an
 /// owned token stream, whose own spans are *token indices* — the mapping that
 /// keeps byte offsets is load-bearing, and this is what notices if it goes.
+///
+/// Asserted as an exact span rather than a range: a range wide enough to
+/// exclude token indices is also wide enough to admit an offset that is
+/// simply wrong, and the offsets feed a consumer that slices source text.
 #[test]
 fn error_spans_are_byte_offsets_into_the_source() {
     let source = "echo ok\necho ok\nfor f in";
+    assert_eq!(source.len(), 24, "fixture moved; the spans below are byte counts");
     let errors = parse(source).expect_err("incomplete for");
     let span = errors[0].span;
-    assert!(
-        span.start >= 16 && span.end <= source.len(),
-        "span {span:?} is not a byte offset into a {}-byte source",
-        source.len()
+    // End of input, at byte 24 — not token index 8.
+    assert_eq!(
+        (span.start, span.end),
+        (24, 24),
+        "span {span:?} is not the byte offset of end-of-input"
+    );
+}
+
+/// An input past `Stream`'s 512-token batch boundary parses the same as a
+/// short one. The old slice input had every token available at once; the
+/// cached parser pulls them in batches, so a combinator that backtracked
+/// across a batch edge would fail only on long input — and every other
+/// parser test in the suite is far shorter than one batch.
+#[test]
+fn an_input_past_the_batch_boundary_parses() {
+    // ~4 tokens per statement, so 400 statements is well past 512 tokens.
+    let source = (0..400)
+        .map(|i| format!("echo item{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let program = parse(&source).expect("parses");
+    let statements = program.statements.len();
+    assert!(statements >= 400, "expected 400 statements, got {statements}");
+
+    // And one long single statement, so the backtracking is inside one
+    // parser rather than across statement boundaries.
+    let args = (0..400).map(|i| format!("a{i}")).collect::<Vec<_>>().join(" ");
+    let one = format!("echo {args}");
+    parse(&one).expect("a 400-argument command parses");
+}
+
+/// A parse error past the batch boundary still reports a byte offset from
+/// the far end of the input, not a truncated or cursor-derived one.
+#[test]
+fn an_error_past_the_batch_boundary_keeps_its_byte_offset() {
+    let prefix = (0..400)
+        .map(|i| format!("echo item{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!("{prefix}\nfor f in");
+    let errors = parse(&source).expect_err("incomplete for at the end");
+    assert_eq!(
+        (errors[0].span.start, errors[0].span.end),
+        (source.len(), source.len()),
+        "a late error must carry a late byte offset, not a token index"
     );
 }
 
