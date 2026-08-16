@@ -104,16 +104,16 @@ fn parse_w3c_baggage(raw: &str) -> std::collections::BTreeMap<String, String> {
     map
 }
 
-/// Parse `source` and format its diagnostics, or `None` when it parses
-/// cleanly.
+/// Parse `source` and return its formatted diagnostics, or `None` when it
+/// parses cleanly.
 ///
 /// Parses `source` up front, ahead of and independent of execution, so a
-/// parse or lexer failure prints `ParseError::format`'s `line:col [parse]:
-/// <message>` and source snippet on its own — the kernel never ran anything,
-/// so the frontend has nothing to add. Every caller (`-c`, a script file,
-/// the interactive REPL) checks this before handing `source` to the kernel,
-/// so the diagnostic leads instead of being buried under an execution-error
-/// wrapper the kernel would otherwise add for every kind of failure alike.
+/// caller can show `ParseError::format`'s `line:col [parse]: <message>` and
+/// source snippet on its own — `source` never ran, so there is nothing to
+/// add. Every caller (`-c`, a script file, the interactive REPL) checks this
+/// before handing `source` to the kernel and prints the result itself, so
+/// the diagnostic leads instead of being buried under the execution-error
+/// wrapper the kernel adds for every kind of failure alike.
 pub fn format_parse_error(source: &str) -> Option<String> {
     kaish_kernel::parser::parse(source).err().map(|errors| {
         errors

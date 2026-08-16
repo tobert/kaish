@@ -67,6 +67,11 @@ fn cli_lexer_error_prints_diagnostic_directly() {
     let (stdout, stderr, code) = run_kaish(&["-c", "echo `ls`"]);
     assert_eq!(code, 1, "a lexer failure must still exit 1: stderr={stderr:?}");
     assert_eq!(stdout, "");
+    // `[parse]` here is inherited from `ParseError::format`, which labels
+    // every diagnostic `[parse]` regardless of whether the lexer or the
+    // grammar caught it (`parser::parse` wraps a lexer error in a
+    // `ParseError` before this function ever sees it) — not a mislabel this
+    // fix introduces.
     assert!(
         stderr.starts_with("1:6 [parse]:"),
         "the diagnostic must lead stderr, got: {stderr:?}"
@@ -103,6 +108,25 @@ fn cli_nonzero_exit_is_unchanged() {
     assert_eq!(code, 3);
     assert_eq!(stdout, "");
     assert_eq!(stderr, "");
+}
+
+#[test]
+fn cli_validation_error_keeps_the_anyhow_chain() {
+    // Validation runs *after* a successful parse and produces the same
+    // `line:col [code]: message` diagnostic shape as a parse error — but
+    // it is a separate `Err` site in `execute_streaming_inner`
+    // ("validation failed:\n…") that this fix does not touch. Pinning it
+    // here records the scope boundary: only parse/lexer failures were
+    // moved out of the wrapper.
+    let (stdout, stderr, code) = run_kaish(&["-c", "v=1; for x in $v; do echo $x; done"]);
+    assert_eq!(code, 1);
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.starts_with("Error: execution failed"),
+        "validation failures are out of this fix's scope and must keep the old wrapper, got: {stderr:?}"
+    );
+    assert!(stderr.contains("Caused by:"), "got: {stderr:?}");
+    assert!(stderr.contains("validation failed:"), "got: {stderr:?}");
 }
 
 #[test]
@@ -168,6 +192,10 @@ fn repl_runtime_error_is_unchanged() {
                 output.contains("command not found: totally_bogus_cmd_xyz"),
                 "got: {output:?}"
             );
+            // A runtime failure is `Ok(ExecResult)`, not `Err`, so it never
+            // went through `ClientError`/anyhow — it must not gain a
+            // wrapper just because a parse-error class exists nearby.
+            assert_no_wrapper_noise(&output);
         }
         other => panic!("expected ProcessResult::Output, got {other:?}"),
     }
