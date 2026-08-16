@@ -11,6 +11,17 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`PlannedCommand.heredocs` publishes each heredoc a command reads** — delimiter
+  word, `literal`, `strip_tabs`, the verbatim body, and the body's own free
+  variables, so `python3 <<'PY'`'s program arrives with the shell framing off.
+- **`Kernel::expand_fragment` expands one heredoc body against a caller-supplied
+  scope** — nothing is read from session state, because a runtime binder like
+  `read` makes a peeked value stale.
+- **A `$(…)` in a body blocks expansion and returns a `Hole` carrying its plan** —
+  running it is the same decision the caller is asking about, so the kernel
+  returns the question rather than answering it.
+- **A heredoc renders back with its own delimiter word** — `Plan::rendered` spelled
+  every delimiter `EOF`, erasing the language hint the author chose.
 - **`:` is the null command** — does nothing, exits 0, another spelling of
   `true`, for the places a statement is required and none is wanted
   (`if …; then :; fi`, `: > file`). It was already the literal `":"` in
