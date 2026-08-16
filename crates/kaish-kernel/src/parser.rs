@@ -10,10 +10,55 @@ use crate::ast::{
     VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
-use chumsky::{input::ValueInput, prelude::*};
+use chumsky::input::{MappedInput, Stream, ValueInput};
+use chumsky::prelude::*;
 
 /// Span type used throughout the parser.
 pub type Span = SimpleSpan;
+
+/// The token stream a cached parser reads.
+///
+/// `Stream` **owns** its tokens, so this type borrows nothing and its input
+/// lifetime is `'static` — which is the whole reason the grammar below can be
+/// built once instead of per call. A slice input borrows, so a parser over one
+/// carries the slice's lifetime and cannot outlive a single `parse`.
+///
+/// The `.map` is not decoration either. `Stream`'s own spans come from cursor
+/// positions, so a bare `Stream` would report *token indices* where the rest of
+/// kaish reports **byte offsets** — every diagnostic position and every
+/// `PlannedHeredoc::body_offset` would silently change meaning. Mapping each
+/// pair through keeps the lexer's byte spans.
+type ParserInput = MappedInput<'static, Token, Span, Stream<std::vec::IntoIter<(Token, Span)>>, PairFn>;
+
+/// The mapping above, as a function pointer rather than a closure: a closure's
+/// type cannot be named, and [`ParserInput`] has to be nameable to appear in
+/// the cached parser's type.
+type PairFn = fn((Token, Span)) -> (Token, Span);
+
+fn keep_pair(pair: (Token, Span)) -> (Token, Span) {
+    pair
+}
+
+thread_local! {
+    /// The whole combinator graph, built once per thread.
+    ///
+    /// `program_parser()` allocated ~840 times and ~163 KB **before reading a
+    /// single token**, on every `parse()` — 62% of the allocations in an
+    /// embedder's `execute()` round trip (GH #255). None of it depended on the
+    /// input, so all of it was rebuilt to be thrown away.
+    ///
+    /// Per-thread rather than one shared static: chumsky's `Boxed` holds an
+    /// `Rc`, so the built graph is not `Sync` and cannot live in a `OnceLock`.
+    /// A thread-local also avoids the lock a shared one would need, and the
+    /// kernel's worker threads each pay the build once.
+    static CACHED_PARSER: Boxed<
+        'static,
+        'static,
+        ParserInput,
+        Program,
+        extra::Err<Rich<'static, Token, Span>>,
+    > = program_parser().boxed();
+}
 
 /// Parse a raw `${...}` string into an Expr.
 ///
@@ -978,9 +1023,9 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // End-of-input span
     let end_span: Span = (source.len()..source.len()).into();
 
-    // Parse using slice-based input (like nano_rust example)
-    let parser = program_parser();
-    let result = parser.parse(tokens.as_slice().map(end_span, |(t, s)| (t, s)));
+    // Parse with the per-thread parser, built once (see `CACHED_PARSER`).
+    let input = Stream::from_iter(tokens).map(end_span, keep_pair as PairFn);
+    let result = CACHED_PARSER.with(|parser| parser.parse(input));
 
     let program = result.into_result().map_err(|errs| {
         errs.into_iter()
