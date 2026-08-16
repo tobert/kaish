@@ -25,7 +25,7 @@ echo "${NAME} more text"
 
 **Why floats?** JSON data often has floats. Kaish supports them natively for easy interop.
 
-**Why strict booleans?** Only `true`/`false` are valid. `TRUE`, `Yes`, `1` are errors — catches AI generation mistakes early.
+**Why lowercase only?** `true` and `false` are the boolean literals. `TRUE`, `Yes`, `yes`, `on`, and `1` are ordinary values — `x=TRUE` binds the string `"TRUE"` and `x=1` binds the number `1`, neither a boolean. Check with `typeof` when it matters.
 
 ### Inline environment prefix — `NAME=value command`
 
@@ -1238,7 +1238,7 @@ The table below records which lint shaped which design decision.
 | **Scatter/gather** | None | `散/集` | Built-in parallelism *(experimental)* |
 | **VFS** | None | `/tmp/`, `/v/` | Unified resource access |
 | **Pre-validation** | None | `kaish-validate` builtin | Catch errors before execution |
-| **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
+| **Strict validation** | Guesses | Rejects word splitting, `eval`, adjacent unquoted tokens | Agent-friendly, fail-fast |
 
 ## Known Limitations
 

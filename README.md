@@ -76,7 +76,7 @@ syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 - **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Explicit splitting** — use `split "$VAR"` for whitespace/delimiter/regex splitting
 - **No backticks** — only `$(cmd)` substitution
-- **Strict booleans** — `TRUE` and `yes` are errors, not truthy
+- **Strict booleans** — only lowercase `true`/`false` are booleans; `TRUE` and `yes` are ordinary strings
 - **Pre-validation** — validation stretches down into builtins, revealing errors before execution
 
 ## Quick Tour

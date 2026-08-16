@@ -455,23 +455,22 @@ mod tests {
         );
     }
 
-    /// Three syntax rules an agent session verified live against kaish 0.13 —
-    /// compound-into-pipe, `[ … ]`, bare `yes`/`no` — must reach both
-    /// agent-facing recipes, since those are the surfaces an embedded agent
-    /// actually reads (a kaijutsu session burned a 63k-token tour hitting these
-    /// with no warning in either). A fourth rule, unquoted comma, was verified
-    /// the same way and got its own fragment (`comma-splits-word`) — the
-    /// grammar itself was fixed instead (comma is significant only inside a
-    /// `[...]`/`{...}` literal or pattern; see `docs/LANGUAGE.md`,
-    /// "Construction"), so the fragment was retired rather than kept as a
-    /// warning about behavior that no longer exists.
+    /// Three rules an embedded agent hits early must reach both agent-facing
+    /// recipes: a compound statement cannot feed a pipe, `[ … ]` is not a
+    /// command, and only lowercase `true`/`false` are booleans. These recipes
+    /// are the surfaces an embedded agent actually reads, so a rule missing
+    /// here is a rule it meets for the first time as a failure.
+    ///
+    /// The needles are substrings of fragment bodies. When a fragment is
+    /// reworded, move the needle rather than dropping it — the guarantee is
+    /// that the *rule* is covered, not that a phrase survives.
     #[test]
     fn agent_onboarding_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());
         for needle in [
             "compound statement can't feed a pipe",
             "is not a command",
-            "are lexer errors",
+            "lowercase `true`/`false` are booleans",
         ] {
             assert!(out.contains(needle), "agent_onboarding missing {needle:?}:\n{out}");
         }
@@ -483,7 +482,7 @@ mod tests {
         for needle in [
             "compound statement can't feed a pipe",
             "is not a command",
-            "are lexer errors",
+            "lowercase `true`/`false` are booleans",
         ] {
             assert!(out.contains(needle), "tool_description missing {needle:?}:\n{out}");
         }

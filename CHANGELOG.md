@@ -50,7 +50,17 @@ breaking entries are marked **BREAKING**.
   below parses each substitution body through the full grammar via its own
   recursive parse call instead of a narrower hand-rolled one.
 
+### Removed
+- **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
+  `AmbiguousBooleanLike` variants are gone — `LexerError` is public and not
+  `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
+
 ### Fixed
+- **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
+  them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
+  before running, and `yes` could not even be named as a command.
+- **Only lowercase `true` and `false` are boolean literals** — unchanged, and the
+  rejection was never what made it so: `yes` was always a string.
 - **`write` with no stdin and no content operand errors instead of truncating the
   file to zero bytes** — a missing operand destroyed an existing file and exited
   0, and `set -o trash` did not cover it. An empty pipe or redirect still
