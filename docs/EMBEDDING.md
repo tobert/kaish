@@ -808,8 +808,12 @@ for planned in kernel.plan_program(script)? {
 }
 ```
 
-`delimiter` is the word as written with quotes removed (`PY`, `SQL`) — the hint
-an author picked for the language they were about to write, and a hint only.
+`delimiter` is the word as written with quotes removed (`PY`, `SQL`). Authors
+often pick it for the language they are about to write, but **about half the
+time it carries no information**: across 10,023 real agent commands the top
+delimiters were `EOF` 534, `PY` 307, `PYEOF` 174, and plain `EOF` outnumbered
+every self-describing word combined. Treat it as a weak hint, never a
+classification.
 `body` is verbatim: no tab stripping, no expansion, no quoting, no
 kernel-internal rewriting. `free_variables` names what plugs into *this* body,
 scoped to it rather than to the whole statement.
@@ -867,6 +871,60 @@ whatever parses it next, so the type cannot represent it.
 `write /tmp/x.py <<'PY'` followed by a later `python3 /tmp/x.py` splits it
 across statements. This raises the quality of analysis on the common case; the
 airtight configuration is still the `subprocess` feature off.
+
+#### From another language: `kaish --plan`
+
+Everything above is a Rust API. `kaish --plan <command>` is the same analysis
+as JSON on stdout, so a consumer in any language reaches it:
+
+```console
+$ kaish --plan "python3 <<'PY'
+import os
+PY"
+{"statements":[{"index":0,"plan":{"rendered":"python3 <<'PY'\nimport os\nPY",
+"statement_kind":"pipeline","commands":[{"name":"python3","args":[],
+"redirects":[{"kind":"<<","target":{"plain":"'PY'"}}],"background":false,
+"heredocs":[{"index":0,"delimiter":"PY","literal":true,"strip_tabs":false,
+"body":{"plain":"import os\n"},"body_offset":15}]}]}}]}
+```
+
+**Nothing executes and no kernel is built** — planning is a pure function of the
+source text, so it touches no filesystem and needs no capability feature.
+`--overlay` is irrelevant here and is ignored.
+
+The output is always a JSON object, so a caller parses one shape whatever
+happened: `{"statements": [...]}` and exit **0**, or `{"errors": [...]}` and
+exit **2** — the same usage code a builtin returns for bad argv.
+
+**`body_offset` plus the body's length is the body's byte span in the source
+you passed.** That is the primitive for the inverse of classification: instead
+of reading the body, *exclude* it — classify the shell framing and route the
+payload separately, so prose inside a heredoc stops being read as a command.
+
+```python
+import json, subprocess
+
+src = "cat <<EOF > notes.md\ndelete all the widgets (prose)\nEOF"
+done = subprocess.run(["kaish", "--plan", src], capture_output=True, text=True)
+
+# Parse first, branch second: stdout is a JSON object at either exit code.
+plan = json.loads(done.stdout)
+if done.returncode != 0:
+    raise ValueError(plan["errors"][0]["message"])
+
+for statement in plan["statements"]:
+    for command in statement["plan"]["commands"]:
+        for heredoc in command["heredocs"]:
+            body = heredoc["body"]["plain"]
+            start = heredoc["body_offset"]
+            framing = src[:start] + "<DATA>" + src[start + len(body):]
+            # 'cat <<EOF > notes.md\n<DATA>EOF'
+```
+
+`--plan` takes the command as one argument; there is no stdin form. `index` is
+the statement's position in the **parsed** program, counted before empty
+statements are dropped — a comment or blank line leaves a gap, so filtering and
+then indexing by position reads the wrong statement.
 
 #### Why this, and not a gate
 

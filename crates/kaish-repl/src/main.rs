@@ -3,6 +3,7 @@
 //! Usage:
 //!   kaish                      # Interactive REPL
 //!   kaish -c `<command>`       # Execute command and exit
+//!   kaish --plan `<command>`   # Print what it would run, as JSON
 //!   kaish script.kai           # Run a script
 
 use std::env;
@@ -187,6 +188,14 @@ fn run() -> Result<ExitCode> {
             run_command(cmd, overlay)
         }
 
+        Some("--plan") => {
+            // A missing source is reported the same way a broken one is. The
+            // contract is that stdout is always a JSON object, and "except
+            // when you called it wrong" is exactly the case a caller would
+            // not have written a branch for.
+            Ok(print_plan(rest.get(1).copied()))
+        }
+
         Some(path) if !path.starts_with('-') => {
             // Treat as script file
             run_script(path, overlay)
@@ -200,18 +209,73 @@ fn run() -> Result<ExitCode> {
     }
 }
 
+/// Print `source`'s statement plans as JSON and exit — command analysis for
+/// a consumer that is not written in Rust.
+///
+/// Nothing executes and no kernel is built: `plan_program` is a pure function
+/// of the source text, so this touches no filesystem and needs no capability.
+/// `--overlay` is therefore irrelevant here and is ignored.
+///
+/// The output is always a JSON object, so a caller parses one shape whatever
+/// happened: `{"statements": [...]}` and exit 0, or `{"errors": [...]}` and
+/// exit 2 — the same usage-error code a builtin returns for bad argv.
+///
+/// "Always" includes being called with no source at all: a caller that got
+/// prose on stderr and an empty stdout for that one case would need a branch
+/// it had no reason to write. An error carries `start`/`end` only when it
+/// refers to a position in the source.
+fn print_plan(source: Option<&str>) -> ExitCode {
+    let Some(source) = source else {
+        let doc = serde_json::json!({
+            "errors": [{ "message": "--plan requires a command argument: kaish --plan '<command>'" }]
+        });
+        println!("{doc}");
+        return ExitCode::from(2);
+    };
+    match kaish_kernel::plan_program(source) {
+        Ok(statements) => {
+            let doc = serde_json::json!({ "statements": statements });
+            println!("{doc}");
+            ExitCode::SUCCESS
+        }
+        Err(errors) => {
+            let errors: Vec<_> = errors
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "message": e.message,
+                        "start": e.span.start,
+                        "end": e.span.end,
+                    })
+                })
+                .collect();
+            let doc = serde_json::json!({ "errors": errors });
+            println!("{doc}");
+            // 2 is the usage/parse code, matching a builtin's argv rejection.
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn print_help() {
     println!(r#"会sh — kaish v{}
 
 Usage:
   kaish                        Interactive REPL
   kaish -c <command>           Execute command and exit
+  kaish --plan <command>       Print what it would run, as JSON, and exit
   kaish <script.kai>           Run a script file
 
 Options:
   --overlay                    Enable copy-on-write overlay mode (writes are
                                virtual; use kaish-vfs commit to apply them)
   -c <command>                 Execute command string and exit
+  --plan <command>             Analyze without running: every command, its
+                               redirects, the variables it reads and writes,
+                               and each heredoc body with its byte offset.
+                               Executes nothing and touches no filesystem.
+                               Prints {{"statements": [...]}} and exits 0, or
+                               {{"errors": [...]}} and exits 2.
   -h, --help                   Show this help
   -V, --version                Show version
 
@@ -221,6 +285,7 @@ Examples:
   kaish -c 'echo hello'       # Run a command
   kaish --overlay -c 'echo test > file.txt; kaish-vfs diff'
   kaish deploy.kai             # Run a deployment script
+  kaish --plan 'rm -r build'   # See what it would run, without running it
 "#, env!("CARGO_PKG_VERSION"));
 }
 

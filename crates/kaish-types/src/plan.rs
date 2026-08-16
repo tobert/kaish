@@ -242,8 +242,10 @@ pub struct PlannedHeredoc {
     /// the `heredoc` half of a [`FragmentAddr`].
     pub index: usize,
     /// The delimiter word as written, quotes removed: `PY` for both `<<PY`
-    /// and `<<'PY'`. Agents pick it for the language they are about to write,
-    /// so it is a hint worth keeping — a hint, never a guarantee.
+    /// and `<<'PY'`. Authors often pick it for the language they are about to
+    /// write, but roughly half the time it says nothing — a bare `EOF`
+    /// outnumbers every self-describing word combined in real agent traffic.
+    /// A weak hint worth keeping, never a classification.
     pub delimiter: String,
     /// Whether the delimiter was quoted (`<<'PY'`, `<<"PY"`). True means no
     /// expansion runs and [`body`](Self::body) is exactly what the command

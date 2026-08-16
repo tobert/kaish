@@ -11,6 +11,12 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`kaish --plan <command>` prints the statement plans as JSON** — command analysis
+  was reachable only from Rust before this.
+- **`--plan` executes nothing and builds no kernel** — planning is a pure function of
+  the source text, so it needs no capability feature.
+- **`--plan` exits 0 with `{"statements": […]}` or 2 with `{"errors": […]}`** — always a
+  JSON object, so a caller parses one shape.
 - **`PlannedCommand.heredocs` publishes each heredoc a command reads** — delimiter
   word, `literal`, `strip_tabs`, the verbatim body, and the body's own free
   variables, so `python3 <<'PY'`'s program arrives with the shell framing off.

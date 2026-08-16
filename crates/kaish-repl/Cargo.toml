@@ -46,8 +46,10 @@ terminal_size = "0.4"
 # Table columns align by display width, not byte count.
 unicode-width = { workspace = true }
 
-[dev-dependencies]
+# `--plan` emits statement plans as JSON, for consumers that are not Rust.
 serde_json = { workspace = true }
+
+[dev-dependencies]
 tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]

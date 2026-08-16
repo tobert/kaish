@@ -1859,6 +1859,12 @@ fn collect_heredoc_bodies(
             rewrite_body_arithmetic(&body, &p)?
         };
 
+        // `source_body` is load-bearing for span arithmetic, not a
+        // readability nicety: a plan publishes it alongside `body_offset`, and
+        // consumers slice the body back out of the source with the pair. The
+        // rewrite above makes `content` longer than what the author typed, so
+        // publishing `content` instead would shift every offset after a
+        // `$((…))` and silently misplace the span.
         heredocs.push(HeredocExtract {
             body: content,
             source_body: body,
