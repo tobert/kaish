@@ -1013,6 +1013,12 @@ fn lexer_non_ascii_words_in_context(#[case] input: &str, #[case] expected: &[&st
 #[case::long_flag_cafe("--café")]
 #[case::long_flag_cafe_in_context("grep --café x")]
 #[case::short_flag_cafe("-café")]
+// A real single-letter short flag with a glued non-ASCII tail — the
+// sharpest case, since `ShortFlag` (unlike `LongFlag`) is excluded from
+// the parser's no-token-pasting glue guard (it carries the `cut -d,`
+// glued-value idiom), so this rule's own ASCII check is the only thing
+// that keeps it loud.
+#[case::short_flag_single_letter_glued_cafe("-lé")]
 #[case::plus_flag_cafe("+café")]
 fn lexer_non_ascii_names_stay_ascii_errors(#[case] input: &str) {
     run_lexer_error_matching(
@@ -1067,6 +1073,19 @@ fn lexer_non_ascii_quoting_still_escapes(#[case] input: &str, #[case] expected: 
 #[case::trailing_slash_boundary("dest/", &["RELPATH(dest/)"])]
 #[case::triple_dash_bare_unaffected("---foo", &["DOUBLEDASHBARE(---foo)"])]
 #[case::plus_bare_unaffected("+%Y-%m-%d", &["PLUSBARE(+%Y-%m-%d)"])]
+// `--foo=bar`'s equals form (`docs/LANGUAGE.md`'s `curl --header="..."`)
+// must still split at `=` — the widened LongFlag continuation class added
+// only the `\u{80}-\u{10FFFF}` range, never `=`, so this is unaffected,
+// but it is exactly the shape a too-greedy widening (e.g. `\S*`) would
+// have broken by swallowing the value into the flag name.
+#[case::longflag_equals_form_unaffected("--foo=bar", &["LONGFLAG(foo)", "EQ", "IDENT(bar)"])]
+// The leading character after the sigil stays ASCII-only (unchanged) for
+// all three flag rules, so a non-ASCII-FIRST word after `--`/`+`/`-` is
+// never claimed by the widened flag rules — it falls through to the
+// existing bareword-fallback rules exactly as it did before this change.
+#[case::doubledashbare_leading_non_ascii_unaffected("--é", &["DOUBLEDASHBARE(--é)"])]
+#[case::plusbare_leading_non_ascii_unaffected("+é", &["PLUSBARE(+é)"])]
+#[case::minusbare_leading_non_ascii_unaffected("-é", &["MINUSBARE(-é)"])]
 fn lexer_widen_does_not_disturb_ascii_priority(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
