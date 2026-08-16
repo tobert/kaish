@@ -1023,11 +1023,52 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // End-of-input span
     let end_span: Span = (source.len()..source.len()).into();
 
-    // Parse with the per-thread parser, built once (see `CACHED_PARSER`).
-    let input = Stream::from_iter(tokens).map(end_span, keep_pair as PairFn);
+    parse_tokens(tokens, end_span, (0..0).into())
+}
+
+/// Parse an already-tokenized slice into a `Program`, running the same
+/// structural well-formedness checks [`parse`] runs on the top-level source.
+///
+/// Shared by [`parse`] and `cmd_subst_parser`'s route-C recursive descent into
+/// an unquoted `$(...)` body (GH #194): the lexer's token spans are absolute
+/// byte offsets into the original source in both cases, so a caller handing
+/// in a sub-slice needs no span-rebasing — errors from this function already
+/// point at the right place.
+///
+/// `stdin_anchor` is where the ambiguous-multiple-stdin-redirect diagnostic
+/// (which carries no AST span of its own) points: the source start for the
+/// top level, or the `$(...)` span for a nested body.
+fn parse_tokens(
+    tokens: Vec<(Token, Span)>,
+    end_span: Span,
+    stdin_anchor: Span,
+) -> Result<Program, Vec<ParseError>> {
+    // Parse with the per-thread parser, built once (see `CACHED_PARSER`). A
+    // nested `$(...)` body reaches this from inside a `try_map` closure that
+    // is itself running as part of a `CACHED_PARSER.with(...)` call on the
+    // same thread — reentrant, but sound: `with` just hands out a shared
+    // `&Boxed<...>` after the one-time init completes, and nothing here is a
+    // `RefCell`, so a second concurrent `&` borrow on the same thread is
+    // ordinary aliasing, not a conflict.
+    //
+    // `tokens.clone()` costs one extra token-vec copy on every call (paid
+    // even on success) so `tokens` survives for `validate_cmd_subst_bodies`
+    // below — see that function's doc comment for why a failure needs a
+    // second look with the original tokens in hand.
+    let input = Stream::from_iter(tokens.clone()).map(end_span, keep_pair as PairFn);
     let result = CACHED_PARSER.with(|parser| parser.parse(input));
 
     let program = result.into_result().map_err(|errs| {
+        // A malformed unquoted `$(...)` body can lose its own precise error
+        // to chumsky's choice/alt bookkeeping (see `validate_cmd_subst_bodies`'s
+        // doc comment) in favor of a generic one from an unrelated sibling
+        // `choice` alternative. Re-validate every `$(...)` body directly,
+        // outside that machinery, so a body failure reports its own message.
+        // Cheap on the common (successful) path — this only runs once the
+        // grammar has already failed.
+        if let Err(specific) = validate_cmd_subst_bodies(&tokens) {
+            return specific;
+        }
         errs.into_iter()
             .map(|e| ParseError {
                 span: *e.span(),
@@ -1042,10 +1083,10 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // it here — at parse time, which (unlike validation) can never be skipped.
     if first_ambiguous_stdin(&program.statements) {
         return Err(vec![ParseError {
-            // Redirects carry no AST span, so anchor at the start of the
-            // source; the message is the actionable part. Precise columns
-            // would require spanning `Redirect` — deferred.
-            span: (0..0).into(),
+            // Redirects carry no AST span; the message is the actionable
+            // part. Precise columns would require spanning `Redirect` —
+            // deferred.
+            span: stdin_anchor,
             message: "multiple stdin redirects on one command are ambiguous; \
                       use exactly one of `<`, `<<`, or `<<<`"
                 .to_string(),
@@ -2133,13 +2174,17 @@ where
 
 /// Redirect: `> file`, `>> file`, `< file`, `<< heredoc`, `2> file`, `&> file`, `2>&1`
 ///
-/// `target` parses the file word (and here-string body). Callers pass the
-/// expression parser appropriate to their context: the top-level command
-/// grammar passes a fresh `primary_expr_parser()`, while `cmd_subst_parser`
-/// passes its *already-recursive* `expr` handle. Threading it in (rather than
-/// building `primary_expr_parser()` internally) is what lets `$(cmd > file)`
-/// parse without an unbounded `cmd_subst → redirect → primary_expr → cmd_subst`
-/// construction cycle.
+/// `target` parses the file word (and here-string body); the sole caller
+/// (`command_parser`) passes a fresh `primary_expr_parser()`. `target` stays
+/// a generic parameter rather than calling `primary_expr_parser()` directly
+/// here for history, not necessity: `cmd_subst_parser` used to pass its own
+/// recursive `expr` handle so a redirect inside `$(...)` could parse without
+/// an unbounded `cmd_subst → redirect → primary_expr → cmd_subst` construction
+/// cycle. Route C (GH #194) replaced that hand-rolled grammar with a
+/// recursive descent through the full program grammar at parse time, so
+/// `cmd_subst_parser` no longer calls this function at all — the cycle this
+/// threading avoided no longer exists here, but the shape was left as-is
+/// since a second caller could reintroduce the same need.
 fn redirect_parser<'tokens, I, T>(
     target: T,
 ) -> impl Parser<'tokens, I, Redirect, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -2716,75 +2761,79 @@ where
         Token::Question => Expr::GlobPattern("?".to_string()),
     };
 
-    recursive(|expr| {
-        choice((
-            positional,
-            arithmetic,
-            cmd_subst_parser(expr.clone()),
-            var_expr_parser(),
-            interpolated_string_parser(),
-            literal_parser().map(Expr::Literal),
-            // Glob patterns before ident (GlobWord is more specific)
-            glob_pattern,
-            // Bare identifiers become string literals (shell barewords)
-            ident_parser().map(|s| Expr::Literal(Value::String(s))),
-            // Absolute paths become string literals
-            path_parser().map(|s| Expr::Literal(Value::String(s))),
-            // Bare words starting with + or - (date +%s, cat -)
-            // Shell navigation tokens
-            select! {
-                // Bare `.` in argument/expression position is the literal
-                // current-directory path (`find .`, `ls .`, `echo .`). The
-                // `source` alias is unaffected: `command_parser` consumes a
-                // *leading* `.` as the command name before args are parsed,
-                // so only a `.` that follows a command reaches here.
-                Token::Dot => Expr::Literal(Value::String(".".into())),
-                Token::DotDot => Expr::Literal(Value::String("..".into())),
-                // Bare comma in argument position is the literal "," — the
-                // `cut -d, -f2` / `tr -d ,` delimiter idiom. This is reached
-                // only by a comma with no adjacent bareword to fold into
-                // (whitespace on both sides, e.g. `cut -d , -f2`, or a
-                // neighbor the lexer doesn't fuse across, e.g. `,$VAR`) — a
-                // comma glued to a bareword (`echo a,b`, `sort -k 2,2n`) is
-                // already folded into ONE token before the parser runs (see
-                // `lexer::flush_glob_run`), and a comma inside a
-                // `[...]`/`{...}` literal or pattern is consumed there
-                // instead (list/record literals, brace expansion — see
-                // `docs/LANGUAGE.md`, "Construction").
-                Token::Comma => Expr::Literal(Value::String(",".into())),
-                // Bare colon in argument position is the literal ":" — the
-                // `awk -F: '{print $1}'` / `--field-separator=:` idiom. In
-                // command-name position the colon is the null command (see
-                // `command_name` in `command_parser`); here it is only reached
-                // after a command name has been parsed, so there is no
-                // ambiguity with that form.
-                Token::Colon => Expr::Literal(Value::String(":".into())),
-                Token::Tilde => Expr::Literal(Value::String("~".into())),
-                Token::TildePath(s) => Expr::Literal(Value::String(s)),
-                Token::RelativePath(s) => Expr::Literal(Value::String(s)),
-                Token::DotSlashPath(s) => Expr::Literal(Value::String(s)),
-                // Digit-leading bareword (SHA prefix `019dda1c`, UUIDs).
-                Token::NumberIdent(s) => Expr::Literal(Value::String(s)),
-                // Hyphenated/minus-led numeric word (`2024-01-02`, `10-20`,
-                // `1.5-2`, `cut -f 1-3`, `find -size -1k`) — one contiguous word.
-                Token::DashNumWord(s) => Expr::Literal(Value::String(s)),
-                // Leading-`@` bareword (`@scope/pkg`, `@0`, bare `@`).
-                Token::AtWord(s) => Expr::Literal(Value::String(s)),
-                // Dot-prefixed bareword (`.gitignore`, `.parent`, `.parent.parent`).
-                // Distinct from `Token::Dot` (the source alias), which only
-                // matches a bare `.` and requires whitespace before its file
-                // argument.
-                Token::DottedIdent(s) => Expr::Literal(Value::String(s)),
-                // Job specifier `%1` for wait/kill — flows as the literal
-                // string "%1"; the builtins interpret the leading `%`.
-                Token::JobSpec(s) => Expr::Literal(Value::String(s)),
-            },
-            plus_minus_bare,
-            // Keywords can be used as barewords in argument position
-            keyword_as_bareword,
-        ))
-        .labelled("expression")
-    })
+    // No longer `recursive()`: `cmd_subst_parser` used to need this closure's
+    // own `expr` handle to parse `$(...)`'s body and redirect targets, which
+    // is what created the `cmd_subst → primary_expr → cmd_subst` construction
+    // cycle (see `cmd_subst_parser`'s doc comment). Route C (GH #194) parses
+    // the `$(...)` body from raw captured tokens instead, so nothing in this
+    // choice references itself anymore.
+    choice((
+        positional,
+        arithmetic,
+        cmd_subst_parser(),
+        var_expr_parser(),
+        interpolated_string_parser(),
+        literal_parser().map(Expr::Literal),
+        // Glob patterns before ident (GlobWord is more specific)
+        glob_pattern,
+        // Bare identifiers become string literals (shell barewords)
+        ident_parser().map(|s| Expr::Literal(Value::String(s))),
+        // Absolute paths become string literals
+        path_parser().map(|s| Expr::Literal(Value::String(s))),
+        // Bare words starting with + or - (date +%s, cat -)
+        // Shell navigation tokens
+        select! {
+            // Bare `.` in argument/expression position is the literal
+            // current-directory path (`find .`, `ls .`, `echo .`). The
+            // `source` alias is unaffected: `command_parser` consumes a
+            // *leading* `.` as the command name before args are parsed,
+            // so only a `.` that follows a command reaches here.
+            Token::Dot => Expr::Literal(Value::String(".".into())),
+            Token::DotDot => Expr::Literal(Value::String("..".into())),
+            // Bare comma in argument position is the literal "," — the
+            // `cut -d, -f2` / `tr -d ,` delimiter idiom. This is reached
+            // only by a comma with no adjacent bareword to fold into
+            // (whitespace on both sides, e.g. `cut -d , -f2`, or a
+            // neighbor the lexer doesn't fuse across, e.g. `,$VAR`) — a
+            // comma glued to a bareword (`echo a,b`, `sort -k 2,2n`) is
+            // already folded into ONE token before the parser runs (see
+            // `lexer::flush_glob_run`), and a comma inside a
+            // `[...]`/`{...}` literal or pattern is consumed there
+            // instead (list/record literals, brace expansion — see
+            // `docs/LANGUAGE.md`, "Construction").
+            Token::Comma => Expr::Literal(Value::String(",".into())),
+            // Bare colon in argument position is the literal ":" — the
+            // `awk -F: '{print $1}'` / `--field-separator=:` idiom. In
+            // command-name position the colon is the null command (see
+            // `command_name` in `command_parser`); here it is only reached
+            // after a command name has been parsed, so there is no
+            // ambiguity with that form.
+            Token::Colon => Expr::Literal(Value::String(":".into())),
+            Token::Tilde => Expr::Literal(Value::String("~".into())),
+            Token::TildePath(s) => Expr::Literal(Value::String(s)),
+            Token::RelativePath(s) => Expr::Literal(Value::String(s)),
+            Token::DotSlashPath(s) => Expr::Literal(Value::String(s)),
+            // Digit-leading bareword (SHA prefix `019dda1c`, UUIDs).
+            Token::NumberIdent(s) => Expr::Literal(Value::String(s)),
+            // Hyphenated/minus-led numeric word (`2024-01-02`, `10-20`,
+            // `1.5-2`, `cut -f 1-3`, `find -size -1k`) — one contiguous word.
+            Token::DashNumWord(s) => Expr::Literal(Value::String(s)),
+            // Leading-`@` bareword (`@scope/pkg`, `@0`, bare `@`).
+            Token::AtWord(s) => Expr::Literal(Value::String(s)),
+            // Dot-prefixed bareword (`.gitignore`, `.parent`, `.parent.parent`).
+            // Distinct from `Token::Dot` (the source alias), which only
+            // matches a bare `.` and requires whitespace before its file
+            // argument.
+            Token::DottedIdent(s) => Expr::Literal(Value::String(s)),
+            // Job specifier `%1` for wait/kill — flows as the literal
+            // string "%1"; the builtins interpret the leading `%`.
+            Token::JobSpec(s) => Expr::Literal(Value::String(s)),
+        },
+        plus_minus_bare,
+        // Keywords can be used as barewords in argument position
+        keyword_as_bareword,
+    ))
+    .labelled("expression")
     .boxed()
 }
 
@@ -2818,144 +2867,204 @@ where
     .labelled("variable reference")
 }
 
-/// Command substitution: `$(pipeline)` - runs a pipeline and returns its result.
+/// Capture the token stream inside `$(...)`, consuming through the matching
+/// closing `)`.
 ///
-/// Accepts a recursive expression parser to support nested command substitution.
-fn cmd_subst_parser<'tokens, I, E>(
-    expr: E,
+/// Depth counts `LParen` and `CmdSubstStart` as opens, `RParen` as the one
+/// close both share. A single counter across both token kinds is what keeps
+/// a nested `$(echo $(echo hi))`, or a `case (pat)` branch's *paired* parens
+/// inside a `$(...)` body, from stopping at the first inner `)`.
+///
+/// A case branch pattern is not always paired, though — `case $x in a) …
+/// ;; esac` is legal with no leading `(` at all, so its closing `)` has no
+/// matching open on the depth counter. `case_active` (incremented on `Case`,
+/// decremented on `Esac`) tracks whether we're inside a case statement's
+/// `in … esac` region; a `)` seen there at depth 0 is that unpaired pattern
+/// terminator, not the substitution's close, so it does not stop the scan.
+/// Depth still wins when both apply — `case $(sub) in …` opens depth on the
+/// subject's own `$(`, so *that* `)` closes depth first, the same as it
+/// would anywhere else; only a `)` that would otherwise underflow the
+/// counter (nothing open to close) falls back to the case-terminator read.
+///
+/// Token spans are untouched — they stay the lexer's absolute byte offsets
+/// into the original source. That is what lets `cmd_subst_parser` hand the
+/// captured slice straight to [`parse_tokens`] and get diagnostics anchored
+/// at their true position with no span-rebasing.
+///
+/// Returns the body tokens (the closing `)` is not included) and that `)`'s
+/// own span, which the caller uses as the sub-parse's end-of-input point.
+/// A `$(...)` body's captured tokens (the closing `)` not included) and that
+/// `)`'s own span. Named so [`cmd_subst_body_tokens`]'s return type reads —
+/// clippy's `type_complexity` flags the bare tuple spelled out inline.
+type CmdSubstBody = (Vec<(Token, Span)>, Span);
+
+fn cmd_subst_body_tokens<'tokens, I>(
+) -> impl Parser<'tokens, I, CmdSubstBody, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    custom(|inp| {
+        let mut tracker = CmdSubstDepth::default();
+        let mut body: Vec<(Token, Span)> = Vec::new();
+        loop {
+            let before = inp.cursor();
+            match inp.next() {
+                None => {
+                    let span = inp.span_since(&before);
+                    return Err(Rich::custom(
+                        span,
+                        "unterminated command substitution: missing `)`",
+                    ));
+                }
+                Some(tok) => {
+                    let span = inp.span_since(&before);
+                    if tracker.step(&tok) {
+                        return Ok((body, span));
+                    }
+                    body.push((tok, span));
+                }
+            }
+        }
+    })
+}
+
+/// Tracks, one token at a time, whether a `)` closes a `$(...)` command
+/// substitution or is consumed as part of its body.
+///
+/// Shared by [`cmd_subst_body_tokens`] (the live chumsky capture that
+/// actually bounds the body during a real parse) and
+/// [`find_cmd_subst_close`] (a plain slice scan used only by
+/// `validate_cmd_subst_bodies`'s error-path fallback) so the depth/case rule
+/// lives in exactly one place. See `cmd_subst_body_tokens`'s doc comment for
+/// the rule itself.
+#[derive(Default)]
+struct CmdSubstDepth {
+    depth: usize,
+    case_active: usize,
+}
+
+impl CmdSubstDepth {
+    /// Feed one token. Returns `true` when `tok` is the substitution's own
+    /// closing `)` — the scan must stop, and `tok` itself is not part of the
+    /// body. Returns `false` when `tok` belongs to the body and scanning
+    /// continues.
+    fn step(&mut self, tok: &Token) -> bool {
+        match tok {
+            Token::RParen if self.depth == 0 && self.case_active == 0 => return true,
+            Token::LParen | Token::CmdSubstStart => self.depth += 1,
+            Token::RParen if self.depth > 0 => self.depth -= 1,
+            // depth == 0 here (the first arm ruled out depth == 0 &&
+            // case_active == 0, so case_active > 0): an unpaired
+            // case-branch pattern terminator. Leave depth alone.
+            Token::RParen => {}
+            Token::Case => self.case_active += 1,
+            Token::Esac => self.case_active = self.case_active.saturating_sub(1),
+            _ => {}
+        }
+        false
+    }
+}
+
+/// Find the index in `tokens` of the `)` that closes a `$(...)` whose body
+/// starts at `tokens[0]` (i.e. `tokens` must NOT include the leading
+/// `CmdSubstStart`). `None` if `tokens` runs out first (unterminated).
+///
+/// Plain-slice twin of [`cmd_subst_body_tokens`]'s live chumsky capture, used
+/// only by `validate_cmd_subst_bodies`'s error-path fallback — see that
+/// function's doc comment for why a second, non-chumsky scan exists at all.
+fn find_cmd_subst_close(tokens: &[(Token, Span)]) -> Option<usize> {
+    let mut tracker = CmdSubstDepth::default();
+    tokens.iter().position(|(tok, _)| tracker.step(tok))
+}
+
+/// Re-validate every unquoted `$(...)` body in `tokens` on its own, outside
+/// chumsky's `choice`/`try_map` alternative machinery — called only after
+/// [`parse_tokens`]'s main grammar pass has already failed.
+///
+/// Why this exists: chumsky's `TryMap::go` (see `combinator.rs` in the
+/// `chumsky` crate) records a failed alternative's error at the cursor
+/// position from *before* the wrapped parser ran, not at the error's own
+/// span. `cmd_subst_parser`'s `try_map` wraps a body that can be many tokens
+/// long, so a deep, specific error from well inside a malformed `$(...)`
+/// body gets attributed to the shallow position right after `$(` for
+/// purposes of chumsky's furthest-error bookkeeping — and can lose to a
+/// shorter, more generic error from a sibling `choice` alternative that
+/// never had a chance of matching. The user then sees "expected expression"
+/// pointing at the `$(` itself instead of the real problem inside.
+///
+/// The fix already used elsewhere in this parser (`bash_substring_hint`,
+/// `first_ambiguous_stdin`) is to step outside chumsky's alternative
+/// machinery entirely for diagnostics we want full control over. This
+/// function does that for `$(...)` bodies: it is not part of the grammar, so
+/// nothing merges or discards the error it returns.
+fn validate_cmd_subst_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
+    let mut i = 0;
+    while i < tokens.len() {
+        if !matches!(tokens[i].0, Token::CmdSubstStart) {
+            i += 1;
+            continue;
+        }
+        let start_span = tokens[i].1;
+        let rest = &tokens[i + 1..];
+        let Some(close_rel) = find_cmd_subst_close(rest) else {
+            return Err(vec![ParseError {
+                span: start_span,
+                message: "unterminated command substitution: missing `)`".to_string(),
+            }]);
+        };
+        let body = &rest[..close_rel];
+        let rparen_span = rest[close_rel].1;
+        let end_span: Span = (rparen_span.start..rparen_span.start).into();
+        // Recurse before moving on to the remainder of `tokens`, so a nested
+        // `$(...)` reports its own (deeper, more specific) error rather than
+        // this level's.
+        parse_tokens(body.to_vec(), end_span, start_span)?;
+        i += 1 + close_rel + 1;
+    }
+    Ok(())
+}
+
+/// Command substitution: `$(...)` - runs a statement sequence and returns its
+/// result.
+///
+/// Route C (GH #194): the body is a token slice, balance-captured by
+/// [`cmd_subst_body_tokens`], then parsed with the FULL program grammar
+/// (`parse_tokens`, the same entry point [`parse`] uses) from inside this
+/// `.try_map()` closure — at *parse* time, not build time. That is what lets
+/// `if`/`for`/`while`/`case` appear inside an unquoted `$(...)`: closing the
+/// cycle with a second `recursive()` call (`cmd_subst → primary_expr →
+/// cmd_subst`) overflows the stack while the parser graph is being
+/// CONSTRUCTED (see `CACHED_PARSER`'s doc comment), but a call made once that
+/// graph already exists — from inside a closure that only runs when this
+/// combinator actually matches a token — has nothing left to recurse through
+/// at build time.
+///
+/// Before this, the body had its own hand-rolled pipeline/`&&`/`||` grammar
+/// with control structures intentionally out of scope — a second, smaller
+/// copy of `pipeline_parser`/`command_parser` kept in sync by hand. Route C
+/// deleted that copy: a pipeline inside `$(...)` now goes through the same
+/// `pipeline_parser` as everywhere else, and this function no longer needs
+/// the caller's recursive `expr` handle at all (the redirect-target cycle
+/// `redirect_parser` used to document is gone with it).
+fn cmd_subst_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
-    E: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
-    // Argument parser using the recursive expression parser
-    // Long flag with value: --name=value
-    let long_flag_with_value = select! {
-        Token::LongFlag(name) => name,
-    }
-    .then_ignore(just(Token::Eq))
-    .then(expr.clone())
-    .map(|(key, value)| Arg::Named { key, value });
-
-    // Boolean long flag: --name
-    let long_flag = select! {
-        Token::LongFlag(name) => Arg::LongFlag(name),
-    };
-
-    // Boolean short flag: -x
-    let short_flag = select! {
-        Token::ShortFlag(name) => Arg::ShortFlag(name),
-    };
-
-    // Shell assignment in argv position: name=value (see arg_before_double_dash_parser).
-    // Keyword keys (`if=`, `in=`, …) are accepted so `$(dd if=x)` parses.
-    let named = choice((ident_parser(), keyword_word()))
-        .then_ignore(just(Token::Eq))
-        .then(expr.clone())
-        .map(|(key, value)| Arg::WordAssign { key, value });
-
-    // Positional argument
-    let positional = expr.clone().map(Arg::Positional);
-
-    let arg = choice((
-        long_flag_with_value,
-        long_flag,
-        short_flag,
-        named,
-        positional,
-    ));
-
-    // Command name parser - accepts identifiers, the boolean keywords, and the
-    // null command (true/false/: are builtins)
-    let command_name = choice((
-        ident_parser(),
-        just(Token::True).to("true".to_string()),
-        just(Token::False).to("false".to_string()),
-        just(Token::Colon).to(":".to_string()),
-    ));
-
-    // Command parser. Trailing redirects (`> file`, `2> file`, `>> file`, …)
-    // reuse the same `redirect_parser` combinator the top-level
-    // `command_parser` uses, so `$(cmd > file)` parses like any other command.
-    // The redirect *target* threads the recursive `expr` handle (not a fresh
-    // `primary_expr_parser()`) so the target may itself contain `$(...)` while
-    // avoiding an unbounded parser-construction cycle.
-    let command = command_name
-        .then(arg.repeated().collect::<Vec<_>>())
-        .then(
-            redirect_parser(expr.clone())
-                .repeated()
-                .collect::<Vec<_>>(),
-        )
-        .map(|((name, args), redirects)| Command {
-            name,
-            args,
-            redirects,
-        });
-
-    // Pipeline parser
-    let pipeline = command
-        .separated_by(just(Token::Pipe))
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|commands| Pipeline {
-            commands,
-            background: false,
-        });
-
-    // A single pipeline becomes one statement (`$(echo x)` → one `Stmt::Command`),
-    // keeping the AST shape uniform with the rest of the parser.
-    let pipeline_stmt = pipeline.map(pipeline_into_stmt);
-
-    // Statement chaining inside `$()`. `&&` and `||` have EQUAL precedence and
-    // associate left-to-right (POSIX) — the same single left fold as the top
-    // level (`statement_parser`), NOT `&&`-binds-tighter. This is the full
-    // statement grammar a command substitution body accepts — pipelines,
-    // `&&`/`||` chains, and (via the sequence below) `;`/newline separators and
-    // `#` comments. Control structures (`if`/`for`/`while`/`case`) are
-    // intentionally out of scope here.
-    let chained = pipeline_stmt.clone().foldl(
-        choice((
-            just(Token::And).to(true), // true = &&
-            just(Token::Or).to(false), // false = ||
-        ))
-        .then(pipeline_stmt.clone())
-        .repeated(),
-        |left, (is_and, right): (bool, Stmt)| {
-            if is_and {
-                Stmt::AndChain {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }
-            } else {
-                Stmt::OrChain {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }
-            }
-        },
-    );
-
-    // `;` / newline separated sequence of chained statements, with optional
-    // leading/trailing/interior separators (so multi-line bodies and a trailing
-    // `;` or comment-induced newline parse cleanly). `#` comments lex to
-    // newlines, so they are consumed here as ordinary separators.
-    let separator = choice((just(Token::Newline), just(Token::Semi)));
-    let body = separator
-        .clone()
-        .repeated()
-        .ignore_then(
-            chained
-                .separated_by(separator.clone().repeated().at_least(1))
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(separator.repeated());
-
     just(Token::CmdSubstStart)
-        .ignore_then(body)
-        .then_ignore(just(Token::RParen))
-        .map(Expr::CommandSubst)
+        .ignore_then(cmd_subst_body_tokens())
+        .try_map(|(body_tokens, rparen_span), outer_span| {
+            let end_span: Span = (rparen_span.start..rparen_span.start).into();
+            parse_tokens(body_tokens, end_span, outer_span)
+                .map(|program| Expr::CommandSubst(program.statements))
+                .map_err(|errs| {
+                    let first = errs.into_iter().next().unwrap_or_else(|| ParseError {
+                        span: outer_span,
+                        message: "command substitution failed to parse".to_string(),
+                    });
+                    Rich::custom(first.span, first.message)
+                })
+        })
         .labelled("command substitution")
 }
 
@@ -4156,6 +4265,201 @@ mod tests {
             },
             other => panic!("expected if, got {:?}", other),
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GH #194: control structures inside an UNQUOTED `$(...)` (route C)
+    //
+    // Before this, `x="$(for f in a b; do echo $f; done)"` (quoted) worked
+    // because `parse_interpolated_string` recursively calls the top-level
+    // `parse()`, but `echo $(for f in a b; do echo $f; done)` (unquoted) was
+    // a parse error: `cmd_subst_parser` had its own hand-rolled
+    // pipeline/`&&`/`||` grammar with control structures intentionally out
+    // of scope. Route C replaced that with a balance-captured token slice
+    // parsed through the full program grammar from inside a `.try_map()`
+    // closure at parse time — see `cmd_subst_parser`'s doc comment for why
+    // it has to be parse time, not build time.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_cmd_subst_unquoted_for_loop() {
+        let result = parse("X=$(for f in a b; do echo $f; done)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::For(f)] => {
+                assert_eq!(f.variable, "f");
+                assert_eq!(f.items.len(), 2);
+                assert!(matches!(f.body.as_slice(), [Stmt::Command(c)] if c.name == "echo"));
+            }
+            other => panic!("expected a single For statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_while_loop() {
+        let result = parse("X=$(while false; do echo x; done)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        assert!(
+            matches!(stmts.as_slice(), [Stmt::While(w)] if matches!(w.body.as_slice(), [Stmt::Command(c)] if c.name == "echo")),
+            "expected a single While statement, got {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_if_else() {
+        let result = parse("X=$(if true; then echo one; else echo two; fi)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::If(i)] => {
+                assert!(i.else_branch.is_some(), "expected an else branch");
+                assert!(matches!(i.then_branch.as_slice(), [Stmt::Command(c)] if c.name == "echo"));
+            }
+            other => panic!("expected a single If statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_case() {
+        // An unpaired case-branch pattern (`a)`, no leading `(`) is the
+        // sharpest case for the balance tracker: its `)` has no matching
+        // open on the depth counter, so it must not be read as the
+        // substitution's own close (see `CmdSubstDepth`).
+        let result = parse("X=$(case a in a) echo hit;; esac)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::Case(c)] => {
+                assert_eq!(c.branches.len(), 1);
+                assert_eq!(c.branches[0].patterns, vec!["a".to_string()]);
+            }
+            other => panic!("expected a single Case statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_case_with_parenthesized_pattern() {
+        // The *paired* form (`(a)`) — depth handles this one without help
+        // from `case_active` at all, since the `(` is on the counter.
+        let result = parse("X=$(case a in (a) echo hit;; esac)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        assert!(
+            matches!(stmts.as_slice(), [Stmt::Case(c)] if c.branches.len() == 1),
+            "expected a single Case statement, got {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_nested_with_control_structure() {
+        // Nesting question #2 from the route-C verification list: a control
+        // structure inside the INNER `$(...)`, reached through an outer one.
+        let result = parse("X=$(echo $(for f in a; do echo $f; done))").unwrap();
+        let outer_stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        let outer_cmd = match outer_stmts.as_slice() {
+            [Stmt::Command(c)] => c,
+            other => panic!("expected a single echo command, got {:?}", other),
+        };
+        assert_eq!(outer_cmd.name, "echo");
+        let inner_stmts = match &outer_cmd.args[0] {
+            Arg::Positional(Expr::CommandSubst(s)) => s,
+            other => panic!("expected nested command subst arg, got {:?}", other),
+        };
+        assert!(
+            matches!(inner_stmts.as_slice(), [Stmt::For(f)] if f.variable == "f"),
+            "expected a single For statement inside the inner $(), got {inner_stmts:?}"
+        );
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_pipeline() {
+        // Verification question from GH #194's route-C plan: a pipeline
+        // (the ordinary, non-compound kind) inside `$(...)` still works once
+        // the body goes through the real `pipeline_parser` instead of its
+        // own hand-rolled copy.
+        let result = parse("X=$(cat f | grep pat | wc -l)").unwrap();
+        let value = match &result.statements[0] {
+            Stmt::Assignment(a) => a.value.clone(),
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        let pipeline = subst_pipeline(&value);
+        assert_eq!(pipeline.commands.len(), 3);
+        assert_eq!(pipeline.commands[2].name, "wc");
+    }
+
+    #[test]
+    fn parse_quoted_cmd_subst_with_for_loop_still_works() {
+        // The quoted form was never broken (it goes through
+        // `parse_interpolated_string`'s own recursive `parse()` call, not
+        // `cmd_subst_parser`) — pinned so route C cannot regress it.
+        let result = parse(r#"out="$(for f in a b; do echo $f; done)""#).unwrap();
+        match &result.statements[0] {
+            Stmt::Assignment(a) => assert_eq!(a.name(), "out"),
+            other => panic!("expected assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_body_error_reports_span_inside_body_not_at_dollar_paren() {
+        // Route C's sharpest failure mode: a `try_map` rejection deep inside
+        // a `$(...)` body can lose its span to chumsky's choice/alt
+        // bookkeeping and surface as a generic error at the `$(` itself
+        // (`validate_cmd_subst_bodies`'s doc comment has the mechanism).
+        // `done` here is swallowed as a second positional arg to `echo`
+        // (`keyword_as_bareword` accepts it as a bareword), so the `for`
+        // loop's own `done` never arrives and the body runs out of tokens.
+        let source = "echo $(for f in a; do echo $f done)";
+        let errs = parse(source).expect_err("missing loop terminator must be a parse error");
+        let dollar_paren = source.find("$(").expect("fixture contains $(");
+        assert!(
+            errs.iter().all(|e| e.span.start > dollar_paren + 1),
+            "error span must point inside the $() body, not at '$(' itself: {errs:?}"
+        );
+        // The message names what's actually missing, not a generic
+        // "expected expression" from an unrelated sibling `choice` arm.
+        assert!(
+            errs.iter().any(|e| e.message.contains("done")),
+            "expected the missing-`done` diagnostic, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn parse_cmd_subst_unterminated_reports_error() {
+        let result = parse("echo $(for f in a; do echo $f; done");
+        assert!(result.is_err(), "a missing `)` must be a parse error");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
