@@ -58,9 +58,12 @@ pub struct StatementPlan {
 ///
 /// `index` is the statement's position in the parsed program, so an embedder
 /// can name which statement it is talking about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlannedStatement {
-    /// The statement's position in the parsed program.
+    /// The statement's position in the parsed program. Counted **before**
+    /// empty statements are dropped, so a comment or a blank line leaves a
+    /// gap — a consumer that filters and then indexes by this number reads
+    /// the wrong statement.
     pub index: usize,
     /// What the statement was asked to run, with every credential redacted.
     pub plan: Plan,
