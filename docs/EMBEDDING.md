@@ -905,8 +905,12 @@ payload separately, so prose inside a heredoc stops being read as a command.
 import json, subprocess
 
 src = "cat <<EOF > notes.md\ndelete all the widgets (prose)\nEOF"
-plan = json.loads(subprocess.run(
-    ["kaish", "--plan", src], capture_output=True, text=True, check=True).stdout)
+done = subprocess.run(["kaish", "--plan", src], capture_output=True, text=True)
+
+# Parse first, branch second: stdout is a JSON object at either exit code.
+plan = json.loads(done.stdout)
+if done.returncode != 0:
+    raise ValueError(plan["errors"][0]["message"])
 
 for statement in plan["statements"]:
     for command in statement["plan"]["commands"]:

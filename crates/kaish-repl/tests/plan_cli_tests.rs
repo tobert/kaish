@@ -1,4 +1,4 @@
-//! `kaish --plan`: the analysis surface as JSON, for consumers that are not
+//! `kaish --plan`: command analysis as JSON, for consumers that are not
 //! written in Rust.
 //!
 //! Everything below drives the real binary, because the contract being tested
@@ -78,8 +78,9 @@ fn the_body_offset_slices_the_body_out_of_the_source() {
         "echo hi\n# a comment\nsqlite3 db <<SQL\nselect 1;\nSQL",
         // Multibyte before AND inside the body: `body_offset` is a byte
         // offset and `body.len()` is a byte length, so a char-counting
-        // mistake anywhere would tear the slice. (The first line is quoted
-        // because an unquoted non-ASCII word does not lex — see GH issue.)
+        // mistake anywhere would tear the slice. The first line is quoted
+        // because every bareword rule in the lexer uses ASCII-only character
+        // classes, so an unquoted `日本語` or `café` is a lexer error.
         "echo \"日本語\"\npython3 <<'PY'\nprint(\"こんにちは\")\nPY",
         // CRLF: the terminator's bytes are part of the body.
         "python3 <<'PY'\r\nimport os\r\nPY",

@@ -3,6 +3,7 @@
 //! Usage:
 //!   kaish                      # Interactive REPL
 //!   kaish -c `<command>`       # Execute command and exit
+//!   kaish --plan `<command>`   # Print what it would run, as JSON
 //!   kaish script.kai           # Run a script
 
 use std::env;
@@ -208,8 +209,8 @@ fn run() -> Result<ExitCode> {
     }
 }
 
-/// Print `source`'s statement plans as JSON and exit — the analysis surface
-/// for a consumer that is not written in Rust.
+/// Print `source`'s statement plans as JSON and exit — command analysis for
+/// a consumer that is not written in Rust.
 ///
 /// Nothing executes and no kernel is built: `plan_program` is a pure function
 /// of the source text, so this touches no filesystem and needs no capability.
@@ -226,7 +227,7 @@ fn run() -> Result<ExitCode> {
 fn print_plan(source: Option<&str>) -> ExitCode {
     let Some(source) = source else {
         let doc = serde_json::json!({
-            "errors": [{ "message": "--plan requires a command argument" }]
+            "errors": [{ "message": "--plan requires a command argument: kaish --plan '<command>'" }]
         });
         println!("{doc}");
         return ExitCode::from(2);
