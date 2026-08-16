@@ -277,3 +277,36 @@ fn plan_file_without_a_path_is_json_and_exits_2() {
     assert!(message.contains("--plan-file <path>"), "got: {message}");
     assert!(message.contains("- for stdin"), "got: {message}");
 }
+
+/// A heredoc whose introducer line carries more command after it — `cat
+/// <<'EOF' && echo done` — starts its body after that whole line, not after
+/// the delimiter word. A scanner that starts at the delimiter swallows the
+/// `&& …` tail into the body, which for a guard means hiding real command
+/// text inside what it excluded as data.
+///
+/// Found by diffing these spans against a hand-rolled regex scanner on real
+/// traffic: 16 of 249 heredocs disagreed, every one this shape, every one in
+/// that direction.
+#[test]
+fn a_heredoc_body_starts_after_the_whole_introducer_line() {
+    for (source, expected) in [
+        ("cat <<'EOF' && echo done\nmessage\nEOF", "message\n"),
+        (
+            "git commit -F - <<'EOF' && git push origin main\na message\nhere\nEOF",
+            "a message\nhere\n",
+        ),
+        ("cat <<'EOF' | tee out.txt && echo ok\nbody\nEOF", "body\n"),
+    ] {
+        let (code, json) = plan(source);
+        assert_eq!(code, 0, "source: {source}");
+        let heredoc = &heredocs(&json)[0];
+        assert_eq!(heredoc["body"]["plain"], expected, "source: {source}");
+        // The whole introducer line, `&&` tail included, sits before the body.
+        let start = heredoc["body_offset"].as_u64().expect("offset") as usize;
+        assert!(
+            source[..start].ends_with('\n') && source[..start].contains("&&"),
+            "the body must start after the introducer line: {:?}",
+            &source[..start]
+        );
+    }
+}
