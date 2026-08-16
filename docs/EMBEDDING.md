@@ -790,6 +790,84 @@ will produce. `rm $(find / -name '*.tmp')` plans as an `rm` whose argument is
 produced by a `find` — you see the shape and the producer, never the resolved
 paths. Judge accordingly.
 
+#### Heredoc bodies: `PlannedCommand.heredocs`
+
+An agent that runs another language runs it through a heredoc — `python3
+<<'PY'`, `sqlite3 <<SQL`. `PlannedCommand.heredocs` publishes each one with the
+shell framing already off, so the body goes straight to whatever reads that
+language:
+
+```rust
+for planned in kernel.plan_program(script)? {
+    for command in &planned.plan.commands {
+        for heredoc in &command.heredocs {
+            // `python3` + `PY` + the program, no quoting to undo.
+            let program = heredoc.body.display();
+        }
+    }
+}
+```
+
+`delimiter` is the word as written with quotes removed (`PY`, `SQL`) — the hint
+an author picked for the language they were about to write, and a hint only.
+`body` is verbatim: no tab stripping, no expansion, no quoting, no
+kernel-internal rewriting. `free_variables` names what plugs into *this* body,
+scoped to it rather than to the whole statement.
+
+**`literal` decides what the body is worth.** A quoted delimiter (`<<'PY'`)
+means the body reaches the command exactly as published. An unquoted one
+(`<<PY`) means the shell expands `${…}` and `$(…)` first, so a substitution can
+land inside a string literal in the other language and the published text is
+what was *asked for*, not what runs.
+
+#### Closing that gap: `expand_fragment`
+
+`Kernel::expand_fragment(source, addr, scope)` resolves an unquoted body
+against values you supply, addressed by statement index and the flat
+`PlannedHeredoc::index`:
+
+```rust
+use kaish_kernel::{Expansion, FragmentAddr};
+
+match kernel.expand_fragment(script, FragmentAddr::new(0, 0), &scope)? {
+    Expansion::Complete(text) => { /* exactly what the command reads */ }
+    Expansion::Blocked { holes } => {
+        for hole in &holes {
+            // hole.source is `$(date +%s)`; hole.plans is what it would run.
+        }
+    }
+}
+```
+
+Two rules shape it, and both are the embedder-in-control preference:
+
+- **The scope is yours, not the kernel's.** Nothing is read from session state.
+  Pair it with `get_var` when the session's values are the ones to judge
+  against, and supply different ones when they are not — `read TOKEN` binds at
+  runtime, so a peeked value would be stale in exactly the case that matters.
+- **A `$(…)` comes back, it does not run.** Running it is a decision with a
+  clock and a blast radius, and it is the same decision you are asking about.
+  Each substitution is a `Hole` carrying its own `Plan`. Judge it safe and you
+  run it in a kernel of your own construction — your capabilities, your
+  timeout, your cancellation — then expand again with the answer in scope.
+
+`Complete` means "this is the text the command reads", and only that. A name
+the body reads and your scope does not carry expands to the empty string,
+because that is what kaish does when it executes; a stricter rule would hand
+back a body the command never sees. Check `free_variables` against your scope
+first when you need every value accounted for. A body reading `$?`, `$$`, or a
+positional is a loud error — a supplied scope cannot carry those, and expanding
+them against a fresh session would invent a value.
+
+`Blocked` carries no text at all. Half-expanded source reads as ground truth to
+whatever parses it next, so the type cannot represent it.
+
+**What this covers.** Heredocs, not every way a program can arrive: `python3 -c
+'…'` puts one in an argument, `echo … | python3` puts it in a pipeline, and
+`write /tmp/x.py <<'PY'` followed by a later `python3 /tmp/x.py` splits it
+across statements. This raises the quality of analysis on the common case; the
+airtight configuration is still the `subprocess` feature off.
+
 #### Why this, and not a gate
 
 kaish used to carry an approval ledger: requests, grants, attempts, an

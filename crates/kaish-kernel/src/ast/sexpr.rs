@@ -107,7 +107,7 @@ fn format_redirect(redir: &Redirect) -> String {
         RedirectKind::StdoutOverwrite => ">",
         RedirectKind::StdoutAppend => ">>",
         RedirectKind::Stdin => "<",
-        RedirectKind::HereDoc => "<<",
+        RedirectKind::HereDoc(_) => "<<",
         RedirectKind::HereString => "<<<",
         RedirectKind::Stderr => "2>",
         RedirectKind::Both => "&>",

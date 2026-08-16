@@ -17,6 +17,7 @@ pub mod backend;
 pub(crate) mod backend_walker_fs;
 pub mod dispatch;
 pub mod duration;
+pub mod fragment;
 pub mod help;
 pub mod ignore_config;
 pub mod interpreter;
@@ -105,3 +106,5 @@ pub use tools::{Tool, ToolRegistry, ExecContext};
 // Statement metadata without execution (embedders compose their own
 // approval machinery over it — see docs/EMBEDDING.md)
 pub use ast::plan::{plan_program, PlannedStatement};
+pub use fragment::{expand_fragment, FragmentError};
+pub use kaish_types::plan::{Expansion, FragmentAddr, Hole, PlannedHeredoc};

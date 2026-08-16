@@ -189,6 +189,10 @@ pub struct PlannedCommand {
     pub redirects: Vec<PlannedRedirect>,
     /// Whether the enclosing pipeline was backgrounded with `&`.
     pub background: bool,
+    /// The heredocs this command reads on stdin, in source order. Empty for
+    /// every command that declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heredocs: Vec<PlannedHeredoc>,
 }
 
 impl PlannedCommand {
@@ -205,6 +209,166 @@ impl PlannedCommand {
             args,
             redirects,
             background,
+            heredocs: Vec::new(),
+        }
+    }
+
+    /// Attach the heredocs this command reads on stdin.
+    pub fn with_heredocs(mut self, heredocs: Vec<PlannedHeredoc>) -> Self {
+        self.heredocs = heredocs;
+        self
+    }
+}
+
+/// One heredoc a [`PlannedCommand`] reads on stdin — the body a command is
+/// fed, published as data.
+///
+/// Agents hand whole programs to interpreters this way (`python3 <<'PY'`,
+/// `sqlite3 <<SQL`), and the shell framing is the part that has to come off
+/// before anything can look at the program. It comes off here: the command
+/// name is on the [`PlannedCommand`], the language hint is
+/// [`delimiter`](Self::delimiter), and the program is [`body`](Self::body)
+/// with no quoting or escaping applied.
+///
+/// [`literal`](Self::literal) decides what the body is worth. A quoted
+/// delimiter (`<<'PY'`) means the body reaches the command exactly as
+/// published; an unquoted one means the shell expands `${…}` and `$(…)`
+/// first, so the published text is what was *asked for* and not what runs.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedHeredoc {
+    /// The heredoc's position among every heredoc in its statement, counted
+    /// in source order across every command the statement contains. This is
+    /// the `heredoc` half of a [`FragmentAddr`].
+    pub index: usize,
+    /// The delimiter word as written, quotes removed: `PY` for both `<<PY`
+    /// and `<<'PY'`. Agents pick it for the language they are about to write,
+    /// so it is a hint worth keeping — a hint, never a guarantee.
+    pub delimiter: String,
+    /// Whether the delimiter was quoted (`<<'PY'`, `<<"PY"`). True means no
+    /// expansion runs and [`body`](Self::body) is exactly what the command
+    /// reads.
+    pub literal: bool,
+    /// Whether the `<<-` form was used. True means leading tabs come off each
+    /// body line before the command sees it; the published body keeps them.
+    pub strip_tabs: bool,
+    /// The body as written, verbatim: no tab stripping, no expansion, no
+    /// quoting, no kernel-internal rewriting. A generated program arrives
+    /// whole and unescaped, ready to hand to whatever reads that language.
+    pub body: PlannedValue,
+    /// Byte offset of the body's first character in the source that was
+    /// planned, for a caller attributing a finding back to a location.
+    pub body_offset: usize,
+    /// Session variables this body reads — sorted, deduplicated root names,
+    /// and always empty when [`literal`](Self::literal) is true. These are
+    /// the values that plug into the body, and the ones an expansion needs
+    /// supplied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub free_variables: Vec<String>,
+}
+
+impl PlannedHeredoc {
+    /// Assemble one planned heredoc. The only constructor for this
+    /// `#[non_exhaustive]` type.
+    pub fn new(
+        index: usize,
+        delimiter: impl Into<String>,
+        literal: bool,
+        strip_tabs: bool,
+        body: PlannedValue,
+        body_offset: usize,
+    ) -> Self {
+        Self {
+            index,
+            delimiter: delimiter.into(),
+            literal,
+            strip_tabs,
+            body,
+            body_offset,
+            free_variables: Vec::new(),
+        }
+    }
+
+    /// Attach the body's variable analysis (sorted, deduplicated).
+    pub fn with_free_variables(mut self, free: Vec<String>) -> Self {
+        self.free_variables = free;
+        self
+    }
+}
+
+// ───────────────────────── Fragment expansion ─────────────────────────
+
+/// Where one heredoc sits in a planned program: which statement, and which
+/// heredoc within it.
+///
+/// The heredoc index is flat across the whole statement — the same
+/// [`PlannedHeredoc::index`] the plan publishes — so a heredoc inside a loop
+/// body or an `if` branch is addressable without walking the structure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FragmentAddr {
+    /// The statement's position in the parsed program.
+    pub statement: usize,
+    /// The heredoc's position within that statement.
+    pub heredoc: usize,
+}
+
+impl FragmentAddr {
+    /// Name one fragment.
+    pub fn new(statement: usize, heredoc: usize) -> Self {
+        Self { statement, heredoc }
+    }
+}
+
+/// What expanding a fragment produced.
+///
+/// There are two outcomes and no third: either the text is complete, or it is
+/// blocked and no text comes back at all. Half-expanded source reads as
+/// ground truth to whatever parses it next and is not, so this type cannot
+/// represent it.
+///
+/// Deliberately **not** `#[non_exhaustive]`, unlike the record types around
+/// it. A caller must handle both arms, and that is the guarantee — a wildcard
+/// arm written today to satisfy the attribute is exactly where a third
+/// outcome would land unnoticed tomorrow. A new variant here would be a
+/// change every embedder must see, so it should break their build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Expansion {
+    /// Every expansion resolved. This is exactly the text the command reads
+    /// on stdin, given the scope that was supplied.
+    Complete(String),
+    /// A `$(…)` stands between the body and its final text. Running it is a
+    /// decision with a clock and a blast radius, so the kernel returns the
+    /// question instead of answering it.
+    Blocked {
+        /// Every substitution the body contains, in source order.
+        holes: Vec<Hole>,
+    },
+}
+
+/// One `$(…)` inside a fragment: what it would run, as a plan.
+///
+/// A caller that decides the substitution is safe runs it in a kernel of its
+/// own construction — its own capabilities, its own timeout, its own
+/// cancellation — and expands again with the answer in the scope.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hole {
+    /// The substitution rendered back to shell text, unexpanded: `$(date +%s)`.
+    pub source: String,
+    /// One plan per statement in the substitution's body — the same
+    /// vocabulary the enclosing statement's plan uses, so a caller judging a
+    /// hole reads it the way it reads everything else.
+    pub plans: Vec<Plan>,
+}
+
+impl Hole {
+    /// Name one substitution. The only constructor for this
+    /// `#[non_exhaustive]` type.
+    pub fn new(source: impl Into<String>, plans: Vec<Plan>) -> Self {
+        Self {
+            source: source.into(),
+            plans,
         }
     }
 }

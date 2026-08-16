@@ -4,9 +4,10 @@
 //! Uses chumsky for parser combinators with good error recovery.
 
 use crate::ast::{
-    Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop, IfStmt,
-    ListElem, Pipeline, Program, RecordEntry, RecordKey, Redirect, RedirectKind, SpannedPart, Stmt,
-    StringPart, StringTestOp, TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
+    Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop,
+    HereDocMeta, IfStmt, ListElem, Pipeline, Program, RecordEntry, RecordKey, Redirect,
+    RedirectKind, SpannedPart, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr, ToolDef, Value,
+    VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -1770,7 +1771,7 @@ fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
         .filter(|r| {
             matches!(
                 r.kind,
-                RedirectKind::Stdin | RedirectKind::HereDoc | RedirectKind::HereString
+                RedirectKind::Stdin | RedirectKind::HereDoc(_) | RedirectKind::HereString
             )
         })
         .count()
@@ -2149,6 +2150,15 @@ where
     let heredoc_redirect = just(Token::HereDocStart)
         .ignore_then(select! { Token::HereDoc(data) => data })
         .try_map(|data: HereDocData, span| {
+            // How it was written, kept for the plan. The target below is what
+            // executes: tab-stripped, or split into interpolation parts.
+            let meta = HereDocMeta {
+                delimiter: data.delimiter.clone(),
+                literal: data.literal,
+                strip_tabs: data.strip_tabs,
+                body: data.source_body.clone(),
+                body_offset: data.body_start_offset,
+            };
             let target = if data.literal {
                 let body = if data.strip_tabs {
                     crate::interpreter::strip_leading_tabs(&data.content)
@@ -2166,7 +2176,7 @@ where
                 if parts.len() == 1 && !data.strip_tabs {
                     if let StringPart::Literal(text) = &parts[0].part {
                         return Ok(Redirect {
-                            kind: RedirectKind::HereDoc,
+                            kind: RedirectKind::HereDoc(meta),
                             target: Expr::Literal(Value::String(text.clone())),
                         });
                     }
@@ -2177,7 +2187,7 @@ where
                 }
             };
             Ok(Redirect {
-                kind: RedirectKind::HereDoc,
+                kind: RedirectKind::HereDoc(meta),
                 target,
             })
         });

@@ -232,7 +232,7 @@ pub enum RedirectKind {
     /// `<` stdin from file
     Stdin,
     /// `<<EOF ... EOF` stdin from here-doc
-    HereDoc,
+    HereDoc(HereDocMeta),
     /// `<<< word` stdin from here-string (bash-style)
     HereString,
     /// `2>` stderr to file
@@ -243,6 +243,28 @@ pub enum RedirectKind {
     MergeStderr,
     /// `1>&2` or `>&2` merge stdout into stderr
     MergeStdout,
+}
+
+/// How a heredoc was **written**, carried alongside the redirect so a plan
+/// can publish it.
+///
+/// Every field is descriptive, never operative: the redirect's target
+/// expression is what executes, and this says what the author typed. That
+/// split is why `body` is here at all — by the time a heredoc reaches the
+/// AST its target has been tab-stripped (literal bodies) or rewritten into
+/// interpolation parts, and neither is the source text an analyzer needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HereDocMeta {
+    /// The delimiter word with quotes removed: `PY` for `<<PY` and `<<'PY'`.
+    pub delimiter: String,
+    /// Whether the delimiter was quoted, meaning the body does not expand.
+    pub literal: bool,
+    /// Whether the `<<-` form was used.
+    pub strip_tabs: bool,
+    /// The body verbatim — no tab stripping, no arithmetic rewriting.
+    pub body: String,
+    /// Byte offset of the body's first character in the original source.
+    pub body_offset: usize,
 }
 
 /// A `StringPart` together with its byte offset in the original source.
@@ -582,7 +604,7 @@ impl fmt::Display for RedirectKind {
             RedirectKind::StdoutOverwrite => write!(f, ">"),
             RedirectKind::StdoutAppend => write!(f, ">>"),
             RedirectKind::Stdin => write!(f, "<"),
-            RedirectKind::HereDoc => write!(f, "<<"),
+            RedirectKind::HereDoc(_) => write!(f, "<<"),
             RedirectKind::HereString => write!(f, "<<<"),
             RedirectKind::Stderr => write!(f, "2>"),
             RedirectKind::Both => write!(f, "&>"),
