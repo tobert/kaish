@@ -330,6 +330,25 @@ echo "literal \$X"              # escaped = no interpolation
 echo 'hello $NAME'              # prints: hello $NAME
 ```
 
+### Word characters
+
+A bareword or path is any run of characters that is not ASCII whitespace and
+not a shell operator (`()|&;<>` and friends) — kaish, like bash, never
+inspects word bytes for alphabetic-ness. Any script lexes unquoted, no
+quoting needed:
+
+```sh
+echo café
+cd ~/文書
+ls /tmp/日本語
+X=café
+```
+
+Variable names and flags are narrower and stay ASCII-only, matching bash's
+`[a-zA-Z_][a-zA-Z0-9_]*` name rule: `$café` and `--café` are lexer errors so a
+typo is loud instead of silently truncating to `$caf`/`--caf` plus a stray
+word. Quote either to pass it as a literal string instead.
+
 ### Quote to join — kaish does not paste adjacent tokens
 
 kaish never concatenates adjacent *unquoted* tokens into one word. `$VAR`,
