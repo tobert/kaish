@@ -185,9 +185,10 @@ fn is_valid_name(name: &str) -> bool {
         _ => return false,
     }
 
-    // The rest is the same class every other door uses, so `export café=1`
-    // and `café=1` agree about what a name is.
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii())
+    // The rest is the same rule every other door uses, so `export café=1`
+    // and `café=1` agree about what a name is — including the refusal of a
+    // character that does not show itself.
+    crate::name::validate(name).is_ok()
 }
 
 #[cfg(test)]
