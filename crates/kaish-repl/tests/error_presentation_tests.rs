@@ -166,6 +166,44 @@ fn cli_script_parse_error_prints_diagnostic_with_correct_line() {
     assert_no_wrapper_noise(&stderr);
 }
 
+/// A shebang script is parsed with its first line blanked, so a diagnostic on
+/// a later line proves the check runs on the blanked source rather than the
+/// raw file. The plain-script test above cannot show that — its line 1 is
+/// ordinary source.
+#[test]
+fn cli_shebang_script_parse_error_reports_the_source_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script_path = dir.path().join("bad-shebang.kai");
+    std::fs::write(&script_path, "#!/usr/bin/env kaish\necho ok\necho $GREET/world.txt\n")
+        .expect("write script");
+    let (stdout, stderr, code) = run_kaish(&[script_path.to_str().expect("utf8 path")]);
+    assert_eq!(code, 1);
+    assert_eq!(stdout, "", "a parse failure runs nothing");
+    assert!(
+        stderr.starts_with("3:6 [parse]:"),
+        "the blanked shebang must still count as line 1, got: {stderr:?}"
+    );
+    assert_no_wrapper_noise(&stderr);
+}
+
+/// `--plan` is the one parse-failure surface this deliberately does NOT
+/// reroute: it answers in JSON on both outcomes, so prose on stderr would
+/// break a caller that parses one shape.
+#[test]
+fn plan_parse_error_stays_json_and_exits_2() {
+    let (stdout, stderr, code) = run_kaish(&["--plan", "echo $GREET/world.txt"]);
+    assert_eq!(code, 2, "a plan that does not parse exits 2");
+    assert!(
+        stdout.starts_with("{\"errors\":"),
+        "the plan surface answers in JSON, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("[parse]:"),
+        "the human diagnostic format must not leak into the JSON surface: {stdout:?}"
+    );
+    assert_eq!(stderr, "", "the plan surface says everything on stdout");
+}
+
 // ── interactive REPL ────────────────────────────────────────────────
 
 #[test]

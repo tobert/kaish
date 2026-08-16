@@ -922,6 +922,38 @@ mod tests {
         assert!(!helper.is_incomplete("if true; then\n  echo hello\nfi"));
     }
 
+    /// The continuation heuristic runs in rustyline's validator, which is
+    /// upstream of `process_line` and therefore upstream of the parse check
+    /// that formats diagnostics. Incomplete input must still be held for
+    /// continuation rather than submitted and reported as a parse error.
+    #[test]
+    fn test_is_incomplete_holds_input_the_parser_would_reject() {
+        let helper = make_test_helper();
+        for fragment in [
+            "for f in a b; do",
+            "if true; then",
+            "while true; do",
+            "echo \"unclosed",
+            "echo 'unclosed",
+        ] {
+            assert!(
+                helper.is_incomplete(fragment),
+                "{fragment:?} must be held for continuation, not submitted"
+            );
+        }
+        assert!(!helper.is_incomplete("echo done"));
+    }
+
+    /// An unterminated `$(` is NOT held for continuation — the heuristic
+    /// tracks quotes, keywords, and heredocs, but not parentheses. It is
+    /// submitted and fails to parse. Pinned so the gap is a decision on the
+    /// record rather than a surprise.
+    #[test]
+    fn test_is_incomplete_does_not_track_command_substitution() {
+        let helper = make_test_helper();
+        assert!(!helper.is_incomplete("echo $(ls"));
+    }
+
     #[test]
     fn test_is_incomplete_for_loop() {
         let helper = make_test_helper();
