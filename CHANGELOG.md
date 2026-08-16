@@ -47,6 +47,11 @@ breaking entries are marked **BREAKING**.
   catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
   `&[]` to keep the old behavior.
 
+### Removed
+- **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
+  `AmbiguousBooleanLike` variants are gone — `LexerError` is public and not
+  `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
+
 ### Fixed
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed

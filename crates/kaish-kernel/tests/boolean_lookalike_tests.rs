@@ -11,8 +11,8 @@
 //! produce them.
 //!
 //! It was not even consistent with its own premise — `1`, `0`, `on`, `off`,
-//! `y`, and `n` are the classic ambiguous booleans and all four were always
-//! accepted.
+//! `y`, and `n` are the classic ambiguous booleans and every one of them was
+//! always accepted.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -34,8 +34,12 @@ async fn only_lowercase_literals_are_booleans() {
         ("x=yes; typeof $x", "string"),
         ("x=no; typeof $x", "string"),
         ("x=TRUE; typeof $x", "string"),
+        ("x=FALSE; typeof $x", "string"),
+        ("x=True; typeof $x", "string"),
         ("x=False; typeof $x", "string"),
         ("x=Yes; typeof $x", "string"),
+        ("x=YES; typeof $x", "string"),
+        ("x=NO; typeof $x", "string"),
         // Always accepted, and always strings — the inconsistency that
         // undercut the rule's own premise.
         ("x=on; typeof $x", "string"),
@@ -47,15 +51,30 @@ async fn only_lowercase_literals_are_booleans() {
     }
 }
 
-/// Booleans still compare as booleans.
+/// What accepting the lookalikes actually costs, pinned so it stays deliberate.
+///
+/// `==` is NOT the discriminator here: `values_equal` stringifies mixed scalars,
+/// so `[[ true == "true" ]]` is true whether the left side is a `bool` or the
+/// string `"true"`. `typeof` is the only surface that separates them, which is
+/// why the test above carries the weight.
+///
+/// What is new is the middle row. `[[ true == TRUE ]]` used to be a loud lexer
+/// error and is now a quiet `false`, and `[[ -n TRUE ]]` is a quiet `true`.
+/// That is the residual the rejection existed to catch — and it was never
+/// caught for `on`, `off`, `1`, or `0`, which always reached the same place.
 #[tokio::test]
-async fn boolean_literals_still_compare() {
+async fn lookalikes_compare_as_the_strings_they_are() {
     let k = kernel();
-    let r = k
-        .execute("if [[ true == true ]]; then echo compared; fi")
-        .await
-        .expect("kernel execute");
-    assert_eq!(r.text_out().trim(), "compared");
+    for (source, expected) in [
+        ("if [[ true == \"true\" ]]; then echo same; else echo differ; fi", "same"),
+        ("if [[ true == TRUE ]]; then echo same; else echo differ; fi", "differ"),
+        ("if [[ -n TRUE ]]; then echo nonempty; else echo empty; fi", "nonempty"),
+        // The always-accepted lookalikes, reaching the identical place.
+        ("if [[ true == on ]]; then echo same; else echo differ; fi", "differ"),
+    ] {
+        let r = k.execute(source).await.expect("kernel execute");
+        assert_eq!(r.text_out().trim(), expected, "for: {source}");
+    }
 }
 
 /// The shapes the rejection broke. Each is an ordinary command that a shell
