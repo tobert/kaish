@@ -117,3 +117,57 @@ async fn the_same_characters_are_fine_as_data() {
         assert_eq!(out, expected, "for: {source:?}");
     }
 }
+
+// ── property: the four doors agree, for names we did not think of ───────
+
+/// Names built from a generator rather than a list, because the bug this file
+/// exists for was a *boundary* between two scanners — the kind of defect that
+/// hides between the cases anyone writes by hand.
+fn a_legal_name() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    proptest::collection::vec(
+        prop_oneof![
+            Just('a'), Just('Z'), Just('_'), Just('7'),
+            Just('é'), Just('名'), Just('Ω'), Just('д'), Just('😁'),
+        ],
+        1..6,
+    )
+    .prop_map(|chars| chars.into_iter().collect::<String>())
+    // A name cannot start with a digit — that is a positional parameter.
+    .prop_filter("no digit-leading names", |s| !s.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(256))]
+
+    /// Whatever the name, `$N`, `${N}`, `"$N"`, and `"${N}"` reach the same
+    /// variable. This is the property that would have caught the truncation
+    /// bug before a line of the fix was written: the quoted door collected a
+    /// name with an ASCII-only rule and silently read a different variable.
+    #[test]
+    fn every_spelling_of_a_reference_agrees(name in a_legal_name()) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let outputs: Vec<String> = runtime.block_on(async {
+            let mut seen = Vec::new();
+            for reference in [
+                format!("echo ${name}"),
+                format!("echo ${{{name}}}"),
+                format!("echo \"${name}\""),
+                format!("echo \"${{{name}}}\""),
+            ] {
+                let k = kernel();
+                let source = format!("{name}=bound; {reference}");
+                let r = k.execute(&source).await.expect("kernel execute");
+                seen.push(r.text_out().trim().to_string());
+            }
+            seen
+        });
+        proptest::prop_assert!(
+            outputs.iter().all(|o| o == "bound"),
+            "the four doors disagreed for name {name:?}: {outputs:?}"
+        );
+    }
+}
