@@ -249,9 +249,11 @@ R=$(printf 'a\nb')                # R is "a\nb"
 echo "got: $(printf 'x\ny')"      # one echo, newline preserved
 
 # A $(...) body takes the full statement grammar: &&/|| chains, ; sequences,
-# multi-line bodies, and # comments (not just a single pipeline):
+# multi-line bodies, # comments, and control structures (not just a single
+# pipeline), quoted or unquoted:
 H=$(cd "$repo" && git rev-parse HEAD)
 B=$(printf a; printf b)           # "ab"
+L=$(for f in *.txt; do wc -l < "$f"; done)
 
 # An assignment with no command name takes the exit status of the LAST
 # command substitution in its value, or 0 if there was none (bash's rule) —

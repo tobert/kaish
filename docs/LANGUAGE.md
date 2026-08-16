@@ -633,9 +633,10 @@ echo "Current time: $NOW"
 RESULT=$(cat file.json | jq ".name")
 ```
 
-A `$(...)` body accepts the **full statement grammar**, not just a single
-pipeline: `&&`/`||` chains, `;` sequences, multi-line bodies, and `#` comments
-all work. Output accumulates across the statements (no separator inserted, like
+A `$(...)` body accepts the **full statement grammar**: pipelines, `&&`/`||`
+chains, `;` sequences, multi-line bodies, `#` comments, and control structures
+(`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
+way. Output accumulates across the statements (no separator inserted, like
 `;`), and the body's side effects (`cd`, assignments) stay contained — only the
 captured stdout escapes.
 
@@ -646,10 +647,12 @@ VER=$(                                      # multi-line + comment
     grep '^version' Cargo.toml             # find the line
     | cut -d'"' -f2
 )
+LINES=$(for f in *.txt; do wc -l < "$f"; done)  # control structure, unquoted
 ```
 
-Control structures (`if`/`for`/`while`/`case`) inside `$(...)` are not currently
-supported — keep those at statement level.
+A control structure as one stage of a *pipeline* (`for f in a b; do echo $f; done | grep a`)
+is not supported at any level, inside `$(...)` or out — a pipeline stage is a
+single command.
 
 ### Structured Data and Newline Splitting in Command Substitution
 

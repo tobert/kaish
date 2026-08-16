@@ -46,6 +46,9 @@ breaking entries are marked **BREAKING**.
   `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
   catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
   `&[]` to keep the old behavior.
+- **Parsing a `$(...)`-heavy script is ~20-25% slower per token** — the fix
+  below parses each substitution body through the full grammar via its own
+  recursive parse call instead of a narrower hand-rolled one.
 
 ### Fixed
 - **`write` with no stdin and no content operand errors instead of truncating the
@@ -79,6 +82,13 @@ breaking entries are marked **BREAKING**.
   can only be opened read-only (write raised EISDIR) and a write-only file
   can only be opened for write (read raised EACCES), so `LocalFs::set_mtime`
   now tries read, then falls back to write, covering both.
+- **`$(...)` accepts `if`/`for`/`while`/`case` unquoted, matching the quoted
+  form** — `x="$(for f in a b; do echo $f; done)"` already ran; the same body
+  without quotes was a parse error, because `cmd_subst_parser` carried its
+  own narrower pipeline/`&&`/`||` grammar with control structures declared
+  out of scope. The body now parses through the same full program grammar as
+  everywhere else, and a malformed body reports its error at the actual
+  failure point instead of a generic message anchored at `$(`.
 
 ## [0.14.1] - 2026-08-14
 
