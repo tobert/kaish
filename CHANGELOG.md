@@ -29,6 +29,9 @@ breaking entries are marked **BREAKING**.
   inside brackets and braces the colon stays structural.
 
 ### Changed
+- **BREAKING (embedders):** a heredoc's `PlannedRedirect.target` is now its
+  delimiter word (`'PY'`), not a rendering of its body — the rendering spelled
+  every delimiter `EOF`, and the body is `PlannedCommand.heredocs`'s job.
 - **BREAKING (embedders):** `validator::Validator::new` takes a third argument,
   `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
   catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
