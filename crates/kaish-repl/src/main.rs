@@ -188,9 +188,11 @@ fn run() -> Result<ExitCode> {
         }
 
         Some("--plan") => {
-            let source = rest.get(1).copied()
-                .context("--plan requires a command argument")?;
-            Ok(print_plan(source))
+            // A missing source is reported the same way a broken one is. The
+            // contract is that stdout is always a JSON object, and "except
+            // when you called it wrong" is exactly the case a caller would
+            // not have written a branch for.
+            Ok(print_plan(rest.get(1).copied()))
         }
 
         Some(path) if !path.starts_with('-') => {
@@ -216,7 +218,19 @@ fn run() -> Result<ExitCode> {
 /// The output is always a JSON object, so a caller parses one shape whatever
 /// happened: `{"statements": [...]}` and exit 0, or `{"errors": [...]}` and
 /// exit 2 — the same usage-error code a builtin returns for bad argv.
-fn print_plan(source: &str) -> ExitCode {
+///
+/// "Always" includes being called with no source at all: a caller that got
+/// prose on stderr and an empty stdout for that one case would need a branch
+/// it had no reason to write. An error carries `start`/`end` only when it
+/// refers to a position in the source.
+fn print_plan(source: Option<&str>) -> ExitCode {
+    let Some(source) = source else {
+        let doc = serde_json::json!({
+            "errors": [{ "message": "--plan requires a command argument" }]
+        });
+        println!("{doc}");
+        return ExitCode::from(2);
+    };
     match kaish_kernel::plan_program(source) {
         Ok(statements) => {
             let doc = serde_json::json!({ "statements": statements });

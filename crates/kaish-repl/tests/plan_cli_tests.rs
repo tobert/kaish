@@ -76,6 +76,19 @@ fn the_body_offset_slices_the_body_out_of_the_source() {
         "for f in a b; do python3 <<-'PY'\n\tindented\n\tPY\ndone",
         "python3 <<PY\nn = $((1 + 2))\nx = ${NAME}\nPY",
         "echo hi\n# a comment\nsqlite3 db <<SQL\nselect 1;\nSQL",
+        // Multibyte before AND inside the body: `body_offset` is a byte
+        // offset and `body.len()` is a byte length, so a char-counting
+        // mistake anywhere would tear the slice. (The first line is quoted
+        // because an unquoted non-ASCII word does not lex — see GH issue.)
+        "echo \"日本語\"\npython3 <<'PY'\nprint(\"こんにちは\")\nPY",
+        // CRLF: the terminator's bytes are part of the body.
+        "python3 <<'PY'\r\nimport os\r\nPY",
+        // Reached only through a command substitution.
+        "out=$(cat <<'A'\nnested\nA\n)",
+        // Two heredocs: the first must not shift the second's offset.
+        "python3 <<'A' | python3 <<'B'\nfirst\nA\nsecond\nB",
+        // A body that is empty, and one that is only a newline.
+        "python3 <<'PY'\nPY",
     ] {
         let (code, json) = plan(source);
         assert_eq!(code, 0, "source: {source}");
@@ -149,18 +162,54 @@ fn the_statement_index_counts_empty_statements() {
     assert_eq!(indices, vec![1, 2], "the comment holds index 0");
 }
 
-/// `--plan` with no source names what it wants rather than planning an empty
-/// program and reporting success.
+/// `--plan` with no source is reported through the same door as a broken
+/// source: JSON on stdout, exit 2. "Always a JSON object, except when you
+/// called it wrong" is the case a caller would not have written a branch for,
+/// so there is no exception.
 #[test]
-fn plan_without_a_source_is_an_error() {
+fn plan_without_a_source_is_json_and_exits_2() {
     let out = Command::new(env!("CARGO_BIN_EXE_kaish"))
         .arg("--plan")
         .output()
         .expect("run kaish --plan");
-    assert_ne!(out.status.code(), Some(0));
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2));
+
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let json: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout was not JSON ({e}): {stdout:?}"));
+    let message = json["errors"][0]["message"].as_str().expect("message");
     assert!(
-        stderr.contains("--plan requires a command argument"),
-        "stderr should name the missing argument: {stderr}"
+        message.contains("--plan requires a command argument"),
+        "the error should name what is missing: {message}"
     );
+}
+
+/// The contract has no third outcome: every way of calling `--plan` prints a
+/// JSON object and exits 0 or 2. A caller writes one parse and two branches.
+#[test]
+fn every_outcome_is_json_with_exit_0_or_2() {
+    for (args, expected) in [
+        (vec!["--plan", "echo hi"], 0),
+        (vec!["--plan", ""], 0),
+        (vec!["--plan", "python3 <<'PY'\nunterminated"], 2),
+        (vec!["--plan"], 2),
+        // `--overlay` is filtered out wherever it sits; the source still plans.
+        (vec!["--plan", "--overlay", "echo hi"], 0),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_kaish"))
+            .args(&args)
+            .output()
+            .expect("run kaish");
+        let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+        assert_eq!(out.status.code(), Some(expected), "args: {args:?}");
+        let json: Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("not JSON for {args:?} ({e}): {stdout:?}"));
+        assert!(json.is_object(), "not an object for {args:?}: {json}");
+        // The shape and the code agree, always.
+        assert_eq!(
+            json.get("statements").is_some(),
+            expected == 0,
+            "shape disagrees with exit {expected} for {args:?}: {json}"
+        );
+    }
 }
