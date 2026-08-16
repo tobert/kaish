@@ -309,6 +309,21 @@ fn find_default_separator_in_content(content: &str) -> Option<usize> {
 /// produced becomes the corresponding subscript (`Index`/`Key`/`Dynamic`/
 /// `Slice`). A dotted segment (`${a.b}`) is kept as a non-root `Field` so
 /// resolution can emit the brackets-only error — the lexer already split it out.
+/// A character that may appear after the first in a variable name: ASCII
+/// alphanumerics, `_`, or any non-ASCII scalar value. Mirrors the lexer's
+/// `SimpleVarRef` class exactly — the unquoted and interpolated doors to a name
+/// must agree on where the name ends, or `"$caf\u{e9}"` collects `caf` and
+/// substitutes a different variable than `$caf\u{e9}` does.
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii()
+}
+
+/// A character that may start a variable name: as [`is_name_char`], minus the
+/// digits, which belong to the positional parameters (`$0`..`$9`).
+fn is_name_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
+}
+
 pub(crate) fn parse_varpath(raw: &str) -> VarPath {
     let segment_strs = lexer::parse_var_ref(raw).unwrap_or_default();
     let segments = segment_strs
@@ -316,8 +331,9 @@ pub(crate) fn parse_varpath(raw: &str) -> VarPath {
         .enumerate()
         .map(|(i, s)| {
             if i == 0 {
-                // The root name (or the special `?`).
-                VarSegment::Field(s)
+                // The root name (or the special `?`). Normalized like every
+                // other door to a name; a subscript below is data and is not.
+                VarSegment::Field(crate::ast::normalize_name(s))
             } else if let Some(inner) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 parse_subscript(inner)
             } else {
@@ -674,13 +690,13 @@ fn parse_interpolated_string_spanned(
                     len: pos - part_start,
                 });
                 current_text_start = pos;
-            } else if next.map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+            } else if next.map(is_name_start).unwrap_or(false) {
                 push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
                 i += 1; // consume '$'
                 pos += 1;
                 let mut var_name = String::new();
                 while let Some(&c) = chars_vec.get(i) {
-                    if c.is_ascii_alphanumeric() || c == '_' {
+                    if is_name_char(c) {
                         var_name.push(c);
                         i += 1;
                         pos += c.len_utf8();
@@ -884,7 +900,7 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                 }
                 chars.next(); // consume second '$'
                 parts.push(StringPart::CurrentPid);
-            } else if chars.peek().map(|c| c.is_ascii_alphabetic() || *c == '_').unwrap_or(false) {
+            } else if chars.peek().copied().map(is_name_start).unwrap_or(false) {
                 // Simple variable reference $NAME
                 if !current_text.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
@@ -893,7 +909,7 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                 // Collect identifier characters
                 let mut var_name = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_ascii_alphanumeric() || c == '_' {
+                    if is_name_char(c) {
                         if let Some(c) = chars.next() {
                             var_name.push(c);
                         }
@@ -1378,7 +1394,9 @@ where
     ident_parser()
         .then(lvalue_subscript_parser().repeated().collect::<Vec<_>>())
         .map(|(name, subscripts)| {
-            let mut segments = vec![VarSegment::Field(name)];
+            // Normalized like every other door to a name, so binding through
+            // one spelling and reading through another reaches one variable.
+            let mut segments = vec![VarSegment::Field(crate::ast::normalize_name(name))];
             segments.extend(subscripts);
             VarPath { segments }
         })
