@@ -325,7 +325,12 @@ impl FragmentAddr {
 /// blocked and no text comes back at all. Half-expanded source reads as
 /// ground truth to whatever parses it next and is not, so this type cannot
 /// represent it.
-#[non_exhaustive]
+///
+/// Deliberately **not** `#[non_exhaustive]`, unlike the record types around
+/// it. A caller must handle both arms, and that is the guarantee — a wildcard
+/// arm written today to satisfy the attribute is exactly where a third
+/// outcome would land unnoticed tomorrow. A new variant here would be a
+/// change every embedder must see, so it should break their build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Expansion {
