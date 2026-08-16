@@ -105,9 +105,12 @@ breaking entries are marked **BREAKING**.
   boundary is now a stack of `$(`/`(`/`case` frames instead of a flat depth
   counter, so a `)` resolves against the frame it actually belongs to.
 - **`esac` used as an ordinary word inside `$(...)` no longer closes a case
-  that was never open** — `X=$(echo esac)` exited 1 (`esac` is also the
-  literal bareword `"esac"` in argument position, same as `done`/`fi`); the
-  frame stack above pops a `case` frame only when it is the innermost one.
+  it doesn't belong to** — `esac` is also the literal bareword `"esac"` in
+  argument position (same as `done`/`fi`), and a `case` genuinely still open
+  around it (`X=$(case a in a) y=esac;; b) echo two;; esac)`) exited 1;
+  the frame stack above pops a `case` frame only where a branch pattern (or
+  the real `esac`) is actually expected — right after `case … in` or a `;;`
+  — never mid-branch.
 - **The same case-branch-`)` bug is fixed in `"$(...)"` (quoted) and in the
   lexer's argument-fusion pass** — both had their own, separately-broken
   version of the same flat counter; the quoted form now reuses the unquoted

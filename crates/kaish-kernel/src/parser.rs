@@ -2943,9 +2943,12 @@ enum CmdSubstFrame {
     /// Opened by a literal `(` (`Token::LParen`) — e.g. a parenthesized
     /// case-branch pattern `(a)`; closed by a `)`.
     Paren,
-    /// Opened by `Token::Case`; closed only by `Token::Esac` while it is
-    /// the innermost frame.
-    Case,
+    /// Opened by `Token::Case`. `awaiting_pattern` is `true` right after
+    /// `case … in` and right after a `;;` — a branch pattern (or `esac`) is
+    /// expected next — and `false` once a pattern's `)` has been consumed,
+    /// for the rest of that branch's body. `Esac` closes this frame only
+    /// while `awaiting_pattern` is `true`; see [`CmdSubstFrames`].
+    Case { awaiting_pattern: bool },
 }
 
 /// Tracks, one token at a time, the stack of open `$(`/`(`/`case` frames
@@ -2960,15 +2963,25 @@ enum CmdSubstFrame {
 /// each `)` against the frame it belongs to:
 ///
 /// - innermost is `Case` — the `)` is a branch pattern terminator; it's
-///   part of the body and nothing pops.
+///   part of the body and nothing pops (but `awaiting_pattern` flips to
+///   `false` — see below).
 /// - innermost is `Paren` or `Subst` — that frame closes; pop it.
 /// - stack empty — this is the substitution's own closing `)`; stop, and
 ///   the token is not part of the body.
 ///
-/// `Esac` pops only when the innermost frame is `Case`, so `esac` used as
-/// an ordinary bareword (`echo esac`, matched by `keyword_as_bareword`)
-/// with no case open leaves the stack untouched instead of closing a case
-/// that was never there.
+/// `Esac` is ALSO the literal bareword `"esac"` in argument position
+/// (`keyword_as_bareword`, same as `done`/`fi`), and that bareword can
+/// appear anywhere inside a branch's own body (`case a in a) y=esac;;
+/// b) …`) — a real, still-open case whose closer has not been reached yet.
+/// Popping the `Case` frame on every `Esac` while it's innermost (rather
+/// than only when one was never open) is not enough: it would treat that
+/// bareword as the closer too, and then the branch's real `;;`/pattern/
+/// `esac` tokens run with no `Case` frame protecting them, corrupting the
+/// scan the same way the original flat counter did. `awaiting_pattern`
+/// tracks the one thing that actually distinguishes them — position, not
+/// spelling: `esac` closes only where a new pattern could otherwise start
+/// (right after `case … in` or a `;;`); anywhere else in the body it's
+/// just a word.
 ///
 /// Shared by [`cmd_subst_body_tokens`] (the live chumsky capture that
 /// actually bounds the body during a real parse) and
@@ -2985,17 +2998,29 @@ impl CmdSubstFrames {
     /// continues.
     fn step(&mut self, tok: &Token) -> bool {
         match tok {
-            Token::RParen => match self.0.last() {
+            Token::RParen => match self.0.last_mut() {
                 None => return true,
-                Some(CmdSubstFrame::Case) => {}
+                Some(CmdSubstFrame::Case { awaiting_pattern }) => {
+                    *awaiting_pattern = false;
+                }
                 Some(CmdSubstFrame::Paren | CmdSubstFrame::Subst) => {
                     self.0.pop();
                 }
             },
             Token::LParen => self.0.push(CmdSubstFrame::Paren),
             Token::CmdSubstStart => self.0.push(CmdSubstFrame::Subst),
-            Token::Case => self.0.push(CmdSubstFrame::Case),
-            Token::Esac if self.0.last() == Some(&CmdSubstFrame::Case) => {
+            Token::Case => self.0.push(CmdSubstFrame::Case { awaiting_pattern: true }),
+            Token::DoubleSemi => {
+                if let Some(CmdSubstFrame::Case { awaiting_pattern }) = self.0.last_mut() {
+                    *awaiting_pattern = true;
+                }
+            }
+            Token::Esac
+                if matches!(
+                    self.0.last(),
+                    Some(CmdSubstFrame::Case { awaiting_pattern: true })
+                ) =>
+            {
                 self.0.pop();
             }
             _ => {}
@@ -4451,8 +4476,9 @@ mod tests {
     #[test]
     fn parse_cmd_subst_unquoted_esac_as_bareword() {
         // `Esac` is also the literal bareword "esac" in argument position
-        // (`keyword_as_bareword`, same as `done`/`fi`). The tracker must not
-        // pop a `Case` frame that was never opened.
+        // (`keyword_as_bareword`, same as `done`/`fi`). No case is open at
+        // all here, so the tracker must not touch a `Case` frame it never
+        // pushed.
         let result = parse("X=$(echo esac)").unwrap();
         let stmts = match &result.statements[0] {
             Stmt::Assignment(a) => match &a.value {
@@ -4471,6 +4497,34 @@ mod tests {
             "expected \"esac\" as a literal argument, got {:?}",
             cmd.args[0]
         );
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_esac_as_bareword_inside_still_open_case() {
+        // The sharper form of the previous test: `esac` as a bareword
+        // *inside a case that is genuinely still open* (its own closer
+        // hasn't been reached yet) — `y=esac` is the first branch's whole
+        // body. Popping the `Case` frame whenever it's merely innermost
+        // (rather than only while `awaiting_pattern`) treats this bareword
+        // as the closer too, and the branch's real `;;`/pattern/`esac`
+        // tokens then run with no `Case` frame protecting them — the same
+        // failure mode a flat counter has, just one level more specific.
+        let result = parse("X=$(case a in a) y=esac;; b) echo two;; esac)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::Case(c)] => {
+                assert_eq!(c.branches.len(), 2);
+                assert_eq!(c.branches[0].patterns, vec!["a".to_string()]);
+                assert_eq!(c.branches[1].patterns, vec!["b".to_string()]);
+            }
+            other => panic!("expected a single Case statement with two branches, got {:?}", other),
+        }
     }
 
     #[test]
