@@ -1024,7 +1024,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     let end_span: Span = (source.len()..source.len()).into();
 
     // Parse with the per-thread parser, built once (see `CACHED_PARSER`).
-    let input = Stream::from_iter(tokens.into_iter()).map(end_span, keep_pair as PairFn);
+    let input = Stream::from_iter(tokens).map(end_span, keep_pair as PairFn);
     let result = CACHED_PARSER.with(|parser| parser.parse(input));
 
     let program = result.into_result().map_err(|errs| {
