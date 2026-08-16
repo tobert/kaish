@@ -104,6 +104,26 @@ fn parse_w3c_baggage(raw: &str) -> std::collections::BTreeMap<String, String> {
     map
 }
 
+/// Parse `source` and format its diagnostics, or `None` when it parses
+/// cleanly.
+///
+/// Parses `source` up front, ahead of and independent of execution, so a
+/// parse or lexer failure prints `ParseError::format`'s `line:col [parse]:
+/// <message>` and source snippet on its own — the kernel never ran anything,
+/// so the frontend has nothing to add. Every caller (`-c`, a script file,
+/// the interactive REPL) checks this before handing `source` to the kernel,
+/// so the diagnostic leads instead of being buried under an execution-error
+/// wrapper the kernel would otherwise add for every kind of failure alike.
+pub fn format_parse_error(source: &str) -> Option<String> {
+    kaish_kernel::parser::parse(source).err().map(|errors| {
+        errors
+            .iter()
+            .map(|e| e.format(source))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 // ── Process result ──────────────────────────────────────────────────
 
 /// Result from processing a line of input.
@@ -499,6 +519,13 @@ impl Repl {
         // Intercept exit/quit before kernel dispatch
         if matches!(trimmed, "exit" | "quit") {
             return ProcessResult::Exit;
+        }
+
+        // A parse/lexer failure never reaches the kernel: print its
+        // diagnostic directly rather than letting `client.execute` wrap it
+        // in a `ClientError` that reads the same as a runtime failure.
+        if let Some(diagnostic) = format_parse_error(trimmed) {
+            return ProcessResult::Output(diagnostic);
         }
 
         // Execute via the client with SIGINT handling.
