@@ -539,6 +539,24 @@ fn spaced_session_state_inside_arithmetic_still_refuses() {
     }
 }
 
+/// The control for the test above, and the one that makes it mean something:
+/// a *spaced* ordinary variable must still expand. `$(( $ COUNT + 1 ))` reads
+/// COUNT and prints 42 when executed (verified against the binary), so a
+/// scanner that treated the space itself as unnameable would refuse a body
+/// that expands correctly — and the refusal test alone cannot tell the two
+/// apart, because refusing everything passes it.
+#[test]
+fn a_spaced_ordinary_variable_inside_arithmetic_still_expands() {
+    assert_eq!(
+        expand(
+            "python3 <<PY\nn = $(( $ COUNT + 1 ))\nPY",
+            0,
+            &[("COUNT".to_string(), Value::Int(41))]
+        ),
+        Expansion::Complete("n = 42\n".to_string())
+    );
+}
+
 /// `${?:-fallback}` reads the exit code through its *path* and never reaches
 /// the default, because an exit code is not empty. Checking only the default
 /// let it through as a confident `Complete`.
