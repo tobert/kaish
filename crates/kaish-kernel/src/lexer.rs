@@ -2230,6 +2230,11 @@ enum Frame {
     /// Plain `( ... )` grouping (function parameter lists): inert, tracked
     /// only so `)` pops the right frame.
     Paren,
+    /// `case ... in ... esac`: closed only by `Esac` while innermost. A `)`
+    /// seen here is a branch pattern terminator (`case $x in a) …`, no
+    /// matching `(`), not a close of some enclosing `Subst`/`Paren` — see
+    /// the `RParen`/`Esac` arms below.
+    Case,
 }
 
 /// Statement-head DFA: decides whether an `=` is an ASSIGNMENT (which puts
@@ -2483,9 +2488,28 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
             Token::LParen => {
                 frames.push(Frame::Paren);
             }
+            Token::Case => {
+                frames.push(Frame::Case);
+                // `Case` is also a statement boundary (see
+                // `is_statement_boundary`), but pushing a frame needs its
+                // own arm, so replicate that arm's DFA reset here.
+                *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                    StmtHead::Start;
+            }
+            Token::Esac => {
+                // Pop the `Case` frame only when it is innermost — an
+                // `esac` used as an ordinary bareword (`echo esac`, matched
+                // by the parser's `keyword_as_bareword`) with no case open
+                // must not touch a frame it doesn't own.
+                if frames.last() == Some(&Frame::Case) {
+                    frames.pop();
+                }
+                *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                    StmtHead::Start;
+            }
             Token::RParen => {
                 // Pop through any dangling literal/test frames to the
-                // nearest Subst/Paren — an unterminated literal inside
+                // nearest Subst/Paren/Case — an unterminated literal inside
                 // `$( )` must not leak into the enclosing scope.
                 while let Some(f) = frames.last() {
                     match f {
@@ -2515,6 +2539,12 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
                         }
                         Frame::Paren => {
                             frames.pop();
+                            break;
+                        }
+                        Frame::Case => {
+                            // Branch pattern terminator (`case $x in a) …`)
+                            // — no matching open on this stack. Leave the
+                            // frame alone; the `)` is ordinary body text.
                             break;
                         }
                         _ => {
@@ -3267,6 +3297,7 @@ mod tests {
             .map(|s| s.token)
             .collect()
     }
+
 
     // ═══════════════════════════════════════════════════════════════════
     // Keyword tests
@@ -4874,6 +4905,43 @@ mod tests {
                 Token::Comma,
                 Token::Ident("ts".into()),
                 Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn case_pattern_paren_inside_list_literal_cmd_subst_does_not_leak_list_frame() {
+        // `compute_value_context`'s Frame stack has no `Case` variant, so a
+        // case-branch pattern's unpaired `)` (`case b in b) …`, no leading
+        // `(`) used to fall through the `RParen` handler's dangling-frame
+        // sweep and pop the nearest `Subst`/`Paren` — here the `$(...)`
+        // that the case is actually inside. When that `$(...)` sits inside
+        // an outer `[...]` list literal, popping it early exposes the
+        // outer `List` frame, and the (still relative) floor check reads
+        // it as still open: a glob argument inside the case body then gets
+        // misread as being at value/list-literal position and its
+        // `[...]` bracket pair does not glob-fuse. Compare against the
+        // same case body with no outer list literal, where it fuses.
+        assert_eq!(
+            lex("x=[a $(case b in b) echo [dog];; esac) c]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::Ident("a".into()),
+                Token::CmdSubstStart,
+                Token::Case,
+                Token::Ident("b".into()),
+                Token::In,
+                Token::Ident("b".into()),
+                Token::RParen,
+                Token::Ident("echo".into()),
+                Token::GlobWord("[dog]".into()),
+                Token::DoubleSemi,
+                Token::Esac,
+                Token::RParen,
+                Token::Ident("c".into()),
+                Token::RBracket,
             ]
         );
     }
