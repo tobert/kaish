@@ -9,6 +9,7 @@
 //! rejected them — so nothing downstream needed to change, but that claim is
 //! only as good as a test that actually executes the construct.
 
+#![cfg(feature = "localfs")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::{Kernel, KernelConfig};
