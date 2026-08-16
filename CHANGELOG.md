@@ -37,6 +37,8 @@ breaking entries are marked **BREAKING**.
   inside brackets and braces the colon stays structural.
 
 ### Changed
+- **The parser graph is built once per thread instead of once per `parse()`** — an
+  embedder's `execute()` round trip drops 63% of its allocations and 77% of its bytes.
 - **BREAKING (embedders):** a heredoc's `PlannedRedirect.target` is now its
   delimiter word (`'PY'`), not a rendering of its body — the rendering spelled
   every delimiter `EOF`, and the body is `PlannedCommand.heredocs`'s job.
