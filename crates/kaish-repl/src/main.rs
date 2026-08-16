@@ -4,6 +4,7 @@
 //!   kaish                      # Interactive REPL
 //!   kaish -c `<command>`       # Execute command and exit
 //!   kaish --plan `<command>`   # Print what it would run, as JSON
+//!   kaish --plan-file `<path>` # Same, reading the source from a file
 //!   kaish script.kai           # Run a script
 
 use std::env;
@@ -193,7 +194,23 @@ fn run() -> Result<ExitCode> {
             // contract is that stdout is always a JSON object, and "except
             // when you called it wrong" is exactly the case a caller would
             // not have written a branch for.
-            Ok(print_plan(rest.get(1).copied()))
+            Ok(print_plan(rest.get(1).copied().map(str::to_string)))
+        }
+
+        Some("--plan-file") => {
+            // Reading the source from a file keeps it out of argv, which
+            // matters when the thing being analyzed is a whole script rather
+            // than a line: argv is capped, and a caller measuring real traffic
+            // should not have to shell-quote it to ask a question about it.
+            Ok(match rest.get(1).copied() {
+                Some(path) => match read_plan_source(path) {
+                    Ok(source) => print_plan(Some(source)),
+                    Err(e) => print_plan_error(&format!("cannot read {path}: {e}")),
+                },
+                None => print_plan_error(
+                    "--plan-file requires a path: kaish --plan-file <path>, or - for stdin",
+                ),
+            })
         }
 
         Some(path) if !path.starts_with('-') => {
@@ -224,15 +241,13 @@ fn run() -> Result<ExitCode> {
 /// prose on stderr and an empty stdout for that one case would need a branch
 /// it had no reason to write. An error carries `start`/`end` only when it
 /// refers to a position in the source.
-fn print_plan(source: Option<&str>) -> ExitCode {
+fn print_plan(source: Option<String>) -> ExitCode {
     let Some(source) = source else {
-        let doc = serde_json::json!({
-            "errors": [{ "message": "--plan requires a command argument: kaish --plan '<command>'" }]
-        });
-        println!("{doc}");
-        return ExitCode::from(2);
+        return print_plan_error(
+            "--plan requires a command argument: kaish --plan '<command>'",
+        );
     };
-    match kaish_kernel::plan_program(source) {
+    match kaish_kernel::plan_program(&source) {
         Ok(statements) => {
             let doc = serde_json::json!({ "statements": statements });
             println!("{doc}");
@@ -257,6 +272,26 @@ fn print_plan(source: Option<&str>) -> ExitCode {
     }
 }
 
+/// Report a plan failure that has no position in a source — a missing
+/// argument, or a file that could not be read. Same shape and same exit code
+/// as a parse failure, because a caller branches on the shape, not on which
+/// of our internal paths produced it.
+fn print_plan_error(message: &str) -> ExitCode {
+    let doc = serde_json::json!({ "errors": [{ "message": message }] });
+    println!("{doc}");
+    ExitCode::from(2)
+}
+
+/// Read plan source from `path`, or from stdin when `path` is `-`.
+fn read_plan_source(path: &str) -> std::io::Result<String> {
+    if path == "-" {
+        let mut source = String::new();
+        std::io::stdin().read_to_string(&mut source)?;
+        return Ok(source);
+    }
+    std::fs::read_to_string(path)
+}
+
 fn print_help() {
     println!(r#"会sh — kaish v{}
 
@@ -264,6 +299,7 @@ Usage:
   kaish                        Interactive REPL
   kaish -c <command>           Execute command and exit
   kaish --plan <command>       Print what it would run, as JSON, and exit
+  kaish --plan-file <path>     Same, reading the source from a file or -
   kaish <script.kai>           Run a script file
 
 Options:
@@ -276,6 +312,8 @@ Options:
                                Executes nothing and touches no filesystem.
                                Prints {{"statements": [...]}} and exits 0, or
                                {{"errors": [...]}} and exits 2.
+  --plan-file <path>           Plan the source in <path>, or stdin for -. Keeps
+                               a whole script out of argv, which is capped.
   -h, --help                   Show this help
   -V, --version                Show version
 
@@ -286,6 +324,7 @@ Examples:
   kaish --overlay -c 'echo test > file.txt; kaish-vfs diff'
   kaish deploy.kai             # Run a deployment script
   kaish --plan 'rm -r build'   # See what it would run, without running it
+  kaish --plan-file deploy.kai # Plan a script without running it
 "#, env!("CARGO_PKG_VERSION"));
 }
 

@@ -921,10 +921,27 @@ for statement in plan["statements"]:
             # 'cat <<EOF > notes.md\n<DATA>EOF'
 ```
 
-`--plan` takes the command as one argument; there is no stdin form. `index` is
-the statement's position in the **parsed** program, counted before empty
-statements are dropped — a comment or blank line leaves a gap, so filtering and
-then indexing by position reads the wrong statement.
+`kaish --plan-file <path>` reads the same source from a file, or from stdin for
+`-`. Use it when the source is a whole script: argv is capped, and a caller
+measuring real traffic should not have to shell-quote a program to ask a
+question about it.
+
+`index` is the statement's position in the **parsed** program, counted before
+empty statements are dropped — a comment or blank line leaves a gap, so
+filtering and then indexing by position reads the wrong statement.
+
+**Check the binary's version before you trust the contract.** "Always a JSON
+object" is a promise about a kaish that has `--plan`; an older one prints
+`Unknown option: --plan` to stderr and exits **1** with an empty stdout, which
+is indistinguishable from a malformed command if you branch on the exit code
+alone. Require **kaish 0.15 or newer** with `kaish -V`, and treat unparseable
+stdout as an unsupported binary rather than as a broken source.
+
+**Keep the analysis an optimization, never a requirement.** A consumer that
+cannot reach a plan — no kaish on `PATH`, a stale one, a source that does not
+lex — should fall back to whatever it did before rather than fail closed. The
+fallback direction matters: for a classifier excluding heredoc bodies, a
+missing plan costs precision and never recall.
 
 #### Why this, and not a gate
 

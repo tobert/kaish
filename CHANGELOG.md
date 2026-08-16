@@ -17,6 +17,8 @@ breaking entries are marked **BREAKING**.
   the source text, so it needs no capability feature.
 - **`--plan` exits 0 with `{"statements": […]}` or 2 with `{"errors": […]}`** — always a
   JSON object, so a caller parses one shape.
+- **`kaish --plan-file <path>` plans the source in a file, or stdin for `-`** — argv is
+  capped, and a whole script does not belong in it.
 - **`PlannedCommand.heredocs` publishes each heredoc a command reads** — delimiter
   word, `literal`, `strip_tabs`, the verbatim body, and the body's own free
   variables, so `python3 <<'PY'`'s program arrives with the shell framing off.
