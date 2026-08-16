@@ -166,3 +166,52 @@ async fn non_ascii_data_still_passes_through() {
         assert_eq!(out, expected, "for: {source}");
     }
 }
+
+/// Every runtime binder reaches the same variable as a written one. These are
+/// the doors that bind a name without going through the parser's normalization
+/// — `for`, `read`, `unset`, and the embedder's own surfaces — and each was
+/// silently missing an NFC-bound variable before the scope itself normalized.
+#[tokio::test]
+async fn runtime_binders_normalize_too() {
+    let nfc = "caf\u{e9}";
+    let nfd = "cafe\u{301}";
+
+    // `for` binds its loop variable directly.
+    let (code, out) = run(&format!("for {nfd} in bound; do echo \"${{{nfc}}}\"; done")).await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "bound", "the for-loop variable must normalize");
+
+    // `read` binds from stdin.
+    let (code, out) = run(&format!("printf bound | read {nfd}; echo \"${{{nfc}}}\"")).await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "bound", "read must normalize its target");
+
+    // `unset` removes by name — a spelling mismatch made it a silent no-op.
+    let (code, out) = run(&format!("{nfc}=bound; unset {nfd}; echo \"[${{{nfc}}}]\"")).await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "[]", "unset must reach the variable it names");
+}
+
+/// `export` used the ASCII name rule while assignment used the wider one, so
+/// `café=1` worked and `export café=1` was "not a valid identifier".
+#[tokio::test]
+async fn export_agrees_with_assignment_about_names() {
+    for (source, expected) in [
+        ("export café=ok; echo $café", "ok"),
+        ("export 名前=ok; echo ${名前}", "ok"),
+        ("export _v=ok; echo $_v", "ok"),
+    ] {
+        let (code, out) = run(source).await;
+        assert_eq!(code, 0, "{source:?} exited {code}");
+        assert_eq!(out, expected, "for: {source:?}");
+    }
+    // A digit still cannot start a name, in any script. This one is refused
+    // before `export` ever sees it — `1x=v` is a token-pasting error — so the
+    // assertion accepts either shape of failure.
+    let k = kernel();
+    let refused = match k.execute("export 1x=v").await {
+        Err(_) => true,
+        Ok(r) => r.code != 0,
+    };
+    assert!(refused, "a digit-leading name is still refused");
+}
