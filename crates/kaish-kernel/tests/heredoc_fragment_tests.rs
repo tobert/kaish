@@ -348,3 +348,138 @@ fn a_body_needing_session_state_is_a_loud_error() {
         "got: {err}"
     );
 }
+
+// ───────────────── The two walks must agree, or an address lies ────────────
+
+/// The plan numbers heredocs with one walk (`ast::plan`) and `expand_fragment`
+/// resolves that number with another (`fragment.rs`). If they ever visit
+/// heredocs in a different order, an address resolves to the WRONG body and
+/// nothing says so — the worst failure this feature can have.
+///
+/// Every heredoc below is literal with a body unique across the statement, so
+/// expanding an address must return exactly the body the plan published at
+/// that index. Any disagreement between the walks shows up as a mismatch.
+#[test]
+fn every_published_address_resolves_to_the_body_it_published() {
+    let shapes = [
+        ("python3 <<'A'\none\nA", 1),
+        ("python3 <<'A' | grep x\none\nA", 1),
+        ("python3 <<'A' | python3 <<'B'\none\nA\ntwo\nB", 2),
+        ("if [[ -f x ]]; then python3 <<'A'\none\nA\nelse python3 <<'B'\ntwo\nB\nfi", 2),
+        ("for f in a b; do python3 <<'A'\none\nA\ndone", 1),
+        ("while [[ -f x ]]; do python3 <<'A'\none\nA\ndone", 1),
+        ("case $x in a) python3 <<'A'\none\nA\n;; esac", 1),
+        ("python3 <<'A' && python3 <<'B'\none\nA\ntwo\nB", 2),
+        ("python3 <<'A' || python3 <<'B'\none\nA\ntwo\nB", 2),
+        ("X=1 python3 <<'A'\none\nA", 1),
+        ("echo $(python3 <<'A'\none\nA\n)", 1),
+        ("out=$(python3 <<'A'\none\nA\n)", 1),
+        ("for f in $(python3 <<'A'\none\nA\n); do echo $f; done", 1),
+        ("if python3 <<'A'\none\nA\nthen echo y\nfi", 1),
+        // Reached only through a REDIRECT TARGET's substitution. The plan
+        // walk descends into redirect targets, so a heredoc here is numbered;
+        // a resolver that did not descend the same way would hand back the
+        // *other* body with nothing saying so.
+        ("cmd > $(cat <<'A'\none\nA\n) && cat <<'B'\ntwo\nB", 2),
+        // Reached only through a substitution inside a double-quoted string.
+        ("echo \"x $(cat <<'A'\none\nA\n) y\" && cat <<'B'\ntwo\nB", 2),
+    ];
+
+    for (source, expected) in shapes {
+        let Ok(plans) = plan_program(source) else {
+            panic!("shape does not parse: {source}");
+        };
+        // Publishing FEWER heredocs than the shape contains is invisible to
+        // the resolve check below — one walk cannot disagree with itself, it
+        // can only miss a place. The count is what catches that.
+        let published: usize = plans
+            .iter()
+            .flat_map(|p| p.plan.commands.iter())
+            .map(|c| c.heredocs.len())
+            .sum();
+        assert_eq!(published, expected, "heredocs missed in: {source}");
+        for planned in &plans {
+            for command in &planned.plan.commands {
+                for heredoc in &command.heredocs {
+                    assert!(
+                        heredoc.literal,
+                        "fixture must use quoted delimiters: {source}"
+                    );
+                    let addr = FragmentAddr::new(planned.index, heredoc.index);
+                    let expanded = expand_fragment(source, addr, &[])
+                        .unwrap_or_else(|e| panic!("address {addr:?} unresolvable in {source}: {e}"));
+                    assert_eq!(
+                        expanded,
+                        Expansion::Complete(heredoc.body.display()),
+                        "walks disagree at index {} of: {source}",
+                        heredoc.index,
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ─────────────── Session state cannot hide behind a spelling ──────────────
+
+/// `$((…))` resolves `$?`, `$$` and positionals inside the arithmetic
+/// evaluator, so they never become a `StringPart` of their own. Expanding
+/// against a fresh scope would read `$?` as 0 and call it the text that runs.
+#[test]
+fn session_state_inside_arithmetic_is_a_loud_error() {
+    for body in [
+        "n = $(($? + 1))",
+        "n = $(($$))",
+        "n = $((${?}))",
+        "n = $((${$}))",
+        "n = $(($1 + 1))",
+    ] {
+        let source = format!("python3 <<PY\n{body}\nPY");
+        let err = expand_fragment(&source, FragmentAddr::new(0, 0), &[])
+            .expect_err("session state must not expand");
+        assert!(
+            matches!(err, FragmentError::NeedsSessionState { .. }),
+            "{body} expanded instead of refusing: {err}"
+        );
+    }
+}
+
+/// An ordinary variable inside arithmetic is not session state — the caller
+/// can supply it, so it must not be refused. Without this the check above
+/// would be free to block everything and still look correct.
+#[test]
+fn an_ordinary_variable_inside_arithmetic_still_expands() {
+    assert_eq!(
+        expand(
+            "python3 <<PY\nn = $((COUNT + 1))\nPY",
+            0,
+            &[("COUNT".to_string(), Value::Int(41))]
+        ),
+        Expansion::Complete("n = 42\n".to_string())
+    );
+}
+
+/// The braced `${?}` is a variable path, not the `$?` special form, and the
+/// scope resolves its root specially — so the two spellings must refuse
+/// alike.
+#[test]
+fn the_braced_exit_code_is_a_loud_error() {
+    let source = "python3 <<PY\nlast = ${?}\nPY";
+    let err = expand_fragment(source, FragmentAddr::new(0, 0), &[])
+        .expect_err("session state must not expand");
+    assert!(
+        matches!(err, FragmentError::NeedsSessionState { .. }),
+        "got: {err}"
+    );
+}
+
+/// A heredoc's planned redirect names its delimiter, not a body rendered
+/// with a delimiter it never had. The target expression has lost the word by
+/// planning time, so rendering from it spelled every heredoc `EOF`.
+#[test]
+fn a_planned_redirect_names_the_real_delimiter() {
+    let plans = plan_program("python3 <<'PY'\nimport os\nPY").expect("parses");
+    let redirect = &plans[0].plan.commands[0].redirects[0];
+    assert_eq!(redirect.kind, "<<");
+    assert_eq!(redirect.target.display(), "'PY'");
+}

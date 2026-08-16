@@ -26,8 +26,8 @@
 use kaish_types::plan::{Expansion, FragmentAddr, Hole};
 use kaish_types::Value;
 
-use crate::ast::plan::{plan_statement, render_expr};
-use crate::ast::{Arg, Command, Expr, ForLoop, IfStmt, Redirect, RedirectKind, Stmt, StringPart};
+use crate::ast::plan::{heredoc_targets, plan_statement, render_expr};
+use crate::ast::{Expr, Stmt, StringPart, VarSegment};
 use crate::interpreter::Evaluator;
 use crate::interpreter::Scope;
 use crate::parser::{self, ParseError};
@@ -110,16 +110,14 @@ pub fn expand_fragment(
             statements: statements.len(),
         })?;
 
-    let mut found = Vec::new();
-    collect_heredoc_targets(stmt, &mut found);
-    let count = found.len();
-    let target = found
-        .into_iter()
-        .nth(addr.heredoc)
-        .ok_or(FragmentError::NoSuchHeredoc {
-            asked: addr.heredoc,
-            heredocs: count,
-        })?;
+    // The plan's own walk, so the index that resolves here is the index the
+    // plan published. A second walk that had to agree is how an address comes
+    // to name a different body than the one it was read from.
+    let targets = heredoc_targets(stmt);
+    let target = *targets.get(addr.heredoc).ok_or(FragmentError::NoSuchHeredoc {
+        asked: addr.heredoc,
+        heredocs: targets.len(),
+    })?;
 
     expand_target(target, scope)
 }
@@ -154,104 +152,6 @@ fn expand_target(target: &Expr, scope: &[(String, Value)]) -> Result<Expansion, 
         other => Err(FragmentError::Eval {
             message: format!("body evaluated to {other:?} instead of text"),
         }),
-    }
-}
-
-// ───────────────────────── Walking for heredocs ─────────────────────────
-
-/// Every heredoc target in one statement, in the order `ast::plan`'s
-/// collection walk reaches them — the order that gives each one the flat
-/// index a plan publishes. The two walks must agree; the tests pin it with a
-/// heredoc nested inside a loop body and one inside an `if`.
-fn collect_heredoc_targets<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
-    match stmt {
-        Stmt::Command(cmd) => command_heredocs(cmd, out),
-        Stmt::Pipeline(p) => {
-            for cmd in &p.commands {
-                command_heredocs(cmd, out);
-            }
-        }
-        Stmt::Assignment(a) => expr_heredocs(&a.value, out),
-        Stmt::If(IfStmt {
-            condition,
-            then_branch,
-            else_branch,
-        }) => {
-            expr_heredocs(condition, out);
-            block_heredocs(then_branch, out);
-            if let Some(block) = else_branch {
-                block_heredocs(block, out);
-            }
-        }
-        Stmt::For(ForLoop { items, body, .. }) => {
-            for item in items {
-                expr_heredocs(item, out);
-            }
-            block_heredocs(body, out);
-        }
-        Stmt::While(w) => {
-            expr_heredocs(&w.condition, out);
-            block_heredocs(&w.body, out);
-        }
-        Stmt::Case(c) => {
-            expr_heredocs(&c.expr, out);
-            for branch in &c.branches {
-                block_heredocs(&branch.body, out);
-            }
-        }
-        Stmt::Return(e) | Stmt::Exit(e) => {
-            if let Some(e) = e {
-                expr_heredocs(e, out);
-            }
-        }
-        Stmt::ToolDef(def) => block_heredocs(&def.body, out),
-        Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
-            collect_heredoc_targets(left, out);
-            collect_heredoc_targets(right, out);
-        }
-        Stmt::EnvScoped { assignments, body } => {
-            for a in assignments {
-                expr_heredocs(&a.value, out);
-            }
-            collect_heredoc_targets(body, out);
-        }
-        Stmt::Test(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Empty => {}
-    }
-}
-
-fn block_heredocs<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a Expr>) {
-    for stmt in stmts {
-        collect_heredoc_targets(stmt, out);
-    }
-}
-
-fn command_heredocs<'a>(cmd: &'a Command, out: &mut Vec<&'a Expr>) {
-    for Redirect { kind, target } in &cmd.redirects {
-        if matches!(kind, RedirectKind::HereDoc(_)) {
-            out.push(target);
-        }
-    }
-    // A substitution in this command's own argv can carry a heredoc too, and
-    // `ast::plan` reaches those after the command itself.
-    for arg in &cmd.args {
-        match arg {
-            Arg::Positional(e)
-            | Arg::Named { value: e, .. }
-            | Arg::WordAssign { value: e, .. } => expr_heredocs(e, out),
-            _ => {}
-        }
-    }
-}
-
-fn expr_heredocs<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    match expr {
-        Expr::Command(cmd) => command_heredocs(cmd, out),
-        Expr::CommandSubst(stmts) => block_heredocs(stmts, out),
-        Expr::BinaryOp { left, right, .. } => {
-            expr_heredocs(left, out);
-            expr_heredocs(right, out);
-        }
-        _ => {}
     }
 }
 
@@ -321,6 +221,58 @@ fn part_state(part: &StringPart) -> Option<String> {
         StringPart::AllArgs => Some("$@".to_string()),
         StringPart::ArgCount => Some("$#".to_string()),
         StringPart::VarWithDefault { default, .. } => default.iter().find_map(part_state),
+        // `$((…))` reads session state through spellings the interpolation
+        // parser never turns into a part of its own — the arithmetic
+        // evaluator resolves them itself.
+        StringPart::Arithmetic(expr) => arithmetic_state(expr),
+        // A braced `${?}` is a variable path, not `LastExitCode`, and the
+        // scope resolves its root specially. `?`, `$`, and a digit run are
+        // not names a caller can supply, so naming them costs no false
+        // positive.
+        StringPart::Var(path) | StringPart::VarLength(path) => {
+            let root = path.segments.first()?;
+            match root {
+                VarSegment::Field(name) if is_session_root(name) => Some(format!("${{{name}}}")),
+                _ => None,
+            }
+        }
         _ => None,
     }
+}
+
+/// Whether a variable root names session state rather than a session
+/// variable. `?` is the exit code the scope resolves specially, `$` the pid,
+/// and a digit run a positional — none can be `set`, so none can arrive in a
+/// supplied scope.
+fn is_session_root(name: &str) -> bool {
+    name == "?" || name == "$" || (!name.is_empty() && name.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The session state an arithmetic expression reads, if any.
+///
+/// The evaluator's special cases are `$?`, `$$`, `${?}`, `${$}`, and a
+/// positional `$N`/`${N}` (see `arithmetic.rs`, the `Some('$')` arm). Every
+/// other `$name` is an ordinary variable a caller can supply, so it does not
+/// block. Keep this in step with that arm — a spelling missing here expands
+/// against a fresh session and invents a value.
+fn arithmetic_state(expr: &str) -> Option<String> {
+    let chars: Vec<char> = expr.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if *c != '$' {
+            continue;
+        }
+        // Look past an opening brace so `${?}` reads the same as `$?`.
+        let mut j = i + 1;
+        let braced = chars.get(j) == Some(&'{');
+        if braced {
+            j += 1;
+        }
+        match chars.get(j) {
+            Some('?') => return Some("$?".to_string()),
+            Some('$') => return Some("$$".to_string()),
+            Some(d) if d.is_ascii_digit() => return Some(format!("${d}")),
+            _ => {}
+        }
+    }
+    None
 }

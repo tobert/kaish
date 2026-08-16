@@ -201,7 +201,7 @@ fn truncate_rendering(rendered: String) -> String {
 /// What one collection walk produces: the statement's commands, the
 /// credentials their argv presented, and its variable analysis.
 #[derive(Default)]
-struct Collected {
+struct Collected<'a> {
     commands: Vec<PlannedCommand>,
     keys: Vec<String>,
     /// Every variable name the statement reads, anywhere — `${x}`, a
@@ -212,16 +212,25 @@ struct Collected {
     /// Every name the statement writes or binds — an assignment target, a
     /// `for` variable, an env-prefix name, a tool-def parameter.
     binds: BTreeSet<String>,
-    /// How many heredocs the walk has published so far. The counter is what
-    /// makes [`PlannedHeredoc::index`] flat across the whole statement, so a
-    /// heredoc inside a loop body is addressable without walking structure.
-    heredoc_count: usize,
+    /// Every heredoc target the walk has reached, in the order it reached
+    /// them — the order that gives each one the flat
+    /// [`PlannedHeredoc::index`] a plan publishes, so a heredoc inside a
+    /// loop body is addressable without walking structure.
+    ///
+    /// Kept here rather than re-derived by a second walk. An address that
+    /// resolves to a *different* body than the one it published is the worst
+    /// failure this surface can have, and two traversals that have to agree
+    /// is how you get one — this walk descends into redirect targets and
+    /// interpolated strings, and a resolver written to match would have to
+    /// remember to. `heredoc_targets[i]` is the target of the heredoc
+    /// published with `index == i`, by construction.
+    heredoc_targets: Vec<&'a Expr>,
 }
 
-impl Collected {
+impl<'a> Collected<'a> {
     /// Publish every heredoc one command declares, numbering them in the
     /// order this walk reaches them.
-    fn take_heredocs(&mut self, cmd: &Command) -> Vec<PlannedHeredoc> {
+    fn take_heredocs(&mut self, cmd: &'a Command) -> Vec<PlannedHeredoc> {
         cmd.redirects
             .iter()
             .filter_map(|r| match &r.kind {
@@ -229,8 +238,8 @@ impl Collected {
                 _ => None,
             })
             .map(|(meta, target)| {
-                let index = self.heredoc_count;
-                self.heredoc_count += 1;
+                let index = self.heredoc_targets.len();
+                self.heredoc_targets.push(target);
                 // The body's own reads, not the statement's: an embedder
                 // asking what plugs into *this* program wants the answer
                 // scoped to it. A literal body reads nothing whatever it
@@ -308,10 +317,20 @@ impl Collected {
 /// A `for` body's commands, an `if` condition's command, and a `$(…)`
 /// substitution's commands are all in here: each is a command this statement
 /// would run, so each is a `cmd` resource a standing grant has to cover.
-fn collect(stmt: &Stmt) -> Collected {
+fn collect<'a>(stmt: &'a Stmt) -> Collected<'a> {
     let mut out = Collected::default();
     collect_stmt(stmt, false, &mut out);
     out
+}
+
+/// Every heredoc target the statement contains, indexed by the flat
+/// [`PlannedHeredoc::index`] the plan publishes.
+///
+/// This is the **same walk** that numbers them, not a second one that agrees
+/// with it — `heredoc_targets(stmt)[i]` is the target of the heredoc the plan
+/// published with `index == i`, by construction rather than by test.
+pub fn heredoc_targets(stmt: &Stmt) -> Vec<&Expr> {
+    collect(stmt).heredoc_targets
 }
 
 /// Every command the statement contains, in source order.
@@ -319,7 +338,7 @@ pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
     collect(stmt).commands
 }
 
-fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
+fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
     match stmt {
         Stmt::Assignment(a) => {
             out.bind_path(&a.path);
@@ -385,18 +404,18 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
     }
 }
 
-fn collect_block(stmts: &[Stmt], background: bool, out: &mut Collected) {
+fn collect_block<'a>(stmts: &'a [Stmt], background: bool, out: &mut Collected<'a>) {
     for stmt in stmts {
         collect_stmt(stmt, background, out);
     }
 }
 
-fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
+fn collect_command<'a>(cmd: &'a Command, background: bool, out: &mut Collected<'a>) {
     let args: Vec<PlannedValue> = cmd.args.iter().map(|arg| plan_arg(arg).1).collect();
     let redirects = cmd
         .redirects
         .iter()
-        .map(|r| PlannedRedirect::new(r.kind.to_string(), plan_redirect_target(&r.target)))
+        .map(|r| PlannedRedirect::new(r.kind.to_string(), plan_redirect_target(r)))
         .collect();
     let heredocs = out.take_heredocs(cmd);
     out.commands.push(
@@ -427,7 +446,7 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     }
 }
 
-fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
+fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
     match expr {
         Expr::Command(cmd) => collect_command(cmd, background, out),
         Expr::CommandSubst(stmts) => collect_block(stmts, background, out),
@@ -475,13 +494,13 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
     }
 }
 
-fn collect_parts(parts: &[StringPart], background: bool, out: &mut Collected) {
+fn collect_parts<'a>(parts: &'a [StringPart], background: bool, out: &mut Collected<'a>) {
     for part in parts {
         collect_part(part, background, out);
     }
 }
 
-fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
+fn collect_part<'a>(part: &'a StringPart, background: bool, out: &mut Collected<'a>) {
     match part {
         StringPart::CommandSubst(stmts) => collect_block(stmts, background, out),
         StringPart::VarWithDefault { path, default } => {
@@ -500,7 +519,7 @@ fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
     }
 }
 
-fn collect_test(test: &TestExpr, background: bool, out: &mut Collected) {
+fn collect_test<'a>(test: &'a TestExpr, background: bool, out: &mut Collected<'a>) {
     match test {
         TestExpr::FileTest { path, .. } => collect_expr(path, background, out),
         TestExpr::StringTest { value, .. } => collect_expr(value, background, out),
@@ -674,8 +693,22 @@ fn plan_arg(arg: &Arg) -> (String, PlannedValue) {
 
 /// Plan one redirect's target: rendered unexpanded, always plain — a
 /// redirect target is never the kernel's confirm key.
-fn plan_redirect_target(target: &Expr) -> PlannedValue {
-    PlannedValue::Plain(render_expr(target))
+///
+/// A heredoc's target is its delimiter word, which is what stands after `<<`
+/// in the source. Rendering the *body* here would repeat what
+/// [`PlannedCommand::heredocs`] carries structurally, and rendering it from
+/// the target expression spells every delimiter `EOF` — the body has lost the
+/// word by then.
+///
+/// [`PlannedCommand::heredocs`]: kaish_types::plan::PlannedCommand::heredocs
+fn plan_redirect_target(redirect: &Redirect) -> PlannedValue {
+    match &redirect.kind {
+        RedirectKind::HereDoc(meta) => {
+            let quote = if meta.literal { "'" } else { "" };
+            PlannedValue::Plain(format!("{quote}{}{quote}", meta.delimiter))
+        }
+        _ => PlannedValue::Plain(render_expr(&redirect.target)),
+    }
 }
 
 fn render_redirect(redirect: &Redirect) -> String {
@@ -699,7 +732,7 @@ fn render_redirect(redirect: &Redirect) -> String {
         _ => format!(
             "{} {}",
             redirect.kind,
-            plan_redirect_target(&redirect.target).display()
+            plan_redirect_target(redirect).display()
         ),
     }
 }
