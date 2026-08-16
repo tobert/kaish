@@ -214,3 +214,66 @@ fn every_outcome_is_json_with_exit_0_or_2() {
         );
     }
 }
+
+// ───────────────── Reading the source from a file ──────────────────
+
+/// A whole script does not fit comfortably in argv, and a caller measuring
+/// real traffic should not have to shell-quote it to ask a question about it.
+/// `--plan-file` reads the same source from a path and answers identically.
+#[test]
+fn planning_a_file_matches_planning_the_same_source_inline() {
+    let source = "python3 <<'PY'\nimport os\nPY";
+    let dir = tempfile::Builder::new()
+        .prefix("plan-file-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("tempdir");
+    let path = dir.path().join("demo.kai");
+    std::fs::write(&path, source).expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_kaish"))
+        .arg("--plan-file")
+        .arg(&path)
+        .output()
+        .expect("run kaish --plan-file");
+    assert_eq!(out.status.code(), Some(0));
+    let from_file: Value = serde_json::from_slice(&out.stdout).expect("json");
+
+    let (code, inline) = plan(source);
+    assert_eq!(code, 0);
+    assert_eq!(from_file, inline, "a file and an argument must plan alike");
+}
+
+/// A path that cannot be read is reported through the same door as a broken
+/// source: JSON, exit 2. It names the path and the reason, because "could not
+/// read" alone leaves the caller guessing between absent and unreadable.
+#[test]
+fn an_unreadable_path_is_json_and_exits_2() {
+    let out = Command::new(env!("CARGO_BIN_EXE_kaish"))
+        .arg("--plan-file")
+        .arg("/nonexistent/nowhere.kai")
+        .output()
+        .expect("run kaish --plan-file");
+    assert_eq!(out.status.code(), Some(2));
+
+    let json: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let message = json["errors"][0]["message"].as_str().expect("message");
+    assert!(
+        message.contains("/nonexistent/nowhere.kai"),
+        "the error should name the path: {message}"
+    );
+}
+
+/// `--plan-file` with no path names the form it wants, including the `-`
+/// spelling, rather than reading stdin by accident.
+#[test]
+fn plan_file_without_a_path_is_json_and_exits_2() {
+    let out = Command::new(env!("CARGO_BIN_EXE_kaish"))
+        .arg("--plan-file")
+        .output()
+        .expect("run kaish --plan-file");
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let message = json["errors"][0]["message"].as_str().expect("message");
+    assert!(message.contains("--plan-file <path>"), "got: {message}");
+    assert!(message.contains("- for stdin"), "got: {message}");
+}
