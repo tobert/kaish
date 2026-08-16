@@ -946,7 +946,7 @@ fn lexer_push_bracket_target_after_and_chain() {
 }
 
 // =============================================================================
-// Non-ASCII words (GH #343)
+// Non-ASCII words
 //
 // Every bareword/path rule used an ASCII-only character class, so
 // `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were all lexer errors —
@@ -985,7 +985,7 @@ fn lexer_non_ascii_paths(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
-/// The exact commands from GH #343's report table, minus the ones that stay
+/// The reported failing commands, minus the ones that stay
 /// errors (covered separately below).
 #[rstest]
 #[case::echo_cafe("echo café", &["IDENT(echo)", "IDENT(café)"])]
@@ -1030,7 +1030,7 @@ fn lexer_non_ascii_names_stay_ascii_errors(#[case] input: &str) {
 
 /// Quoting remains the escape hatch out of ASCII-only flag/variable rules —
 /// unaffected by this change, pinned here so a future regression in the
-/// quoted-string path doesn't look like a GH #343 fix regression.
+/// quoted-string path still agrees with the unquoted one.
 #[rstest]
 #[case::quoted_cafe(r#""café""#, &["STRING(café)"])]
 fn lexer_non_ascii_quoting_still_escapes(#[case] input: &str, #[case] expected: &[&str]) {
@@ -1038,7 +1038,7 @@ fn lexer_non_ascii_quoting_still_escapes(#[case] input: &str, #[case] expected: 
 }
 
 // =============================================================================
-// GH #343 differential corpus — priority-interaction regression guard.
+// Differential corpus — priority-interaction regression guard.
 //
 // Widening 11 bareword/path character classes to admit non-ASCII risked
 // shifting which rule wins the longest-match race for existing ASCII input
