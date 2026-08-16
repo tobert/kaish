@@ -455,22 +455,15 @@ mod tests {
         );
     }
 
-    /// Three syntax rules an agent session verified live against kaish 0.13 —
-    /// compound-into-pipe, `[ … ]`, bare `yes`/`no` — must reach both
-    /// agent-facing recipes, since those are the surfaces an embedded agent
-    /// actually reads (a kaijutsu session burned a 63k-token tour hitting these
-    /// with no warning in either). A fourth rule, unquoted comma, was verified
-    /// the same way and got its own fragment (`comma-splits-word`) — the
-    /// grammar itself was fixed instead (comma is significant only inside a
-    /// `[...]`/`{...}` literal or pattern; see `docs/LANGUAGE.md`,
-    /// "Construction"), so the fragment was retired rather than kept as a
-    /// warning about behavior that no longer exists.
+    /// Three rules an embedded agent hits early must reach both agent-facing
+    /// recipes: a compound statement cannot feed a pipe, `[ … ]` is not a
+    /// command, and only lowercase `true`/`false` are booleans. These recipes
+    /// are the surfaces an embedded agent actually reads, so a rule missing
+    /// here is a rule it meets for the first time as a failure.
     ///
-    /// The bare `yes`/`no` rule went the same way: the lexer no longer rejects
-    /// boolean lookalikes, so the warning became false. What replaced it is the
-    /// rule underneath, which the rejection had been hiding — `x=TRUE` binds a
-    /// string, and now does so quietly. That is the shape an agent needs told,
-    /// so the needle moved rather than being dropped.
+    /// The needles are substrings of fragment bodies. When a fragment is
+    /// reworded, move the needle rather than dropping it — the guarantee is
+    /// that the *rule* is covered, not that a phrase survives.
     #[test]
     fn agent_onboarding_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());

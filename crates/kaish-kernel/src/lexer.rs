@@ -935,16 +935,11 @@ fn lex_invalid_float_no_trailing(_lex: &mut logos::Lexer<Token>) -> Result<(), L
 
 /// Lex an identifier.
 ///
-/// `yes`, `no`, `TRUE`, and `False` are ordinary words here. The lexer used
-/// to reject them as boolean-like, which made `echo yes`, `cat no`, and
-/// `grep TRUE data.csv` errors, and kept `yes` from being named as a command
-/// at all. A lexer cannot see whether a boolean was wanted, so it rejected
-/// the word everywhere to catch the one place it might have mattered.
-///
-/// Nothing is lost by accepting them: only lowercase `true` and `false` are
-/// boolean literals, so `yes` and `TRUE` were always going to be strings.
-/// The rule was also never consistent with its own premise — `1`, `0`, `on`,
-/// and `off` are the classic ambiguous booleans and were always accepted.
+/// Every bareword arrives here, `yes`, `no`, `TRUE`, and `False` included —
+/// they are ordinary words. Only lowercase `true` and `false` are boolean
+/// literals, and those are their own tokens, so they never reach this
+/// function. A lexer cannot see whether a boolean was wanted, so it does not
+/// guess: `x=TRUE` binds the string `"TRUE"`.
 fn lex_ident(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
     Ok(lex.slice().to_string())
 }
