@@ -64,6 +64,11 @@ breaking entries are marked **BREAKING**.
 - **`$😁` and `${😁}` reach the same variable** — the four doors to a name
   (`$x`, `${x}`, `x=`, and interpolation) each had their own rule for where a
   name ends; they now share one.
+- **`for`, `read`, and `unset` reach the same variable a written name does** —
+  each bound or removed a name without normalizing, so a loop variable or a
+  `read` target spelled with a combining mark silently missed the value.
+- **`export café=1` works, agreeing with `café=1`** — `export` kept an
+  ASCII-only name rule and rejected what plain assignment accepted.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.

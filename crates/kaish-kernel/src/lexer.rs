@@ -111,8 +111,9 @@ pub enum LexerError {
     ArithmeticInVarRef,
     /// A `-flag`/`--flag`/`+flag` word matched but contained a non-ASCII
     /// character. Flag names are ASCII-only; see the note on `Token`.
-    /// `kind` is `"flag"` or
-    /// `"variable"`; `text` is the whole matched word (sigil included).
+    /// `kind` is always `"flag"` — it stays a field because the message reads
+    /// off it, and a second ASCII-only name class would use the same shape.
+    /// `text` is the whole matched word (sigil included).
     NonAsciiName { kind: &'static str, text: String },
 }
 
@@ -660,7 +661,7 @@ pub enum Token {
 
     // ═══════════════════════════════════════════════════════════════════
     // Identifiers (command names, barewords, etc. — NOT `$name` variable
-    // references; those are `SimpleVarRef` above and stay ASCII)
+    // references; those are `SimpleVarRef` above)
     // ═══════════════════════════════════════════════════════════════════
 
     /// Identifier - value is the identifier string
