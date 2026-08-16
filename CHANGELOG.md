@@ -99,6 +99,14 @@ breaking entries are marked **BREAKING**.
   out of scope. The body now parses through the same full program grammar as
   everywhere else, and a malformed body reports its error at the actual
   failure point instead of a generic message anchored at `$(`.
+- **Unquoted barewords and paths accept any non-ASCII character** —
+  `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
+  every bareword/path rule now matches bash's "not whitespace, not an
+  operator" word rule instead of an ASCII-only character class.
+- **Flag names and `$name` variable references stay ASCII-only** — `--café`
+  and `$café` are still loud lexer errors (matching bash's name rule), now
+  reported as a dedicated diagnostic instead of silently splitting into a
+  truncated flag/name plus a stray bareword argument.
 
 ## [0.14.1] - 2026-08-14
 

@@ -182,6 +182,18 @@ fn run_lexer_error_variant(input: &str, expected: LexerError) {
     );
 }
 
+/// Like [`run_lexer_error_variant`] but matches against a predicate, for error
+/// variants that carry a payload — `LexerError::NonAsciiName` names the
+/// offending word, so an equality assertion would have to spell it twice.
+fn run_lexer_error_matching(input: &str, pred: impl Fn(&LexerError) -> bool, what: &str) {
+    let errors = tokenize(input).expect_err(&format!("expected error for input: {input:?}"));
+    assert!(
+        errors.iter().any(|e| pred(&e.token)),
+        "input {input:?}: expected {what}, got {:?}",
+        errors.iter().map(|e| &e.token).collect::<Vec<_>>(),
+    );
+}
+
 // =============================================================================
 // Keywords
 // =============================================================================
@@ -933,4 +945,149 @@ fn lexer_push_bracket_target_after_and_chain() {
             "IDENT(push)", "IDENT(xs[0])", "IDENT(item)",
         ],
     );
+}
+
+// =============================================================================
+// Non-ASCII words
+//
+// Every bareword/path rule used an ASCII-only character class, so
+// `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were all lexer errors —
+// quoting was the only way through. bash's rule is that a word is anything
+// that is not an operator or whitespace; it never inspects bytes for
+// alphabetic-ness. These rules now match that: any non-ASCII scalar value
+// (`\u{80}` and up) is an ordinary word character, same as an ASCII letter.
+//
+// Flag names and `$name` variable references deliberately did NOT widen —
+// see the errors section below.
+// =============================================================================
+
+#[rstest]
+#[case::ident_cafe("café", &["IDENT(café)"])]
+#[case::ident_cjk("日本語", &["IDENT(日本語)"])]
+#[case::ident_cyrillic("привет", &["IDENT(привет)"])]
+#[case::ident_internal_dash("a-café", &["IDENT(a-café)"])]
+#[case::ident_trailing_dash("café-a", &["IDENT(café-a)"])]
+fn lexer_non_ascii_idents(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+#[rstest]
+#[case::absolute_path("/tmp/日本語", &["PATH(/tmp/日本語)"])]
+#[case::tilde_path("~/文書", &["TILDEPATH(~/文書)"])]
+#[case::dot_slash_path("./café.txt", &["DOTSLASH(./café.txt)"])]
+#[case::dot_dot_path("../café/x", &["RELPATH(../café/x)"])]
+#[case::bare_relative_path("café/foo", &["RELPATH(café/foo)"])]
+#[case::bare_relative_leading_non_ascii("日本語/foo", &["RELPATH(日本語/foo)"])]
+#[case::dotted_ident(".日本語", &["DOTIDENT(.日本語)"])]
+#[case::number_ident("019café", &["NUMIDENT(019café)"])]
+#[case::at_word("@café/pkg", &["ATWORD(@café/pkg)"])]
+#[case::dash_num_word("2024-café", &["DASHNUM(2024-café)"])]
+#[case::glob_merge_still_fuses("café*.txt", &["GLOB(café*.txt)"])]
+fn lexer_non_ascii_paths(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+/// The reported failing commands, minus the ones that stay
+/// errors (covered separately below).
+#[rstest]
+#[case::echo_cafe("echo café", &["IDENT(echo)", "IDENT(café)"])]
+#[case::ls_cjk_path("ls /tmp/日本語", &["IDENT(ls)", "PATH(/tmp/日本語)"])]
+#[case::cd_tilde_cjk("cd ~/文書", &["IDENT(cd)", "TILDEPATH(~/文書)"])]
+#[case::echo_dot_slash_cafe("echo ./café.txt", &["IDENT(echo)", "DOTSLASH(./café.txt)"])]
+#[case::echo_dot_dot_cafe("echo ../café/x", &["IDENT(echo)", "RELPATH(../café/x)"])]
+#[case::assignment_value("X=café", &["IDENT(X)", "EQ", "IDENT(café)"])]
+#[case::word_with_internal_dash("echo a-café", &["IDENT(echo)", "IDENT(a-café)"])]
+fn lexer_non_ascii_words_in_context(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+/// Flag names and `$name` variable references stay ASCII (matching bash's
+/// `[a-zA-Z_][a-zA-Z0-9_]*` name rule) even though barewords and paths
+/// widened. Without special handling, a non-ASCII tail glued onto an
+/// otherwise-valid flag or var-ref prefix would silently lex as TWO tokens
+/// once `Ident`'s leading character class admits non-ASCII — e.g.
+/// `--café` as `LongFlag(caf)` followed by a stray `Ident(é)` argument,
+/// turning a typo into a silently-wrong argument count instead of a loud
+/// error. These regexes claim the full non-ASCII tail and the callback
+/// rejects it, so the diagnostic is one `NonAsciiName` error, never a split.
+#[rstest]
+#[case::simple_varref_cafe("$café")]
+#[case::long_flag_cafe("--café")]
+#[case::long_flag_cafe_in_context("grep --café x")]
+#[case::short_flag_cafe("-café")]
+// A real single-letter short flag with a glued non-ASCII tail — the
+// sharpest case, since `ShortFlag` (unlike `LongFlag`) is excluded from
+// the parser's no-token-pasting glue guard (it carries the `cut -d,`
+// glued-value idiom), so this rule's own ASCII check is the only thing
+// that keeps it loud.
+#[case::short_flag_single_letter_glued_cafe("-lé")]
+#[case::plus_flag_cafe("+café")]
+fn lexer_non_ascii_names_stay_ascii_errors(#[case] input: &str) {
+    run_lexer_error_matching(
+        input,
+        |e| matches!(e, LexerError::NonAsciiName { .. }),
+        "LexerError::NonAsciiName",
+    );
+}
+
+/// Quoting remains the escape hatch out of ASCII-only flag/variable rules —
+/// unaffected by this change, pinned here so a future regression in the
+/// quoted-string path still agrees with the unquoted one.
+#[rstest]
+#[case::quoted_cafe(r#""café""#, &["STRING(café)"])]
+fn lexer_non_ascii_quoting_still_escapes(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// =============================================================================
+// Differential corpus — priority-interaction regression guard.
+//
+// Widening 11 bareword/path character classes to admit non-ASCII risked
+// shifting which rule wins the longest-match race for existing ASCII input
+// (NumberIdent vs. Int, DashNumWord vs. Int/flags, RelativePath vs.
+// Ident+Path, glob-merge boundaries, flag-metachar colon fusion). This
+// corpus pins one representative case per widened rule family — every case
+// below passed before this change and must keep producing the exact same
+// token stream after it.
+// =============================================================================
+
+#[rstest]
+#[case::ident_boundary("foo-bar", &["IDENT(foo-bar)"])]
+#[case::numident_boundary("123abc", &["NUMIDENT(123abc)"])]
+#[case::numident_pure_int_unaffected("123", &["INT(123)"])]
+#[case::dashnum_boundary("2024-01-02", &["DASHNUM(2024-01-02)"])]
+#[case::dashnum_minus_led_boundary("-1a", &["DASHNUM(-1a)"])]
+#[case::dashnum_pure_int_unaffected("-123", &["INT(-123)"])]
+#[case::atword_boundary("@scope/pkg", &["ATWORD(@scope/pkg)"])]
+#[case::dotident_boundary(".gitignore", &["DOTIDENT(.gitignore)"])]
+#[case::tildepath_boundary("~/src/kaish", &["TILDEPATH(~/src/kaish)"])]
+#[case::relpath_dotdot_boundary("../foo/bar", &["RELPATH(../foo/bar)"])]
+#[case::relpath_bareword_boundary("src/kaish", &["RELPATH(src/kaish)"])]
+#[case::dotslash_boundary("./src/main.rs", &["DOTSLASH(./src/main.rs)"])]
+#[case::path_boundary("/etc/hosts", &["PATH(/etc/hosts)"])]
+#[case::longflag_boundary("--force", &["LONGFLAG(force)"])]
+#[case::shortflag_boundary("-la", &["SHORTFLAG(la)"])]
+#[case::plusflag_boundary("+ex", &["PLUSFLAG(ex)"])]
+#[case::simplevarref_boundary("$foo_bar", &["SIMPLEVARREF(foo_bar)"])]
+#[case::glob_still_wins_over_ident("*.txt", &["GLOB(*.txt)"])]
+#[case::glob_colon_merge_unaffected("foo::bar*.txt", &["GLOB(foo::bar*.txt)"])]
+#[case::shortflag_colon_fuse_unaffected("-F:", &["SHORTFLAG(F:)"])]
+#[case::trailing_slash_boundary("dest/", &["RELPATH(dest/)"])]
+#[case::triple_dash_bare_unaffected("---foo", &["DOUBLEDASHBARE(---foo)"])]
+#[case::plus_bare_unaffected("+%Y-%m-%d", &["PLUSBARE(+%Y-%m-%d)"])]
+// `--foo=bar`'s equals form (`docs/LANGUAGE.md`'s `curl --header="..."`)
+// must still split at `=` — the widened LongFlag continuation class added
+// only the `\u{80}-\u{10FFFF}` range, never `=`, so this is unaffected,
+// but it is exactly the shape a too-greedy widening (e.g. `\S*`) would
+// have broken by swallowing the value into the flag name.
+#[case::longflag_equals_form_unaffected("--foo=bar", &["LONGFLAG(foo)", "EQ", "IDENT(bar)"])]
+// The leading character after the sigil stays ASCII-only (unchanged) for
+// all three flag rules, so a non-ASCII-FIRST word after `--`/`+`/`-` is
+// never claimed by the widened flag rules — it falls through to the
+// existing bareword-fallback rules exactly as it did before this change.
+#[case::doubledashbare_leading_non_ascii_unaffected("--é", &["DOUBLEDASHBARE(--é)"])]
+#[case::plusbare_leading_non_ascii_unaffected("+é", &["PLUSBARE(+é)"])]
+#[case::minusbare_leading_non_ascii_unaffected("-é", &["MINUSBARE(-é)"])]
+fn lexer_widen_does_not_disturb_ascii_priority(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
 }

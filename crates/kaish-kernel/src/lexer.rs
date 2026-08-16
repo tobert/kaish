@@ -109,6 +109,11 @@ pub enum LexerError {
     /// text here — so it is a loud error instead. (Inside double-quoted
     /// strings the same construct works via string interpolation.)
     ArithmeticInVarRef,
+    /// A `-flag`/`--flag`/`+flag`/`$name` word matched but contained a
+    /// non-ASCII character. Flag and variable names are ASCII-only; see the
+    /// note on `Token`. `kind` is `"flag"` or
+    /// `"variable"`; `text` is the whole matched word (sigil included).
+    NonAsciiName { kind: &'static str, text: String },
 }
 
 impl fmt::Display for LexerError {
@@ -138,6 +143,11 @@ impl fmt::Display for LexerError {
                      assign it to a variable first, e.g. N=$((expr)); ${{X:-$N}}"
                 )
             }
+            LexerError::NonAsciiName { kind, text } => write!(
+                f,
+                "{kind} `{text}` has a non-ASCII character; {kind}s are ASCII-only — \
+                 quote it to use as a literal word instead"
+            ),
         }
     }
 }
@@ -182,6 +192,19 @@ pub struct HereDocData {
     pub body_start_offset: usize,
 }
 
+/// A word is anything that is not whitespace and not an operator, so the
+/// bareword and path rules below admit `\u{80}-\u{10FFFF}` — this file's
+/// spelling of "any non-ASCII scalar value" — alongside their ASCII classes.
+/// bash never inspects a word's bytes for alphabetic-ness, and `café`,
+/// `日本語`, and `~/文書` lex the same shape as their ASCII equivalents.
+///
+/// Two families keep ASCII-only classes: flag names (`LongFlag`, `ShortFlag`,
+/// `PlusFlag`) and `$name` variable references (`SimpleVarRef`), matching
+/// bash's `[a-zA-Z_][a-zA-Z0-9_]*` for names. `--café` is a typo worth being
+/// loud about, not a language a flag can be spelled in. Those rules still
+/// *match* a non-ASCII tail and reject it in their callback with
+/// `LexerError::NonAsciiName`; declining to match would split the word into a
+/// flag plus a stray bareword argument instead of failing loud.
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(error = LexerError)]
 #[logos(skip r"[ \t]+")]
@@ -361,8 +384,8 @@ pub enum Token {
     #[token(".")]
     Dot,
 
-    /// Tilde path: `~/foo`, `~user/bar` - value includes the full string
-    #[regex(r"~[a-zA-Z0-9_./+-]+", lex_tilde_path, priority = 3)]
+    /// Tilde path: `~/foo`, `~user/bar` - value includes the full string.
+    #[regex(r"~[a-zA-Z0-9_./+\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
     TildePath(String),
 
     /// Bare tilde: `~` alone (expands to $HOME)
@@ -374,12 +397,12 @@ pub enum Token {
     /// trailing-slash form uses `*` (not `+`) after the slash so `dest/`
     /// lexes as one token instead of `Ident("dest")` + `Path("/")` — the
     /// latter split silently turned `cp a b dest/` into a 4-operand command.
-    #[regex(r"\.\./[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]*", lex_relative_path, priority = 3)]
+    #[regex(r"\.\./[a-zA-Z0-9_./\-\u{80}-\u{10FFFF}]+", lex_relative_path, priority = 3)]
+    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
     RelativePath(String),
 
-    /// Dot-slash path: `./foo`, `./script.sh`
-    #[regex(r"\./[a-zA-Z0-9_./-]+", lex_dot_slash_path, priority = 3)]
+    /// Dot-slash path: `./foo`, `./script.sh`.
+    #[regex(r"\./[a-zA-Z0-9_./\-\u{80}-\u{10FFFF}]+", lex_dot_slash_path, priority = 3)]
     DotSlashPath(String),
 
     /// Dot-prefixed bareword: `.parent`, `.gitignore`, `.foo.bar`.
@@ -387,7 +410,7 @@ pub enum Token {
     /// (the POSIX `.` source alias) which only matches a bare `.` — the source
     /// alias requires whitespace before its file argument (`. script`), so
     /// `.parent` (no space) is unambiguously a single bareword.
-    #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_.-]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     DottedIdent(String),
 
     #[token("{")]
@@ -437,8 +460,14 @@ pub enum Token {
     // Flags (must come before Int to win over negative numbers)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Long flag: `--name` or `--foo-bar`
-    #[regex(r"--[a-zA-Z][a-zA-Z0-9-]*", lex_long_flag, priority = 3)]
+    /// Long flag: `--name` or `--foo-bar`. Flag names are ASCII-only; the
+    /// match region still admits non-ASCII in the tail so the regex claims the
+    /// WHOLE word instead of
+    /// stopping at the ASCII prefix; without that, `--café` would lex as
+    /// `LongFlag(caf)` plus a silently separate `Ident(é)` argument rather
+    /// than one loud error. `lex_long_flag` rejects the match if it isn't
+    /// pure ASCII.
+    #[regex(r"--[a-zA-Z][a-zA-Z0-9\-\u{80}-\u{10FFFF}]*", lex_long_flag, priority = 3)]
     LongFlag(String),
 
     /// Short flag: `-l`, `-la` (combined short flags), or a dash-word with
@@ -449,11 +478,11 @@ pub enum Token {
     /// the third char isn't a letter either, in which case it's
     /// `DoubleDashBare` — see below — and whether the word is a flag or a
     /// literal is the binding layer's call.
-    #[regex(r"-[a-zA-Z][a-zA-Z0-9-]*", lex_short_flag, priority = 3)]
+    #[regex(r"-[a-zA-Z][a-zA-Z0-9\-\u{80}-\u{10FFFF}]*", lex_short_flag, priority = 3)]
     ShortFlag(String),
 
-    /// Plus flag: `+e` or `+x` (for set +e to disable options)
-    #[regex(r"\+[a-zA-Z][a-zA-Z0-9]*", lex_plus_flag, priority = 3)]
+    /// Plus flag: `+e` or `+x` (for set +e to disable options).
+    #[regex(r"\+[a-zA-Z][a-zA-Z0-9\u{80}-\u{10FFFF}]*", lex_plus_flag, priority = 3)]
     PlusFlag(String),
 
     /// Double dash: `--` alone marks end of flags. Only matches when nothing
@@ -531,8 +560,12 @@ pub enum Token {
     #[regex(r"\$\{", lex_varref)]
     VarRef(String),
 
-    /// Simple variable reference: `$NAME` - just the identifier
-    #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", lex_simple_varref)]
+    /// Simple variable reference: `$NAME` - just the identifier. Variable
+    /// names are ASCII-only, and the match region claims a non-ASCII tail so
+    /// `$café` errors as one word rather than lexing as `SimpleVarRef(caf)`
+    /// plus a stray `Ident(é)`. See
+    /// `lex_simple_varref`.
+    #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_\u{80}-\u{10FFFF}]*", lex_simple_varref)]
     SimpleVarRef(String),
 
     /// Positional parameter: `$0` through `$9`
@@ -582,7 +615,7 @@ pub enum Token {
     /// strings. Distinguished from `Int` because at least one alpha character
     /// follows the leading digits — the lexer commits to "this is a string,
     /// not a number." Treated as a bareword string in expression position.
-    #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_.-]*", lex_number_ident, priority = 3)]
+    #[regex(r"[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
     /// Numeric word containing an embedded hyphen run, or a minus-led numeric
@@ -595,15 +628,15 @@ pub enum Token {
     /// zeros survive). A plain `2024`/`1.5`/`-1` stays `Int`/`Float` — the
     /// digit-hyphen form requires a `-segment`, and the minus-led form requires
     /// an alpha after the digits.
-    #[regex(r"[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._]+)+", lex_slice_word, priority = 3)]
-    #[regex(r"-[0-9]+[a-zA-Z_][0-9a-zA-Z._-]*", lex_slice_word, priority = 3)]
+    #[regex(r"[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._\u{80}-\u{10FFFF}]+)+", lex_slice_word, priority = 3)]
+    #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     DashNumWord(String),
 
     /// Leading-`@` bareword: `@scope/pkg` (scoped package), `@0` (epoch in
     /// `date -d @0`), or bare `@`. Mid-word `@` (`user@host`) is handled by
     /// `Ident`; this covers the leading-`@` cases that would otherwise be an
     /// "unexpected character" lexer error.
-    #[regex(r"@[a-zA-Z0-9_./@-]*", lex_slice_word, priority = 3)]
+    #[regex(r"@[a-zA-Z0-9_./@\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     AtWord(String),
 
     /// Invalid: float without leading digit (like .5)
@@ -619,18 +652,21 @@ pub enum Token {
     // Paths (absolute paths starting with /)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Absolute path: `/tmp/out`, `/etc/hosts`, etc.
-    #[regex(r"/[a-zA-Z0-9_./+-]*", lex_path)]
+    /// Absolute path: `/tmp/out`, `/etc/hosts`, `/tmp/日本語`, etc.
+    #[regex(r"/[a-zA-Z0-9_./+\-\u{80}-\u{10FFFF}]*", lex_path)]
     Path(String),
 
     // ═══════════════════════════════════════════════════════════════════
-    // Identifiers (command names, variable names, etc.)
+    // Identifiers (command names, barewords, etc. — NOT `$name` variable
+    // references; those are `SimpleVarRef` above and stay ASCII)
     // ═══════════════════════════════════════════════════════════════════
 
     /// Identifier - value is the identifier string
     /// Allows dots for filenames like `script.kai` and `@` for `user@host`,
-    /// `a@b.com` (bare `@` is an ordinary word character, as in bash).
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.@-]*", lex_ident)]
+    /// `a@b.com` (bare `@` is an ordinary word character, as in bash). The
+    /// leading class excludes digits — `NumberIdent`/`Int` own digit-leading
+    /// words — and the ASCII operator/whitespace set.
+    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@\-\u{80}-\u{10FFFF}]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -867,10 +903,15 @@ fn lex_varref(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
     Err(LexerError::UnterminatedVarRef)
 }
 
-/// Lex a simple variable reference: `$NAME` → `NAME`
-fn lex_simple_varref(lex: &mut logos::Lexer<Token>) -> String {
+/// Lex a simple variable reference: `$NAME` → `NAME`. Rejects a non-ASCII
+/// match whole; see the note on `Token`.
+fn lex_simple_varref(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    let s = lex.slice();
+    if !s.is_ascii() {
+        return Err(LexerError::NonAsciiName { kind: "variable", text: s.to_string() });
+    }
     // Strip the leading `$`
-    lex.slice()[1..].to_string()
+    Ok(s[1..].to_string())
 }
 
 /// Lex a positional parameter: `$1` → 1
@@ -944,22 +985,35 @@ fn lex_ident(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
     Ok(lex.slice().to_string())
 }
 
-/// Lex a long flag: `--name` → `name`
-fn lex_long_flag(lex: &mut logos::Lexer<Token>) -> String {
+/// Lex a long flag: `--name` → `name`. Rejects a non-ASCII match whole; see
+/// the note on `Token`.
+fn lex_long_flag(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    let s = lex.slice();
+    if !s.is_ascii() {
+        return Err(LexerError::NonAsciiName { kind: "flag", text: s.to_string() });
+    }
     // Strip the leading `--`
-    lex.slice()[2..].to_string()
+    Ok(s[2..].to_string())
 }
 
-/// Lex a short flag: `-l` → `l`, `-la` → `la`
-fn lex_short_flag(lex: &mut logos::Lexer<Token>) -> String {
+/// Lex a short flag: `-l` → `l`, `-la` → `la`.
+fn lex_short_flag(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    let s = lex.slice();
+    if !s.is_ascii() {
+        return Err(LexerError::NonAsciiName { kind: "flag", text: s.to_string() });
+    }
     // Strip the leading `-`
-    lex.slice()[1..].to_string()
+    Ok(s[1..].to_string())
 }
 
-/// Lex a plus flag: `+e` → `e`, `+ex` → `ex`
-fn lex_plus_flag(lex: &mut logos::Lexer<Token>) -> String {
+/// Lex a plus flag: `+e` → `e`, `+ex` → `ex`.
+fn lex_plus_flag(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    let s = lex.slice();
+    if !s.is_ascii() {
+        return Err(LexerError::NonAsciiName { kind: "flag", text: s.to_string() });
+    }
     // Strip the leading `+`
-    lex.slice()[1..].to_string()
+    Ok(s[1..].to_string())
 }
 
 /// Lex a plus bare word: `+%s` → `+%s` (keep the full string)
