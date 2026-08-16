@@ -182,6 +182,18 @@ fn run_lexer_error_variant(input: &str, expected: LexerError) {
     );
 }
 
+/// Like [`run_lexer_error_variant`] but matches against a predicate, for error
+/// variants that carry a payload — `LexerError::NonAsciiName` names the
+/// offending word, so an equality assertion would have to spell it twice.
+fn run_lexer_error_matching(input: &str, pred: impl Fn(&LexerError) -> bool, what: &str) {
+    let errors = tokenize(input).expect_err(&format!("expected error for input: {input:?}"));
+    assert!(
+        errors.iter().any(|e| pred(&e.token)),
+        "input {input:?}: expected {what}, got {:?}",
+        errors.iter().map(|e| &e.token).collect::<Vec<_>>(),
+    );
+}
+
 // =============================================================================
 // Keywords
 // =============================================================================
