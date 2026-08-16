@@ -1,9 +1,9 @@
 //! `yes`, `no`, `TRUE`, and `False` are ordinary words, not booleans.
 //!
 //! The lexer used to reject them outright as "ambiguous boolean-like", which
-//! made `yes | head -3` unable to run the POSIX utility, `cat no` unable to
-//! read a file named `no`, and `grep TRUE data.csv` unable to search for a
-//! common CSV value. Quoting was the only way through.
+//! left `yes` unable to even be named as a command, `cat no` unable to read a
+//! file named `no`, and `grep TRUE data.csv` unable to search for a common CSV
+//! value. Quoting was the only way through.
 //!
 //! The rejection was protecting nothing, and that is what these tests pin:
 //! only lowercase `true` and `false` were ever boolean *literals*, so `yes`

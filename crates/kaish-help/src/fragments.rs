@@ -227,14 +227,14 @@ pub const FRAGMENTS: &[Fragment] = &[
     .ranked(10),
     en(
         Concept::Foundations,
-        "boolean-like-yes-no",
+        "boolean-literals-are-lowercase",
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Bare `yes`/`no` are lexer errors.** They read as ambiguous booleans — so \
-         does `TRUE`/`Yes`/any non-lowercase `true`/`false` — so `echo yes` fails \
-         before it runs. Quote them or use `true`/`false`. `on`/`off` are \
-         unaffected.",
+        "**Only lowercase `true`/`false` are booleans.** `TRUE`, `Yes`, `yes`, `no`, \
+         `on`, and `off` are ordinary strings — `x=TRUE` binds the string `\"TRUE\"`, \
+         not a boolean. Write `true`/`false` where a boolean is meant, and check \
+         with `typeof`.",
     )
     .ranked(11),
     en(

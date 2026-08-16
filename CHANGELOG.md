@@ -48,6 +48,11 @@ breaking entries are marked **BREAKING**.
   `&[]` to keep the old behavior.
 
 ### Fixed
+- **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
+  them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
+  before running, and `yes` could not even be named as a command.
+- **Only lowercase `true` and `false` are boolean literals** — unchanged, and the
+  rejection was never what made it so: `yes` was always a string.
 - **`write` with no stdin and no content operand errors instead of truncating the
   file to zero bytes** — a missing operand destroyed an existing file and exited
   0, and `set -o trash` did not cover it. An empty pipe or redirect still

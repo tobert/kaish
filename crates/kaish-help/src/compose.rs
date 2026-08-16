@@ -465,13 +465,19 @@ mod tests {
     /// `[...]`/`{...}` literal or pattern; see `docs/LANGUAGE.md`,
     /// "Construction"), so the fragment was retired rather than kept as a
     /// warning about behavior that no longer exists.
+    ///
+    /// The bare `yes`/`no` rule went the same way: the lexer no longer rejects
+    /// boolean lookalikes, so the warning became false. What replaced it is the
+    /// rule underneath, which the rejection had been hiding — `x=TRUE` binds a
+    /// string, and now does so quietly. That is the shape an agent needs told,
+    /// so the needle moved rather than being dropped.
     #[test]
     fn agent_onboarding_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());
         for needle in [
             "compound statement can't feed a pipe",
             "is not a command",
-            "are lexer errors",
+            "lowercase `true`/`false` are booleans",
         ] {
             assert!(out.contains(needle), "agent_onboarding missing {needle:?}:\n{out}");
         }
@@ -483,7 +489,7 @@ mod tests {
         for needle in [
             "compound statement can't feed a pipe",
             "is not a command",
-            "are lexer errors",
+            "lowercase `true`/`false` are booleans",
         ] {
             assert!(out.contains(needle), "tool_description missing {needle:?}:\n{out}");
         }
