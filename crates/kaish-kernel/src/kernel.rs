@@ -1305,6 +1305,29 @@ impl Kernel {
         crate::ast::plan::plan_program(source)
     }
 
+    /// Expand one heredoc body against a scope the caller supplies —
+    /// [`expand_fragment`](crate::fragment::expand_fragment) as a method.
+    ///
+    /// The scope is the caller's, not this kernel's: pair it with `get_var`
+    /// when the session's values are the ones to judge against, and supply
+    /// different values when they are not. Nothing executes, and a `$(…)` in
+    /// the body comes back as a [`Hole`](kaish_types::plan::Hole) rather than
+    /// running here.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FragmentError`](crate::fragment::FragmentError) when the
+    /// source does not parse, the address names no heredoc, or the body reads
+    /// something the supplied scope does not carry.
+    pub fn expand_fragment(
+        &self,
+        source: &str,
+        addr: kaish_types::plan::FragmentAddr,
+        scope: &[(String, Value)],
+    ) -> Result<kaish_types::plan::Expansion, crate::fragment::FragmentError> {
+        crate::fragment::expand_fragment(source, addr, scope)
+    }
+
     /// Get the kernel name.
     pub fn name(&self) -> &str {
         &self.name

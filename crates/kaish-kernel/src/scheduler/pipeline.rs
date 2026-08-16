@@ -191,7 +191,7 @@ pub(crate) async fn apply_redirects(
                 result.err.clear();
             }
             // Pre-execution redirects - already handled before command execution
-            RedirectKind::Stdin | RedirectKind::HereDoc | RedirectKind::HereString => {}
+            RedirectKind::Stdin | RedirectKind::HereDoc(_) | RedirectKind::HereString => {}
         }
     }
     // Materialize any remaining OutputData into result.out.
@@ -282,7 +282,7 @@ async fn setup_stdin_redirects(
                     .map_err(|e| format!("redirect: {path}: {e}"))?;
                 ctx.set_stdin(data);
             }
-            RedirectKind::HereDoc => {
+            RedirectKind::HereDoc(_) => {
                 match &redir.target {
                     Expr::Literal(Value::String(content)) => {
                         ctx.set_stdin(content.clone());

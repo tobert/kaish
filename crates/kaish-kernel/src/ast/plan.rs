@@ -29,12 +29,15 @@
 
 use std::collections::BTreeSet;
 
-use kaish_types::plan::{Plan, PlannedCommand, PlannedRedirect, PlannedValue, PLAN_RENDER_LIMIT};
+use kaish_types::plan::{
+    Plan, PlannedCommand, PlannedHeredoc, PlannedRedirect, PlannedValue, PLAN_RENDER_LIMIT,
+};
 use kaish_types::Value;
 
 use super::types::{
     Arg, Assignment, BinaryOp, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    RecordKey, Redirect, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop,
+    RecordKey, Redirect, RedirectKind, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment,
+    WhileLoop,
 };
 
 /// One statement's plan, plus the redemption credentials its argv presented.
@@ -209,9 +212,49 @@ struct Collected {
     /// Every name the statement writes or binds — an assignment target, a
     /// `for` variable, an env-prefix name, a tool-def parameter.
     binds: BTreeSet<String>,
+    /// How many heredocs the walk has published so far. The counter is what
+    /// makes [`PlannedHeredoc::index`] flat across the whole statement, so a
+    /// heredoc inside a loop body is addressable without walking structure.
+    heredoc_count: usize,
 }
 
 impl Collected {
+    /// Publish every heredoc one command declares, numbering them in the
+    /// order this walk reaches them.
+    fn take_heredocs(&mut self, cmd: &Command) -> Vec<PlannedHeredoc> {
+        cmd.redirects
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RedirectKind::HereDoc(meta) => Some((meta, &r.target)),
+                _ => None,
+            })
+            .map(|(meta, target)| {
+                let index = self.heredoc_count;
+                self.heredoc_count += 1;
+                // The body's own reads, not the statement's: an embedder
+                // asking what plugs into *this* program wants the answer
+                // scoped to it. A literal body reads nothing whatever it
+                // contains, because nothing in it expands.
+                let free = if meta.literal {
+                    Vec::new()
+                } else {
+                    let mut body_reads = Collected::default();
+                    collect_expr(target, false, &mut body_reads);
+                    body_reads.reads.into_iter().collect()
+                };
+                PlannedHeredoc::new(
+                    index,
+                    meta.delimiter.clone(),
+                    meta.literal,
+                    meta.strip_tabs,
+                    PlannedValue::Plain(meta.body.clone()),
+                    meta.body_offset,
+                )
+                .with_free_variables(free)
+            })
+            .collect()
+    }
+
     /// Record every read a variable path performs: its root name, plus any
     /// `[$k]` dynamic-subscript variable along the path.
     fn read_path(&mut self, path: &VarPath) {
@@ -355,12 +398,11 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
         .iter()
         .map(|r| PlannedRedirect::new(r.kind.to_string(), plan_redirect_target(&r.target)))
         .collect();
-    out.commands.push(PlannedCommand::new(
-        cmd.name.clone(),
-        args,
-        redirects,
-        background,
-    ));
+    let heredocs = out.take_heredocs(cmd);
+    out.commands.push(
+        PlannedCommand::new(cmd.name.clone(), args, redirects, background)
+            .with_heredocs(heredocs),
+    );
     // Lift any literal credential out of the argv on the same pass that
     // redacts it from the rendering — one walk, one truth about what this
     // statement presented.
@@ -639,9 +681,20 @@ fn plan_redirect_target(target: &Expr) -> PlannedValue {
 fn render_redirect(redirect: &Redirect) -> String {
     // A merge redirect (`2>&1`, `1>&2`) is the whole operator: its target
     // expression is a placeholder, and printing it would invent a filename.
-    match redirect.kind {
-        super::types::RedirectKind::MergeStderr | super::types::RedirectKind::MergeStdout => {
-            redirect.kind.to_string()
+    match &redirect.kind {
+        RedirectKind::MergeStderr | RedirectKind::MergeStdout => redirect.kind.to_string(),
+        // A heredoc renders back the way it was written — its own delimiter
+        // word, its own body. Spelling every delimiter `EOF` would erase the
+        // hint the author chose (`PY`, `SQL`) from the one field a classifier
+        // reads first.
+        RedirectKind::HereDoc(meta) => {
+            let dash = if meta.strip_tabs { "-" } else { "" };
+            let quote = if meta.literal { "'" } else { "" };
+            format!(
+                "<<{dash}{quote}{delim}{quote}\n{body}{delim}",
+                delim = meta.delimiter,
+                body = meta.body,
+            )
         }
         _ => format!(
             "{} {}",

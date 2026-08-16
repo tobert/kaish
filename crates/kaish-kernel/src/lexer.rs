@@ -174,9 +174,18 @@ impl fmt::Display for LexerError {
 ///   parts AFTER the rewritten expression drift by the rewrite's length
 ///   difference — the body-local `${__ARITH:expr__}` form is longer than
 ///   the source text; see `rewrite_body_arithmetic`.)
+/// - `delimiter` is the word as written with its quotes removed (`PY` for
+///   both `<<PY` and `<<'PY'`), kept because it is the language hint the
+///   author chose and a plan publishes it.
+/// - `source_body` is the body exactly as it appears in the source. It differs
+///   from `content` only for an interpolated body containing `$((…))`, which
+///   `content` carries in the rewritten `${__ARITH:…}` form — a kernel-internal
+///   spelling that must never reach a plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocData {
     pub content: String,
+    pub source_body: String,
+    pub delimiter: String,
     pub literal: bool,
     pub strip_tabs: bool,
     pub body_start_offset: usize,
@@ -1286,6 +1295,9 @@ fn map_span(span: &Span, replacements: &[Replacement]) -> Span {
 #[derive(Debug, Clone)]
 struct HeredocExtract {
     body: String,
+    /// The body before any arithmetic rewrite — what the author typed.
+    source_body: String,
+    delimiter: String,
     literal: bool,
     strip_tabs: bool,
     body_start_offset: usize,
@@ -1841,14 +1853,16 @@ fn collect_heredoc_bodies(
         // pre-#95 false-positive fix). Bash expands `$(( ))` in heredoc
         // bodies regardless of quotes within the body, so the body scan
         // is deliberately quote-blind; `\$((` escapes it.
-        let body = if p.literal {
-            body
+        let content = if p.literal {
+            body.clone()
         } else {
             rewrite_body_arithmetic(&body, &p)?
         };
 
         heredocs.push(HeredocExtract {
-            body,
+            body: content,
+            source_body: body,
+            delimiter: p.delimiter.clone(),
             literal: p.literal,
             strip_tabs: p.strip_tabs,
             body_start_offset: body_start,
@@ -2017,6 +2031,8 @@ fn resolve_markers(
                 result.push(Spanned::new(
                     Token::HereDoc(HereDocData {
                         content: hd.body.clone(),
+                        source_body: hd.source_body.clone(),
+                        delimiter: hd.delimiter.clone(),
                         literal: hd.literal,
                         strip_tabs: hd.strip_tabs,
                         body_start_offset: hd.body_start_offset,
@@ -4183,6 +4199,8 @@ mod tests {
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
                 content: "hello\nworld\n".to_string(),
+                source_body: "hello\nworld\n".to_string(),
+                delimiter: "EOF".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -4200,6 +4218,8 @@ mod tests {
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
                 content: "".to_string(),
+                source_body: "".to_string(),
+                delimiter: "EOF".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -4217,6 +4237,8 @@ mod tests {
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
                 content: "$VAR and \"quoted\" 'single'\n".to_string(),
+                source_body: "$VAR and \"quoted\" 'single'\n".to_string(),
+                delimiter: "EOF".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -4234,6 +4256,8 @@ mod tests {
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
                 content: "line1\nline2\nline3\n".to_string(),
+                source_body: "line1\nline2\nline3\n".to_string(),
+                delimiter: "END".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -4251,6 +4275,8 @@ mod tests {
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
                 content: "hello\n".to_string(),
+                source_body: "hello\n".to_string(),
+                delimiter: "EOF".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 10,
@@ -4273,6 +4299,8 @@ mod tests {
             Token::HereDocStart,
             Token::HereDoc(HereDocData {
                 content: "\thello\n\tworld\n".to_string(),
+                source_body: "\thello\n\tworld\n".to_string(),
+                delimiter: "EOF".to_string(),
                 literal: false,
                 strip_tabs: true,
                 body_start_offset: 11,
@@ -4534,6 +4562,8 @@ mod tests {
         assert_eq!(
             Token::HereDoc(HereDocData {
                 content: "test".to_string(),
+                source_body: "test".to_string(),
+                delimiter: "EOF".to_string(),
                 literal: false,
                 strip_tabs: false,
                 body_start_offset: 0,
