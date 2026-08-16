@@ -86,8 +86,6 @@ pub enum LexerError {
     UnterminatedVarRef,
     InvalidEscape,
     InvalidNumber,
-    AmbiguousBoolean(String),
-    AmbiguousBooleanLike(String),
     InvalidFloatNoLeading,
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
@@ -121,13 +119,6 @@ impl fmt::Display for LexerError {
             LexerError::UnterminatedVarRef => write!(f, "unterminated variable reference"),
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
-            LexerError::AmbiguousBoolean(s) => {
-                write!(f, "ambiguous boolean, use lowercase '{}'", s.to_lowercase())
-            }
-            LexerError::AmbiguousBooleanLike(s) => {
-                let suggest = if s.eq_ignore_ascii_case("yes") { "true" } else { "false" };
-                write!(f, "ambiguous boolean-like '{}', use '{}' or '\"{}\"'", s, suggest, s)
-            }
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
@@ -942,25 +933,18 @@ fn lex_invalid_float_no_trailing(_lex: &mut logos::Lexer<Token>) -> Result<(), L
     Err(LexerError::InvalidFloatNoTrailing)
 }
 
-/// Lex an identifier, rejecting ambiguous boolean-like values.
+/// Lex an identifier.
+///
+/// `yes`, `no`, `TRUE`, and `False` are ordinary words here. The lexer used
+/// to reject them as boolean-like, which made `yes | head -3` — a POSIX
+/// utility — unrunnable, and `cat no` and `grep TRUE data.csv` errors. A
+/// lexer cannot see whether a boolean was wanted, so it rejected the word
+/// everywhere to catch the one place it might have mattered.
+///
+/// Where a boolean IS expected, the argument binder knows which parameter it
+/// is filling and can say so; the lexer never could.
 fn lex_ident(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
-    let s = lex.slice();
-
-    // Reject ambiguous boolean variants (TRUE, FALSE, True, etc.)
-    // Only lowercase 'true' and 'false' are valid booleans (handled by Token::True/False)
-    match s.to_lowercase().as_str() {
-        "true" | "false" if s != "true" && s != "false" => {
-            return Err(LexerError::AmbiguousBoolean(s.to_string()));
-        }
-        _ => {}
-    }
-
-    // Reject yes/no/YES/NO/Yes/No as ambiguous boolean-like values
-    if s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("no") {
-        return Err(LexerError::AmbiguousBooleanLike(s.to_string()));
-    }
-
-    Ok(s.to_string())
+    Ok(lex.slice().to_string())
 }
 
 /// Lex a long flag: `--name` → `name`
