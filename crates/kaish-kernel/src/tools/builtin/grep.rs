@@ -66,7 +66,7 @@ struct GrepArgs {
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Search directories recursively (same behavior as -r).
+    /// Search directories recursively (identical to -r; the uppercase spelling is accepted).
     #[arg(short = 'R')]
     recursive_upper: bool,
 
@@ -1969,7 +1969,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grep_recursive_uppercase_r() {
-        // -R should work the same as -r (muscle memory compatibility)
+        // -R should work the same as -r (the uppercase spelling is accepted)
         let mut ctx = make_recursive_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("TODO".into()));
