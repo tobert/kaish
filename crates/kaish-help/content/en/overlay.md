@@ -84,7 +84,7 @@ builtin, `cd` to a real path, or `kaish-vfs commit`), rather than the plain
 
 Under Sandboxed+overlay, `cd /tmp` moves cwd to a real LocalFs mount — from
 there, external commands work and see (and write) the real filesystem directly.
-That is the intended escape hatch for running compilers; be aware that writes
+That is the intended override for running compilers; be aware that writes
 in `/tmp` are not part of the overlay transaction.
 
 ## Structured diff output (`--json`)

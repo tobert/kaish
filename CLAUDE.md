@@ -223,14 +223,18 @@ fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need m
 
 ## Writing style
 
-kaish keeps a small, predictable subset of `sh`, chosen so muscle memory transfers. Our
-prose keeps a small, predictable subset of English, chosen for the same reason. Full
+kaish keeps a small, predictable subset of `sh`, chosen so existing `sh` skill transfers.
+Our prose keeps a small, predictable subset of English, chosen for the same reason. Full
 guide: `docs/style.md`. **These are weights, not gates** — there is no linter. Groom the
 text you touch; we are not scheduling a rewrite.
 
 - **Subset, not slang** — keep the vocabulary small; this constrains distinct words, not
-  length. Avoid metaphors that name a mental act as a physical one ("reach for"). `muscle
-  memory`, `footgun`, and `escape hatch` are load-bearing and stay. The list grows only on
+  length. Avoid metaphors that name a mental act as a physical one ("reach for"). Write
+  the engineering term instead of colloquial hazard metaphors: `hazard` (named with its
+  fix), `override` (a documented way past a restriction kaish enforces), `affordance`
+  (what an output signals can be done next). Vocabulary comes from cybernetics, cognitive
+  science, resilience and reliability engineering, and user-experience design. The list
+  grows only on
   evidence — a candidate must already be in consistent use across the corpus with one
   meaning, never on the argument that it would read well. Prefer the reader's word over a
   tool's private one ("allocations", not dhat's "blocks"). American spelling.
@@ -281,7 +285,8 @@ every entry below was verified to be in real use in the governed prose.
 | overlay | noun, adjective | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
 | trash | noun, verb | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
 | spill | verb, noun | To write oversize output to a file, or the file that results. |
-| escape hatch | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
+| hazard | noun | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
+| override | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. Never a workaround: an override is part of the design, and every restriction that has one names it. |
 
 ## Changelog
 

@@ -66,7 +66,7 @@ struct GrepArgs {
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Search directories recursively (uppercase, muscle memory alias).
+    /// Search directories recursively (same behavior as -r).
     #[arg(short = 'R')]
     recursive_upper: bool,
 

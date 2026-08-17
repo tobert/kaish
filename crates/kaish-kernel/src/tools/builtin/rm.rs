@@ -21,7 +21,7 @@ struct RmArgs {
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Alias for -r (uppercase, muscle memory).
+    /// Alias for -r (same behavior).
     #[arg(short = 'R')]
     recursive_upper: bool,
 

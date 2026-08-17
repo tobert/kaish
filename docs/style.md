@@ -1,8 +1,8 @@
 # kaish writing style
 
-kaish keeps a small, predictable subset of `sh`, chosen so muscle memory transfers. This
-guide keeps a small, predictable subset of English, chosen for the same reason. A reader
-who understands the language already understands the prose.
+kaish keeps a small, predictable subset of `sh`, chosen so existing `sh` skill transfers.
+This guide keeps a small, predictable subset of English, chosen for the same reason. A
+reader who understands the language already understands the prose.
 
 These are weights, not gates. There is no linter and there is no compliance pass. Apply
 them when you write, and groom the text you touch.
@@ -46,16 +46,34 @@ The class to avoid is the metaphor that names a mental act as a physical one: "r
 "the defensive-quoting dance." A reader who learned English second, or a model working
 from a partial context, cannot recover the intent from the figure.
 
-Some idiom is load-bearing and stays. `muscle memory` names the design thesis in two
-words. `footgun` names a hazard class we ship a fix for. `escape hatch` names a design
-commitment: kaish restricts, and every restriction ships a documented way out. Treat these
-as terms, not as decoration.
+Colloquial hazard metaphors are retired as terms (2026-08-17). They read
+human-friendly, but the usual reader is a model, and a colloquialism lights
+pathways trained on other people's prose — the reader gets the affect without
+the definition. The migration notes live in the working plan, not here; this
+guide states what to write instead, defined the way the term table in
+`CLAUDE.md` defines one:
+
+| Write | Meaning |
+|---|---|
+| hazard | A condition with a predictable failure. Name the hazard and the fix kaish ships for it; lead with neither. |
+| override | A documented, supported way past a restriction kaish enforces. Never a workaround: an override is part of the design, and every restriction that has one names it. |
+| affordance | What an output signals can be done next — an error that names its fix affords the fix. Design the output so the next action is visible in it. |
+| plain words | For the design thesis, write "familiar syntax" or "your `sh` habits apply" — existing skill transfers because the syntax is a subset, not because of a property of memory. |
+
+Vocabulary comes from the fields kaish is built in — cybernetics, cognitive
+science, resilience and reliability engineering — and from user-experience
+design. Prefer their terms (constraint, guarantee, hazard, override, recovery,
+affordance) over colloquialism, and keep each term to one meaning.
 
 **The list grows only on evidence.** A candidate must already be in consistent use across
-the corpus with one meaning — never on the argument that it would read well. `escape
-hatch` was on the banned list above until we counted: about thirty uses, one sense, no
-drift. The corpus was right and the guide was wrong, so the guide changed. Count the uses
-before you argue.
+the corpus with one meaning — never on the argument that it would read well. One
+candidate once won its count — about thirty uses, one sense, no drift — and the guide
+changed to match the corpus. Count the uses before you argue.
+
+Evidence also retires a term. The same word's count re-opened on 2026-08-17, when
+the audience sharpened: most readers are models, and a colloquialism that lands
+with a human lights the wrong pathways in a model. The uses were consistent; the
+reader had changed. The table above is the rule now.
 
 Borrowed jargon is a separate problem from metaphor. When a tool has a private word for
 something the reader can count, use the reader's word: `dhat` calls an allocation a
@@ -63,7 +81,7 @@ something the reader can count, use the reader's word: `dhat` calls an allocatio
 
 American spelling, to match the corpus (`modeled`, not `modelled`).
 
-> Before: Reach for `test` for muscle memory or where a plain command is wanted.
+> Before: Reach for `test` where the plain-command form is wanted.
 >
 > After: Use `test` when you want a plain command, or when the `sh` habit is faster to type.
 
@@ -172,6 +190,55 @@ below.
 reach this class: the mechanism leaks sit in files nobody has reason to open, so the audit
 has to ride along with any visit to the file.
 
+### Writing for the model reader
+
+The reader is usually a language model: it skims under truncation, it
+pattern-matches from examples, and it meets a rule the second time as an error
+message. These weights apply on top of the ones above, full weight wherever the
+table says full weight.
+
+**Example before rule.** The example is the rule; the sentence after it names what
+the example shows. A model completes patterns it saw, not rules it read — a
+section that leads with prose teaches the skim path nothing.
+
+> Before: **Quote to join.** `$VAR`, `$(cmd)`, and globs are each a separate word
+> unless quoted — kaish never pastes adjacent unquoted tokens.
+>
+> After: `"$dir/file.txt"` — one path. kaish keeps `$VAR`, `$(cmd)`, and globs
+> each a separate word; quote the whole word to join text with interpolation.
+
+**Show the wrong way, marked.** The reader's prior already contains the wrong
+form, so print it and cross it out: the correct form first, the wrong form
+explicitly marked (`# error — use …`), the two adjacent. Never show an unmarked
+wrong example — a code block reads as an invitation, and an invitation gets
+accepted.
+
+> Before: Unquoted text adjacent to an expansion is a PARSE ERROR (quote the word).
+>
+> After: `echo "$dir/file.txt"` is one path; the unquoted `echo $dir/file.txt`
+> is a parse error — shown marked, next to the fix, wherever it appears.
+
+**Quote the error.** A rule that fails loud quotes its failure text, and the
+failure text names its help topic — the reader meets the rule twice, once in each
+direction, and the second meeting is where recall happens. `help syntax` says a
+bare `for x in $xs` is an error (E012); the E012 message says "bare variable in
+for loop iterates once" and hands back six runnable fixes. Keep both ends of that
+loop in sync when either end changes.
+
+**Three registers.** Each guarantee lives in exactly three places — the
+onboarding spine, the topic doc, and the error string — and nowhere else.
+Repetition across those registers is design: a model that missed the spine still
+meets the rule in the topic, and again in the error. A fourth copy is drift
+waiting to happen — when a guarantee needs a new home, vacate an old one.
+
+**Separate the embedder from the agent.** When only the host can fix a failure,
+write "this session is configured to…" — name the setting in prose, not the Rust
+struct. `KernelConfig::` spellings belong in `docs/EMBEDDING.md`, or in a message
+that labels the embedder as the reader who can act. This is the dual-audience
+rule: the test is still "can the reader act on it", and when the answer is
+"only the embedder", the message writes for both readers and labels which half
+can act.
+
 ### Groom at the point of touch
 
 When you edit a file, bring the part you edited into voice. Leave the rest alone.
@@ -179,51 +246,3 @@ When you edit a file, bring the part you edited into voice. Leave the rest alone
 We are not scheduling a rewrite. A bulk pass would freeze this guide before we know
 whether it works, and it would separate the style decision from the person who understands
 the text. Grooming keeps both together.
-
-## Known debt
-
-These are real violations, found by cross-model review of this guide. They are recorded so
-that whoever next touches these files knows to fix them, not as a rewrite plan. Clear an
-entry when you fix it, and add one when you find a violation you are not fixing today.
-
-- Example labels have not caught up with the imperative ruling. About a hundred of the 311
-  labels in the builtin corpus are still noun phrases ("Case-insensitive", "Compact
-  notation (default)"). Fix the ones in a file you are already editing; there is no sweep
-  scheduled, deliberately — the label needs the person who understands the example.
-- Error and diagnostic strings are full weight and largely unswept — about 745 failure
-  sites. An agent reads a failure message more often than any help topic, so this is the
-  highest-value surface left. A first pass found seven that name something the reader
-  cannot act on: `exec.rs:81` and `spawn.rs:103` (`allow_external_commands=false`, a
-  `KernelConfig` field — `env.rs:180` says "sandbox mode" for the same condition and reads
-  better), `timeout.rs:134` (`into_arc()`), `kaish_vfs.rs:39` and `:410`
-  (`KernelConfig::with_overlay(true)`, the `localfs` feature), `kill.rs:518`, and
-  `uname.rs:208` (cargo feature names).
-- **Open question on those seven:** some are arguably not leaks but deliberate
-  dual-audience messages. `kaish_vfs.rs:39` names the REPL flag *and* the embedder call,
-  each labeled, and a `timeout` dispatcher error can only be fixed by an embedder — so the
-  reader who can act IS the embedder. Decide the rule before rewriting them; the guide's
-  own test ("does the reader need it to predict behavior") does not settle who the reader
-  is when a builtin fails for a reason only the host can change.
-- Two messages state a constraint without its grammar: `sleep.rs:69` ("invalid time
-  interval" — no value, no accepted forms, unlike its sibling at `:107`) and
-  `kaish_trash.rs:196` (value but no suffix rules). `timeout.rs:100` is the model to copy.
-- Tools behind a capability feature are only walked by the mechanism-leak test when the
-  build enables them. Run it with `--features full` after touching `timeout`, `tokens`,
-  or `ps`; the default CI run does not see them.
-
-Mechanism leaks in **published param descriptions** are now a test, not a rule:
-`crates/kaish-kernel/tests/published_prose_tests.rs` walks the live registry and fails on
-`to_argv`, `consumes=`, `args.positional`, `clap`, and friends. It was written to lock in
-the sweep below and immediately found thirteen builtins the hand-audit had missed — which
-is the argument for keeping it. A `///` on a **hidden positional** is published:
-`params_from_clap` keeps hidden positionals on purpose, because they are the real operand
-surface for `cat`, `mkdir`, and the rest.
-
-Cleared: twenty-three builtins' `Sink —` docs, which published clap mechanism as the
-entire description of a parameter; `jq_native.rs`'s `consumes=2`, `See _arg above`, and
-its cross-reference to Rust module docs; `sed.rs`'s `(clap Append → schema repeatable)`,
-its `-i.bak` lexer note, and its cross-reference to the deleted `issues.md`; the
-`bg`/`fg`/`wait` "or PID" string, which described a code path that does not exist; and the
-four "reach for" and one "defensive-quoting dance" sites in help content, `fragments.rs`,
-and `docs/LANGUAGE.md`. `escape hatch` left this list by becoming a term rather than by
-being rewritten — see "Subset, not slang".
