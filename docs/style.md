@@ -63,7 +63,9 @@ guide states what to write instead, defined the way the term table in
 Vocabulary comes from the fields kaish is built in — cybernetics, cognitive
 science, resilience and reliability engineering — and from user-experience
 design. Prefer their terms (constraint, guarantee, hazard, override, recovery,
-affordance) over colloquialism, and keep each term to one meaning.
+affordance) over colloquialism, and keep each term to one meaning. This table
+is writing guidance; the terms that carry a guarantee live in the table in
+`CLAUDE.md`.
 
 **The list grows only on evidence.** A candidate must already be in consistent use across
 the corpus with one meaning — never on the argument that it would read well. One
@@ -225,11 +227,13 @@ bare `for x in $xs` is an error (E012); the E012 message says "bare variable in
 for loop iterates once" and hands back six runnable fixes. Keep both ends of that
 loop in sync when either end changes.
 
-**Three registers.** Each guarantee lives in exactly three places — the
-onboarding spine, the topic doc, and the error string — and nowhere else.
+**Three registers.** Each guarantee lives in exactly three working places —
+the onboarding spine, the topic doc, and the error string — and nowhere else.
 Repetition across those registers is design: a model that missed the spine still
-meets the rule in the topic, and again in the error. A fourth copy is drift
-waiting to happen — when a guarantee needs a new home, vacate an old one.
+meets the rule in the topic, and again in the error. The README and the help
+overview may *name* a guarantee — they are the invitation — but they do not
+restate its mechanism. A fourth working copy is drift waiting to happen — when
+a guarantee needs a new home, vacate an old one.
 
 **Separate the embedder from the agent.** When only the host can fix a failure,
 write "this session is configured to…" — name the setting in prose, not the Rust

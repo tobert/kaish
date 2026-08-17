@@ -39,7 +39,7 @@ single-char FS is literal; a multi-char FS is an ERE regex. `-F '\|'` /
 
 ## Strings & substitution
 
-These DO populate / mutate (a common awk pitfall elsewhere — here they work):
+These DO populate / mutate (a common awk hazard elsewhere — here they work):
 
 ```sh
 n = split($0, a, ",")      # fills a[1]..a[n], returns n

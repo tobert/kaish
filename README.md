@@ -92,7 +92,7 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# regular *.log works but glob adds modern affordances and its
+# regular *.log works but glob adds recursive ** patterns, and its
 # data passes to the for loop as a JSON array
 for file in $(glob **/*.log); do
     echo "logfile: $file"

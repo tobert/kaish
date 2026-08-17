@@ -165,7 +165,7 @@ Kernel (核)
 
 kaish prefers designs where the **embedder holds the state and the control flow**, and the
 kernel supplies the mechanism that makes holding it correct. This is a design preference,
-not a rule about one subsystem — reach for it whenever a new seam is being drawn.
+not a rule about one subsystem — apply it whenever a new seam is being drawn.
 
 The test to apply at a seam: does the kernel *ask* the embedder for an answer, or does it
 *run* the embedder's work? Asking is a pure function on the request path — the kernel keeps
@@ -313,7 +313,7 @@ releases may carry breaking changes.
 - **Every version bump gets a git tag** `vX.Y.Z` at the bump commit. One tag per
   released version, no gaps — the changelog and `git tag -l` must agree.
 
-## Contributor conventions & gotchas
+## Contributor conventions & common hazards
 
 Hard-won rules that aren't obvious from the code. Violating these silently breaks things.
 
@@ -368,7 +368,7 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
   variadic field for passthrough builtins (`timeout`/`exec`). Domain parsing
   (sed expressions, awk programs, find predicates) stays hand-rolled — clap only
   owns the argv layer.
-- **clap builtin gotchas:** `with_output` drops the `rich_json` payload — use
+- **clap builtin hazards:** `with_output` drops the `rich_json` payload — use
   `with_output_and_text` when a builtin needs a custom pipe representation;
   `to_argv()` injects a `--` separator, so don't unit-test clap builtins via raw
   `positional` (route through an `execute_argv`-style entrypoint).

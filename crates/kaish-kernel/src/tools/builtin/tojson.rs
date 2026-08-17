@@ -62,7 +62,7 @@ impl Tool for ToJson {
             [
                 ("Serialize a value", "tojson $cfg"),
                 ("Pretty-print to a file", "tojson --pretty $cfg | tee config.json"),
-                ("Escape hatch for export", "export CFG_JSON=$(tojson $cfg)"),
+                ("Export a record through the environment", "export CFG_JSON=$(tojson $cfg)"),
                 ("A scalar is valid JSON", "tojson hello"),
             ],
         )

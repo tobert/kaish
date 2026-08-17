@@ -61,7 +61,7 @@ that call only.
 `execute()` call and commit in the next, the transaction from the first call
 was already discarded when its kernel was dropped.
 
-## Escape hatches (writes that bypass the overlay)
+## Overrides (writes that bypass the overlay)
 
 Under Sandboxed+overlay, the following mounts are **real LocalFs** and escape
 the transaction:
