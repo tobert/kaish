@@ -103,6 +103,9 @@ flavor. Do not use it about prose.
 surfaces", "the surface to use for"). In reader-facing text, name the thing: the tool
 schema, the error message, the help topic.
 
+`seam` was a synonym for `boundary`, borrowed from legacy-refactoring jargon, and
+the sewing metaphor is undefined for a general reader. Write `boundary`.
+
 **Example labels are imperative.** "Send STOP by name", not "Named shorthand" and not
 "Alternation (ERE or GNU BRE)". The label sits next to a command, so it should read like
 one.

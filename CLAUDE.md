@@ -165,9 +165,10 @@ Kernel (核)
 
 kaish prefers designs where the **embedder holds the state and the control flow**, and the
 kernel supplies the mechanism that makes holding it correct. This is a design preference,
-not a rule about one subsystem — apply it whenever a new seam is being drawn.
+not a rule about one subsystem — apply it whenever a new boundary between kernel and
+embedder is being drawn.
 
-The test to apply at a seam: does the kernel *ask* the embedder for an answer, or does it
+The test to apply at a boundary: does the kernel *ask* the embedder for an answer, or does it
 *run* the embedder's work? Asking is a pure function on the request path — the kernel keeps
 control, and the answer is data. Running means the kernel owns a task, a clock, and a
 cancellation policy on the embedder's behalf, and those are three decisions per deployment
@@ -184,7 +185,7 @@ Three things follow:
 - **The kernel keeps what must be correct under concurrency**, and only that: the job
   table, the trash contract, the output limits. Inverting *those* would make every
   embedder re-implement the hard part.
-- **Helpers compose above the seam, never inside it.** A reusable waiter, a pending queue,
+- **Helpers compose above the boundary, never inside it.** A reusable waiter, a pending queue,
   a retry policy — write them as composable pieces in the REPL or a util crate that is
   itself an embedder. A convenience that reads a clock or parks a decision inside the
   kernel has moved policy back in through the back door.
