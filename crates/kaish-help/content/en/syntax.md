@@ -145,6 +145,27 @@ cmd > $dir/out.txt        # error — quote "$dir/out.txt"
 # (single-token words like file.txt or v1.2.3 are fine unquoted)
 ```
 
+## Comments
+
+```sh
+# whole-line comment
+echo hi                   # trailing comment — the space before # is required
+
+# `#` starts a comment only at the START of a word. Everywhere else it is an
+# ordinary word character, as in bash and sh:
+echo abc#3                # prints abc#3
+echo 2d25fb02#3           # prints 2d25fb02#3 — an id keeps its #<seq>
+echo https://ex.com/p#sec # prints the whole URL, fragment included
+echo abc #3               # prints abc — the space makes #3 a comment
+
+# A # that follows a token kaish keeps as its own word is an ERROR, not a
+# comment — commenting there would drop the rest of the line at exit 0:
+echo "$x#3"               # correct — quote the whole word
+echo $x#3                 # error — # after a variable reference
+echo "$(echo a)#3"        # correct
+echo $(echo a)#3          # error — # after a closing )
+```
+
 ## Pipes & Redirects
 
 ```sh

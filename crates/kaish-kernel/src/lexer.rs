@@ -114,6 +114,12 @@ pub enum LexerError {
     /// note on `Token`. `kind` is `"flag"` or
     /// `"variable"`; `text` is the whole matched word (sigil included).
     NonAsciiName { kind: &'static str, text: String },
+    /// A `#` that is not at the start of a word — `$x#3`, `"abc"#3`, `$(f)#3`.
+    /// POSIX opens a comment only at a word start, and the word classes carry
+    /// `#` as an ordinary character, so a `#` that reaches this error follows
+    /// something that cannot absorb it. Commenting from here would drop the
+    /// rest of the line, `;` separators and whole commands included, at exit 0.
+    HashInsideWord,
 }
 
 impl fmt::Display for LexerError {
@@ -147,6 +153,12 @@ impl fmt::Display for LexerError {
                 f,
                 "{kind} `{text}` has a non-ASCII character; {kind}s are ASCII-only — \
                  quote it to use as a literal word instead"
+            ),
+            LexerError::HashInsideWord => write!(
+                f,
+                "`#` starts a comment only at the start of a word, so a comment here \
+                 would drop the rest of the line — quote the whole word to keep `#` \
+                 inside it, e.g. \"$x#3\". Put a space before `#` to start a comment."
             ),
         }
     }
@@ -385,7 +397,7 @@ pub enum Token {
     Dot,
 
     /// Tilde path: `~/foo`, `~user/bar` - value includes the full string.
-    #[regex(r"~[a-zA-Z0-9_./+\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
+    #[regex(r"~[a-zA-Z0-9_./+#\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
     TildePath(String),
 
     /// Bare tilde: `~` alone (expands to $HOME)
@@ -397,12 +409,12 @@ pub enum Token {
     /// trailing-slash form uses `*` (not `+`) after the slash so `dest/`
     /// lexes as one token instead of `Ident("dest")` + `Path("/")` — the
     /// latter split silently turned `cp a b dest/` into a 4-operand command.
-    #[regex(r"\.\./[a-zA-Z0-9_./\-\u{80}-\u{10FFFF}]+", lex_relative_path, priority = 3)]
-    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
+    #[regex(r"\.\./[a-zA-Z0-9_./#\-\u{80}-\u{10FFFF}]+", lex_relative_path, priority = 3)]
+    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.#\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./#\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
     RelativePath(String),
 
     /// Dot-slash path: `./foo`, `./script.sh`.
-    #[regex(r"\./[a-zA-Z0-9_./\-\u{80}-\u{10FFFF}]+", lex_dot_slash_path, priority = 3)]
+    #[regex(r"\./[a-zA-Z0-9_./#\-\u{80}-\u{10FFFF}]+", lex_dot_slash_path, priority = 3)]
     DotSlashPath(String),
 
     /// Dot-prefixed bareword: `.parent`, `.gitignore`, `.foo.bar`.
@@ -410,7 +422,7 @@ pub enum Token {
     /// (the POSIX `.` source alias) which only matches a bare `.` — the source
     /// alias requires whitespace before its file argument (`. script`), so
     /// `.parent` (no space) is unambiguously a single bareword.
-    #[regex(r"\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.#\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     DottedIdent(String),
 
     #[token("{")]
@@ -615,7 +627,7 @@ pub enum Token {
     /// strings. Distinguished from `Int` because at least one alpha character
     /// follows the leading digits — the lexer commits to "this is a string,
     /// not a number." Treated as a bareword string in expression position.
-    #[regex(r"[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
+    #[regex(r"[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.#\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
     /// Numeric word containing an embedded hyphen run, or a minus-led numeric
@@ -653,7 +665,7 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Absolute path: `/tmp/out`, `/etc/hosts`, `/tmp/日本語`, etc.
-    #[regex(r"/[a-zA-Z0-9_./+\-\u{80}-\u{10FFFF}]*", lex_path)]
+    #[regex(r"/[a-zA-Z0-9_./+#\-\u{80}-\u{10FFFF}]*", lex_path)]
     Path(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -666,15 +678,21 @@ pub enum Token {
     /// `a@b.com` (bare `@` is an ordinary word character, as in bash). The
     /// leading class excludes digits — `NumberIdent`/`Int` own digit-leading
     /// words — and the ASCII operator/whitespace set.
-    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@\-\u{80}-\u{10FFFF}]*", lex_ident)]
+    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@#\-\u{80}-\u{10FFFF}]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
     // Structural tokens
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Comment: `# ...` to end of line
-    #[regex(r"#[^\n\r]*", allow_greedy = true)]
+    /// Comment: `# ...` to end of line, and only where a word can start.
+    ///
+    /// `#` is an ordinary character inside a word — `echo abc#3` prints
+    /// `abc#3`, as it does in bash and `sh` — so the word classes above carry
+    /// `#` and a mid-word `#` never reaches this rule. What does reach it
+    /// after a non-word character is a loud error, not a comment: see
+    /// `lex_comment`.
+    #[regex(r"#[^\n\r]*", lex_comment, allow_greedy = true)]
     Comment,
 
     /// Newline (significant in kaish - ends statements)
@@ -966,6 +984,34 @@ fn lex_invalid_float_no_leading(_lex: &mut logos::Lexer<Token>) -> Result<(), Le
 /// `UnexpectedCharacter` they would have hit otherwise.
 fn reject_backtick(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
     Err(LexerError::BackticksNotSupported)
+}
+
+/// True where a new word can begin, so a following `#` opens a comment.
+///
+/// Whitespace and the operators that end a command (`; | & < >`) and the
+/// opening `(` are word boundaries in every shell. A closing `)` is
+/// deliberately absent: `$(f)#3` is one word in bash, and the lexer cannot
+/// tell that `)` from a subshell's here, so both are a loud error rather than
+/// a silent comment.
+fn opens_a_word(c: char) -> bool {
+    c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(')
+}
+
+/// Accept a comment only at the start of a word.
+///
+/// POSIX opens a comment at a word start, and bash and `/bin/sh` agree:
+/// `echo abc#3` prints `abc#3`, and only `echo abc #3` comments. kaish used to
+/// start a comment at any `#`, which truncated the word and swallowed the rest
+/// of the line — `;` separators and whole commands included — at exit 0. That
+/// is indistinguishable from commands that ran and printed nothing, so the
+/// position that cannot be a comment is an error instead.
+fn lex_comment(lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
+    match lex.source()[..lex.span().start].chars().next_back() {
+        // Start of input, or a real word boundary: a comment.
+        None => Ok(()),
+        Some(c) if opens_a_word(c) => Ok(()),
+        Some(_) => Err(LexerError::HashInsideWord),
+    }
 }
 
 /// Lex an invalid float without trailing digit (like 5.).

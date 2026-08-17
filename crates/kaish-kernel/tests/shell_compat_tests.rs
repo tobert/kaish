@@ -1176,3 +1176,62 @@ shell_compat! {
     absent: "unreachable",
     exit: 1,
 }
+
+// ---- `#` opens a comment only at the start of a word ----------------------
+// POSIX, and bash and /bin/sh agree on every row below. kaish used to start a
+// comment at any `#`, which truncated the word AND swallowed the rest of the
+// line — `;` separators included — at exit 0. See `hash_word_tests.rs`.
+
+shell_compat! {
+    name: hash_mid_word_is_literal,
+    script: "echo abc#3",
+    eq: "abc#3",
+}
+
+shell_compat! {
+    name: hash_mid_word_does_not_swallow_the_line,
+    script: "echo abc#3; echo two",
+    eq: "abc#3\ntwo",
+}
+
+shell_compat! {
+    name: hash_in_digit_leading_word_is_literal,
+    script: "echo 2d25fb02#3",
+    eq: "2d25fb02#3",
+}
+
+shell_compat! {
+    name: hash_in_path_is_literal,
+    script: "echo /foo/bar#1",
+    eq: "/foo/bar#1",
+}
+
+shell_compat! {
+    name: repeated_hashes_are_literal,
+    script: "echo a#b#c",
+    eq: "a#b#c",
+}
+
+shell_compat! {
+    name: trailing_hash_belongs_to_the_word,
+    script: "echo abc# 3",
+    eq: "abc# 3",
+}
+
+shell_compat! {
+    name: spaced_hash_starts_a_comment,
+    script: "echo abc #3",
+    eq: "abc",
+}
+
+shell_compat! {
+    name: hash_after_semicolon_starts_a_comment,
+    script: "echo a;#c",
+    eq: "a",
+}
+
+shell_compat! {
+    name: quoted_leading_hash_is_literal,
+    script: "echo '#3'",
+    eq: "#3",
+}

@@ -349,6 +349,36 @@ Variable names and flags are narrower and stay ASCII-only, matching bash's
 typo is loud instead of silently truncating to `$caf`/`--caf` plus a stray
 word. Quote either to pass it as a literal string instead.
 
+### Comments — `#` starts one only at the start of a word
+
+```sh
+echo abc#3                     # prints abc#3 — `#` is an ordinary word character
+echo 2d25fb02#3                # prints 2d25fb02#3 — ids keep their #<seq>
+echo https://ex.com/p#section  # prints the whole URL, fragment included
+echo abc #3                    # prints abc — the space makes `#3` a comment
+```
+
+A `#` opens a comment only where a word can start: at the start of input, after
+whitespace, or after an operator (`;`, `|`, `&`, `<`, `>`, `(`). Everywhere else
+it is a character in the word, as it is in bash and `sh`. Put a space before `#`
+to start a comment.
+
+A `#` that can be neither — because it follows something kaish keeps as its own
+word — is a lexer error, not a comment:
+
+```sh
+echo "$x#3"                    # correct — quote the whole word
+echo $x#3                      # error — `#` after a variable reference
+echo "$(echo a)#3"             # correct
+echo $(echo a)#3               # error — `#` after a closing `)`
+```
+
+Commenting from those positions would drop the rest of the line, `;` separators
+and whole commands with it, and exit 0 — a script that silently loses two
+commands looks exactly like a script whose commands printed nothing. The error
+names the quote fix instead. `$(f)#3` is one word in bash; kaish cannot tell
+that `)` from a subshell's, so it refuses rather than guessing.
+
 ### Quote to join — kaish does not paste adjacent tokens
 
 kaish never concatenates adjacent *unquoted* tokens into one word. `$VAR`,

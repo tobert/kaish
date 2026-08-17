@@ -56,6 +56,11 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **`#` starts a comment only at the start of a word** — `echo abc#3` printed `abc`
+  and silently dropped the rest of the line, `;` separators and whole commands
+  included, at exit 0. It prints `abc#3` now, as bash and `sh` do.
+- **A `#` that can join no word is a loud lexer error** — `echo $x#3` and
+  `echo $(f)#3` name the quote fix instead of commenting the line away.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.
