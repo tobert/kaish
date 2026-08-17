@@ -376,8 +376,27 @@ echo $(echo a)#3               # error — `#` after a closing `)`
 Commenting from those positions would drop the rest of the line, `;` separators
 and whole commands with it, and exit 0 — a script that silently loses two
 commands looks exactly like a script whose commands printed nothing. The error
-names the quote fix instead. `$(f)#3` is one word in bash; kaish cannot tell
-that `)` from a subshell's, so it refuses rather than guessing.
+names the quote fix instead.
+
+The accept list is exactly whitespace, start of input, and `; | & < > (`. A
+closing `)`, `]`, or `}` is **not** on it, so a comment glued directly to one is
+an error where bash accepts it — put a space before the `#`:
+
+```sh
+case $x in a) # comment            # correct
+case $x in a)# comment             # error — space before #
+[[ -f f ]] # comment               # correct
+cmd 2>&1 # comment                 # correct — `1` is a word character
+```
+
+`$(f)#3` is one word in bash, and a `case` pattern's `)` is not a command
+substitution's. The lexer cannot tell those two `)` apart, so it refuses both
+rather than guessing — the guess that admits `$(f)#3` as a comment would drop
+the rest of the line, which is the defect this rule exists to close.
+
+A name containing `#` is not a valid assignment target: `abc#3=5` is error
+`E018`, because `$abc#3` would not read it back. kaish refuses to create a
+variable nothing can reference.
 
 ### Quote to join — kaish does not paste adjacent tokens
 

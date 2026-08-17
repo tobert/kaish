@@ -1431,7 +1431,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
     let mut i = 0;
     // Tracks the previously copied character so `$#` (arg count) isn't
     // mistaken for a comment introducer.
-    let mut prev_char: Option<char> = None;
 
     while i < n {
         let (pos, ch) = chars[i];
@@ -1443,7 +1442,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
         if ch == '\\' && i + 1 < n {
             out.push(ch);
             out.push(chars[i + 1].1);
-            prev_char = Some(chars[i + 1].1);
             i += 2;
             continue;
         }
@@ -1462,7 +1460,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     out.push('\''); // closing quote
                     i += 1;
                 }
-                prev_char = Some('\'');
             }
 
             // Double-quoted string: arithmetic still expands inside;
@@ -1505,17 +1502,28 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     out.push(dch);
                     i += 1;
                 }
-                prev_char = Some('"');
             }
 
             // Comment: copy verbatim through end-of-line (logos tokenizes
-            // and drops it). The `$` guard keeps `$#` (arg count) intact.
-            '#' if prev_char != Some('$') => {
+            // and drops it), but only where a word can start — `#` is an
+            // ordinary word character mid-word.
+            //
+            // The test reads the last character of `out`, which is the exact
+            // buffer logos will lex: deciding from it makes this pass and
+            // `lex_comment` agree by construction. They must. The scanner
+            // extracts `$((…))` and heredoc bodies, so a scanner that skipped
+            // a mid-word `#` to end-of-line would drop an arithmetic expansion
+            // that logos then meets as raw `$((`.
+            //
+            // This replaced a `prev_char` tracker that only approximated the
+            // same character — it recorded `'_'` for marker text, which is the
+            // real last byte of a marker. `out` needs no approximation. `$#`
+            // stays intact without the old `$` guard: `$` does not open a word.
+            '#' if out.chars().next_back().is_none_or(opens_a_word) => {
                 while i < n && chars[i].1 != '\n' && chars[i].1 != '\r' {
                     out.push(chars[i].1);
                     i += 1;
                 }
-                prev_char = Some('#');
             }
 
             // `<<<` here-string passes through; `<<` starts a heredoc.
@@ -1523,7 +1531,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                 if i + 2 < n && chars[i + 2].1 == '<' {
                     out.push_str("<<<");
                     i += 3;
-                    prev_char = Some('<');
                     continue;
                 }
                 let heredoc_index = heredocs.len() + pending.len();
@@ -1536,7 +1543,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     &mut replacements,
                     heredoc_index,
                 );
-                prev_char = Some('_'); // marker text ends with '_'
             }
 
             // `$((` arithmetic; `${...}` variable reference region.
@@ -1550,7 +1556,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     &mut arithmetics,
                     &mut replacements,
                 )?;
-                prev_char = Some('_');
             }
             '$' if i + 1 < n && chars[i + 1].1 == '{' => {
                 // Copy the ${...} region verbatim, tracking brace depth.
@@ -1582,7 +1587,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     out.push(vch);
                     i += 1;
                 }
-                prev_char = Some('}');
             }
 
             // Unescaped newline: copy it, then collect any pending
@@ -1590,7 +1594,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
             '\n' => {
                 out.push('\n');
                 i += 1;
-                prev_char = Some('\n');
                 if !pending.is_empty() {
                     collect_heredoc_bodies(
                         &chars,
@@ -1616,7 +1619,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
             {
                 out.push('\n');
                 i += 1;
-                prev_char = Some('\n');
                 collect_heredoc_bodies(
                     &chars,
                     &mut i,
@@ -1631,7 +1633,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
             _ => {
                 out.push(ch);
                 i += 1;
-                prev_char = Some(ch);
             }
         }
     }
@@ -2197,6 +2198,20 @@ fn relex_fragment(
     base: usize,
     result: &mut Vec<Spanned<Token>>,
 ) -> Result<(), Vec<Spanned<LexerError>>> {
+    // A fragment of a split word is mid-word by construction: the word token
+    // it came from cannot begin with `#`, so a fragment that does is always
+    // preceded by a marker or by the word's earlier part. Re-lexing starts at
+    // byte 0 of the fragment, where `lex_comment` would see start-of-input and
+    // mint a comment that swallows the rest of the line — the defect this
+    // whole rule exists to close. Reject it here instead, with the same error
+    // the direct path gives `$(f)#3`.
+    if fragment.starts_with('#') {
+        return Err(vec![Spanned::new(
+            LexerError::HashInsideWord,
+            base..base + fragment.len(),
+        )]);
+    }
+
     let mut errors = Vec::new();
     for (tok, span) in Token::lexer(fragment).spanned() {
         let span = base + span.start..base + span.end;

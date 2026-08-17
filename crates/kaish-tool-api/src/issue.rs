@@ -63,6 +63,12 @@ pub enum IssueCode {
     /// for other uses (filenames, `source foo.kai`), so this is caught here
     /// rather than by tightening the lexer regex.
     DottedAssignmentTarget,
+    /// An assignment target contains `#` (`abc#3=5`). The `Ident` token admits
+    /// `#` so words, ids, and URLs keep it, but `$abc#3` is itself an error,
+    /// so such a variable could be created and never read back. Caught here
+    /// rather than by tightening the lexer regex, for the same reason
+    /// `DottedAssignmentTarget` is.
+    UnreadableAssignmentTarget,
 }
 
 impl IssueCode {
@@ -93,6 +99,7 @@ impl IssueCode {
             IssueCode::LastResultFieldAccess => "E015",
             IssueCode::LvalueUndefinedRoot => "E016",
             IssueCode::DottedAssignmentTarget => "E017",
+            IssueCode::UnreadableAssignmentTarget => "E018",
         }
     }
 
@@ -127,7 +134,8 @@ impl IssueCode {
             | IssueCode::ScatterWithoutGather
             | IssueCode::LastResultFieldAccess
             | IssueCode::LvalueUndefinedRoot
-            | IssueCode::DottedAssignmentTarget => Severity::Error,
+            | IssueCode::DottedAssignmentTarget
+            | IssueCode::UnreadableAssignmentTarget => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

@@ -136,6 +136,29 @@ impl<'a> Validator<'a> {
                     .with_suggestion(format!("use `{root}[{rest}]=value`")),
                 );
             }
+            if name.contains('#') {
+                // `#` is an ordinary word character, so `abc#3` is a legal
+                // word — but `$abc#3` is a lexer error, so this assignment
+                // would bind a variable that can never be read back. Silent
+                // creation of an unreachable name is worse than a refusal.
+                //
+                // TODO: `-` has the same disease and predates this check —
+                // `a-b=5` binds `a-b`, and `$a-b` reads `$a` then `-b`. Left
+                // alone here because the name class is #349/#351's to settle.
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::UnreadableAssignmentTarget,
+                        format!(
+                            "'{name}' is not a valid assignment target — `#` is a word \
+                             character, so `${name}` would not read this variable back"
+                        ),
+                    )
+                    .with_suggestion(format!(
+                        "drop the `#`, e.g. `{}=value`",
+                        name.replace('#', "_")
+                    )),
+                );
+            }
             // Bind the variable name in scope
             self.scope.bind(name);
         } else if !self.scope.is_bound(name) {

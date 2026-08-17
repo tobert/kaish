@@ -164,6 +164,10 @@ echo "$x#3"               # correct — quote the whole word
 echo $x#3                 # error — # after a variable reference
 echo "$(echo a)#3"        # correct
 echo $(echo a)#3          # error — # after a closing )
+
+# A closing ) ] } is not a comment position either — put a space before #:
+case $x in a) # comment   # correct
+case $x in a)# comment    # error — space before #
 ```
 
 ## Pipes & Redirects

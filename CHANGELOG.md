@@ -11,6 +11,8 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`E018` rejects an assignment target containing `#`** — `abc#3=5` bound a
+  variable that nothing could read back, because `$abc#3` is itself an error.
 - **`kaish --plan <command>` prints the statement plans as JSON** — command analysis
   was reachable only from Rust before this.
 - **`--plan` executes nothing and builds no kernel** — planning is a pure function of
@@ -61,6 +63,12 @@ breaking entries are marked **BREAKING**.
   included, at exit 0. It prints `abc#3` now, as bash and `sh` do.
 - **A `#` that can join no word is a loud lexer error** — `echo $x#3` and
   `echo $(f)#3` name the quote fix instead of commenting the line away.
+- **An arithmetic expansion after a mid-word `#` still expands** — the scanner
+  extracted `$((…))` before the lexer and used the old comment rule, so
+  `echo abc# $((1+2))` lost the expansion and failed to parse.
+- **`echo $((1+2))#3` reports the mid-word `#` error** — a `#` glued to an
+  expansion was re-lexed from the start of a fragment, where it looked like a
+  fresh comment.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.
