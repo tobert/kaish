@@ -56,6 +56,11 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **An unterminated `$(` inside a double-quoted string is a loud parse error**
+  — `echo "pre $(echo hi"` used to fabricate a closing `)` and run the
+  substitution anyway whenever the remainder happened to parse on its own; it
+  now reports "unterminated command substitution: missing `)`", matching the
+  unquoted form.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.
