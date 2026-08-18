@@ -3,13 +3,13 @@
 **kaish** (会sh) is a predictable shell for AI agents: an embeddable Rust library with a
 reference REPL.
 
-## Project Overview
+## Project overview
 
-会sh is stable and the language has settled down. There may still be some changes before 1.0
-for ergonomics or correctness. The focus is the embeddable kernel/library and a reference REPL
-that keeps the interactive use case honest. kaish does **not** ship its own MCP server — that
-surface lives in the embedders: [kaibo](https://github.com/tobert/kaibo) (解剖) is the MCP
-showcase (a read-only codebase-analysis MCP that drives kaish), and
+会sh is stable. Changes before 1.0 are limited to ergonomics and correctness. The focus is
+the embeddable kernel/library and a reference REPL that tests the kernel against interactive
+use. kaish does **not** ship its own MCP server — MCP servers live in the embedders:
+[kaibo](https://github.com/tobert/kaibo) (解剖) is the MCP showcase (a read-only
+codebase-analysis MCP that drives kaish), and
 [kaijutsu](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP interface. Both
 have the same maintainer, so API changes are straightforward where they improve the projects
 together.
@@ -22,9 +22,9 @@ The kaish validator is the only checker that sees them.**
 
 **Explicitly dropped features**: process substitution `<(cmd)`, backticks, `eval`, word splitting
 
-## Crate Structure
+## Crate structure
 
-Eagerly read the `crates/kaish-types/` crate in full.
+Read `crates/kaish-types/` in full before working in the kernel.
 
 ```
 crates/
@@ -40,7 +40,7 @@ crates/
 └── kaish-wasi/       # WASI target (wasm32-wasip1)
 ```
 
-## Build Commands
+## Build commands
 
 ```bash
 cargo build                              # Build workspace
@@ -58,13 +58,12 @@ cargo insta review                       # Interactive review of pending snapsho
 CI (`.github/workflows/ci.yml`) runs the gates on every PR and push to `main`:
 `cargo test --all --locked`, clippy with `-D warnings`, rustdoc with
 `RUSTDOCFLAGS="-D warnings"` (a broken intra-doc link fails the PR — run the
-doc gate locally too; it has cost two PRs a full CI round trip each), a
-committed-`.snap.new` tripwire, `cargo test -p kaish-kernel
---no-default-features --locked` (see the integration-test feature-gating
-convention below), and the `kaish-wasi` wasm32-wasip1 build. When a gate changes, change ci.yml in the same PR. The runners track current
-stable Rust, which may be newer than local toolchains — CI clippy can fire
-lints local clippy doesn't have yet; fix the code rather than pinning the
-toolchain.
+doc gate locally too), a committed-`.snap.new` tripwire, `cargo test -p
+kaish-kernel --no-default-features --locked`, and the `kaish-wasi`
+wasm32-wasip1 build. When a gate changes, change ci.yml in the same PR.
+The runners track current stable Rust, which may be newer than local
+toolchains — CI clippy can fire lints local clippy doesn't have yet; fix the
+code rather than pinning the toolchain.
 
 The workspace denies `clippy::unwrap_used` and warns `clippy::expect_used` (see
 `[workspace.lints]` in the root `Cargo.toml`) to keep production code propagating
@@ -76,18 +75,18 @@ restriction lints don't fire on code inside `#[test]` bodies — but clippy does
 fixture IS the test failing). `cargo clippy --all` alone skips test targets — use
 `--all-targets` to catch test code too.
 
-## Development Guidelines
+## Development guidelines
 
-### Error Handling
+### Error handling
 
 - Use `anyhow::Result` for fallible operations
 - Avoid `unwrap()` — propagate with `?`
 - Add context: `.context("what we were trying to do")`
 - Never discard errors.
-   - If an error can never happen in practice it can be hidden, but the program must panic on the outside case.
-   - When an error is explicitly ignored, it must have a comment saying so.
+   - If an error is impossible in practice, the program must still panic if it occurs.
+   - When an error is deliberately ignored, a comment must say so.
 
-### Code Style
+### Code style
 
 - Comments only for non-obvious intent or complex behavior
 - **`///` on a builtin argument is published to agents** — `params_from_clap` copies it
@@ -97,7 +96,7 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 - Full words for names, avoid abbreviations
 - Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`
 
-### Version Control
+### Version control
 
 - **`main` is protected — every change lands via PR.** Branch first
   (`git switch -c <type>/<short-desc>`), push, and open a PR with `gh pr create`.
@@ -106,9 +105,9 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   via PR like any other change; only the `git tag` and `cargo publish` (neither a
   branch commit) run from `main`, after the bump PR has merged.
 - **Have the PR reviewed before merging** — prefer kaibo (`consult`) for the
-  review; `/code-review` on the diff or another agent/model also works. A few
-  tokens on review goes a long way (this is what we ask outside contributors to do
-  too; see README "Contributing").
+  review; `/code-review` on the diff or another agent/model also works. Review
+  is cheap; a bug on `main` is not (we ask outside contributors to do the same;
+  see README "Contributing").
 - **Merging to `main` is Amy's word, and an agent asks every time.** Default:
   open the PR, get it reviewed, address the review, report it ready — then stop.
   Amy reads the PR herself; that reading is the point of the gate, and a green
@@ -126,11 +125,11 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   the PR description land in the history. A maintainer generally does the merging;
   write the PR title/body to carry the same decision-narrative the commit messages
   do (see below).
-- **Always add files by name**
+- **Add files by name**: `git add <file>`, never `git add -A` or `git add .`
 - Before committing, both must be clean:
   - `cargo test --all`
   - `cargo clippy --all --all-targets` — zero errors **and** zero warnings
-    (`--all-targets` so test code is linted too; see Build Commands for the
+    (`--all-targets` so test code is linted too; see Build commands for the
     test-code allow convention)
   CI enforces these (plus the sandbox and WASI legs) on the PR — run them
   locally first anyway; the feedback loop is minutes faster.
@@ -188,20 +187,20 @@ Three things follow:
 - **Helpers compose above the boundary, never inside it.** A reusable waiter, a pending queue,
   a retry policy — write them as composable pieces in the REPL or a util crate that is
   itself an embedder. A convenience that reads a clock or parks a decision inside the
-  kernel has moved policy back in through the back door.
+  kernel has moved policy back across the boundary.
 
-The payoff is the point: an embedder that owns the state can do things with it we will not
+The payoff: an embedder that owns the state can do things with it we will not
 think of. kaijutsu parks a decision in its own UI, kaibo can put a plan in front of a
 different model, someone else queues it for a shift change. None of those shapes need a
 kernel change, because the kernel never assumed which one it was serving.
 
-The approval ledger is the receipt: kaish once held approval state and decision flow
+The approval ledger is the evidence: kaish once held approval state and decision flow
 inside the kernel, and it was removed before 0.14.0 because every embedder already had
 its own — see `docs/EMBEDDING.md`, "Why this, and not a gate".
 
 ## Testing
 
-Uses **rstest** for parameterized tests and **insta** for snapshot testing.
+Tests use **rstest** for parameterized cases and **insta** for snapshot testing.
 Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/tests/snapshots/*.snap`.
 
 ## Documentation
@@ -225,11 +224,11 @@ fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need m
 ## Writing style
 
 kaish keeps a small, predictable subset of `sh`, so existing shell skills transfer. This
-guide keeps a small, predictable subset of English for the same reason. This is meant to
-be read before editing prose, comments, and documentation. This guide is loosely based
-on Standard Technical English and uses similar prescriptions.
+guide keeps a small, predictable subset of English for the same reason. Read this before
+editing prose, comments, or documentation. This guide is loosely based on Standard
+Technical English and uses similar prescriptions.
 
-### Vocabulary Choices
+### Vocabulary choices
 
 Keep the vocabulary small. This limits the number of distinct words, not the length of the
 text — familiar words may require a longer sentence.
@@ -241,16 +240,12 @@ Use an established technical term when kaish gives it one meaning.
 
 | Write | Meaning |
 |---|---|
-| hazard | A condition with a predictable failure. Name the condition and the fix kaish provides. |
-| override | A documented way past a restriction. An override is part of the design, not a workaround; every restriction that has one names it. |
 | affordance | A visible cue for the next available action. An error that names its fix affords that fix. |
 | familiar syntax | Existing `sh` skill transfers because kaish preserves familiar syntax. |
 
-This table uses the terms it defines: a missing fix is a hazard; a documented way past a
-restriction is an override; a visible next action is an affordance. Use the terms this way
-until they become ordinary kaish vocabulary.
-
-Terms that carry a behavioral guarantee live in the table in `AGENTS.md`.
+`hazard` and `override` belong to this vocabulary too; they carry guarantees, so their
+definitions live in the Terms table below, with every other term that carries a
+behavioral guarantee.
 
 Use the public word instead of a tool's private term. For example, `dhat` calls
 an allocation a "block"; write "18% fewer allocations," not "18% fewer blocks."
@@ -273,14 +268,14 @@ that does not affect those actions.
 Example labels are imperative. Write "Send STOP by name," not "Named shorthand." The
 label sits next to a command, so it should read like one.
 
-Cross-references take one form: ``see `help <topic>` `` for a help topic, and
+Cross-references take one form per target: ``see `help <topic>` `` for a help topic, and
 `docs/LANGUAGE.md`, "Section name" for the language reference. Link instead of
 re-explaining.
 
 This section keeps one term for each concept because one term, one meaning applies to the
 guide itself.
 
-### Provide Specific Values
+### Provide specific values
 
 Whenever it's practical, provide the public exit code, size, flag, default, and condition.
 This saves round trips to get more information and gives agents clear observations for
@@ -293,9 +288,9 @@ updating their model of the world.
 State the default and condition too, for example: "reads stdin when no files are given"
 and "off by default; applies to `-r` only."
 
-### Fast & Informative Failures
+### Fast and informative failures
 
-Errors, warnings, and failures should be informative and, where possible, instructive.
+Make errors, warnings, and failures informative and, where possible, instructive.
 Lead with consequences, name conditions, and suggest next steps when they are known.
 
 Errors that face users, agents, and models must not leak internals. Internal code names
@@ -328,8 +323,8 @@ struct — the visit supplies the context needed to judge each line.
 ### Write for model context
 
 Use the same prose in human and model contexts. Assume the context may be truncated. Teach
-syntax with examples. Repeat a rule in its error. These instructions strengthen the
-weights above; they do not replace them.
+syntax with examples. Repeat a rule in its error. These instructions add to the rules
+above; they do not replace them.
 
 ### The example is the rule
 
@@ -342,15 +337,15 @@ surrounding prose is missing. Make the example carry the rule by itself.
 > After: `"$dir/file.txt"` — one path. kaish keeps `$VAR`, `$(cmd)`, and globs as
 > separate words; quote the whole word to join text with interpolation.
 
-Avoid using incorrect examples. When it does happen, put the correct form first and
-the clearly marked error next to it:
+Avoid incorrect examples. When one is necessary, put the correct form first and the
+clearly marked error next to it:
 `echo "$dir/file.txt"`; `echo $dir/file.txt # error — quote the whole path`.
 
 ### Terms
 
 Terms that carry a guarantee. **This table is the source**; `README.md` mirrors it for
-readers and must be kept in step. The list grows when we find a collision, not in advance —
-every entry below was verified to be in real use in the governed prose.
+readers and must be kept in step. The list grows when a collision appears in real prose,
+not in advance.
 
 | Term | Part of speech | Meaning |
 |---|---|---|
