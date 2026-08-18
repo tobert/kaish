@@ -666,7 +666,13 @@ pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> Result<ScatterOpt
 
     match args.named.get("as") {
         None => {}
-        Some(Value::String(name)) => opts.var_name = name.clone(),
+        Some(Value::String(name)) => {
+            // The worker binding is the one door with no parse-time name scan
+            // in front of it, so the rule is applied here instead.
+            crate::name::validate(name)
+                .map_err(|bad| format!("scatter --as: `{name}': {bad}"))?;
+            opts.var_name = name.clone();
+        }
         Some(other) => {
             return Err(format!(
                 "scatter --as: expected a variable name, got {}",

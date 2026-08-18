@@ -1001,17 +1001,28 @@ fn lexer_non_ascii_words_in_context(#[case] input: &str, #[case] expected: &[&st
     run_lexer_test(input, expected);
 }
 
-/// Flag names and `$name` variable references stay ASCII (matching bash's
-/// `[a-zA-Z_][a-zA-Z0-9_]*` name rule) even though barewords and paths
-/// widened. Without special handling, a non-ASCII tail glued onto an
-/// otherwise-valid flag or var-ref prefix would silently lex as TWO tokens
-/// once `Ident`'s leading character class admits non-ASCII — e.g.
-/// `--café` as `LongFlag(caf)` followed by a stray `Ident(é)` argument,
-/// turning a typo into a silently-wrong argument count instead of a loud
-/// error. These regexes claim the full non-ASCII tail and the callback
-/// rejects it, so the diagnostic is one `NonAsciiName` error, never a split.
+/// Variable names take the same characters as barewords, in both positions,
+/// so a reference is spelled in whatever script the name is.
 #[rstest]
-#[case::simple_varref_cafe("$café")]
+#[case::varref_cafe("$café", &["SIMPLEVARREF(café)"])]
+#[case::varref_japanese("$名前", &["SIMPLEVARREF(名前)"])]
+#[case::varref_emoji("$😁", &["SIMPLEVARREF(😁)"])]
+#[case::varref_mixed("$x😁", &["SIMPLEVARREF(x😁)"])]
+fn lexer_non_ascii_variable_names(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+/// Flag names stay ASCII. A flag spelled in another script is ambiguous — a
+/// flag no tool defines, or a word the caller meant literally — so kaish
+/// refuses rather than guessing, and the error says to quote it.
+///
+/// Without special handling, a non-ASCII tail glued onto an otherwise-valid
+/// flag prefix would silently lex as TWO tokens, since `Ident`'s leading
+/// character class admits non-ASCII — `--café` as `LongFlag(caf)` followed by
+/// a stray `Ident(é)` argument, turning a typo into a silently-wrong argument
+/// count. These regexes claim the full non-ASCII tail and the callback rejects
+/// it, so the diagnostic is one `NonAsciiName` error, never a split.
+#[rstest]
 #[case::long_flag_cafe("--café")]
 #[case::long_flag_cafe_in_context("grep --café x")]
 #[case::short_flag_cafe("-café")]

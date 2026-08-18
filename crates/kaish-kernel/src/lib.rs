@@ -24,6 +24,7 @@ pub mod interpreter;
 pub mod output_limit;
 pub mod kernel;
 pub mod lexer;
+pub mod name;
 pub mod operation;
 pub mod parser;
 pub mod paths;

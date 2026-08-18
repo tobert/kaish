@@ -97,11 +97,8 @@ impl Tool for Export {
         // Handle named arguments: `export FOO="bar"` parses as Named { key: "FOO", value: "bar" }
         // This is the common case when the shell parses `export VAR="value"`
         for (name, value) in &args.named {
-            if !is_valid_name(name) {
-                return ExecResult::failure(
-                    1,
-                    format!("export: `{}': not a valid identifier", name),
-                );
+            if let Err(why) = check_name(name) {
+                return ExecResult::failure(1, why);
             }
             ctx.scope.set_exported_global(name, value.clone());
         }
@@ -118,21 +115,15 @@ impl Tool for Export {
                 let name = &arg_str[..eq_pos];
                 let value = &arg_str[eq_pos + 1..];
 
-                if !is_valid_name(name) {
-                    return ExecResult::failure(
-                        1,
-                        format!("export: `{}': not a valid identifier", name),
-                    );
+                if let Err(why) = check_name(name) {
+                    return ExecResult::failure(1, why);
                 }
 
                 ctx.scope.set_exported_global(name, Value::String(value.to_string()));
             } else {
                 // Just mark for export
-                if !is_valid_name(arg_str) {
-                    return ExecResult::failure(
-                        1,
-                        format!("export: `{}': not a valid identifier", arg_str),
-                    );
+                if let Err(why) = check_name(arg_str) {
+                    return ExecResult::failure(1, why);
                 }
                 ctx.scope.export(arg_str);
             }
@@ -174,22 +165,36 @@ fn format_value(value: &Value) -> String {
     }
 }
 
-/// Check if a name is a valid shell variable identifier.
-fn is_valid_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-
+/// Check a name against the same rule an assignment uses, and say why when it
+/// fails. The reason is the whole point: `export` is the one door a name can
+/// enter through without the parser having seen it as an `Ident`, so a
+/// rejection here is the only message the author gets.
+fn check_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
 
-    // First character must be letter or underscore
+    // First character must be a letter or underscore — never a digit, which
+    // would collide with the positional parameters.
     match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || !c.is_ascii() => {}
+        Some(_) => return Err(format!("export: `{name}': not a valid identifier")),
+        None => return Err("export: a name cannot be empty".to_string()),
     }
 
-    // Remaining characters must be alphanumeric or underscore
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    // A dotted name binds nothing readable: `${a.b}` is a loud brackets-only
+    // error, so `export a.b=1` would create a variable no read path reaches.
+    // Assignment refuses this too, and the two doors have to agree.
+    if let Some(dot) = name.find('.') {
+        let (root, rest) = (&name[..dot], &name[dot + 1..]);
+        return Err(format!(
+            "export: `{name}' is not a valid name — kaish uses bracket access, not dots; \
+             use `export {root}[{rest}]=value`"
+        ));
+    }
+
+    // The rest is the same rule every other door uses, so `export café=1`
+    // and `café=1` agree about what a name is — including the refusal of a
+    // character that does not show itself.
+    crate::name::validate(name).map_err(|bad| format!("export: `{name}': {bad}"))
 }
 
 #[cfg(test)]

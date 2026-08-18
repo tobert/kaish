@@ -39,6 +39,8 @@ schemars = { workspace = true, optional = true }
 
 # printf's %Ns width specifier pads by display column, not byte count.
 unicode-width = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-ident = { workspace = true }
 
 # Logging / Telemetry. opentelemetry + its SDK propagators turn the
 # embedder-supplied W3C trace context on ExecuteOptions into an OTel Context

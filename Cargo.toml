@@ -64,6 +64,8 @@ rustyline = "17"
 # column, so byte or char counts misalign every table the kernel and the REPL
 # print (#130). Features differ per crate; only the version is shared.
 unicode-width = "0.2"
+unicode-normalization = "0.1"
+unicode-ident = "1"
 
 # Unix process/signal/terminal syscalls behind the `subprocess` axis (kernel)
 # and the REPL's PTY tests. Each crate picks its own features.

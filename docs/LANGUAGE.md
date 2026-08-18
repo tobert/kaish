@@ -332,22 +332,55 @@ echo 'hello $NAME'              # prints: hello $NAME
 
 ### Word characters
 
-A bareword or path is any run of characters that is not ASCII whitespace and
-not a shell operator (`()|&;<>` and friends) — kaish, like bash, never
-inspects word bytes for alphabetic-ness. Any script lexes unquoted, no
-quoting needed:
+A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`,
+and **any non-ASCII character** — kaish, like bash, never inspects word bytes
+for alphabetic-ness. Any script lexes unquoted, no quoting needed. (ASCII
+punctuation outside that set is still not a word character: `echo 100%` is an
+error, as it was before.)
 
 ```sh
 echo café
 cd ~/文書
 ls /tmp/日本語
-X=café
+echo 😁
 ```
 
-Variable names and flags are narrower and stay ASCII-only, matching bash's
-`[a-zA-Z_][a-zA-Z0-9_]*` name rule: `$café` and `--café` are lexer errors so a
-typo is loud instead of silently truncating to `$caf`/`--caf` plus a stray
-word. Quote either to pass it as a literal string instead.
+**Variable names are identifiers plus emoji** — letters, digits, and `_` in any
+script (Unicode [UAX #31]), and emoji. A name is spelled in whatever script you
+think in:
+
+[UAX #31]: https://www.unicode.org/reports/tr31/
+
+```sh
+café=au-lait;  echo $café       # au-lait
+名前=kaish;     echo "${名前}"    # kaish
+😁=grin;       echo $😁         # grin
+```
+
+A name is **NFC-normalized**. `café` typed as `e` + a combining acute and
+`café` typed as the precomposed `é` render identically, so they name one
+variable — binding through one spelling and reading through the other finds the
+value. Subscript keys are not normalized: a key is data you chose, and its
+bytes are its own.
+
+A name has to read as what it is, so a character that does not show itself is
+refused and the error names the codepoint: whitespace such as `U+00A0`, which
+makes one name look like two words; zero-width characters such as `U+200B`,
+which render as nothing while naming a different variable; and bidirectional
+controls such as `U+202E`, which reorder the source around them. The zero-width
+joiner is the one exception, permitted between emoji because that is what fuses
+two glyphs into one.
+
+Typography and mathematics are not names either — `a->b` spelled with an arrow
+character, or `a` and `b` joined by a command symbol, are errors. Quote the word
+to use any of these as a literal string.
+
+This is a deliberate divergence from bash, which restricts names to
+`[a-zA-Z_][a-zA-Z0-9_]*`.
+
+**Flag names stay ASCII.** `--café` is ambiguous — a flag no tool defines, or a
+word you meant literally — so kaish refuses rather than guessing, and the error
+says to quote it. Quoting passes it through as a literal word.
 
 ### Quote to join — kaish does not paste adjacent tokens
 
