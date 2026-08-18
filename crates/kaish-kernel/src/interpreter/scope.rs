@@ -504,9 +504,16 @@ impl Scope {
     /// Set a variable in the current (innermost) frame.
     ///
     /// Use this for `local` variable declarations.
+    ///
+    /// The name is NFC-normalized here, which is what makes the scope's keys
+    /// canonical no matter which door bound them. Parse-time normalization
+    /// covers the four written spellings of a name; this covers every runtime
+    /// binder — `for`, `read`, `unset`, `scatter --as`, and the embedder's own
+    /// `initial_vars` — without each having to remember.
     pub fn set(&mut self, name: impl Into<String>, value: Value) {
+        let name = crate::ast::normalize_name(name.into());
         if let Some(frame) = Arc::make_mut(&mut self.frames).last_mut() {
-            frame.insert(name.into(), value);
+            frame.insert(name, value);
         }
     }
 
@@ -516,7 +523,7 @@ impl Scope {
     /// Otherwise, create it in the outermost (root) frame.
     /// Use this for non-local variable assignments.
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
-        let name = name.into();
+        let name = crate::ast::normalize_name(name.into());
 
         // Search from innermost to outermost to find existing variable
         let frames = Arc::make_mut(&mut self.frames);
@@ -535,6 +542,13 @@ impl Scope {
 
     /// Get a variable by name, searching from innermost to outermost frame.
     pub fn get(&self, name: &str) -> Option<&Value> {
+        let normalized;
+        let name = if name.is_ascii() {
+            name
+        } else {
+            normalized = crate::ast::normalize_name(name.to_string());
+            normalized.as_str()
+        };
         for frame in self.frames.iter().rev() {
             if let Some(value) = frame.get(name) {
                 return Some(value);
@@ -547,6 +561,13 @@ impl Scope {
     ///
     /// Returns the removed value if found, None otherwise.
     pub fn remove(&mut self, name: &str) -> Option<Value> {
+        let normalized;
+        let name = if name.is_ascii() {
+            name
+        } else {
+            normalized = crate::ast::normalize_name(name.to_string());
+            normalized.as_str()
+        };
         for frame in Arc::make_mut(&mut self.frames).iter_mut().rev() {
             if let Some(value) = frame.remove(name) {
                 return Some(value);

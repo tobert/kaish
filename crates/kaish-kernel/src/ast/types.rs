@@ -520,11 +520,27 @@ pub struct VarPath {
 
 impl VarPath {
     /// Create a simple variable reference with just a name.
+    ///
+    /// The name is NFC-normalized. `café` typed as `e` + U+0301 and `café`
+    /// typed as U+00E9 render identically, so they name one variable; without
+    /// this, binding through one spelling and reading through the other
+    /// resolves empty and says nothing. Subscript keys are NOT normalized —
+    /// a key is data the caller chose, and its bytes are its own.
     pub fn simple(name: impl Into<String>) -> Self {
         Self {
-            segments: vec![VarSegment::Field(name.into())],
+            segments: vec![VarSegment::Field(normalize_name(name.into()))],
         }
     }
+}
+
+/// NFC-normalize a variable name, skipping the allocation when it is already
+/// normalized — which every ASCII name is.
+pub fn normalize_name(name: String) -> String {
+    use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
+    if name.is_ascii() || is_nfc_quick(name.chars()) == IsNormalized::Yes {
+        return name;
+    }
+    name.nfc().collect()
 }
 
 /// A segment in a variable path.
