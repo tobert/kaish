@@ -76,6 +76,13 @@ pub enum IssueCode {
     /// an env-scoped prefix (`x=1 BAD=2 cmd`), where a target and an argv
     /// `key=value` word look identical one token back.
     InvisibleAssignmentTarget,
+    /// A name is spelled in two scripts, so it reads as a name it does not
+    /// bind — `PАTH` with CYRILLIC CAPITAL LETTER A (U+0410) binds a second
+    /// variable and leaves `$PATH` alone. UAX #39's Highly Restrictive
+    /// profile is the rule, so `café`, `名前`, and `変数x` stay quiet. A
+    /// warning, never an error: the name binds either way, and the author is
+    /// the only one who knows which name they meant.
+    MixedScriptName,
 }
 
 impl IssueCode {
@@ -83,7 +90,8 @@ impl IssueCode {
     ///
     /// Code numbers are stable identifiers, not contiguous. E010 and
     /// W003/W004/W005 remain retired, as does W006 (PosixTestCommand, retired
-    /// when `test` became a first-class builtin). E006 (InvalidSedExpr), E007
+    /// when `test` became a first-class builtin) — W007 is the next free
+    /// warning number, not a reuse of one of them. E006 (InvalidSedExpr), E007
     /// (InvalidJqFilter), and E011 (DiffNeedsTwoFiles) were wired up with
     /// real emitters in 2026-06-14.
     pub fn code(&self) -> &'static str {
@@ -108,6 +116,7 @@ impl IssueCode {
             IssueCode::DottedAssignmentTarget => "E017",
             IssueCode::UnreadableAssignmentTarget => "E018",
             IssueCode::InvisibleAssignmentTarget => "E019",
+            IssueCode::MixedScriptName => "W007",
         }
     }
 
@@ -117,14 +126,14 @@ impl IssueCode {
     /// Most warnings stay trace-only — `UndefinedCommand` fires on every
     /// external command (`grep`, `cargo`), so surfacing them all would be
     /// noise. Opt a code in here only when its guidance is worth interrupting
-    /// for. This is the surfacing seam for the "did-you-mean" guidance pass.
+    /// for; this is the boundary between the two.
     ///
-    /// Currently dormant: the one opted-in code (`PosixTestCommand`) was retired
-    /// when `test` became a builtin. The seam stays wired for the next code that
-    /// earns surfacing — add a `matches!(self, IssueCode::Foo | …)` arm here.
+    /// `MixedScriptName` is opted in. It reports a name whose spelling and
+    /// binding disagree, which nothing else reports — the exit code is 0 and
+    /// the output looks right — so a trace-only warning would report it to
+    /// nobody. Add a code to the `matches!` arm when the same is true of it.
     pub fn surfaces_to_agent(&self) -> bool {
-        let _ = self;
-        false
+        matches!(self, IssueCode::MixedScriptName)
     }
 
     /// Default severity for this issue code.
@@ -154,7 +163,8 @@ impl IssueCode {
             | IssueCode::InvalidArgType
             | IssueCode::UndefinedCommand
             | IssueCode::UnknownFlag
-            | IssueCode::PossiblyUndefinedVariable => Severity::Warning,
+            | IssueCode::PossiblyUndefinedVariable
+            | IssueCode::MixedScriptName => Severity::Warning,
         }
     }
 }

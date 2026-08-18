@@ -12,9 +12,21 @@
 //! around it, so the source shows an order the parser does not see. Each of
 //! those is rejected, and the error names the character.
 //!
+//! A name that mixes scripts is a different problem: every character shows
+//! itself, and the name still reads as something it is not. `PАTH` — with
+//! CYRILLIC CAPITAL LETTER A where Latin `A` belongs — binds a second variable
+//! and leaves `$PATH` alone. That one is a warning, not a refusal ([`mixed_script`]),
+//! because refusing it would refuse `変数x` and every other name a writing
+//! system spells in two scripts.
+//!
 //! [UAX #31]: https://www.unicode.org/reports/tr31/
+//! [UAX #39]: https://www.unicode.org/reports/tr39/
 
 use std::fmt;
+
+use unicode_script::{Script, UnicodeScript};
+use unicode_security::mixed_script::AugmentedScriptSet;
+use unicode_security::skeleton;
 
 /// Why a name was refused, carrying the character that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +231,133 @@ pub fn validate(name: &str) -> Result<(), NameError> {
     Ok(())
 }
 
+/// A name spelled in more than one script, and the character that shows it.
+///
+/// Reported by [`mixed_script`], and a warning at every door — a mixed-script
+/// name still binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixedScript {
+    /// The name as written.
+    pub name: String,
+    /// The first character that does not belong to the name's own script.
+    pub ch: char,
+    /// The script the rest of the name is written in.
+    pub script: &'static str,
+    /// The script [`MixedScript::ch`] belongs to.
+    pub other_script: &'static str,
+    /// The all-ASCII spelling the name reads as, from [UAX #39]'s confusables
+    /// data. `None` when the plain reading is itself not ASCII — `Ωmega`
+    /// reduces to `Ωrnega`, which teaches nothing.
+    ///
+    /// [UAX #39]: https://www.unicode.org/reports/tr39/
+    pub reads_as: Option<String>,
+}
+
+impl MixedScript {
+    /// What to do about it. Pairs with the message as a suggestion.
+    pub fn suggestion(&self) -> String {
+        match &self.reads_as {
+            Some(plain) => format!("write the name in one script, e.g. `{plain}`"),
+            None => "write the name in one script".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for MixedScript {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}` mixes {} and {}", self.name, self.script, self.other_script)?;
+        if let Some(plain) = &self.reads_as {
+            write!(f, " and reads as `{plain}`")?;
+        }
+        write!(
+            f,
+            // "names", not "binds": this message reaches `unset` too, which
+            // removes a variable rather than creating one.
+            " — `{}` (U+{:04X}) is {}, so this names a different variable",
+            self.ch, self.ch as u32, self.other_script
+        )
+    }
+}
+
+/// Is this name spelled in more than one script?
+///
+/// The rule is [UAX #39]'s Highly Restrictive profile: a name whose characters
+/// resolve to one script is fine, and so are the three script sets a writing
+/// system needs — Latin with Japanese, with Chinese, or with Korean. `café`,
+/// `名前`, `переменная`, and `変数x` all pass. `PАTH` does not.
+///
+/// Separate from [`validate`] on purpose. `validate` returns an `Err` its
+/// callers refuse on, and this is a warning: the name binds either way.
+///
+/// [UAX #39]: https://www.unicode.org/reports/tr39/
+pub fn mixed_script(name: &str) -> Option<MixedScript> {
+    // `Common` and `Inherited` characters — ASCII digits, `_`, emoji, and the
+    // joiners — intersect every script, so they leave the arithmetic alone
+    // without being named here. A character with no script at all (an
+    // unassigned code point inside an emoji block) carries no evidence either
+    // way and is skipped; folding it in would empty every set and report every
+    // emoji name.
+    let mut resolved = AugmentedScriptSet::default();
+    let mut without_latin = AugmentedScriptSet::default();
+    for c in name.chars() {
+        let set = AugmentedScriptSet::for_char(c);
+        if set.is_empty() {
+            continue;
+        }
+        resolved.intersect_with(set);
+        if !set.base.contains_script(Script::Latin) {
+            without_latin.intersect_with(set);
+        }
+    }
+    // One script covers the name.
+    if !resolved.is_empty() {
+        return None;
+    }
+    // Latin beside Japanese, Chinese, or Korean — the augmented sets Highly
+    // Restrictive admits, and the reason this is not simply "one script".
+    if without_latin.jpan || without_latin.hanb || without_latin.kore {
+        return None;
+    }
+
+    // Name the character that stands out rather than the one that happens to
+    // break a left-to-right intersection: in `Аbc` the Cyrillic letter comes
+    // first, and blaming `b` would point at the characters spelled correctly.
+    let spelled: Vec<(char, Script)> = name
+        .chars()
+        .map(|c| (c, c.script()))
+        .filter(|(_, s)| !matches!(s, Script::Common | Script::Inherited | Script::Unknown))
+        .collect();
+    let mut tally: Vec<(Script, usize)> = Vec::new();
+    for (_, s) in &spelled {
+        match tally.iter_mut().find(|(t, _)| t == s) {
+            Some(entry) => entry.1 += 1,
+            None => tally.push((*s, 1)),
+        }
+    }
+    // An empty resolved set with fewer than two scripts present is not
+    // reachable — one script always resolves to itself — so a `None` here
+    // would be a bug in the walk above rather than a name to report.
+    let (mut main_script, mut best) = *tally.first()?;
+    for &(script, count) in &tally[1..] {
+        if count > best {
+            main_script = script;
+            best = count;
+        }
+    }
+    let (ch, other) = spelled.into_iter().find(|&(_, s)| s != main_script)?;
+
+    let plain: String = skeleton(name).collect();
+    let reads_as = (plain.is_ascii() && plain != name).then_some(plain);
+
+    Some(MixedScript {
+        name: name.to_string(),
+        ch,
+        script: main_script.full_name(),
+        other_script: other.full_name(),
+        reads_as,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +403,70 @@ mod tests {
         for name in ["a«b", "a→b", "a⌘b", "a▪b"] {
             assert!(validate(name).is_err(), "{name:?} should be refused");
         }
+    }
+
+    /// Every name kaish accepts today is spelled in one script, and stays
+    /// quiet. `Common` and `Inherited` characters — digits, `_`, emoji, and
+    /// the joiners — must drop out of the rule on their own; if this goes red,
+    /// the arithmetic is wrong, not the list.
+    #[test]
+    fn single_script_names_are_not_mixed() {
+        for name in [
+            "v", "_x", "x1", "café", "名前", "Ω", "переменная", "😁", "x😁", "👨\u{200d}👩",
+            "❤\u{fe0f}", "$", "?",
+        ] {
+            assert_eq!(mixed_script(name), None, "{name:?} is one script");
+        }
+    }
+
+    /// Latin beside Han, Hiragana, or Katakana is a writing system, not a
+    /// confusable — UAX #39's Highly Restrictive profile admits it.
+    #[test]
+    fn latin_with_japanese_is_not_mixed() {
+        for name in ["変数x", "x変数", "カタカナ1", "名前_v2"] {
+            assert_eq!(mixed_script(name), None, "{name:?} is Highly Restrictive");
+        }
+    }
+
+    /// The defect this rule exists for.
+    #[test]
+    fn latin_with_cyrillic_is_mixed() {
+        let found = mixed_script("PАTH").expect("PАTH mixes scripts");
+        assert_eq!(found.ch, '\u{0410}');
+        assert_eq!(found.script, "Latin");
+        assert_eq!(found.other_script, "Cyrillic");
+        assert_eq!(found.reads_as.as_deref(), Some("PATH"));
+
+        let text = found.to_string();
+        assert!(text.contains("U+0410"), "got: {text}");
+        assert!(text.contains("Cyrillic"), "got: {text}");
+        assert!(text.contains("`PATH`"), "got: {text}");
+    }
+
+    /// The odd character out is named even when it comes first — `Аbc` is
+    /// three correct letters and one wrong one, not the other way round.
+    #[test]
+    fn the_minority_script_is_the_one_named() {
+        let found = mixed_script("Аbc").expect("Аbc mixes scripts");
+        assert_eq!(found.ch, '\u{0410}');
+        assert_eq!(found.other_script, "Cyrillic");
+    }
+
+    /// Greek beside Latin mixes too, and its plain reading is noise
+    /// (`Ωmega` reduces to `Ωrnega`), so the message leaves it out.
+    #[test]
+    fn latin_with_greek_is_mixed_without_a_plain_reading() {
+        let found = mixed_script("Ωmega").expect("Ωmega mixes scripts");
+        assert_eq!(found.ch, 'Ω');
+        assert_eq!(found.other_script, "Greek");
+        assert_eq!(found.reads_as, None);
+        assert!(!found.to_string().contains("reads as"), "{found}");
+    }
+
+    /// A mixed-script name is still a name — this rule never refuses.
+    #[test]
+    fn a_mixed_script_name_still_validates() {
+        assert!(validate("PАTH").is_ok());
     }
 
     /// The message has to name the character, since the whole problem is that

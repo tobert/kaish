@@ -38,7 +38,8 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// push tool: append value(s) to a list variable, in place.
 pub struct Push;
@@ -74,6 +75,17 @@ impl Tool for Push {
                 ("Append to a nested list", "push services[web][tags] canary"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+        // Only the first positional is a name; the rest are values, and a
+        // subscript is data the author chose (same split `execute` makes).
+        if let Some(Value::String(target)) = args.positional.first() {
+            let root = target.split('[').next().unwrap_or(target);
+            issues.extend(super::mixed_script_issue(root));
+        }
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
