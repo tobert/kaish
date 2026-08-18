@@ -330,24 +330,19 @@ fn is_name_start(c: char) -> bool {
 }
 
 
-/// The variable name a token spells, if it spells one.
+/// The variable name a token spells, and whether it is an assignment *target*.
 ///
 /// Five tokens can carry a name: `$x`, `${x}`, `${#x}`, an `Ident` that is the
 /// target of an assignment, and the `Ident` a `for` loop binds. The neighbors
 /// are what tell them apart — the same `Ident` in argument position is
 /// ordinary data and its bytes are its own, and `case subject in` puts a
 /// data word in front of the very `In` that marks a `for` variable.
-fn name_in_token<'a>(tok: &'a Token, prev: Option<&Token>, next: Option<&Token>) -> Option<&'a str> {
-    name_in_token_kind(tok, prev, next).map(|(name, _)| name)
-}
-
-/// As [`name_in_token`], and whether the name is an assignment *target*.
 ///
-/// The distinction exists for one rule: a dotted target is refused by the
-/// validator as `E017`, which names the exact corrected spelling
+/// The target flag exists for one rule: a dotted or hashed target is refused by
+/// the validator as `E017`/`E018`, which name the exact corrected spelling
 /// (`user[email]=x`). This scan runs first and would report a blander message
 /// for the same input, so it stands aside for that one shape and lets the
-/// better error win. Every other door — including `for`, and the runtime doors
+/// better error win. Every other door — `for` included, and the runtime doors
 /// that never reach the validator at all — is refused here.
 fn name_in_token_kind<'a>(
     tok: &'a Token,
