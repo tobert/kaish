@@ -46,6 +46,9 @@ breaking entries are marked **BREAKING**.
   (`if …; then :; fi`, `: > file`). It was already the literal `":"` in
   argument position (`awk -F:`), so only the command-name position changed;
   inside brackets and braces the colon stays structural.
+- **BREAKING (embedders):** `LexerError` gained a `NonAsciiName { kind, text }`
+  variant — `LexerError` is public and not `#[non_exhaustive]`, so an exhaustive
+  match must add an arm.
 
 ### Changed
 - **BREAKING: an ASCII variable name is letters, digits, and `_`** — `a-b=1`,
@@ -74,18 +77,18 @@ breaking entries are marked **BREAKING**.
   (a documented way past a restriction) and `hazard` (named with its fix) carry
   the old meanings, because engineering vocabulary transfers to a model reader
   without colloquial connotation.
-- **`docs/style.md` gained weights for the model reader** — example before
-  rule, marked wrong pairs, quoted error text, three registers, and the
-  embedder/agent split, because the corpus is mostly read by LLMs.
-- **The known-debt ledger moved out of `docs/style.md`** — the guide primes
-  agents to write the style; its history lives in git.
+- **The writing style guide gained weights for the model reader** — the same
+  prose serves human and model contexts, the example carries the rule, and a
+  rule repeats in its error, because the corpus is mostly read by LLMs. The
+  guide is inlined in `AGENTS.md`, "Writing style".
+- **The known-debt ledger left the repo** — `issues.md` never appeared in a
+  release and is gone; known debt lives in the issue tracker, and the style
+  guide's history lives in git.
 
 ### Removed
 - **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
   `AmbiguousBooleanLike` variants are gone — `LexerError` is public and not
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
-- **BREAKING (embedders):** `LexerError` gained a `NonAsciiName { kind, text }`
-  variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
 - **A command substitution's stderr reaches the caller** — `x=$(cat /nope)` kept

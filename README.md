@@ -291,7 +291,7 @@ error messages.
 | override | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. Never a workaround: an override is part of the design, and every restriction that has one names it. |
 
 Contributors: the writing style behind this vocabulary is in
-[docs/style.md](docs/style.md).
+[AGENTS.md](AGENTS.md), "Writing style".
 
 ## Why build 会sh?
 

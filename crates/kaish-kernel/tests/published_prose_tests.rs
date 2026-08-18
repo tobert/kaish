@@ -3,7 +3,8 @@
 //! `params_from_clap` copies a clap **argument**'s `///` doc into
 //! `ParamSchema.description`, and the kernel ships that to the model through
 //! `Kernel::tool_schemas()` — so those lines are published prose, governed at
-//! full weight by `docs/style.md`. The leak is easy to reintroduce because the
+//! full weight by the writing style guide (`AGENTS.md`, "Writing style"). The
+//! leak is easy to reintroduce because the
 //! doc comment sits in a Rust file next to code that legitimately discusses
 //! clap, and nothing about writing it looks like writing documentation.
 //!
@@ -11,8 +12,9 @@
 //! caught wherever the text comes from: a doc comment, a hand-written
 //! `ToolSchema::param` call, or a builtin that composes its schema at runtime.
 //!
-//! `docs/style.md`, "Do not leak the kernel" is the rule; the sweep that
-//! motivated this test is recorded in the git history.
+//! `AGENTS.md`, "Published builtin text" is the rule — behavior in the `///`,
+//! mechanism in `//` comments; the sweep that motivated this test is recorded
+//! in the git history.
 //!
 //! Coverage depends on features: the registry only holds what the build
 //! enabled, so a default run does not walk `timeout`, `tokens`, or `ps`. Run
@@ -90,7 +92,7 @@ fn published_param_descriptions_name_no_kernel_internals() {
         leaks.is_empty(),
         "these param descriptions ship kernel mechanism to the model. Move the \
          mechanism to a `//` comment and leave the `///` describing what the \
-         reader must predict (docs/style.md, \"Do not leak the kernel\"):\n  {}",
+         reader must predict (AGENTS.md, \"Published builtin text\"):\n  {}",
         leaks.join("\n  ")
     );
 }
