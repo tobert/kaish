@@ -11,6 +11,8 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`E018` rejects an assignment target containing `#`** — `abc#3=5` bound a
+  variable that nothing could read back, because `$abc#3` is itself an error.
 - **Property tests over the parser** — `parse` answers rather than panicking for
   any composition of shell fragments, planning agrees with parsing about what is
   well-formed, and a plan's own `rendered` text parses back.
@@ -61,6 +63,17 @@ breaking entries are marked **BREAKING**.
   variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **`#` starts a comment only at the start of a word** — `echo abc#3` printed `abc`
+  and silently dropped the rest of the line, `;` separators and whole commands
+  included, at exit 0. It prints `abc#3` now, as bash and `sh` do.
+- **A `#` that can join no word is a loud lexer error** — `echo $x#3` and
+  `echo $(f)#3` name the quote fix instead of commenting the line away.
+- **An arithmetic expansion after a mid-word `#` still expands** — the scanner
+  extracted `$((…))` before the lexer and used the old comment rule, so
+  `echo abc# $((1+2))` lost the expansion and failed to parse.
+- **`echo $((1+2))#3` reports the mid-word `#` error** — a `#` glued to an
+  expansion was re-lexed from the start of a fragment, where it looked like a
+  fresh comment.
 - **`"$café"` substitutes the variable named `café`, not the one named `caf`** —
   a double-quoted reference collected only the ASCII head of the name, silently
   substituted a *different* variable, and appended the rest as literal text.

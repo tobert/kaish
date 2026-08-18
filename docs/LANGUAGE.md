@@ -382,6 +382,55 @@ This is a deliberate divergence from bash, which restricts names to
 word you meant literally — so kaish refuses rather than guessing, and the error
 says to quote it. Quoting passes it through as a literal word.
 
+### Comments — `#` starts one only at the start of a word
+
+```sh
+echo abc#3                     # prints abc#3 — `#` is an ordinary word character
+echo 2d25fb02#3                # prints 2d25fb02#3 — ids keep their #<seq>
+echo https://ex.com/p#section  # prints the whole URL, fragment included
+echo abc #3                    # prints abc — the space makes `#3` a comment
+```
+
+A `#` opens a comment only where a word can start: at the start of input, after
+whitespace, or after an operator (`;`, `|`, `&`, `<`, `>`, `(`). Everywhere else
+it is a character in the word, as it is in bash and `sh`. Put a space before `#`
+to start a comment.
+
+A `#` that can be neither — because it follows something kaish keeps as its own
+word — is a lexer error, not a comment:
+
+```sh
+echo "$x#3"                    # correct — quote the whole word
+echo $x#3                      # error — `#` after a variable reference
+echo "$(echo a)#3"             # correct
+echo $(echo a)#3               # error — `#` after a closing `)`
+```
+
+Commenting from those positions would drop the rest of the line, `;` separators
+and whole commands with it, and exit 0 — a script that silently loses two
+commands looks exactly like a script whose commands printed nothing. The error
+names the quote fix instead.
+
+The accept list is exactly whitespace, start of input, and `; | & < > (`. A
+closing `)`, `]`, or `}` is **not** on it, so a comment glued directly to one is
+an error where bash accepts it — put a space before the `#`:
+
+```sh
+case $x in a) # comment            # correct
+case $x in a)# comment             # error — space before #
+[[ -f f ]] # comment               # correct
+cmd 2>&1 # comment                 # correct — `1` is a word character
+```
+
+`$(f)#3` is one word in bash, and a `case` pattern's `)` is not a command
+substitution's. The lexer cannot tell those two `)` apart, so it refuses both
+rather than guessing — the guess that admits `$(f)#3` as a comment would drop
+the rest of the line, which is the defect this rule exists to close.
+
+A name containing `#` is not a valid assignment target: `abc#3=5` is error
+`E018`, because `$abc#3` would not read it back. kaish refuses to create a
+variable nothing can reference.
+
 ### Quote to join — kaish does not paste adjacent tokens
 
 kaish never concatenates adjacent *unquoted* tokens into one word. `$VAR`,
