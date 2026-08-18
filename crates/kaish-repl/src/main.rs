@@ -349,6 +349,15 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
         source
     };
 
+    // A parse/lexer failure means nothing in the script would have run —
+    // print its diagnostic directly and stop, before a kernel even exists,
+    // rather than let `execute_noninteractive`'s `Err` reach `main` as an
+    // execution-error wrapper.
+    if let Some(diagnostic) = kaish_repl::format_parse_error(&source) {
+        eprintln!("{diagnostic}");
+        return Ok(ExitCode::FAILURE);
+    }
+
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
     let config = kaish_repl::noninteractive_config(overlay);
@@ -376,6 +385,15 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
 fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
     use kaish_kernel::Kernel;
+
+    // A parse/lexer failure means nothing would have run — print its
+    // diagnostic directly and stop, before a kernel even exists, rather
+    // than let `execute_noninteractive`'s `Err` reach `main` as an
+    // execution-error wrapper.
+    if let Some(diagnostic) = kaish_repl::format_parse_error(cmd) {
+        eprintln!("{diagnostic}");
+        return Ok(ExitCode::FAILURE);
+    }
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
