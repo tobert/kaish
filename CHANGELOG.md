@@ -61,6 +61,13 @@ breaking entries are marked **BREAKING**.
   substitution anyway whenever the remainder happened to parse on its own; it
   now reports "unterminated command substitution: missing `)`", matching the
   unquoted form.
+- **`kaish -c`, a script, and the REPL print a parse or lexer failure's
+  diagnostic directly** — `Error: execution failed` / `Caused by:` /
+  `execution error: parse error:` used to bury the `line:col [parse]:
+  <message>` and source snippet three layers deep; each now parses the
+  source itself first and prints the diagnostic on its own. `--plan`/
+  `--plan-file`'s JSON output, a validation failure, and every runtime
+  failure (command not found, nonzero exit, a builtin error) are unchanged.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.
