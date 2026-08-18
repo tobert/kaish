@@ -37,10 +37,20 @@ pub enum NameErrorKind {
     /// ASCII punctuation a *word* may hold but a name may not, because it does
     /// not read back through every spelling of a reference.
     AmbiguousAscii,
+    /// A dot, which reads as collection access rather than as part of a name.
+    DottedName,
 }
 
 impl fmt::Display for NameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.kind == NameErrorKind::DottedName {
+            return write!(
+                f,
+                "variable name contains `.` (U+002E) — kaish reads a dot as collection \
+                 access, not as part of a name, so write `name[key]` instead. Quote the \
+                 word to use it as a literal string instead"
+            );
+        }
         if self.kind == NameErrorKind::AmbiguousAscii {
             return write!(
                 f,
@@ -54,7 +64,9 @@ impl fmt::Display for NameError {
         let what = match self.kind {
             NameErrorKind::Whitespace => "whitespace",
             NameErrorKind::Invisible => "an invisible character",
-            NameErrorKind::AmbiguousAscii => unreachable!("handled above"),
+            NameErrorKind::AmbiguousAscii | NameErrorKind::DottedName => {
+                unreachable!("handled above")
+            }
             NameErrorKind::NotAnIdentifier => "a character that is not a letter, digit, or emoji",
         };
         write!(
@@ -162,10 +174,17 @@ pub fn validate(name: &str) -> Result<(), NameError> {
             // one way and cannot be read another is the silent write this rule
             // removes.
             //
-            // `.` and `#` are left to the validator, which refuses them with a
-            // message this function cannot write: it knows the spelling to
-            // suggest (`a[b]=value`) and this one does not.
-            if !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '#') {
+            // `.` and `#` are refused here too, not left to the validator. The
+            // validator writes a better message — it knows the exact spelling
+            // to suggest — but it only ever sees an assignment, and `read`,
+            // `unset`, `push`, and `scatter --as` take a name at runtime with
+            // no validator pass in front of them. Leaving the two characters
+            // out left `read a.b` binding a name no read could reach, which is
+            // the whole defect.
+            if c == '.' {
+                return Err(NameError { ch: c, kind: NameErrorKind::DottedName });
+            }
+            if !(c.is_ascii_alphanumeric() || c == '_') {
                 return Err(NameError { ch: c, kind: NameErrorKind::AmbiguousAscii });
             }
             previous = Some(c);

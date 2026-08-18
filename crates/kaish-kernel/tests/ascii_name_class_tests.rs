@@ -52,7 +52,11 @@ fn every_name_door(name: &str) -> Vec<(&'static str, String)> {
 /// The three ambiguous characters are refused at every door.
 #[tokio::test]
 async fn ambiguous_ascii_is_refused_at_every_door() {
-    for name in ["a-b", "a@b", "a:b"] {
+    // `.` and `#` are here because they were the hole: the validator refuses
+    // them for an assignment, but `read`/`unset`/`push`/`scatter --as` take a
+    // name at runtime and never reach the validator, so `read a.b` bound a
+    // name no read could reach long after the assignment door was closed.
+    for name in ["a-b", "a@b", "a:b", "a.b", "a#b"] {
         for (door, source) in every_name_door(name) {
             assert!(
                 refusal(&source).await.is_some(),
@@ -87,6 +91,8 @@ async fn a_legal_name_still_works_at_every_door() {
 async fn words_are_not_names() {
     for (source, expected) in [
         ("echo a-b", "a-b"),
+        ("echo a.b", "a.b"),
+        ("echo a#b", "a#b"),
         ("echo a@b", "a@b"),
         ("echo a:b", "a:b"),
         ("echo my-file.txt", "my-file.txt"),
@@ -103,7 +109,7 @@ async fn words_are_not_names() {
 /// The refusal says which character it refused, so the author can see it.
 #[tokio::test]
 async fn the_refusal_names_the_character() {
-    for (name, ch) in [("a-b", "-"), ("a@b", "@"), ("a:b", ":")] {
+    for (name, ch) in [("a-b", "-"), ("a@b", "@"), ("a:b", ":"), ("a.b", "."), ("a#b", "#")] {
         let text = refusal(&format!("{name}=1"))
             .await
             .unwrap_or_else(|| panic!("{name} was accepted"));

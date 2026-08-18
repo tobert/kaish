@@ -338,13 +338,29 @@ fn is_name_start(c: char) -> bool {
 /// ordinary data and its bytes are its own, and `case subject in` puts a
 /// data word in front of the very `In` that marks a `for` variable.
 fn name_in_token<'a>(tok: &'a Token, prev: Option<&Token>, next: Option<&Token>) -> Option<&'a str> {
+    name_in_token_kind(tok, prev, next).map(|(name, _)| name)
+}
+
+/// As [`name_in_token`], and whether the name is an assignment *target*.
+///
+/// The distinction exists for one rule: a dotted target is refused by the
+/// validator as `E017`, which names the exact corrected spelling
+/// (`user[email]=x`). This scan runs first and would report a blander message
+/// for the same input, so it stands aside for that one shape and lets the
+/// better error win. Every other door — including `for`, and the runtime doors
+/// that never reach the validator at all — is refused here.
+fn name_in_token_kind<'a>(
+    tok: &'a Token,
+    prev: Option<&Token>,
+    next: Option<&Token>,
+) -> Option<(&'a str, bool)> {
     match tok {
-        Token::SimpleVarRef(name) => Some(name.as_str()),
-        Token::VarLength(inner) => Some(root_of(inner)),
+        Token::SimpleVarRef(name) => Some((name.as_str(), false)),
+        Token::VarLength(inner) => Some((root_of(inner), false)),
         Token::VarRef(raw) => raw
             .strip_prefix("${")
             .and_then(|s| s.strip_suffix('}'))
-            .map(root_of),
+            .map(|r| (root_of(r), false)),
         // An assignment target — but only where a statement can start. The
         // same `Ident`+`Eq` spelling is an ordinary argv `key=value` word in
         // argument position (`echo k=v`), and that word is data: its bytes are
@@ -357,12 +373,12 @@ fn name_in_token<'a>(tok: &'a Token, prev: Option<&Token>, next: Option<&Token>)
                     Some(p) => crate::lexer::is_statement_boundary(p) || matches!(p, Token::Local),
                 } =>
         {
-            Some(name.as_str())
+            Some((name.as_str(), true))
         }
         // `for x in …` binds `x`. Keyed on the `For` before it, not the `In`
         // after it: `case x in …` reads the same one token ahead, and that
         // `x` is a subject to match, not a name.
-        Token::Ident(name) if matches!(prev, Some(Token::For)) => Some(name.as_str()),
+        Token::Ident(name) if matches!(prev, Some(Token::For)) => Some((name.as_str(), false)),
         _ => None,
     }
 }
@@ -1127,9 +1143,22 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // cannot see, so it must not lose to a competing alternative's.
     for (i, (tok, span)) in tokens.iter().enumerate() {
         let prev = i.checked_sub(1).and_then(|j| tokens.get(j)).map(|(t, _)| t);
-        if let Some(name) = name_in_token(tok, prev, tokens.get(i + 1).map(|(t, _)| t)) {
+        if let Some((name, is_target)) =
+            name_in_token_kind(tok, prev, tokens.get(i + 1).map(|(t, _)| t))
+        {
             if let Err(bad) = crate::name::validate(name) {
-                return Err(vec![ParseError { span: *span, message: bad.to_string() }]);
+                // `.` and `#` in an assignment target belong to the validator,
+                // which refuses them as `E017`/`E018` and names the corrected
+                // spelling (`user[email]=x`) where this scan can only describe
+                // the shape. Those two codes are a published surface, so the
+                // scan stands aside for exactly that case — and only that
+                // case. A dot or hash anywhere the validator never looks
+                // (`for`, `read`, `unset`, `push`, `scatter --as`) is refused
+                // right here, which is the hole this rule exists to close.
+                let defer = is_target && matches!(bad.ch, '.' | '#');
+                if !defer {
+                    return Err(vec![ParseError { span: *span, message: bad.to_string() }]);
+                }
             }
         }
         // The quoted spelling of a read: `"$x"` arrives whole, so its names
