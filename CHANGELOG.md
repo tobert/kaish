@@ -82,6 +82,10 @@ breaking entries are marked **BREAKING**.
   variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **A command substitution's stderr reaches the caller** — `x=$(cat /nope)` kept
+  the exit code and discarded the reason; `echo $(cat /nope)` reported nothing at
+  all. A substitution's stderr now joins the enclosing statement's stderr, as in
+  `sh`, and never contaminates the substituted value.
 - **An unterminated or malformed `$(` in a heredoc body is a loud error** — an
   unquoted heredoc expands like a double-quoted string, but a bad substitution
   was kept as literal text and the statement ran with it silently dropped.
