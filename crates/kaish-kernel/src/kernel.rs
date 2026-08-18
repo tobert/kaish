@@ -102,7 +102,7 @@ use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
-use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipeWriter, PipelineRunner, StderrReceiver};
+use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
 use crate::scheduler::{drain_to_stream_teed, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
@@ -3091,6 +3091,27 @@ impl Kernel {
             ec.stdin_data = None;
         }
 
+        // Carry the enclosing command's pipe writer the same way, and for the
+        // same reason: `ec` is one shared slot, and the snapshot above was
+        // built with `pipe_stdout: None`. Left in `ec`, a writer belonging to
+        // an outer pipeline stage is overwritten with `None` by the first
+        // nested `dispatch_command` and dropped — the stage then produced
+        // correct bytes with nowhere to send them, and `echo $(echo sub) | cat`
+        // printed nothing at exit 0. Moving it into `ctx` parks it for the
+        // duration; the sync-back below returns it.
+        //
+        // This is the choke point for every nested dispatch — a `$(…)` in a
+        // command's own argument list, a function body, a `source`d file — so
+        // it belongs here rather than at each caller that re-enters.
+        //
+        // Nothing downstream can write to it by mistake: `child_for_pipeline`
+        // starts every stage at `pipe_stdout: None`, and only stages before
+        // the last are handed a writer, which the runner creates itself.
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ctx.pipe_stdout = ec.pipe_stdout.take();
+        }
+
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 
         // Post-hoc spill check + exit-3 remap (catches builtins and fast
@@ -3120,6 +3141,10 @@ impl Kernel {
             // single-command and the pipeline case alike.
             ec.stdin = ctx.stdin.take();
             ec.pipe_stdin = ctx.pipe_stdin.take();
+            // The parked writer goes home. A pipeline never sets this on its
+            // own `ctx` — its stages get writers the runner owns — so what is
+            // here is what was carried in.
+            ec.pipe_stdout = ctx.pipe_stdout.take();
         }
         {
             let mut scope = self.scope.write().await;
@@ -4295,46 +4320,7 @@ impl Kernel {
     /// Functions push a new scope frame for local variables. Variables declared
     /// with `local` are scoped to the function; other assignments modify outer
     /// scopes (or create in root if new).
-    /// Take the enclosing command's pipe writer out of `exec_ctx` for the
-    /// duration of a captured block, and hand back what was there.
-    ///
-    /// `exec_ctx` is one shared slot. A pipeline stage moves its `pipe_stdout`
-    /// into it and leaves it there for the whole dispatch, so anything that
-    /// dispatches *during* that command — a `$(…)` in its own argument list, a
-    /// function body — snapshots the same writer and drops it with its own
-    /// context. The stage then produced correct bytes with nowhere to send
-    /// them: `echo $(echo sub) | cat` printed nothing at exit 0.
-    ///
-    /// Only the write end is hidden. bash lets a substitution consume the
-    /// stage's stdin (`echo hi | echo $(cat)` prints `hi`) and kaish matches,
-    /// so `pipe_stdin` deliberately stays visible.
-    ///
-    /// Pair every call with `restore_pipe_stdout` on *all* paths — the capture
-    /// bodies below are full of `?`, which is exactly how the writer would go
-    /// missing again.
-    async fn hide_pipe_stdout(&self) -> Option<PipeWriter> {
-        self.exec_ctx.write().await.pipe_stdout.take()
-    }
-
-    /// Put back what `hide_pipe_stdout` took.
-    ///
-    /// This overwrites rather than merges: a captured block has no business
-    /// leaving a writer behind, and one found here is a leak, not a value to
-    /// preserve.
-    async fn restore_pipe_stdout(&self, saved: Option<PipeWriter>) {
-        self.exec_ctx.write().await.pipe_stdout = saved;
-    }
-
     async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
-        // A function body accumulates its own stdout, so the enclosing stage's
-        // writer must not be reachable from it. See `hide_pipe_stdout`.
-        let saved = self.hide_pipe_stdout().await;
-        let outcome = self.execute_user_tool_capturing(def, args).await;
-        self.restore_pipe_stdout(saved).await;
-        outcome
-    }
-
-    async fn execute_user_tool_capturing(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
         let _depth = self.enter_recursion("a shell function")?;
 
         // 1. Build function args from AST args (async to support command substitution)
@@ -4506,16 +4492,6 @@ impl Kernel {
     }
 
     async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
-        // A substitution's stdout is captured by definition — it becomes the
-        // substituted value — so the enclosing stage's writer must not be
-        // reachable from it. See `hide_pipe_stdout`.
-        let saved = self.hide_pipe_stdout().await;
-        let outcome = self.execute_block_capturing_inner(stmts).await;
-        self.restore_pipe_stdout(saved).await;
-        outcome
-    }
-
-    async fn execute_block_capturing_inner(&self, stmts: &[Stmt]) -> Result<ExecResult> {
         let _depth = self.enter_recursion("command substitution")?;
         // Accumulate stdout as raw bytes so a binary-producing statement
         // (`$(dd …)`, `$(base64 -d …)`) isn't lossy-decoded here before the

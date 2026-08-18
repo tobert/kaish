@@ -16,10 +16,15 @@
 //! rows are a regression net for behavior that was never right, not a guard on
 //! a recent change.
 //!
-//! The stdin direction is deliberately *not* isolated — bash lets a
+//! The fix carries the writer through `execute_pipeline`'s context for the
+//! duration, exactly as `pipe_stdin` was already carried. That asymmetry —
+//! stdin carried, stdout left behind — *was* the bug, so the two endpoints now
+//! read the same at that site.
+//!
+//! stdin's own semantics are unchanged and deliberately different: bash lets a
 //! substitution consume the stage's stdin (`echo hi | echo $(cat)` prints
 //! `hi`), and kaish matches. `substitution_still_consumes_the_stage_stdin`
-//! pins that, so a future fix here cannot "tidy" both endpoints at once.
+//! pins that, so nobody "fixes" the read end into isolation later.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -27,6 +32,7 @@
 
 use kaish_kernel::{Kernel, KernelConfig};
 use rstest::rstest;
+use tempfile::tempdir;
 
 fn kernel() -> Kernel {
     Kernel::new(KernelConfig::repl().with_trash(false)).expect("failed to create kernel")
@@ -108,7 +114,7 @@ async fn substitution_still_consumes_the_stage_stdin() {
 /// A *pipeline* inside the substitution already worked, and the boundary is
 /// sharp enough to get backwards: `echo "$(echo a | cat)" | cat` prints `a`
 /// today while `echo "$(echo sub)" | cat` prints nothing. The nested pipeline
-/// runs on its own stage contexts (`snapshot_exec_ctx` sets `pipe_stdout:
+/// runs on its own stage contexts (`child_for_pipeline` sets `pipe_stdout:
 /// None`), so it never reaches the shared slot; a nested *single command*
 /// dispatches straight onto it. Both must work after the fix.
 ///
@@ -157,4 +163,49 @@ async fn a_plain_stage_still_pipes() {
         .expect("execution failed");
 
     assert_eq!(result.text_out(), "plain\n");
+}
+
+/// `source` runs its statements on the enclosing dispatch, so it is the same
+/// hazard as a function body — and a review caught that the first attempt,
+/// which wrapped only the substitution and function paths, left it exposed:
+///
+/// ```text
+/// source foo.kai | cat   →  (nothing), exit 0      bash: hello
+/// ```
+///
+/// Both spellings of the special form are here — `source` and `.` share one
+/// implementation, and a fix applied to only one door is exactly the mistake
+/// this whole change is about.
+///
+/// Executing a `.kai` *script* (`./helper.kai | cat`) is a different dispatch
+/// path and was never affected; the same review predicted it was broken and
+/// running it showed otherwise. It is not covered here because it needs an
+/// executable-script setup this harness does not provide — verified by hand
+/// against the built binary instead, both by relative path and through PATH.
+#[rstest]
+#[case::source_keyword("source helper.kai | cat", "hello\n")]
+#[case::source_dot(". helper.kai | cat", "hello\n")]
+#[tokio::test]
+async fn a_sourced_or_scripted_stage_keeps_its_stdout(
+    #[case] source_text: &str,
+    #[case] expected: &str,
+) {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("helper.kai"), "echo hello\n").unwrap();
+    let kernel = Kernel::new(
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_trash(false),
+    )
+    .expect("failed to create kernel");
+
+    let result = kernel.execute(source_text).await.expect("execution failed");
+
+    assert_eq!(
+        result.text_out(),
+        expected,
+        "`{source_text}` lost its stdout in the pipe (exit {}, stderr {:?})",
+        result.code,
+        result.err
+    );
 }
