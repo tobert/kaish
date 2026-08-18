@@ -69,6 +69,13 @@ pub enum IssueCode {
     /// rather than by tightening the lexer regex, for the same reason
     /// `DottedAssignmentTarget` is.
     UnreadableAssignmentTarget,
+    /// An assignment target holds a character that does not show itself —
+    /// whitespace, a zero-width character, or a bidi control. Most spellings
+    /// are caught earlier, on the token stream; this covers the ones only the
+    /// syntax tree can tell apart from data, such as the second assignment in
+    /// an env-scoped prefix (`x=1 BAD=2 cmd`), where a target and an argv
+    /// `key=value` word look identical one token back.
+    InvisibleAssignmentTarget,
 }
 
 impl IssueCode {
@@ -100,6 +107,7 @@ impl IssueCode {
             IssueCode::LvalueUndefinedRoot => "E016",
             IssueCode::DottedAssignmentTarget => "E017",
             IssueCode::UnreadableAssignmentTarget => "E018",
+            IssueCode::InvisibleAssignmentTarget => "E019",
         }
     }
 
@@ -135,7 +143,8 @@ impl IssueCode {
             | IssueCode::LastResultFieldAccess
             | IssueCode::LvalueUndefinedRoot
             | IssueCode::DottedAssignmentTarget
-            | IssueCode::UnreadableAssignmentTarget => Severity::Error,
+            | IssueCode::UnreadableAssignmentTarget
+            | IssueCode::InvisibleAssignmentTarget => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

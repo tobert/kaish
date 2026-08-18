@@ -345,8 +345,11 @@ ls /tmp/日本語
 echo 😁
 ```
 
-**Variable names take the same characters**, so a name is spelled in whatever
-script you think in:
+**Variable names are identifiers plus emoji** — letters, digits, and `_` in any
+script (Unicode [UAX #31]), and emoji. A name is spelled in whatever script you
+think in:
+
+[UAX #31]: https://www.unicode.org/reports/tr31/
 
 ```sh
 café=au-lait;  echo $café       # au-lait
@@ -359,6 +362,18 @@ A name is **NFC-normalized**. `café` typed as `e` + a combining acute and
 variable — binding through one spelling and reading through the other finds the
 value. Subscript keys are not normalized: a key is data you chose, and its
 bytes are its own.
+
+A name has to read as what it is, so a character that does not show itself is
+refused and the error names the codepoint: whitespace such as `U+00A0`, which
+makes one name look like two words; zero-width characters such as `U+200B`,
+which render as nothing while naming a different variable; and bidirectional
+controls such as `U+202E`, which reorder the source around them. The zero-width
+joiner is the one exception, permitted between emoji because that is what fuses
+two glyphs into one.
+
+Typography and mathematics are not names either — `a->b` spelled with an arrow
+character, or `a` and `b` joined by a command symbol, are errors. Quote the word
+to use any of these as a literal string.
 
 This is a deliberate divergence from bash, which restricts names to
 `[a-zA-Z_][a-zA-Z0-9_]*`.
