@@ -4425,6 +4425,19 @@ impl Kernel {
         if err.is_empty() {
             return;
         }
+        // Terminate the chunk. Builtins are inconsistent about a trailing
+        // newline (`cat`'s failure message has none), and two substitutions in
+        // one statement would otherwise concatenate into a single unreadable
+        // line: `x="$(cat /a)$(cat /b)"` produced both messages run together.
+        // The statement drain already normalizes this boundary the same way
+        // when it joins drained stderr to a statement's own.
+        let terminated;
+        let err = if err.ends_with('\n') {
+            err
+        } else {
+            terminated = format!("{err}\n");
+            &terminated
+        };
         match self.exec_ctx.read().await.stderr.as_ref() {
             Some(stream) => stream.write_str(err),
             // The kernel seeds this stream in both `new` and `fork`, so it is
