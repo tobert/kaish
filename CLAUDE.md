@@ -224,49 +224,127 @@ fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need m
 
 ## Writing style
 
-kaish keeps a small, predictable subset of `sh`, chosen so existing `sh` skill transfers.
-Our prose keeps a small, predictable subset of English, chosen for the same reason. Full
-guide: `docs/style.md`. **These are weights, not gates** — there is no linter. Groom the
-text you touch; we are not scheduling a rewrite.
+kaish keeps a small, predictable subset of `sh`, so existing shell skills transfer. This
+guide keeps a small, predictable subset of English for the same reason. This is meant to
+be read before editing prose, comments, and documentation. This guide is loosely based
+on Standard Technical English and uses similar prescriptions.
 
-- **Subset, not slang** — keep the vocabulary small; this constrains distinct words, not
-  length. Avoid metaphors that name a mental act as a physical one ("reach for"). Write
-  the engineering term instead of colloquial hazard metaphors: `hazard` (named with its
-  fix), `override` (a documented way past a restriction kaish enforces), `affordance`
-  (what an output signals can be done next). Vocabulary comes from cybernetics, cognitive
-  science, resilience and reliability engineering, and user-experience design. The list
-  grows only on
-  evidence — a candidate must already be in consistent use across the corpus with one
-  meaning, never on the argument that it would read well. Prefer the reader's word over a
-  tool's private one ("allocations", not dhat's "blocks"). American spelling.
-- **One term, one meaning** — a synonym reads as a new concept. Terms that carry a
-  guarantee go in the table below. Example labels are imperative. Cross-references take one
-  form: ``see `help <topic>` ``, or `docs/LANGUAGE.md`, "Section name".
-- **State the number** — exact exit code, size, flag, default, condition. "Spills to a file
-  and exits 3", never "fails". Agents act on our numbers.
-- **Fail loud** — constraint and consequence at the front of the sentence, no hedging. The
-  first sentence must work alone; readers skim and the onboarding spine truncates at 3500
-  chars.
-- **Keep the why** — `<rule> — <why>`; the clause after the dash is load-bearing. Split a
-  tangled sentence rather than dropping the rationale, and never invent a rationale the
-  source does not record. There is no word budget. Tables carry the same weights and get
-  longer, which is the correct trade.
-- **Do not leak the kernel** — the test is whether the reader needs the internal to predict
-  behavior, not whether the sentence names one. When you touch a builtin, audit every `///`
-  on its clap struct (see Code Style).
+### Vocabulary Choices
 
-Full weight applies to help content, `fragments.rs` bodies, builtin schema text
-(`description`, `about`, example labels, `///` argument docs), and **every error and
-diagnostic string a builtin or the kernel returns** — an agent reads a failure message
-more often than any help topic. Partial weight to `LANGUAGE.md`/`EMBEDDING.md`/`NAMING.md`
-and `///` rustdoc on `pub` items. Terms only to `README.md` and the design docs.
-`signoff.md` and `designing-syntax-with-llms.md` are exempt — they tell a
-story and need a voice. kaibo and kaish-extras adopt this by reference as they evolve;
-kaijutsu is exempt.
+Keep the vocabulary small. This limits the number of distinct words, not the length of the
+text — familiar words may require a longer sentence.
 
-`CHANGELOG.md` is the one place "Keep the why" does not win: one line per bullet, carrying
-the rule and one clause of rationale. The narrative goes in the PR body, which becomes the
-merge commit. Three numbers and three reasons means three bullets.
+Use plain words instead of figures of speech. Make the intended meaning available from the
+words themselves, including in second-language or partial-context use.
+
+Use an established technical term when kaish gives it one meaning.
+
+| Write | Meaning |
+|---|---|
+| hazard | A condition with a predictable failure. Name the condition and the fix kaish provides. |
+| override | A documented way past a restriction. An override is part of the design, not a workaround; every restriction that has one names it. |
+| affordance | A visible cue for the next available action. An error that names its fix affords that fix. |
+| familiar syntax | Existing `sh` skill transfers because kaish preserves familiar syntax. |
+
+This table uses the terms it defines: a missing fix is a hazard; a documented way past a
+restriction is an override; a visible next action is an affordance. Use the terms this way
+until they become ordinary kaish vocabulary.
+
+Terms that carry a behavioral guarantee live in the table in `AGENTS.md`.
+
+Use the public word instead of a tool's private term. For example, `dhat` calls
+an allocation a "block"; write "18% fewer allocations," not "18% fewer blocks."
+
+Use American spelling to match the corpus: `modeled`, not `modelled`.
+
+### One term, one meaning
+
+Pick one word for each concept and keep it. Do not vary a word for style.
+
+`dialect` is reserved for a ShellCheck language mode or a regex flavor. Do not use it
+about prose.
+
+`surface` can hide the thing it names. In published text, name the tool schema, error
+message, help topic, or API.
+
+Write `boundary`, not `seam`. Use a boundary to separate available actions from mechanism
+that does not affect those actions.
+
+Example labels are imperative. Write "Send STOP by name," not "Named shorthand." The
+label sits next to a command, so it should read like one.
+
+Cross-references take one form: ``see `help <topic>` `` for a help topic, and
+`docs/LANGUAGE.md`, "Section name" for the language reference. Link instead of
+re-explaining.
+
+This section keeps one term for each concept because one term, one meaning applies to the
+guide itself.
+
+### Provide Specific Values
+
+Whenever it's practical, provide the public exit code, size, flag, default, and condition.
+This saves round trips to get more information and gives agents clear observations for
+updating their model of the world.
+
+> Before: Oversize output fails.
+>
+> After: Oversize output spills to a file and exits 3.
+
+State the default and condition too, for example: "reads stdin when no files are given"
+and "off by default; applies to `-r` only."
+
+### Fast & Informative Failures
+
+Errors, warnings, and failures should be informative and, where possible, instructive.
+Lead with consequences, name conditions, and suggest next steps when they are known.
+
+Errors that face users, agents, and models must not leak internals. Internal code names
+and references will be unresolvable and should only be exposed for assertions and errors
+that indicate a real problem in kaish.
+
+### Published builtin text
+
+A `///` comment on a builtin argument is published to agents. `params_from_clap` copies
+it into `ParamSchema.description`, and the kernel exposes it through
+`Kernel::tool_schemas()`. Describe the argument's behavior there. Put implementation
+notes in `//` comments.
+
+A `///` comment on the clap struct is not published; `schema_from_clap` reads
+`cmd.get_about()` instead. Struct docs and `//` comments are safe places for mechanism.
+
+> Before: `/// Unset a variable (-u VAR). Repeatable: -u A -u B. Clap sees a single`
+> `/// occurrence via to_argv() ... This field is a validation sink only.`
+>
+> After: `/// Unset a variable (-u VAR). Repeatable: -u A -u B.`
+
+A blank `///` line also splits clap short help from long help. Everything before the blank
+line is published; everything after it is not. Use the split when an implementation note
+belongs next to the field.
+
+Do not infer the published text by grepping the source. Read `Kernel::tool_schemas()` or
+run the published-prose test. When you touch a builtin, audit every `///` on its clap
+struct — the visit supplies the context needed to judge each line.
+
+### Write for model context
+
+Use the same prose in human and model contexts. Assume the context may be truncated. Teach
+syntax with examples. Repeat a rule in its error. These instructions strengthen the
+weights above; they do not replace them.
+
+### The example is the rule
+
+Show the correct example before explaining it. Continue the correct pattern when the
+surrounding prose is missing. Make the example carry the rule by itself.
+
+> Before: **Quote to join.** `$VAR`, `$(cmd)`, and globs are each a separate word unless
+> quoted — kaish never pastes adjacent unquoted tokens.
+>
+> After: `"$dir/file.txt"` — one path. kaish keeps `$VAR`, `$(cmd)`, and globs as
+> separate words; quote the whole word to join text with interpolation.
+
+Avoid using incorrect examples. When it does happen, put the correct form first and
+the clearly marked error next to it:
+`echo "$dir/file.txt"`; `echo $dir/file.txt # error — quote the whole path`.
 
 ### Terms
 
@@ -276,7 +354,7 @@ every entry below was verified to be in real use in the governed prose.
 
 | Term | Part of speech | Meaning |
 |---|---|---|
-| loud, fail loud | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
+| fail loudly | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
 | silently | adverb | Used only in the negative, to name behavior kaish refuses. |
 | builtin | noun | A tool that runs inside the kernel process. |
 | external command | noun | A program the kernel runs through `PATH`. |
@@ -313,85 +391,4 @@ releases may carry breaking changes.
   the `[X.Y.Z]` compare link at the bottom of the file.
 - **Every version bump gets a git tag** `vX.Y.Z` at the bump commit. One tag per
   released version, no gaps — the changelog and `git tag -l` must agree.
-
-## Contributor conventions & common hazards
-
-Hard-won rules that aren't obvious from the code. Violating these silently breaks things.
-
-- **No legacy dual-representations.** Delete old code the moment it's superseded —
-  no compatibility shims, no parallel old/new types. Fix call sites immediately.
-- **Prefer a small PR over an issue, and ask before filing one.** When the work is
-  straightforward, do it — a small focused PR beats an issue describing the same
-  thing. Pick the lightest artifact that keeps the thought:
-  - **Straightforward?** Fix it in a small PR.
-  - **Minor, and you don't want to lose it?** An inline `TODO` is fine. We sweep
-    them, and a `TODO` rides in the diff where review can call it out — either
-    "just fix that now" or "that's a follow-up". A comment nobody reads is the
-    failure mode; one sitting in a diff under review is not.
-  - **Out of scope for the PR you're in?** The PR body, so it travels with the
-    change. A merged PR is a sufficient record and the merge commit keeps it
-    searchable.
-  - **Real backlog that outlives the PR?** A GitHub issue — but **agents check
-    with the user before opening one.** Unilateral filing produces granular churn
-    that costs more attention than it saves.
-- **Test builtins through `kernel.execute(...)`, not a builtin's direct
-  `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
-  output limits) and pass while the real path is broken.
-- **Read clap value flags from the parsed struct, never the raw `ToolArgs` map.**
-  The kernel binds kebab-case keys (`-A`/`--after-context`); a snake_case raw-map
-  read silently misses them (this was the `grep`/`rg` context-flag bug class).
-- **`--json` is a kernel-level concern**, not per-tool: `extract_output_format()`
-  strips it before tools run; `apply_output_format()` transforms the `ExecResult`
-  after. Builtins emit typed `ExecResult::with_output(OutputData::...)` and never
-  format JSON themselves (unless they opt out via `ToolSchema.owns_output`).
-- **No real system paths in tests.** Use `tempfile::tempdir()` for real FS and VFS
-  paths (`/v/...`) for in-memory; never hardcode `/tmp`, `/home`, `/bin`. Gate
-  Linux-only tests (`/proc`, absolute `/bin/`) with `#[cfg(target_os = "linux")]`.
-  Trash-related tempdirs must use `CARGO_TARGET_TMPDIR`.
-- **Backends that don't override `read_range` are O(n²)** under the streaming
-  readers (`wc`/`cat`/`grep`/`cmp`/`checksum` scan in 256 KiB windows). Override it
-  on any new `Filesystem`/`KernelBackend` that supports byte ranges.
-- **Hermetic env has two spawn sites that must stay in sync:**
-  `kernel.rs::try_execute_external` (production) and
-  `dispatch.rs::BackendDispatcher::try_external` (test-only). The kernel never reads
-  OS env — frontends populate `KernelConfig::initial_vars`.
-- **Adding a builtin (clap pattern).** Every builtin parses argv with a private
-  `clap::Parser` struct inside `execute()` — copy the nearest existing builtin;
-  it's the living reference. The non-obvious parts: derive the `ToolSchema` with
-  `schema_from_clap` (params come from the struct; description + examples stay
-  hand-written); always `#[command(flatten)] global: GlobalFlags` and call
-  `parsed.global.apply(ctx)` so `--json` works; a parse failure returns
-  `failure(2, ...)` (POSIX usage). **Read `Value`-typed positionals off
-  `args.positional`, not the clap struct** — `to_argv()` stringifies values
-  (lossy), so the clap positional field is a `#[arg(hide = true)]` sink for
-  validation only. Don't add `trailing_var_arg`/`allow_hyphen_values` normally
-  (`to_argv()` already emits `--` before positionals); DO add them on the
-  variadic field for passthrough builtins (`timeout`/`exec`). Domain parsing
-  (sed expressions, awk programs, find predicates) stays hand-rolled — clap only
-  owns the argv layer.
-- **clap builtin hazards:** `with_output` drops the `rich_json` payload — use
-  `with_output_and_text` when a builtin needs a custom pipe representation;
-  `to_argv()` injects a `--` separator, so don't unit-test clap builtins via raw
-  `positional` (route through an `execute_argv`-style entrypoint).
-- **Capability features are opt-in axes** (`localfs`, `overlay`, `subprocess`,
-  `host`, `os-integration`, `tokens`); default is `["localfs", "overlay"]`. A
-  default build does not spawn subprocesses. `full`/`native` are aliases for all
-  six, and `overlay` and `subprocess` each imply `localfs`. New OS-touching
-  code must sit behind the right axis and compile out cleanly without it (the
-  `--no-default-features` gates in Build Commands enforce this).
-- **Feature-gate integration-test files that need a capability, not just the
-  production code.** A test file that constructs a kernel via `KernelConfig::repl()`,
-  touches a real host path (`tempfile`, `common::kernel_at`), or mounts `LocalFs`
-  directly needs `#![cfg(feature = "localfs")]` at the top (the `external_command_tests.rs`
-  pattern: `#![cfg(feature = "subprocess")]`, or `#![cfg(all(feature = "localfs",
-  feature = "subprocess"))]` when both apply). Prefer the narrowest gate that
-  compiles+passes: if only a few tests in an otherwise-featureless file need it,
-  gate just those `#[cfg(feature = "localfs")] #[tokio::test]` functions instead of
-  the whole file (`vfs_budget_tests.rs`, `validation_tests.rs` do this). Watch for
-  tests that *compile* featureless but *fail at runtime* — e.g. `Kernel::transient()`
-  falls back to `KernelConfig::isolated()` (`NoLocal`, cwd `"/"`, no real
-  filesystem) without `localfs`, so a test asserting cwd-isolation against a non-`/`
-  starting cwd, or reading a real tempfile path, needs the same gate even though
-  nothing failed to compile.
-
 
