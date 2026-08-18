@@ -7099,7 +7099,10 @@ mod argv_classify_tests {
             // `Int`/`Float` and drops the literal text (even inside a colon-merged
             // word: `00:` → `0:`); the classifier intentionally preserves the raw
             // string. Those numeric edges are pinned exactly by the unit tests.
-            token in "[a-zA-Z_=./@:+-]{1,8}"
+            // Non-ASCII is a word character now, so the generator has to
+            // reach it — an ASCII-only strategy tests a shrinking slice of
+            // what the classifier actually sees.
+            token in "[a-zA-Z_=./@:+\\-\u{00e9}\u{540d}\u{1f600}]{1,8}"
         ) {
             let parsed = match parse(&format!("cmd {token}")) {
                 Ok(p) => p,
