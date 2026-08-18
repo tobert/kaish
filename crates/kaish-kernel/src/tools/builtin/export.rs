@@ -64,6 +64,11 @@ impl Tool for Export {
         // `export PATH` is a positional; `export PATH=/bin` is a `key=value`
         // word whose key is the name. A quoted `export "PATH=/bin"` arrives as
         // one positional string, so a positional is cut at the first `=` too.
+        //
+        // A glued unknown flag (`export --PАTH=foo`) lands in the same map with
+        // no way left to tell it from a name, so it warns here as well as
+        // through W001. Two warnings on a command clap will refuse anyway is a
+        // better trade than a name door that skips a whole map.
         let positional = args.positional.iter().filter_map(|v| match v {
             Value::String(s) => Some(s.split('=').next().unwrap_or(s)),
             _ => None,

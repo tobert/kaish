@@ -89,6 +89,28 @@ async fn single_script_names_are_quiet_at_every_door() {
     }
 }
 
+/// A name that only exists at runtime has no spelling to judge before it runs,
+/// so no door warns about one. This pins the outcome, not the mechanism: the
+/// walker's `<dynamic>` placeholder is itself single-script Latin, so the
+/// explicit guard in `mixed_script_issue` is there to say the placeholder is
+/// not a name, not to carry this case.
+#[tokio::test]
+async fn a_name_that_is_not_known_until_runtime_is_not_judged() {
+    let name = cyrillic_path();
+    for source in [
+        format!("n={name}; unset $n"),
+        format!("n={name}; read $n"),
+        format!("n={name}; xs=[a]; push $n b"),
+        format!("n={name}; seq 1 2 | scatter --as $n | echo hi | gather"),
+    ] {
+        let (_, _, err) = run(&source).await;
+        assert!(
+            !err.contains("W007"),
+            "{source} has no static name to judge: {err:?}"
+        );
+    }
+}
+
 /// `unset`, `push`, `read`, and `scatter --as` take a name as a runtime word,
 /// so each needs the check in its own `Tool::validate`.
 #[tokio::test]

@@ -123,7 +123,9 @@ use crate::validator::{IssueCode, ValidationIssue};
 ///
 /// `<dynamic>` is the walker's placeholder for a word it cannot read before
 /// execution (`unset "$name"`). There is no spelling to judge, so it is
-/// skipped rather than reported.
+/// skipped rather than reported. The placeholder is single-script Latin and
+/// would not warn on its own; the guard says it is not a name, and holds if
+/// the sentinel ever changes.
 pub(crate) fn mixed_script_issue(name: &str) -> Option<ValidationIssue> {
     if name == "<dynamic>" {
         return None;
