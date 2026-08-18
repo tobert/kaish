@@ -1,8 +1,8 @@
 //! Properties the parser holds for every input, not just the ones we thought of.
 //!
 //! The suite pins behavior we chose. These pin behavior we require: that
-//! `parse` answers rather than panicking, and that a name means the same thing
-//! whichever way it is spelled. Both classes of bug found on this parser came
+//! `parse` answers rather than panicking, and that a plan's own rendering
+//! parses back to something. Both classes of bug found on this parser came
 //! from inputs nobody wrote a case for — a structural nesting combination, and
 //! a name boundary where two scanners disagreed — so the generators build
 //! *structure*, not random bytes. Random bytes hit a lexer error in
