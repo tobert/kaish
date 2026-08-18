@@ -72,6 +72,18 @@ breaking entries are marked **BREAKING**.
   `read` target spelled with a combining mark silently missed the value.
 - **`export café=1` works, agreeing with `café=1`** — `export` kept an
   ASCII-only name rule and rejected what plain assignment accepted.
+- **Every door refuses a name that does not read as what it is, not just the
+  written spellings** — `for`, `read`, `unset`, `push`, `scatter --as`, and a
+  quoted `"$x"` each took a name past the rule, so `a\u{200b}b` bound through
+  one door and was refused by every read.
+- **`export a.b=1` is refused and teaches the bracket form** — assignment
+  already refused a dotted target and `${a.b}` is a loud brackets-only error,
+  so `export` was the one door minting a variable no read could reach.
+- **An argv `key=value` word is data, not a name** — `echo a\u{200b}b=bar` was
+  refused as if the word were an assignment target; a word's bytes are its own.
+- **E019: an assignment target holding an invisible character is refused in the
+  syntax tree too** — the token scan cannot tell the second target in an
+  env-scoped prefix (`x=1 BAD=2 cmd`) from an argv word, and the tree can.
 - **`kaish -c`, a script, and the REPL print a parse or lexer failure's
   diagnostic directly** — `Error: execution failed` / `Caused by:` /
   `execution error: parse error:` used to bury the `line:col [parse]:
@@ -159,10 +171,15 @@ breaking entries are marked **BREAKING**.
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
   operator" word rule instead of an ASCII-only character class.
-- **Variable names accept any non-ASCII character too, and are NFC-normalized** —
-  `café=au-lait; echo $café` works, and a name spelled with a combining mark and
+- **Variable names are identifiers in any script plus emoji, and are NFC-normalized** —
+  `café=au-lait` and `😁=grin` work, and a name spelled with a combining mark and
   one spelled precomposed reach the same variable. Diverges from bash, which
   restricts names to `[a-zA-Z_][a-zA-Z0-9_]*`.
+- **A name holding a character that does not show itself is a loud error naming the
+  codepoint** — whitespace (`U+00A0`), zero-width characters (`U+200B`), and bidi
+  controls (`U+202E`) make a name read as something other than what it is. The
+  zero-width joiner stays legal between emoji, which is what makes a multi-glyph
+  emoji one character.
 - **Flag names stay ASCII-only** — `--café` is ambiguous between a flag and a
   literal word, so it is a loud lexer error naming the fix, rather than the
   generic "unexpected character" it was before.

@@ -2277,7 +2277,7 @@ enum StmtHead {
 /// consumes interior newlines) but does reset the DFA when no literal is
 /// open, and pops dangling `Test` frames (kaish's `[[ ]]` grammar is
 /// single-line).
-fn is_statement_boundary(token: &Token) -> bool {
+pub(crate) fn is_statement_boundary(token: &Token) -> bool {
     // `LBrace`/`RBrace` also reset the DFA, but they have dedicated match
     // arms (record-literal vs block-brace discrimination) that run before
     // the boundary wildcard, so they are deliberately absent here.

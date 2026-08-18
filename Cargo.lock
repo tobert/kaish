@@ -1099,6 +1099,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "trash",
+ "unicode-ident",
  "unicode-normalization",
  "unicode-width",
 ]
