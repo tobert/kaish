@@ -80,8 +80,8 @@ impl fmt::Display for NameError {
         };
         write!(
             f,
-            "variable name contains {what} (U+{:04X}) — a name has to read as \
-             what it is; quote the word to use it as a literal string instead",
+            "variable name contains {what} (U+{:04X}) — quote the word to use it \
+             as a literal string",
             self.ch as u32
         )
     }
