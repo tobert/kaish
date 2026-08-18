@@ -271,7 +271,9 @@ impl fmt::Display for MixedScript {
         }
         write!(
             f,
-            " — `{}` (U+{:04X}) is {}, so this binds a different variable",
+            // "names", not "binds": this message reaches `unset` too, which
+            // removes a variable rather than creating one.
+            " — `{}` (U+{:04X}) is {}, so this names a different variable",
             self.ch, self.ch as u32, self.other_script
         )
     }
