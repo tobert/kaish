@@ -348,3 +348,66 @@ proptest::proptest! {
         );
     }
 }
+
+// ── an argv `key=value` word is data, not a name ─────────────────────────
+
+/// `echo k=v` passes a word; `k=1` binds a variable. Both spell `Ident` `=`,
+/// and only the second is a name — a word's bytes are its own, so refusing one
+/// for holding a character a *name* may not hold rejects a valid program.
+#[tokio::test]
+async fn an_argv_key_value_word_is_not_a_name() {
+    for source in [
+        "echo a\u{200b}b=bar",
+        "echo a\u{00a0}b=bar",
+        "echo k=v",
+        "echo a\u{200b}b",
+    ] {
+        let (code, out) = run(source).await;
+        assert_eq!(code, 0, "an argv word was refused as if it were a name: {source:?} -> {out:?}");
+    }
+}
+
+/// The assignment spelling is still refused wherever a statement can start.
+/// These are the positions the argv rule above must not have opened up.
+#[tokio::test]
+async fn an_assignment_target_is_a_name_at_every_statement_start() {
+    let name = "a\u{200b}b";
+    for source in [
+        format!("{name}=1"),
+        format!("x=1; {name}=1"),
+        format!("true && {name}=1"),
+        format!("true || {name}=1"),
+        format!("local {name} = 1"),
+        format!("if true; then {name}=1; fi"),
+        format!("for i in 1; do {name}=1; done"),
+    ] {
+        assert!(
+            refusal(&source).await.is_some(),
+            "an assignment target was accepted: {source:?}"
+        );
+    }
+}
+
+/// CANARY — a known gap, deliberately pinned so it cannot go quiet.
+///
+/// A *second* assignment in an env-scoped prefix (`x=1 BAD=2 cmd`) is not
+/// reached by the name rule. The parse-time scan tells an assignment target
+/// from an argv word by what precedes it, and here both are preceded by the
+/// previous assignment's value, so the two are indistinguishable one token
+/// back. The first assignment in the prefix IS checked.
+///
+/// **If this test fails, the gap was closed — that is good news.** Delete this
+/// test and add the case to `every_name_door`. The intended fix is in
+/// `validator/walker.rs::validate_assignment`, which sees every `Assignment`
+/// including each one in `Stmt::EnvScoped` and has no ambiguity about what is
+/// a target; it needs a new `IssueCode`, which is why it did not land here —
+/// `E018` was being taken by the `#`-at-word-start branch at the same time and
+/// two branches minting the same code would collide on merge.
+#[tokio::test]
+async fn canary_env_prefix_second_assignment_escapes_the_name_rule() {
+    let (code, _out) = run("x=1 a\u{200b}b=2 echo hi").await;
+    assert_eq!(
+        code, 0,
+        "the env-prefix gap is closed — see this test's doc comment for what to do"
+    );
+}

@@ -340,7 +340,20 @@ fn name_in_token<'a>(tok: &'a Token, prev: Option<&Token>, next: Option<&Token>)
             .strip_prefix("${")
             .and_then(|s| s.strip_suffix('}'))
             .map(root_of),
-        Token::Ident(name) if matches!(next, Some(Token::Eq)) => Some(name.as_str()),
+        // An assignment target — but only where a statement can start. The
+        // same `Ident`+`Eq` spelling is an ordinary argv `key=value` word in
+        // argument position (`echo k=v`), and that word is data: its bytes are
+        // its own, and refusing it for holding a character a *name* may not
+        // hold rejects a valid program.
+        Token::Ident(name)
+            if matches!(next, Some(Token::Eq))
+                && match prev {
+                    None => true,
+                    Some(p) => crate::lexer::is_statement_boundary(p) || matches!(p, Token::Local),
+                } =>
+        {
+            Some(name.as_str())
+        }
         // `for x in …` binds `x`. Keyed on the `For` before it, not the `In`
         // after it: `case x in …` reads the same one token ahead, and that
         // `x` is a subject to match, not a name.
