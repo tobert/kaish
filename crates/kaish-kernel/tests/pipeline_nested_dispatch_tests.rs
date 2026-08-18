@@ -43,6 +43,13 @@ fn kernel() -> Kernel {
 // Quoted because kaish does no token pasting — bare `echo a$(echo b)` is a
 // parse error by design, not a case this fix is allowed to change.
 #[case::substitution_glued("echo \"a$(echo b)\" | cat", "ab\n")]
+// Literal text on BOTH sides of the substitution. The whole stage's output
+// was lost, not merely the substituted part — `x:[` vanished along with `C`.
+// This row is what separates the real fix from a plausible partial one that
+// delivers the literals and an empty substitution; that shape would pass
+// every other case here. Reported by the kaijutsu session.
+#[case::literal_text_either_side("echo \"x:[$(echo C)]\" | cat", "x:[C]\n")]
+#[case::literal_text_either_side_dashes("echo \"pre-$(echo M)-post\" | cat", "pre-M-post\n")]
 // A different builtin, to prove this is not `echo`-specific.
 #[case::substitution_feeding_seq("seq 1 $(echo 3) | cat", "1\n2\n3\n")]
 // Two pipes deep: the loss must not reappear at a middle stage.
@@ -109,7 +116,11 @@ async fn substitution_still_consumes_the_stage_stdin() {
 /// embedded kernel and checked which form its own rc scripts use.
 #[rstest]
 #[case::pipeline_inside_a_substitution("echo \"$(echo a | cat)\" | cat", "a\n")]
-#[case::pipeline_inside_a_substitution_assigned("x=\"$(echo a | cat)\"; echo $x | cat", "a\n")]
+// An assignment is safe for a *different* reason worth keeping straight: it
+// is not a pipeline stage at all, so there is no writer in the slot to steal.
+// Both rows passed before the fix; they pass for unrelated reasons.
+#[case::assignment_is_not_a_stage("x=\"$(echo a | cat)\"; echo $x | cat", "a\n")]
+#[case::assignment_of_a_bare_substitution("x=\"$(echo a)\"; echo $x | cat", "a\n")]
 #[tokio::test]
 async fn a_pipeline_inside_a_substitution_keeps_working(
     #[case] source: &str,
