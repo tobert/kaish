@@ -240,3 +240,21 @@ fn repl_runtime_error_is_unchanged() {
         other => panic!("expected ProcessResult::Output, got {other:?}"),
     }
 }
+
+#[test]
+fn repl_background_announcement_reaches_the_screen() {
+    // The announcement rides stderr on a success (bash semantics). The
+    // empty-result gate must not swallow it: a screen that shows nothing for
+    // `cmd &` is exactly the "background output is lost" defect this lane
+    // fixes.
+    let mut repl = Repl::new().expect("Failed to create REPL");
+    match repl.process_line("echo hi &") {
+        ProcessResult::Output(output) => {
+            assert!(
+                output.contains("[1]"),
+                "the job announcement must be shown, got: {output:?}"
+            );
+        }
+        other => panic!("expected ProcessResult::Output, got {other:?}"),
+    }
+}

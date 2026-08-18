@@ -141,10 +141,16 @@ async fn test_background_job_returns_job_id() {
     let result = kernel.execute("echo hello &").await.unwrap();
 
     assert!(result.ok(), "background command should succeed, got: {}", result.err);
-    // Should return job ID like "[1]"
+    // The announcement is a shell message: it rides stderr (as bash does), so
+    // stdout stays clean for `$(cmd &)` captures.
     assert!(
-        result.text_out().contains("[1]") || result.text_out().contains("1"),
-        "expected job ID in output, got: {}",
+        result.err.contains("[1]"),
+        "expected job ID announcement on stderr, got: {:?}",
+        result.err
+    );
+    assert!(
+        result.text_out().is_empty(),
+        "the announcement is not command output, got: {:?}",
         result.text_out()
     );
 }

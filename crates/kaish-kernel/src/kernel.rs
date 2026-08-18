@@ -3193,6 +3193,15 @@ impl Kernel {
             // gives us that (Kernel implements CommandDispatcher).
             let mut result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
 
+            // A background task is its own statement boundary. Pipeline stages
+            // and command substitutions flush stderr to the fork's stderr
+            // channel exactly as they would in the foreground, but the
+            // statement-boundary drains live in `Kernel::execute`, which this
+            // task never runs. Drain here, or the job's stderr never reaches
+            // its result: a substitution's failure reason is lost and
+            // `/v/jobs/{id}/stderr` stays empty.
+            fork.drain_stderr_into(&mut result).await;
+
             // Apply the same spill/exit-3 contract the foreground path gets
             // (`execute_pipeline`'s `apply_spill_contract` call) — without
             // this, a background job whose output overflows the capture ring
@@ -3214,7 +3223,12 @@ impl Kernel {
             let _ = tx.send(result);
         }));
 
-        Ok(ExecResult::success(format!("[{}]", job_id)))
+        // The announcement is a shell message, not command output: bash writes
+        // it to stderr, and stdout stays clean so `$(cmd &)` captures no shell
+        // metadata. Terminated like every kaish diagnostic (#363).
+        let mut announcement = ExecResult::success("");
+        announcement.err = ExecResult::terminate_diagnostic(format!("[{job_id}]"));
+        Ok(announcement)
     }
 
     /// Format a pipeline as a command string for display.
@@ -9094,7 +9108,7 @@ AFTER="yes"'"#)
         // live); the redirect is what this test asserts on.
         let result = kernel.execute("echo hello > /tmp/basic_out.txt &").await.expect("execution failed");
         assert!(result.ok(), "background command should succeed: {}", result.err);
-        assert!(result.text_out().contains("[1]"), "should return job ID: {}", result.text_out());
+        assert!(result.err.contains("[1]"), "announcement rides stderr: {:?}", result.err);
 
         // Give the job time to complete
         tokio::time::sleep(Duration::from_millis(100)).await;
