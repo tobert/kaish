@@ -34,13 +34,39 @@ pub enum NameErrorKind {
     Invisible,
     /// Not an identifier character in any script, and not an emoji.
     NotAnIdentifier,
+    /// ASCII punctuation a *word* may hold but a name may not, because it does
+    /// not read back through every spelling of a reference.
+    AmbiguousAscii,
+    /// A dot, which reads as collection access rather than as part of a name.
+    DottedName,
 }
 
 impl fmt::Display for NameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.kind == NameErrorKind::DottedName {
+            return write!(
+                f,
+                "variable name contains `.` (U+002E) — kaish reads a dot as collection \
+                 access, not as part of a name, so write `name[key]` instead. Quote the \
+                 word to use it as a literal string instead"
+            );
+        }
+        if self.kind == NameErrorKind::AmbiguousAscii {
+            return write!(
+                f,
+                "variable name contains `{}` (U+{:04X}) — an ASCII name is letters, \
+                 digits, and `_`, because anything else fails to read back through \
+                 some spelling of a reference: `$a-b` reads `$a` and then the \
+                 literal text. Quote the word to use it as a literal string instead",
+                self.ch, self.ch as u32
+            );
+        }
         let what = match self.kind {
             NameErrorKind::Whitespace => "whitespace",
             NameErrorKind::Invisible => "an invisible character",
+            NameErrorKind::AmbiguousAscii | NameErrorKind::DottedName => {
+                unreachable!("handled above")
+            }
             NameErrorKind::NotAnIdentifier => "a character that is not a letter, digit, or emoji",
         };
         write!(
@@ -127,10 +153,45 @@ pub fn is_name_continue(c: char) -> bool {
 /// legitimate after an emoji: `👨‍👩` is one glyph, while `a‍b` renders as `ab`
 /// and is a different variable from `ab`.
 pub fn validate(name: &str) -> Result<(), NameError> {
+    // `${$}` and `${?}` are the braced spellings of the session identifier and
+    // the last exit code, and their name is literally that one character. They
+    // are the *only* two: every other special parameter (`$@`, `$#`, `$0`-`$9`)
+    // is its own token and never reaches this function.
+    //
+    // Listed rather than derived as "any single punctuation character". That
+    // wider rule looked equivalent — no assignment can create such a name,
+    // because the `Ident` token cannot start with punctuation — but the runtime
+    // doors do not take names from `Ident`: `read .`, `read @`, and `read -`
+    // are ordinary argument words, and each bound a variable no read could
+    // reach. The narrow list has no such hole.
+    if name == "$" || name == "?" {
+        return Ok(());
+    }
+
     let mut previous: Option<char> = None;
     for (i, c) in name.chars().enumerate() {
-        // ASCII was always legal and is checked by the caller's own class.
         if c.is_ascii() {
+            // An ASCII name is letters, digits, and `_`. The `Ident` token
+            // admits `-`, `@`, `.`, and `#` so that words, paths, hostnames,
+            // and ids keep them, but none of the four reads back through every
+            // spelling of a reference — `$a-b` reads `$a` and then the literal
+            // `-b`, and `a:b` has no read spelling at all. A name that binds
+            // one way and cannot be read another is the silent write this rule
+            // removes.
+            //
+            // `.` and `#` are refused here too, not left to the validator. The
+            // validator writes a better message — it knows the exact spelling
+            // to suggest — but it only ever sees an assignment, and `read`,
+            // `unset`, `push`, and `scatter --as` take a name at runtime with
+            // no validator pass in front of them. Leaving the two characters
+            // out left `read a.b` binding a name no read could reach, which is
+            // the whole defect.
+            if c == '.' {
+                return Err(NameError { ch: c, kind: NameErrorKind::DottedName });
+            }
+            if !(c.is_ascii_alphanumeric() || c == '_') {
+                return Err(NameError { ch: c, kind: NameErrorKind::AmbiguousAscii });
+            }
             previous = Some(c);
             continue;
         }

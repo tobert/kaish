@@ -357,6 +357,16 @@ café=au-lait;  echo $café       # au-lait
 😁=grin;       echo $😁         # grin
 ```
 
+A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
+admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
+them, and `echo a-b`, `ls -l`, and `my-file.txt` are unaffected — but a name
+holding one cannot be read back through every spelling of a reference, so
+`a-b=1` is a loud error naming the character. `$a-b` reads `$a` and then the
+literal `-b`; `$a@b` is an adjacent-words error; `a:b` has no read spelling at
+all. A name that binds one way and cannot be read another is a silent write,
+which is the shape this rule removes. Write `a_b`, or quote the word to use it
+as a literal string.
+
 A name is **NFC-normalized**. `café` typed as `e` + a combining acute and
 `café` typed as the precomposed `é` render identically, so they name one
 variable — binding through one spelling and reading through the other finds the

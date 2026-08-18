@@ -42,6 +42,12 @@ breaking entries are marked **BREAKING**.
   inside brackets and braces the colon stays structural.
 
 ### Changed
+- **BREAKING: an ASCII variable name is letters, digits, and `_`** — `a-b=1`,
+  `a@b=1`, and `a:b=1` bound variables that could not be read back through every
+  spelling of a reference (`$a-b` reads `$a` then literal text; `a:b` had no read
+  spelling at all). All three are now a loud error naming the character, at every
+  door including `read`, `unset`, `push`, `scatter --as`, and `export`. Words are
+  unaffected — `echo a-b`, `ls -l`, and `my-file.txt` still work.
 - **The parser graph is built once per thread instead of once per `parse()`** — an
   embedder's `execute()` round trip drops 63% of its allocations and 77% of its bytes.
 - **BREAKING (embedders):** a heredoc's `PlannedRedirect.target` is now its

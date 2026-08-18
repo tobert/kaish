@@ -129,8 +129,15 @@ impl<'a> Validator<'a> {
         // second target and a command name look identical one token back. Here
         // the tree already knows this is a target, so the rule is exact.
         if let Err(bad) = crate::name::validate(name) {
-            self.issues
-                .push(ValidationIssue::error(IssueCode::InvisibleAssignmentTarget, bad.to_string()));
+            // `.` and `#` have their own codes below, which name the corrected
+            // spelling. Reporting the general rule as well would hand the
+            // author two errors for one mistake.
+            if !matches!(bad.ch, '.' | '#') {
+                self.issues.push(ValidationIssue::error(
+                    IssueCode::InvisibleAssignmentTarget,
+                    bad.to_string(),
+                ));
+            }
         }
 
         if assign.path.segments.len() == 1 {
