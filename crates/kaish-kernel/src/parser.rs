@@ -324,6 +324,81 @@ fn is_name_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
 }
 
+
+/// The variable name a token spells, if it spells one.
+///
+/// Five tokens can carry a name: `$x`, `${x}`, `${#x}`, an `Ident` that is the
+/// target of an assignment, and the `Ident` a `for` loop binds. The neighbors
+/// are what tell them apart — the same `Ident` in argument position is
+/// ordinary data and its bytes are its own, and `case subject in` puts a
+/// data word in front of the very `In` that marks a `for` variable.
+fn name_in_token<'a>(tok: &'a Token, prev: Option<&Token>, next: Option<&Token>) -> Option<&'a str> {
+    match tok {
+        Token::SimpleVarRef(name) => Some(name.as_str()),
+        Token::VarLength(inner) => Some(root_of(inner)),
+        Token::VarRef(raw) => raw
+            .strip_prefix("${")
+            .and_then(|s| s.strip_suffix('}'))
+            .map(root_of),
+        // An assignment target — but only where a statement can start. The
+        // same `Ident`+`Eq` spelling is an ordinary argv `key=value` word in
+        // argument position (`echo k=v`), and that word is data: its bytes are
+        // its own, and refusing it for holding a character a *name* may not
+        // hold rejects a valid program.
+        Token::Ident(name)
+            if matches!(next, Some(Token::Eq))
+                && match prev {
+                    None => true,
+                    Some(p) => crate::lexer::is_statement_boundary(p) || matches!(p, Token::Local),
+                } =>
+        {
+            Some(name.as_str())
+        }
+        // `for x in …` binds `x`. Keyed on the `For` before it, not the `In`
+        // after it: `case x in …` reads the same one token ahead, and that
+        // `x` is a subject to match, not a name.
+        Token::Ident(name) if matches!(prev, Some(Token::For)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// The first name inside an interpolated string that does not read as what it
+/// is. A quoted `"$x"` never becomes a name-carrying token of its own — the
+/// whole string is one `Token::String` — so without this the quoted spelling
+/// of a name is the one door that reads an invisible character in silence.
+fn bad_name_in_parts(parts: &[StringPart]) -> Option<crate::name::NameError> {
+    fn root(path: &VarPath) -> Option<&str> {
+        match path.segments.first() {
+            Some(VarSegment::Field(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+    for part in parts {
+        let bad = match part {
+            StringPart::Var(path) | StringPart::VarLength(path) => {
+                root(path).and_then(|n| crate::name::validate(n).err())
+            }
+            StringPart::VarWithDefault { path, default } => root(path)
+                .and_then(|n| crate::name::validate(n).err())
+                .or_else(|| bad_name_in_parts(default)),
+            // A command substitution's own statements were parsed by `parse`,
+            // which ran this same scan over them.
+            _ => None,
+        };
+        if bad.is_some() {
+            return bad;
+        }
+    }
+    None
+}
+
+/// The root of a variable path — everything before the first subscript or
+/// dotted field. Only the root is a name; a subscript is data.
+fn root_of(inner: &str) -> &str {
+    let end = inner.find(['[', '.', ':', '-']).unwrap_or(inner.len());
+    &inner[..end]
+}
+
 pub(crate) fn parse_varpath(raw: &str) -> VarPath {
     let segment_strs = lexer::parse_var_ref(raw).unwrap_or_default();
     let segments = segment_strs
@@ -1030,7 +1105,32 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // rejection inside `choice` loses its own message to a competing
     // alternative's. This shape needs to *teach* the bracket form, so it is
     // caught where nothing can outvote it.
-    for (tok, span) in &tokens {
+    //
+    // A name that does not read as what it is — one holding whitespace, a
+    // bidi control, or a zero-width character — is caught in the same scan and
+    // for the same reason: the message has to name a character the reader
+    // cannot see, so it must not lose to a competing alternative's.
+    for (i, (tok, span)) in tokens.iter().enumerate() {
+        let prev = i.checked_sub(1).and_then(|j| tokens.get(j)).map(|(t, _)| t);
+        if let Some(name) = name_in_token(tok, prev, tokens.get(i + 1).map(|(t, _)| t)) {
+            if let Err(bad) = crate::name::validate(name) {
+                return Err(vec![ParseError { span: *span, message: bad.to_string() }]);
+            }
+        }
+        // The quoted spelling of a read: `"$x"` arrives whole, so its names
+        // have to be dug out rather than met as tokens. An all-ASCII string
+        // cannot hold a name this rule refuses — every character the rule
+        // rejects is non-ASCII — so the common string never pays for the
+        // second parse.
+        if let Token::String(s) = tok {
+            if !s.is_ascii() && s.contains('$') {
+                if let Ok(parts) = parse_interpolated_string(s) {
+                    if let Some(bad) = bad_name_in_parts(&parts) {
+                        return Err(vec![ParseError { span: *span, message: bad.to_string() }]);
+                    }
+                }
+            }
+        }
         let message = match tok {
             Token::VarRef(raw) => raw
                 .strip_prefix("${")

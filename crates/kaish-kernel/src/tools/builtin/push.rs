@@ -116,6 +116,14 @@ impl Tool for Push {
         // token, verbatim — so both are parsed the same way here via the
         // shared `${...}` path grammar (`services[web][tags]` round-trips
         // through it exactly like `${services[web][tags]}`'s interior).
+        // Only the root is a name — a subscript is data the author chose, and
+        // its bytes are its own. Checked before the append so `push` refuses a
+        // root that `$x` would refuse to read back.
+        let root = name.split('[').next().unwrap_or(name.as_str());
+        if let Err(bad) = crate::name::validate(root) {
+            return ExecResult::failure(2, format!("push: `{root}': {bad}"));
+        }
+
         let path = crate::parser::parse_varpath(&format!("${{{name}}}"));
 
         let values: Vec<Value> = args.positional[1..].to_vec();

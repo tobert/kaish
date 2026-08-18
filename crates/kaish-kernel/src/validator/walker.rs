@@ -122,6 +122,17 @@ impl<'a> Validator<'a> {
         self.validate_expr(&assign.value);
 
         let name = assign.name();
+
+        // The token-stream scan catches most spellings earlier and with a
+        // tighter span, but it tells a target from an argv `key=value` word by
+        // what precedes it — and in an env-scoped prefix (`x=1 BAD=2 cmd`) the
+        // second target and a command name look identical one token back. Here
+        // the tree already knows this is a target, so the rule is exact.
+        if let Err(bad) = crate::name::validate(name) {
+            self.issues
+                .push(ValidationIssue::error(IssueCode::InvisibleAssignmentTarget, bad.to_string()));
+        }
+
         if assign.path.segments.len() == 1 {
             if let Some(dot) = name.find('.') {
                 let (root, rest) = (&name[..dot], &name[dot + 1..]);
