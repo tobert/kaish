@@ -1,6 +1,6 @@
 # kaish (会sh)
 
-Bourne-like shell for AI agents. Familiar syntax, fewer footguns.
+Bourne-like shell for AI agents. Familiar syntax, typed values, structured output.
 Validates before execution. Builtins run in-process; external commands via PATH.
 
 ## Topics

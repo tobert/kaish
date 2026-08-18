@@ -54,6 +54,19 @@ breaking entries are marked **BREAKING**.
 - **Parsing a `$(...)`-heavy script is ~20-25% slower per token** — the fix
   below parses each substitution body through the full grammar via its own
   recursive parse call instead of a narrower hand-rolled one.
+- **Agent-facing help and onboarding now lead with what kaish does** — the
+  tagline and guidance state the capabilities (typed values, structured output,
+  pre-execution validation) instead of defining against bash's hazards, because
+  agents learn what to write from what the prose writes.
+- **Help prose replaces colloquial terms with engineering terms** — `override`
+  (a documented way past a restriction) and `hazard` (named with its fix) carry
+  the old meanings, because engineering vocabulary transfers to a model reader
+  without colloquial connotation.
+- **`docs/style.md` gained weights for the model reader** — example before
+  rule, marked wrong pairs, quoted error text, three registers, and the
+  embedder/agent split, because the corpus is mostly read by LLMs.
+- **The known-debt ledger moved out of `docs/style.md`** — the guide primes
+  agents to write the style; its history lives in git.
 
 ### Removed
 - **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and

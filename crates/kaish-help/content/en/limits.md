@@ -2,7 +2,7 @@
 
 ## Intentionally Missing
 
-| Feature | Workaround |
+| Feature | Use instead |
 |---------|------------|
 | Shell brace expansion `{a,b,c}` | List items explicitly |
 | Process substitution `<(cmd)` | `cmd > /tmp/t.txt; cmd2 /tmp/t.txt` |
@@ -24,7 +24,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 
 ## Lexer/Parser Limitations
 
-| Limitation | Details | Workaround |
+| Limitation | Details | Use instead |
 |-----------|---------|------------|
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's native list literals |
 | Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
@@ -54,7 +54,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 
 ## External Commands
 
-| Constraint | Workaround |
+| Constraint | Use instead |
 |-----------|------------|
 | No PTY assumed | TTY works if present, but kaish doesn't allocate one |
 | Output buffered (non-pipeline) | Redirect to file or use in pipeline |

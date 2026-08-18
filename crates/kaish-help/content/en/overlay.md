@@ -61,7 +61,7 @@ that call only.
 `execute()` call and commit in the next, the transaction from the first call
 was already discarded when its kernel was dropped.
 
-## Escape hatches (writes that bypass the overlay)
+## Overrides (writes that bypass the overlay)
 
 Under Sandboxed+overlay, the following mounts are **real LocalFs** and escape
 the transaction:
@@ -84,7 +84,7 @@ builtin, `cd` to a real path, or `kaish-vfs commit`), rather than the plain
 
 Under Sandboxed+overlay, `cd /tmp` moves cwd to a real LocalFs mount — from
 there, external commands work and see (and write) the real filesystem directly.
-That is the intended escape hatch for running compilers; be aware that writes
+That is the intended override for running compilers; be aware that writes
 in `/tmp` are not part of the overlay transaction.
 
 ## Structured diff output (`--json`)

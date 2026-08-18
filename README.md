@@ -92,7 +92,7 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# regular *.log works but glob adds modern affordances and its
+# regular *.log works but glob adds recursive ** patterns, and its
 # data passes to the for loop as a JSON array
 for file in $(glob **/*.log); do
     echo "logfile: $file"
@@ -287,7 +287,8 @@ error messages.
 | overlay | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
 | trash | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
 | spill | To write oversize output to a file, or the file that results. |
-| escape hatch | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows, single quotes out of expansion. Never a workaround: an escape hatch is part of the design, and every restriction that has one names it. |
+| hazard | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
+| override | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. Never a workaround: an override is part of the design, and every restriction that has one names it. |
 
 Contributors: the writing style behind this vocabulary is in
 [docs/style.md](docs/style.md).
