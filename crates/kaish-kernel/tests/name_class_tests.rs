@@ -171,3 +171,180 @@ proptest::proptest! {
         );
     }
 }
+
+/// The text of a refusal, however it arrived. A name caught before execution
+/// comes back as an `Err`; one caught by a builtin comes back as a nonzero
+/// result. Both are refusals, and a test that knows only one shape would call
+/// half the doors broken.
+async fn refusal(source: &str) -> Option<String> {
+    let k = kernel();
+    match k.execute(source).await {
+        Err(e) => Some(format!("{e:#}")),
+        // A builtin's refusal goes to `err`, a parse-time one to the `Err`
+        // above — read both, or half the doors look like they said nothing.
+        Ok(r) if r.code != 0 => Some(format!("{}{}", r.text_out(), r.err)),
+        Ok(_) => None,
+    }
+}
+
+// ── every door, not just the four written spellings ──────────────────────
+
+/// The doors a name can enter through that are *not* `$x`/`${x}`/`"$x"`/`N=`.
+///
+/// Each one is a place a name arrives as a runtime word or under a keyword,
+/// where the parser's name scan does not meet it as a name-carrying token. A
+/// door missing from this rule is the silent-write shape the whole name class
+/// exists to close: bound through one spelling, refused by every read.
+fn every_name_door(name: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("assign", format!("{name}=1")),
+        ("read $x", format!("echo ${name}")),
+        ("read \"$x\"", format!("echo \"${name}\"")),
+        ("read \"${x}\"", format!("echo \"${{{name}}}\"")),
+        ("read \"${x:-d}\"", format!("echo \"${{{name}:-d}}\"")),
+        ("read \"${#x}\"", format!("echo \"${{#{name}}}\"")),
+        ("for", format!("for {name} in 1; do echo hi; done")),
+        ("export", format!("export {name}=1")),
+        ("read builtin", format!("read {name}")),
+        ("unset", format!("unset {name}")),
+        ("push", format!("push {name} 1")),
+    ]
+}
+
+/// Every door refuses an invisible name, and says which character it refused.
+///
+/// The zero-width space is the sharp case: `a\u{200b}b` renders as `ab`, so a
+/// door that accepts it binds a variable the author believes is `ab` and no
+/// read can reach.
+#[tokio::test]
+async fn every_door_refuses_an_invisible_name() {
+    let name = "a\u{200b}b";
+    for (door, source) in every_name_door(name) {
+        let text = refusal(&source)
+            .await
+            .unwrap_or_else(|| panic!("the `{door}` door accepted an invisible name: {source:?}"));
+        assert!(
+            text.contains("U+200B"),
+            "the `{door}` door refused without naming the character: {text}"
+        );
+    }
+}
+
+/// The same doors, for a name holding whitespace that does not look like it.
+#[tokio::test]
+async fn every_door_refuses_a_no_break_space() {
+    let name = "a\u{00a0}b";
+    for (door, source) in every_name_door(name) {
+        let text = refusal(&source)
+            .await
+            .unwrap_or_else(|| panic!("the `{door}` door accepted a no-break space: {source:?}"));
+        assert!(
+            text.contains("U+00A0"),
+            "the `{door}` door refused without naming the character: {text}"
+        );
+    }
+}
+
+/// A legal name works through every one of those doors, so the refusals above
+/// are the rule doing its job rather than the doors being broken.
+#[tokio::test]
+async fn every_door_accepts_a_visible_name() {
+    for source in [
+        "café=1; echo $café",
+        "café=1; echo \"$café\"",
+        "for café in 1; do echo $café; done",
+        "export café=1",
+        "x=1; unset x",
+        "xs=[]; push xs 1",
+        "名前=1; echo \"${名前:-d}\"",
+    ] {
+        let (code, out) = run(source).await;
+        assert_eq!(code, 0, "a visible name was refused: {source:?} -> {out:?}");
+    }
+}
+
+/// `export` refuses a dotted name and teaches the bracket form.
+///
+/// The assignment door already refuses `a.b=1`, and `${a.b}` is a loud
+/// brackets-only error — so an `export` that accepted it would be the one
+/// door minting a variable no read path can reach.
+#[tokio::test]
+async fn export_refuses_a_dotted_name() {
+    let text = refusal("export a.b=1").await.expect("export accepted a dotted name");
+    assert!(text.contains("bracket access"), "export did not teach the bracket form: {text}");
+    assert!(text.contains("a[b]"), "export did not show the corrected spelling: {text}");
+}
+
+/// `scatter --as` refuses a name no read could reach, at option-parse time.
+#[tokio::test]
+async fn scatter_as_refuses_an_invisible_name() {
+    let text = refusal("echo 1 | scatter --as a\u{200b}b -- echo hi | gather")
+        .await
+        .expect("scatter --as accepted an invisible name");
+    assert!(text.contains("U+200B"), "scatter --as refused without naming it: {text}");
+}
+
+// ── property: no name is legal at one door and illegal at another ────────
+
+/// A name with exactly one invisible character spliced into an otherwise
+/// legal one. The generator builds the *illegal* half of the space — the
+/// legal-name property above cannot see a door disagreement, because a door
+/// that never refuses anything agrees with every other door on legal input.
+fn an_illegal_name() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    (
+        proptest::collection::vec(
+            prop_oneof![Just('a'), Just('Z'), Just('_'), Just('é'), Just('名')],
+            1..4,
+        ),
+        prop_oneof![
+            Just('\u{200b}'), // ZERO WIDTH SPACE
+            Just('\u{00a0}'), // NO-BREAK SPACE
+            Just('\u{00ad}'), // SOFT HYPHEN
+            Just('\u{2066}'), // LEFT-TO-RIGHT ISOLATE
+        ],
+        proptest::collection::vec(
+            prop_oneof![Just('a'), Just('Z'), Just('_'), Just('é'), Just('名')],
+            1..4,
+        ),
+    )
+        .prop_map(|(head, bad, tail)| {
+            let mut s: String = head.into_iter().collect();
+            s.push(bad);
+            s.extend(tail);
+            s
+        })
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+
+    /// Whatever the illegal name, every door refuses it. One door accepting
+    /// what the others refuse is the silent write this class exists to close,
+    /// and it is a boundary defect — the kind that hides between hand cases.
+    #[test]
+    fn no_door_accepts_what_another_refuses(name in an_illegal_name()) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let unrefused: Vec<&str> = runtime.block_on(async {
+            let mut unrefused = Vec::new();
+            for (door, source) in every_name_door(&name) {
+                // Not merely "it failed" — `read NAME` fails for want of
+                // stdin whatever the name, and that would pass this property
+                // without the rule ever running. The refusal has to name the
+                // character it refused.
+                let named = refusal(&source).await.is_some_and(|t| t.contains("U+"));
+                if !named {
+                    unrefused.push(door);
+                }
+            }
+            unrefused
+        });
+        proptest::prop_assert!(
+            unrefused.is_empty(),
+            "these doors did not refuse the illegal name {name:?}: {unrefused:?}"
+        );
+    }
+}

@@ -69,6 +69,13 @@ breaking entries are marked **BREAKING**.
   `read` target spelled with a combining mark silently missed the value.
 - **`export café=1` works, agreeing with `café=1`** — `export` kept an
   ASCII-only name rule and rejected what plain assignment accepted.
+- **Every door refuses a name that does not read as what it is, not just the
+  written spellings** — `for`, `read`, `unset`, `push`, `scatter --as`, and a
+  quoted `"$x"` each took a name past the rule, so `a\u{200b}b` bound through
+  one door and was refused by every read.
+- **`export a.b=1` is refused and teaches the bracket form** — assignment
+  already refused a dotted target and `${a.b}` is a loud brackets-only error,
+  so `export` was the one door minting a variable no read could reach.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.
