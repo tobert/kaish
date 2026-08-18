@@ -567,8 +567,10 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         if !result.ok() && !result.err.is_empty() {
             match format {
                 OutputFormat::Json => {
+                    // The line terminator is a text-rendering contract (#363);
+                    // the JSON envelope carries the message as written.
                     let mut obj = serde_json::json!({
-                        "error": result.err,
+                        "error": result.err.trim_end_matches('\n'),
                         "code": result.code,
                     });
                     // A tool that attached structured data to an error result

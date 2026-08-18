@@ -131,7 +131,7 @@ impl Tool for Tee {
         // binary input.
         let mut result = ExecResult::success_text_or_bytes(input);
         if !errors.is_empty() {
-            result.err = errors.join("\n");
+            result.err = ExecResult::terminate_diagnostic(errors.join("\n"));
             result = result.with_code(1);
         }
         result

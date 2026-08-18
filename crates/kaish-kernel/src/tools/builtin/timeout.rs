@@ -168,11 +168,11 @@ impl Tool for Timeout {
                     // "sleep: interrupted"). Append rather than overwrite so
                     // that inner detail isn't lost.
                     let note = format!("timeout: timed out after {}", duration_str);
-                    result.err = if result.err.is_empty() {
+                    result.err = ExecResult::terminate_diagnostic(if result.err.is_empty() {
                         note
                     } else {
                         format!("{}\n{}", note, result.err)
-                    };
+                    });
                 }
                 result
             }

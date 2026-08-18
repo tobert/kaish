@@ -269,7 +269,7 @@ impl Checksum {
         }
 
         if failures > 0 {
-            ExecResult::from_output(1, output, format!("checksum: {} computed checksum(s) did NOT match", failures))
+            ExecResult::from_parts(1, output, format!("checksum: {} computed checksum(s) did NOT match", failures), None)
         } else {
             ExecResult::with_output(OutputData::text(output))
         }

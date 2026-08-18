@@ -109,7 +109,7 @@ impl Tool for Stat {
             ExecResult::with_output(OutputData::table(headers, nodes))
         };
         if let Some(msg) = last_err {
-            result.err = msg;
+            result.err = ExecResult::terminate_diagnostic(msg);
             result = result.with_code(1);
         }
         result

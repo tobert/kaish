@@ -585,9 +585,16 @@ fn format_result(result: &ExecResult) -> String {
         let context = format::detect_context();
         let formatted = format::format_output(result, context);
 
-        // For failures, append error info
+        // For failures, append error info. The diagnostic's line terminator is
+        // a rendering contract for raw stderr (#363); inside a quoted field it
+        // would strand the closing quote on its own line, so it stays out.
         if !result.ok() && !result.err.is_empty() {
-            return format!("{}\n✗ code={} err=\"{}\"", formatted, result.code, result.err);
+            return format!(
+                "{}\n✗ code={} err=\"{}\"",
+                formatted,
+                result.code,
+                result.err.trim_end_matches('\n')
+            );
         }
         return formatted;
     }

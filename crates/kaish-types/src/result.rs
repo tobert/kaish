@@ -96,6 +96,13 @@ pub struct ExecResult {
     /// Standard output payload — text (canonical for pipes) or raw bytes.
     out: OutputPayload,
     /// Raw standard error as a string.
+    ///
+    /// Line contract: empty, or ends with exactly one `\n` — every diagnostic
+    /// kaish mints ends its own line (#363), so renderers print `err`
+    /// verbatim. Two deliberate exceptions carry unterminated text: a
+    /// `read -p` prompt and stdout folded into stderr by `1>&2` — both stay
+    /// byte-faithful, as bash does. External-command stderr is pass-through
+    /// data too; the contract covers kaish's own messages.
     pub err: String,
     /// Structured data — only populated when a builtin/tool sets it explicitly.
     /// Stdout is *never* sniffed; this stays `None` for external commands.
@@ -135,6 +142,24 @@ pub struct ExecResult {
 }
 
 impl ExecResult {
+    /// End a kaish diagnostic on its own line: empty stays empty; anything
+    /// else ends with exactly one `\n`.
+    ///
+    /// stderr is line-oriented. A diagnostic kaish mints must terminate its
+    /// own line, or whatever renders next fuses onto it (#363). The
+    /// constructors call this; apply it to any message assigned to `err`
+    /// directly.
+    pub fn terminate_diagnostic(message: impl Into<String>) -> String {
+        let mut message = message.into();
+        if message.is_empty() {
+            return message;
+        }
+        let terminated = message.trim_end_matches('\n').len();
+        message.truncate(terminated);
+        message.push('\n');
+        message
+    }
+
     /// Create a successful result with output.
     pub fn success(out: impl Into<String>) -> Self {
         Self {
@@ -231,11 +256,14 @@ impl ExecResult {
     }
 
     /// Create a failed result with an error message.
+    ///
+    /// The message is normalized to the stderr line contract: it ends with
+    /// exactly one newline (unless empty), so renderers print it verbatim.
     pub fn failure(code: i64, err: impl Into<String>) -> Self {
         Self {
             code,
             out: OutputPayload::Text(String::new()),
-            err: err.into(),
+            err: Self::terminate_diagnostic(err),
             data: None,
             output: None,
             did_spill: false,
@@ -292,7 +320,7 @@ impl ExecResult {
         Self {
             code,
             out: OutputPayload::Text(out),
-            err,
+            err: Self::terminate_diagnostic(err),
             data,
             output: None,
             did_spill: false,
@@ -573,7 +601,44 @@ mod tests {
         let result = ExecResult::failure(1, "command not found");
         assert!(!result.ok());
         assert_eq!(result.code, 1);
-        assert_eq!(result.err, "command not found");
+        assert_eq!(result.err, "command not found\n");
+    }
+
+    #[test]
+    fn failure_ends_exactly_one_newline() {
+        assert_eq!(ExecResult::failure(1, "msg").err, "msg\n");
+        assert_eq!(ExecResult::failure(1, "msg\n").err, "msg\n");
+        assert_eq!(ExecResult::failure(1, "msg\n\n\n").err, "msg\n");
+    }
+
+    #[test]
+    fn failure_empty_message_stays_empty() {
+        // Callers branch on `err.is_empty()`; an empty failure must not mint
+        // a bare blank line.
+        assert_eq!(ExecResult::failure(1, "").err, "");
+    }
+
+    #[test]
+    fn terminate_diagnostic_keeps_multiline_interior_newlines() {
+        let msg = "wc: a: not found\nwc: b: not found";
+        assert_eq!(
+            ExecResult::terminate_diagnostic(msg),
+            "wc: a: not found\nwc: b: not found\n"
+        );
+    }
+
+    #[test]
+    fn from_parts_ends_the_diagnostic_line() {
+        assert_eq!(ExecResult::from_parts(1, String::new(), "boom".into(), None).err, "boom\n");
+        assert_eq!(ExecResult::from_parts(1, String::new(), String::new(), None).err, "");
+    }
+
+    #[test]
+    fn from_output_keeps_external_stderr_byte_faithful() {
+        // A program that dies mid-line stays mid-line, as in bash: the
+        // pass-through constructor must not add bytes.
+        let result = ExecResult::from_output(1, "", "died mid-line");
+        assert_eq!(result.err, "died mid-line");
     }
 
     #[test]
@@ -651,7 +716,7 @@ mod tests {
         let result = ExecResult::from_parts(42, "out".into(), "err".into(), None);
         assert_eq!(result.code, 42);
         assert_eq!(&*result.text_out(),"out");
-        assert_eq!(result.err, "err");
+        assert_eq!(result.err, "err\n");
         assert!(result.data.is_none());
         assert!(result.output.is_none());
     }

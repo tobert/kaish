@@ -122,11 +122,13 @@ impl Tool for Which {
             } else {
                 // Some found, some not - still success but report not found
                 let mut result = ExecResult::with_output(OutputData::text(output));
-                result.err = not_found
-                    .iter()
-                    .map(|n| format!("which: no {} in ({})", n, path_var))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                result.err = ExecResult::terminate_diagnostic(
+                    not_found
+                        .iter()
+                        .map(|n| format!("which: no {} in ({})", n, path_var))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
                 result
             }
         } else {
