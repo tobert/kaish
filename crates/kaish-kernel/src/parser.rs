@@ -85,9 +85,14 @@ fn parse_var_expr(raw: &str) -> Expr {
         // Extract default value (between :- and }) and recursively parse it,
         // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
-        // This `${VAR:-WORD}` expr path is infallible; a malformed `$()` inside
-        // the default word stays literal here (rare edge). The common quoted
-        // `"$(…)"` path is the loud one (see `parse_interpolated_string`).
+        // TODO: this discards a real error. `parse_interpolated_string` now
+        // reports an unterminated `$(`, but this path returns `Expr` and has
+        // nowhere to put a failure, so `echo ${x:-$(echo hi}` still exits 0
+        // with the body kept as literal text — the same silent shape the
+        // quoted path just stopped doing. Closing it needs the check on the
+        // token stream, where `validate_interpolated_strings` already lives;
+        // it only inspects `Token::String` today and would have to read a
+        // `VarRef`'s default word too.
         let default_word = unquote_default_word(default_str);
         let default = parse_interpolated_string(&default_word)
             .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
