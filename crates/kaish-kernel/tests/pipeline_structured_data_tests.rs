@@ -64,3 +64,60 @@ async fn seq_into_scatter_sees_structured_items() {
         );
     }
 }
+
+// --- The sideband survives a nested dispatch in the consuming stage --------
+//
+// Same assertion as `seq_into_jq_uses_structured_data` above, with one thing
+// added to the consuming stage: a `$(…)` in its own argument list, or a
+// function body around it. That nested dispatch destroys the structured
+// value, and `jq` falls back to parsing the pipe *text* — the exact failure
+// the sideband was built to prevent, re-entered through a different door:
+//
+//     seq 1 3 | jq -c .            → [1,2,3]
+//     seq 1 3 | jq -c $(echo .)    → "trailing characters … looks like JSONL"
+//
+// Same root shape as the `pipe_stdout` loss (see
+// `pipeline_nested_dispatch_tests.rs`): a per-invocation IO resource lives in
+// the kernel's one shared `exec_ctx` slot, and a nested dispatch takes it and
+// does not put it back. `stdin_data`/`stdin_data_rx` are moved *into* a
+// command's context at every sync site and never returned, so an outer stage
+// that has not consumed them yet loses them to the inner call.
+//
+// Unlike the `pipe_stdout` loss, this one fails loudly — a wrong answer with
+// an error message attached, not silence at exit 0.
+//
+// Deterministic, so no loop: the race the tests above defend against is a
+// different mechanism.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_substitution_in_the_consumer_does_not_eat_the_structured_value() {
+    let (code, out) = run("seq 1 3 | jq -c $(echo .)").await;
+    assert_eq!(code, 0, "seq | jq $(echo .) should succeed, got out={out:?}");
+    assert_eq!(
+        out, "[1,2,3]",
+        "a `$()` in the consumer's argv must not cost it the structured value"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quoted_substitution_in_the_consumer_is_the_same_case() {
+    let (code, out) = run("seq 1 3 | jq -c \"$(echo .)\"").await;
+    assert_eq!(code, 0, "quoted form should succeed, got out={out:?}");
+    assert_eq!(out, "[1,2,3]");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_function_body_consumer_keeps_the_structured_value() {
+    let (code, out) = run("f() { jq -c .; }; seq 1 3 | f").await;
+    assert_eq!(code, 0, "function-body consumer should succeed, got out={out:?}");
+    assert_eq!(out, "[1,2,3]");
+}
+
+/// The control that says this is about the sideband and not about stdin bytes:
+/// a text consumer reads the pipe directly and was never affected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_consumer_was_never_affected() {
+    let (code, out) = run("seq 1 3 | wc -l").await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "3");
+}
