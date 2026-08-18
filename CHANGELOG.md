@@ -63,6 +63,11 @@ breaking entries are marked **BREAKING**.
   variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **An unterminated `$(` inside a double-quoted string is a loud parse error**
+  — `echo "pre $(echo hi"` used to fabricate a closing `)` and run the
+  substitution anyway whenever the remainder happened to parse on its own; it
+  now reports "unterminated command substitution: missing `)`", matching the
+  unquoted form.
 - **`#` starts a comment only at the start of a word** — `echo abc#3` printed `abc`
   and silently dropped the rest of the line, `;` separators and whole commands
   included, at exit 0. It prints `abc#3` now, as bash and `sh` do.
