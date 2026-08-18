@@ -24,7 +24,7 @@ The kaish validator is the only checker that sees them.**
 
 ## Crate structure
 
-Read `crates/kaish-types/` in full before working in the kernel.
+Read `crates/kaish-types/` in full before working on code.
 
 ```
 crates/
@@ -143,7 +143,7 @@ made.
 
 ## Architecture
 
-The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to the same kernel:
+The kernel is the unit of execution. Multiple frontends connect to the same kernel:
 
 ```
 Frontends (REPL, Embedded — e.g. kaibo/kaijutsu)
@@ -349,18 +349,16 @@ not in advance.
 
 | Term | Part of speech | Meaning |
 |---|---|---|
+| hazard | noun | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
+| override | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. An override is designed and documented intentionally. |
 | fail loudly | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
-| silently | adverb | Used only in the negative, to name behavior kaish refuses. |
-| builtin | noun | A tool that runs inside the kernel process. |
-| external command | noun | A program the kernel runs through `PATH`. |
-| kernel | noun | The execution core. Not the OS kernel. |
+| builtin | noun | An embedded Unix-like tool that runs inside the kernel process. |
+| external command | noun | A program the kernel runs on the underlying system via execve(2) family, often via `$PATH`. |
+| kernel | noun | The kaish execution core. Not the OS kernel. |
 | mount | noun, verb | A path prefix bound to a filesystem, or the act of binding one. |
 | typed | adjective | A value keeps its JSON type through substitution. It is not stringified. |
 | overlay | noun, adjective | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
-| trash | noun, verb | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
 | spill | verb, noun | To write oversize output to a file, or the file that results. |
-| hazard | noun | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
-| override | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. Never a workaround: an override is part of the design, and every restriction that has one names it. |
 
 ## Changelog
 
