@@ -104,6 +104,26 @@ fn parse_w3c_baggage(raw: &str) -> std::collections::BTreeMap<String, String> {
     map
 }
 
+/// Parse `source` and return its formatted diagnostics, or `None` when it
+/// parses cleanly.
+///
+/// Parses `source` up front, ahead of and independent of execution, so a
+/// caller can show `ParseError::format`'s `line:col [parse]: <message>` and
+/// source snippet on its own — `source` never ran, so there is nothing to
+/// add. Every caller (`-c`, a script file, the interactive REPL) checks this
+/// before handing `source` to the kernel and prints the result itself, so
+/// the diagnostic leads instead of being buried under the execution-error
+/// wrapper the kernel adds for every kind of failure alike.
+pub fn format_parse_error(source: &str) -> Option<String> {
+    kaish_kernel::parser::parse(source).err().map(|errors| {
+        errors
+            .iter()
+            .map(|e| e.format(source))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 // ── Process result ──────────────────────────────────────────────────
 
 /// Result from processing a line of input.
@@ -501,6 +521,13 @@ impl Repl {
             return ProcessResult::Exit;
         }
 
+        // A parse/lexer failure never reaches the kernel: print its
+        // diagnostic directly rather than letting `client.execute` wrap it
+        // in a `ClientError` that reads the same as a runtime failure.
+        if let Some(diagnostic) = format_parse_error(trimmed) {
+            return ProcessResult::Output(diagnostic);
+        }
+
         // Execute via the client with SIGINT handling.
         // A per-execute signal listener catches Ctrl-C during execution,
         // cancels the kernel, and returns exit code 130. `tokio::signal::unix`
@@ -893,6 +920,38 @@ mod tests {
         assert!(helper.is_incomplete("if true; then"));
         assert!(helper.is_incomplete("if true; then\n  echo hello"));
         assert!(!helper.is_incomplete("if true; then\n  echo hello\nfi"));
+    }
+
+    /// The continuation heuristic runs in rustyline's validator, which is
+    /// upstream of `process_line` and therefore upstream of the parse check
+    /// that formats diagnostics. Incomplete input must still be held for
+    /// continuation rather than submitted and reported as a parse error.
+    #[test]
+    fn test_is_incomplete_holds_input_the_parser_would_reject() {
+        let helper = make_test_helper();
+        for fragment in [
+            "for f in a b; do",
+            "if true; then",
+            "while true; do",
+            "echo \"unclosed",
+            "echo 'unclosed",
+        ] {
+            assert!(
+                helper.is_incomplete(fragment),
+                "{fragment:?} must be held for continuation, not submitted"
+            );
+        }
+        assert!(!helper.is_incomplete("echo done"));
+    }
+
+    /// An unterminated `$(` is NOT held for continuation — the heuristic
+    /// tracks quotes, keywords, and heredocs, but not parentheses. It is
+    /// submitted and fails to parse. Pinned so the gap is a decision on the
+    /// record rather than a surprise.
+    #[test]
+    fn test_is_incomplete_does_not_track_command_substitution() {
+        let helper = make_test_helper();
+        assert!(!helper.is_incomplete("echo $(ls"));
     }
 
     #[test]
