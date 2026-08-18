@@ -76,6 +76,11 @@ breaking entries are marked **BREAKING**.
 - **`export a.b=1` is refused and teaches the bracket form** — assignment
   already refused a dotted target and `${a.b}` is a loud brackets-only error,
   so `export` was the one door minting a variable no read could reach.
+- **An argv `key=value` word is data, not a name** — `echo a\u{200b}b=bar` was
+  refused as if the word were an assignment target; a word's bytes are its own.
+- **E019: an assignment target holding an invisible character is refused in the
+  syntax tree too** — the token scan cannot tell the second target in an
+  env-scoped prefix (`x=1 BAD=2 cmd`) from an argv word, and the tree can.
 - **`yes`, `no`, `TRUE`, and `False` are ordinary words again** — the lexer rejected
   them as boolean-like, so `echo yes`, `cat no`, and `grep TRUE data.csv` failed
   before running, and `yes` could not even be named as a command.

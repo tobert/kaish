@@ -208,6 +208,9 @@ fn every_name_door(name: &str) -> Vec<(&'static str, String)> {
         ("read builtin", format!("read {name}")),
         ("unset", format!("unset {name}")),
         ("push", format!("push {name} 1")),
+        // A target in an env-scoped prefix, past the first — the spelling the
+        // token scan cannot tell from an argv word, caught in the tree.
+        ("env prefix", format!("x=1 {name}=2 echo hi")),
     ]
 }
 
@@ -386,28 +389,4 @@ async fn an_assignment_target_is_a_name_at_every_statement_start() {
             "an assignment target was accepted: {source:?}"
         );
     }
-}
-
-/// CANARY — a known gap, deliberately pinned so it cannot go quiet.
-///
-/// A *second* assignment in an env-scoped prefix (`x=1 BAD=2 cmd`) is not
-/// reached by the name rule. The parse-time scan tells an assignment target
-/// from an argv word by what precedes it, and here both are preceded by the
-/// previous assignment's value, so the two are indistinguishable one token
-/// back. The first assignment in the prefix IS checked.
-///
-/// **If this test fails, the gap was closed — that is good news.** Delete this
-/// test and add the case to `every_name_door`. The intended fix is in
-/// `validator/walker.rs::validate_assignment`, which sees every `Assignment`
-/// including each one in `Stmt::EnvScoped` and has no ambiguity about what is
-/// a target; it needs a new `IssueCode`, which is why it did not land here —
-/// `E018` was being taken by the `#`-at-word-start branch at the same time and
-/// two branches minting the same code would collide on merge.
-#[tokio::test]
-async fn canary_env_prefix_second_assignment_escapes_the_name_rule() {
-    let (code, _out) = run("x=1 a\u{200b}b=2 echo hi").await;
-    assert_eq!(
-        code, 0,
-        "the env-prefix gap is closed — see this test's doc comment for what to do"
-    );
 }
