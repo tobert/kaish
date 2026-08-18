@@ -122,6 +122,17 @@ impl<'a> Validator<'a> {
         self.validate_expr(&assign.value);
 
         let name = assign.name();
+
+        // The token-stream scan catches most spellings earlier and with a
+        // tighter span, but it tells a target from an argv `key=value` word by
+        // what precedes it — and in an env-scoped prefix (`x=1 BAD=2 cmd`) the
+        // second target and a command name look identical one token back. Here
+        // the tree already knows this is a target, so the rule is exact.
+        if let Err(bad) = crate::name::validate(name) {
+            self.issues
+                .push(ValidationIssue::error(IssueCode::InvisibleAssignmentTarget, bad.to_string()));
+        }
+
         if assign.path.segments.len() == 1 {
             if let Some(dot) = name.find('.') {
                 let (root, rest) = (&name[..dot], &name[dot + 1..]);
@@ -134,6 +145,29 @@ impl<'a> Validator<'a> {
                         ),
                     )
                     .with_suggestion(format!("use `{root}[{rest}]=value`")),
+                );
+            }
+            if name.contains('#') {
+                // `#` is an ordinary word character, so `abc#3` is a legal
+                // word — but `$abc#3` is a lexer error, so this assignment
+                // would bind a variable that can never be read back. Silent
+                // creation of an unreachable name is worse than a refusal.
+                //
+                // TODO: `-` has the same disease and predates this check —
+                // `a-b=5` binds `a-b`, and `$a-b` reads `$a` then `-b`. Left
+                // alone here because the name class is #349/#351's to settle.
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::UnreadableAssignmentTarget,
+                        format!(
+                            "'{name}' is not a valid assignment target — `#` is a word \
+                             character, so `${name}` would not read this variable back"
+                        ),
+                    )
+                    .with_suggestion(format!(
+                        "drop the `#`, e.g. `{}=value`",
+                        name.replace('#', "_")
+                    )),
                 );
             }
             // Bind the variable name in scope

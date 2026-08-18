@@ -92,6 +92,15 @@ impl Tool for Read {
             return ExecResult::failure(1, "read: missing variable name");
         }
 
+        // Refuse before binding anything: a name `$x` cannot read back is a
+        // silent write, and `read` takes its names as runtime words that the
+        // parser's own name scan never sees.
+        for name in &var_names {
+            if let Err(bad) = crate::name::validate(name) {
+                return ExecResult::failure(1, format!("read: `{name}': {bad}"));
+            }
+        }
+
         // If prompt is provided, output it to stderr
         // (In a real interactive shell this would display before reading)
         let prompt_output = prompt.as_deref().unwrap_or("");

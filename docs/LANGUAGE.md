@@ -345,8 +345,11 @@ ls /tmp/日本語
 echo 😁
 ```
 
-**Variable names take the same characters**, so a name is spelled in whatever
-script you think in:
+**Variable names are identifiers plus emoji** — letters, digits, and `_` in any
+script (Unicode [UAX #31]), and emoji. A name is spelled in whatever script you
+think in:
+
+[UAX #31]: https://www.unicode.org/reports/tr31/
 
 ```sh
 café=au-lait;  echo $café       # au-lait
@@ -360,12 +363,73 @@ variable — binding through one spelling and reading through the other finds th
 value. Subscript keys are not normalized: a key is data you chose, and its
 bytes are its own.
 
+A name has to read as what it is, so a character that does not show itself is
+refused and the error names the codepoint: whitespace such as `U+00A0`, which
+makes one name look like two words; zero-width characters such as `U+200B`,
+which render as nothing while naming a different variable; and bidirectional
+controls such as `U+202E`, which reorder the source around them. The zero-width
+joiner is the one exception, permitted between emoji because that is what fuses
+two glyphs into one.
+
+Typography and mathematics are not names either — `a->b` spelled with an arrow
+character, or `a` and `b` joined by a command symbol, are errors. Quote the word
+to use any of these as a literal string.
+
 This is a deliberate divergence from bash, which restricts names to
 `[a-zA-Z_][a-zA-Z0-9_]*`.
 
 **Flag names stay ASCII.** `--café` is ambiguous — a flag no tool defines, or a
 word you meant literally — so kaish refuses rather than guessing, and the error
 says to quote it. Quoting passes it through as a literal word.
+
+### Comments — `#` starts one only at the start of a word
+
+```sh
+echo abc#3                     # prints abc#3 — `#` is an ordinary word character
+echo 2d25fb02#3                # prints 2d25fb02#3 — ids keep their #<seq>
+echo https://ex.com/p#section  # prints the whole URL, fragment included
+echo abc #3                    # prints abc — the space makes `#3` a comment
+```
+
+A `#` opens a comment only where a word can start: at the start of input, after
+whitespace, or after an operator (`;`, `|`, `&`, `<`, `>`, `(`). Everywhere else
+it is a character in the word, as it is in bash and `sh`. Put a space before `#`
+to start a comment.
+
+A `#` that can be neither — because it follows something kaish keeps as its own
+word — is a lexer error, not a comment:
+
+```sh
+echo "$x#3"                    # correct — quote the whole word
+echo $x#3                      # error — `#` after a variable reference
+echo "$(echo a)#3"             # correct
+echo $(echo a)#3               # error — `#` after a closing `)`
+```
+
+Commenting from those positions would drop the rest of the line, `;` separators
+and whole commands with it, and exit 0 — a script that silently loses two
+commands looks exactly like a script whose commands printed nothing. The error
+names the quote fix instead.
+
+The accept list is exactly whitespace, start of input, and `; | & < > (`. A
+closing `)`, `]`, or `}` is **not** on it, so a comment glued directly to one is
+an error where bash accepts it — put a space before the `#`:
+
+```sh
+case $x in a) # comment            # correct
+case $x in a)# comment             # error — space before #
+[[ -f f ]] # comment               # correct
+cmd 2>&1 # comment                 # correct — `1` is a word character
+```
+
+`$(f)#3` is one word in bash, and a `case` pattern's `)` is not a command
+substitution's. The lexer cannot tell those two `)` apart, so it refuses both
+rather than guessing — the guess that admits `$(f)#3` as a comment would drop
+the rest of the line, which is the defect this rule exists to close.
+
+A name containing `#` is not a valid assignment target: `abc#3=5` is error
+`E018`, because `$abc#3` would not read it back. kaish refuses to create a
+variable nothing can reference.
 
 ### Quote to join — kaish does not paste adjacent tokens
 
