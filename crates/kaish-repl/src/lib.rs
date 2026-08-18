@@ -600,10 +600,16 @@ fn format_result(result: &ExecResult) -> String {
     }
 
     // No structured output — just pass through the raw text.
-    // Success: show output directly (no status prefix).
+    // Success: show output directly (no status prefix). A success can still
+    // carry a shell message on stderr — the job announcement (`cmd &`), `dd`'s
+    // status line, `read -p`'s prompt — and it belongs on screen.
     // Failure: show stderr or exit code so the user notices.
     if result.ok() {
-        result.text_out().into_owned()
+        let mut output = result.text_out().into_owned();
+        if !result.err.is_empty() {
+            output.push_str(&result.err);
+        }
+        output
     } else {
         let mut output = String::new();
         let text = result.text_out();

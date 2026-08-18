@@ -30,6 +30,10 @@ breaking entries are marked **BREAKING**.
   JSON object, so a caller parses one shape.
 - **`kaish --plan-file <path>` plans the source in a file, or stdin for `-`** — argv is
   capped, and a whole script does not belong in it.
+- **BREAKING (embedders):** the `cmd &` job announcement moved from stdout to
+  stderr — `[N]` is a shell message, as bash writes it, line-terminated; stdout
+  stays clean so `$(cmd &)` captures no shell metadata, and the announcement
+  can no longer fuse onto the next output.
 - **`PlannedCommand.heredocs` publishes each heredoc a command reads** — delimiter
   word, `literal`, `strip_tabs`, the verbatim body, and the body's own free
   variables, so `python3 <<'PY'`'s program arrives with the shell framing off.
@@ -91,6 +95,15 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **A background job's stderr is the same stderr the foreground would see** —
+  `execute_background` runs the pipeline without the statement-boundary drains
+  that collect the kernel's stderr channel, so a pipeline stage's stderr and a
+  command substitution's stderr inside `cmd &` were lost, and
+  `/v/jobs/{id}/stderr` stayed empty where the foreground form reports. The
+  background task now drains its own statement boundary.
+- **The interactive REPL shows shell messages that ride stderr on a success** —
+  the job announcement, `dd`'s status line, `read -p`'s prompt, and `which`'s
+  partial-path diagnostic used to be dropped on success.
 - **Every diagnostic kaish writes ends its own line** — `kaish -c 'cat /nope'`
   printed `cat: /nope: … (os error 2)` with no trailing newline, so the next
   output ran into it. kaish's own failure messages (builtins, the kernel's
