@@ -109,10 +109,11 @@ pub enum LexerError {
     /// text here — so it is a loud error instead. (Inside double-quoted
     /// strings the same construct works via string interpolation.)
     ArithmeticInVarRef,
-    /// A `-flag`/`--flag`/`+flag`/`$name` word matched but contained a
-    /// non-ASCII character. Flag and variable names are ASCII-only; see the
-    /// note on `Token`. `kind` is `"flag"` or
-    /// `"variable"`; `text` is the whole matched word (sigil included).
+    /// A `-flag`/`--flag`/`+flag` word matched but contained a non-ASCII
+    /// character. Flag names are ASCII-only; see the note on `Token`.
+    /// `kind` is always `"flag"` — it stays a field because the message reads
+    /// off it, and a second ASCII-only name class would use the same shape.
+    /// `text` is the whole matched word (sigil included).
     NonAsciiName { kind: &'static str, text: String },
 }
 
@@ -198,13 +199,16 @@ pub struct HereDocData {
 /// bash never inspects a word's bytes for alphabetic-ness, and `café`,
 /// `日本語`, and `~/文書` lex the same shape as their ASCII equivalents.
 ///
-/// Two families keep ASCII-only classes: flag names (`LongFlag`, `ShortFlag`,
-/// `PlusFlag`) and `$name` variable references (`SimpleVarRef`), matching
-/// bash's `[a-zA-Z_][a-zA-Z0-9_]*` for names. `--café` is a typo worth being
-/// loud about, not a language a flag can be spelled in. Those rules still
-/// *match* a non-ASCII tail and reject it in their callback with
-/// `LexerError::NonAsciiName`; declining to match would split the word into a
-/// flag plus a stray bareword argument instead of failing loud.
+/// Variable names accept the same characters, and are NFC-normalized where the
+/// reference is built (`VarPath::simple`), so a name spelled with a combining
+/// mark and one spelled precomposed reach the same variable.
+///
+/// Flag names (`LongFlag`, `ShortFlag`, `PlusFlag`) are the exception and stay
+/// ASCII. `--café` is ambiguous — a flag no tool defines, or a word the caller
+/// meant literally — so kaish refuses rather than guessing, and the error says
+/// to quote it. Those rules still *match* a non-ASCII tail and reject it in
+/// their callback with `LexerError::NonAsciiName`; declining to match would
+/// split the word into a flag plus a stray bareword argument instead.
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(error = LexerError)]
 #[logos(skip r"[ \t]+")]
@@ -560,12 +564,11 @@ pub enum Token {
     #[regex(r"\$\{", lex_varref)]
     VarRef(String),
 
-    /// Simple variable reference: `$NAME` - just the identifier. Variable
-    /// names are ASCII-only, and the match region claims a non-ASCII tail so
-    /// `$café` errors as one word rather than lexing as `SimpleVarRef(caf)`
-    /// plus a stray `Ident(é)`. See
-    /// `lex_simple_varref`.
-    #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_\u{80}-\u{10FFFF}]*", lex_simple_varref)]
+    /// Simple variable reference: `$NAME` - just the identifier. A name is
+    /// ASCII alphanumerics, `_`, or any non-ASCII scalar value, so `$café`,
+    /// `$名前`, and `$😁` name variables the same way `$NAME` does. The name is
+    /// NFC-normalized when the reference is built (`VarPath::simple`).
+    #[regex(r"\$[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_\u{80}-\u{10FFFF}]*", lex_simple_varref)]
     SimpleVarRef(String),
 
     /// Positional parameter: `$0` through `$9`
@@ -592,7 +595,7 @@ pub enum Token {
     /// The trailing `(\[[^\]]*\])*` admits chained bracket subscripts so a
     /// length-of-path lexes in expression position, not just inside strings; the
     /// parser turns the captured inner into a `VarPath`.
-    #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*(\[[^\]]*\])*\}", lex_var_length)]
+    #[regex(r"\$\{#[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_\u{80}-\u{10FFFF}]*(\[[^\]]*\])*\}", lex_var_length)]
     VarLength(String),
 
     /// Here-doc content: synthesized by preprocessing, not directly lexed.
@@ -658,7 +661,7 @@ pub enum Token {
 
     // ═══════════════════════════════════════════════════════════════════
     // Identifiers (command names, barewords, etc. — NOT `$name` variable
-    // references; those are `SimpleVarRef` above and stay ASCII)
+    // references; those are `SimpleVarRef` above)
     // ═══════════════════════════════════════════════════════════════════
 
     /// Identifier - value is the identifier string
@@ -903,15 +906,10 @@ fn lex_varref(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
     Err(LexerError::UnterminatedVarRef)
 }
 
-/// Lex a simple variable reference: `$NAME` → `NAME`. Rejects a non-ASCII
-/// match whole; see the note on `Token`.
+/// Lex a simple variable reference: `$NAME` → `NAME`.
 fn lex_simple_varref(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
-    let s = lex.slice();
-    if !s.is_ascii() {
-        return Err(LexerError::NonAsciiName { kind: "variable", text: s.to_string() });
-    }
     // Strip the leading `$`
-    Ok(s[1..].to_string())
+    Ok(lex.slice()[1..].to_string())
 }
 
 /// Lex a positional parameter: `$1` → 1

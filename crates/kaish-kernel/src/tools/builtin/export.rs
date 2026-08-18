@@ -176,20 +176,18 @@ fn format_value(value: &Value) -> String {
 
 /// Check if a name is a valid shell variable identifier.
 fn is_valid_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-
     let mut chars = name.chars();
 
-    // First character must be letter or underscore
+    // First character must be a letter or underscore — never a digit, which
+    // would collide with the positional parameters.
     match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || !c.is_ascii() => {}
         _ => return false,
     }
 
-    // Remaining characters must be alphanumeric or underscore
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    // The rest is the same class every other door uses, so `export café=1`
+    // and `café=1` agree about what a name is.
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii())
 }
 
 #[cfg(test)]

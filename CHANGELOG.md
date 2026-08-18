@@ -57,8 +57,21 @@ breaking entries are marked **BREAKING**.
 - **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
   `AmbiguousBooleanLike` variants are gone — `LexerError` is public and not
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
+- **BREAKING (embedders):** `LexerError` gained a `NonAsciiName { kind, text }`
+  variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **`"$café"` substitutes the variable named `café`, not the one named `caf`** —
+  a double-quoted reference collected only the ASCII head of the name, silently
+  substituted a *different* variable, and appended the rest as literal text.
+- **`$😁` and `${😁}` reach the same variable** — the four doors to a name
+  (`$x`, `${x}`, `x=`, and interpolation) each had their own rule for where a
+  name ends; they now share one.
+- **`for`, `read`, and `unset` reach the same variable a written name does** —
+  each bound or removed a name without normalizing, so a loop variable or a
+  `read` target spelled with a combining mark silently missed the value.
+- **`export café=1` works, agreeing with `café=1`** — `export` kept an
+  ASCII-only name rule and rejected what plain assignment accepted.
 - **`kaish -c`, a script, and the REPL print a parse or lexer failure's
   diagnostic directly** — `Error: execution failed` / `Caused by:` /
   `execution error: parse error:` used to bury the `line:col [parse]:
@@ -146,10 +159,13 @@ breaking entries are marked **BREAKING**.
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
   operator" word rule instead of an ASCII-only character class.
-- **Flag names and `$name` variable references stay ASCII-only** — `--café`
-  and `$café` are still loud lexer errors (matching bash's name rule), now
-  reported as a dedicated diagnostic instead of silently splitting into a
-  truncated flag/name plus a stray bareword argument.
+- **Variable names accept any non-ASCII character too, and are NFC-normalized** —
+  `café=au-lait; echo $café` works, and a name spelled with a combining mark and
+  one spelled precomposed reach the same variable. Diverges from bash, which
+  restricts names to `[a-zA-Z_][a-zA-Z0-9_]*`.
+- **Flag names stay ASCII-only** — `--café` is ambiguous between a flag and a
+  literal word, so it is a loud lexer error naming the fix, rather than the
+  generic "unexpected character" it was before.
 
 ## [0.14.1] - 2026-08-14
 
