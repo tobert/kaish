@@ -553,7 +553,14 @@ impl Repl {
 
         match result {
             Ok(exec_result) => {
-                if exec_result.ok() && !exec_result.has_output() && exec_result.text_out().is_empty() {
+                // A success can still carry a shell message on stderr — the
+                // job announcement, `dd`'s status line, `read -p`'s prompt —
+                // so "nothing to show" means both streams are empty.
+                if exec_result.ok()
+                    && !exec_result.has_output()
+                    && exec_result.text_out().is_empty()
+                    && exec_result.err.is_empty()
+                {
                     ProcessResult::Empty
                 } else {
                     ProcessResult::Output(format_result(&exec_result))
@@ -607,6 +614,9 @@ fn format_result(result: &ExecResult) -> String {
     if result.ok() {
         let mut output = result.text_out().into_owned();
         if !result.err.is_empty() {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
             output.push_str(&result.err);
         }
         output
