@@ -82,6 +82,12 @@ breaking entries are marked **BREAKING**.
   variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **An unterminated or malformed `$(` in a heredoc body is a loud error** — an
+  unquoted heredoc expands like a double-quoted string, but a bad substitution
+  was kept as literal text and the statement ran with it silently dropped.
+  A quoted delimiter (`<<'EOF'`) is literal and unaffected.
+- **The same in a `${VAR:-WORD}` default word**, at any nesting depth —
+  `echo ${x:-$(echo hi}` exited 0.
 - **An unterminated `$(` inside a double-quoted string is a loud parse error**
   — `echo "pre $(echo hi"` used to fabricate a closing `)` and run the
   substitution anyway whenever the remainder happened to parse on its own; it

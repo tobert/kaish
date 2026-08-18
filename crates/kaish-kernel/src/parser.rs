@@ -625,6 +625,7 @@ fn parse_interpolated_string_spanned(
                 pos += 2;
                 let mut cmd_content = String::new();
                 let mut depth = 1;
+                let mut closed = false;
                 while let Some(&c) = chars_vec.get(i) {
                     i += 1;
                     pos += c.len_utf8();
@@ -634,6 +635,7 @@ fn parse_interpolated_string_spanned(
                     } else if c == ')' {
                         depth -= 1;
                         if depth == 0 {
+                            closed = true;
                             break;
                         }
                         cmd_content.push(c);
@@ -641,15 +643,15 @@ fn parse_interpolated_string_spanned(
                         cmd_content.push(c);
                     }
                 }
-                // TODO(#unfiled): `depth` running out before finding the closing
-                // `)` (unterminated) and `parse(&cmd_content)` returning `Err`
-                // (malformed body) both fall through to the literal-text
-                // fallback below with no error — an unquoted heredoc body never
-                // reports a bad `$(...)`. `parse_interpolated_string` (double-
-                // quoted strings) had both the same silent-unterminated bug
-                // (fixed) and the same silent-malformed-body bug (fixed
-                // earlier, see `quoted_cmdsubst_error_tests.rs`); this sibling
-                // was not in scope for either fix. Ask before filing an issue.
+                if !closed {
+                    return Err("unterminated command substitution: missing `)`".to_string());
+                }
+                // Both silent fallbacks are closed here rather than by reusing
+                // `parse_interpolated_string`: a heredoc body is not the inside
+                // of a double-quoted string and may hold a raw `"`, so the
+                // string scanner mis-reads `stamp = "$(date +%s)"` as
+                // unterminated. The escape models genuinely differ, which is
+                // why this sibling exists at all.
                 let inserted = if let Ok(program) = parse(&cmd_content) {
                     // The full statement block runs as the substitution body
                     // (pipelines, `&&`/`||`, `;`/newline sequences, comments).
@@ -665,7 +667,9 @@ fn parse_interpolated_string_spanned(
                         true
                     }
                 } else {
-                    false
+                    return Err(format!(
+                        "syntax error in command substitution: $({cmd_content})"
+                    ));
                 };
                 if inserted {
                     // Successfully pushed a CommandSubst; the next literal
@@ -720,9 +724,13 @@ fn parse_interpolated_string_spanned(
                     // outer body — the inner parts get their own offsets via
                     // the recursive call when needed. For now, the default's
                     // parts are stored without spans (default is a Vec<StringPart>).
-                    let default_word = unquote_default_word(default_str);
-                    let default = parse_interpolated_string(&default_word)
-                        .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
+                    // Propagated, not discarded. The twin in
+                    // `parse_interpolated_string` already uses `?` here; this
+                    // copy swallowed a malformed `$(` in the default word and
+                    // kept it as literal text, so a heredoc body carrying
+                    // `${x:-$(echo hi}` ran with the substitution silently
+                    // dropped.
+                    let default = parse_interpolated_string(&unquote_default_word(default_str))?;
                     StringPart::VarWithDefault { path, default }
                 } else if let Some(msg) = bash_substring_hint(&var_content) {
                     return Err(msg);
@@ -1245,6 +1253,10 @@ fn parse_tokens(
         // string instead of the unquoted grammar (see
         // `validate_interpolated_strings`'s doc comment).
         if let Err(specific) = validate_interpolated_strings(&tokens) {
+            return specific;
+        }
+        // And the same, for a heredoc body's own `$(...)`.
+        if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
         errs.into_iter()
@@ -3040,6 +3052,20 @@ where
             {
                 return Err(Rich::custom(span, msg));
             }
+            // `${x:-WORD}`'s default word expands like a double-quoted string,
+            // and `parse_var_expr` returns an `Expr` with nowhere to put a
+            // failure — so a malformed `$(` inside the word was kept as
+            // literal text and the whole statement ran. Checked here, at the
+            // grammar, rather than on the token stream: a nested default word
+            // (`$(echo ${x:-$(echo hi})`) is a `VarRef` at whatever depth it
+            // occurs, so this one rule reaches every nesting.
+            if let Some(colon) = find_default_separator(&raw)
+                && raw.len() > colon + 3
+                && let Err(msg) =
+                    parse_interpolated_string(&unquote_default_word(&raw[colon + 2..raw.len() - 1]))
+            {
+                return Err(Rich::custom(span, msg));
+            }
             Ok(parse_var_expr(&raw))
         }),
         select! { Token::SimpleVarRef(name) => Expr::VarRef(VarPath::simple(name)) },
@@ -3304,8 +3330,44 @@ fn validate_cmd_subst_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseEr
 /// problem).
 fn validate_interpolated_strings(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
     for (tok, span) in tokens {
-        if let Token::String(s) = tok
-            && let Err(message) = parse_interpolated_string(s)
+        let owned;
+        let body = match tok {
+            Token::String(s) => Some(s.as_str()),
+            // `${x:-WORD}`'s default word fails in `var_expr_parser`'s
+            // `try_map`, which is inside the same `choice` bookkeeping — so its
+            // message needs surfacing here for the same reason a string's does.
+            Token::VarRef(raw) => match find_default_separator(raw) {
+                Some(colon) if raw.len() > colon + 3 => {
+                    owned = unquote_default_word(&raw[colon + 2..raw.len() - 1]);
+                    Some(owned.as_str())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(body) = body
+            && let Err(message) = parse_interpolated_string(body)
+        {
+            return Err(vec![ParseError { span: *span, message }]);
+        }
+    }
+    Ok(())
+}
+
+/// A heredoc body's own `$(...)` errors are raised inside
+/// `parse_interpolated_string_spanned`, deep in a `try_map`, so chumsky's
+/// alternative bookkeeping can bury them behind a generic "found `<<`" — the
+/// same loss `validate_cmd_subst_bodies` exists to undo for the unquoted form.
+///
+/// Uses the heredoc's own parser, never the double-quoted string's: a body may
+/// hold a raw `"`, and the string scanner reads `stamp = "$(date +%s)"` as
+/// unterminated. A quoted delimiter (`<<'EOF'`) is literal and never expanded,
+/// so its body is never inspected.
+fn validate_heredoc_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
+    for (tok, span) in tokens {
+        if let Token::HereDoc(d) = tok
+            && !d.literal
+            && let Err(message) = parse_interpolated_string_spanned(&d.content, 0)
         {
             return Err(vec![ParseError { span: *span, message }]);
         }
