@@ -144,11 +144,41 @@ async fn a_special_parameter_is_not_refused() {
     // `${#}` is left out deliberately: it fails on main too (the braced form
     // of `$#` is unsupported, unrelated to the name class), so asserting it
     // here would pin someone else's bug to this rule.
-    for source in ["echo ${$}", "echo $$", "echo $?", "echo $#"] {
+    for source in ["echo ${$}", "echo ${?}", "echo $$", "echo $?", "echo $@", "echo $#"] {
         let (code, out) = run(source).await;
         assert_eq!(code, 0, "a special parameter was refused: {source:?} -> {out:?}");
     }
     // The narrow-exemption guard: still refused, still by codepoint.
     let text = refusal("\u{200b}=1").await.expect("a lone zero-width name was accepted");
     assert!(text.contains("U+200B"), "refused without naming the character: {text}");
+}
+
+/// A lone punctuation character is not a special parameter, and the runtime
+/// doors take names as ordinary argument words rather than as `Ident` tokens —
+/// so `read .` reached the name rule as the one-character name `.`.
+///
+/// The exemption above lists `$` and `?` rather than allowing "any single
+/// punctuation character". The wider rule read as equivalent, because no
+/// assignment can create such a name, but these doors do not go through an
+/// assignment and each of them bound a variable nothing could read back.
+#[tokio::test]
+async fn a_lone_punctuation_character_is_not_a_name() {
+    for source in ["read .", "read @", "read -", "unset .", "push . 1", "read \"#\""] {
+        assert!(
+            refusal(source).await.is_some(),
+            "a lone punctuation name was accepted: {source:?}"
+        );
+    }
+}
+
+/// One mistake, one error code. `validate` refuses a dotted or hashed target
+/// too, and reporting the general rule alongside E017/E018 would hand the
+/// author two errors for the same character.
+#[tokio::test]
+async fn a_dotted_or_hashed_target_reports_one_code() {
+    for (source, code, other) in [("user.email=x", "E017", "E019"), ("abc#3=5", "E018", "E019")] {
+        let text = refusal(source).await.unwrap_or_else(|| panic!("{source} was accepted"));
+        assert!(text.contains(code), "{source:?} did not report {code}: {text}");
+        assert!(!text.contains(other), "{source:?} reported {other} as well: {text}");
+    }
 }

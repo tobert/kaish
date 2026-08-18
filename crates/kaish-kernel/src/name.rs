@@ -153,13 +153,18 @@ pub fn is_name_continue(c: char) -> bool {
 /// legitimate after an emoji: `👨‍👩` is one glyph, while `a‍b` renders as `ab`
 /// and is a different variable from `ab`.
 pub fn validate(name: &str) -> Result<(), NameError> {
-    // A one-character ASCII punctuation name is a special parameter — `$$`,
-    // `$?`, `$@`, `$#` — never a name a user wrote. The `Ident` token cannot
-    // start with punctuation, so no assignment can create one, and the ASCII
-    // class below would otherwise refuse `${$}`. Restricted to ASCII on
-    // purpose: a lone zero-width character IS lexable as a name start, and
-    // still has to be refused.
-    if name.len() == 1 && name.is_ascii() && !name.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+    // `${$}` and `${?}` are the braced spellings of the session identifier and
+    // the last exit code, and their name is literally that one character. They
+    // are the *only* two: every other special parameter (`$@`, `$#`, `$0`-`$9`)
+    // is its own token and never reaches this function.
+    //
+    // Listed rather than derived as "any single punctuation character". That
+    // wider rule looked equivalent — no assignment can create such a name,
+    // because the `Ident` token cannot start with punctuation — but the runtime
+    // doors do not take names from `Ident`: `read .`, `read @`, and `read -`
+    // are ordinary argument words, and each bound a variable no read could
+    // reach. The narrow list has no such hole.
+    if name == "$" || name == "?" {
         return Ok(());
     }
 
