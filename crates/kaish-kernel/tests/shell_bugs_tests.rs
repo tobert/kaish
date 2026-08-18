@@ -896,3 +896,188 @@ async fn test_record_literal_failed_subst_propagates() {
     assert_eq!(result.text_out().trim(), "1");
 }
 
+// ============================================================================
+// `set -e` must abort loudly, not silently.
+//
+// A statement failing under errexit used to have its `out`/`err` replaced by
+// `ControlFlow::exit_code(code)`'s `ExecResult::success("")` — the exit code
+// survived, the reason did not. `cat /nope`'s error message is compared to
+// the compat harness's stdout-only checks (see this file's header), so these
+// live here, not in shell_compat_tests.rs.
+// ============================================================================
+
+#[tokio::test]
+async fn test_errexit_preserves_builtin_error_message() {
+    // A clap parse failure carries a message and needs no real filesystem —
+    // this is the version of the regression test that runs under every
+    // feature combination, including `--no-default-features`.
+    let with_e = Kernel::transient().unwrap();
+    let with_e_result = with_e.execute("set -e; wc --bogus-flag-xyz").await.unwrap();
+    assert!(!with_e_result.ok(), "wc with an unknown flag should fail");
+    assert_eq!(with_e_result.code, 2, "clap usage errors exit 2");
+    assert!(
+        !with_e_result.err.is_empty(),
+        "set -e must not discard the failing command's error message"
+    );
+
+    // Control: the same failure without `set -e` — proves the fix did not
+    // change the general (non-errexit) failure path.
+    let without_e = Kernel::transient().unwrap();
+    let without_e_result = without_e.execute("wc --bogus-flag-xyz").await.unwrap();
+    assert_eq!(
+        with_e_result.code, without_e_result.code,
+        "set -e must not change the exit code"
+    );
+    assert_eq!(
+        with_e_result.err, without_e_result.err,
+        "set -e must not change the error message"
+    );
+}
+
+#[cfg(feature = "localfs")]
+#[tokio::test]
+async fn test_errexit_preserves_message_for_missing_file() {
+    // Matches the exact repro from the bug report: `cat /nope` under `-e`.
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("set -e; cat /nope").await.unwrap();
+    assert!(!result.ok());
+    assert_eq!(result.code, 1);
+    assert!(
+        !result.err.is_empty(),
+        "set -e must not discard cat's error message"
+    );
+    assert!(
+        result.err.contains("/nope"),
+        "error should name the missing path: {}",
+        result.err
+    );
+}
+
+// `for`/`while` loop bodies check `error_exit_enabled()` at a separate call
+// site from a bare statement (kernel.rs accumulates each iteration's output
+// into a running `result` before folding it into the Exit signal) — cover
+// both loop forms so a fix at one site can't leave the other still dropping
+// the message.
+#[tokio::test]
+async fn test_errexit_preserves_message_in_for_loop_body() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            "set -e
+for x in a; do
+    echo pre
+    wc --bogus-flag-xyz
+    echo SHOULD_NOT_RUN
+done
+echo ALSO_NOT_RUN",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.code, 2);
+    assert!(
+        !result.err.is_empty(),
+        "set -e in a for-loop body must not discard the message"
+    );
+    assert!(
+        result.text_out().contains("pre"),
+        "output before the failure in the same iteration is kept: {}",
+        result.text_out()
+    );
+    assert!(!result.text_out().contains("SHOULD_NOT_RUN"));
+    assert!(!result.text_out().contains("ALSO_NOT_RUN"));
+}
+
+#[tokio::test]
+async fn test_errexit_preserves_message_in_while_loop_body() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            "set -e
+i=0
+while [[ $i -lt 1 ]]; do
+    echo pre
+    wc --bogus-flag-xyz
+    echo SHOULD_NOT_RUN
+    i=1
+done
+echo ALSO_NOT_RUN",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.code, 2);
+    assert!(
+        !result.err.is_empty(),
+        "set -e in a while-loop body must not discard the message"
+    );
+    assert!(
+        result.text_out().contains("pre"),
+        "output before the failure in the same iteration is kept: {}",
+        result.text_out()
+    );
+    assert!(!result.text_out().contains("SHOULD_NOT_RUN"));
+    assert!(!result.text_out().contains("ALSO_NOT_RUN"));
+}
+
+#[tokio::test]
+async fn test_errexit_still_aborts_statement_list() {
+    // The regression guard that matters most: preserving the message must
+    // not come at the cost of `-e` continuing past the failure.
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("set -e; wc --bogus-flag-xyz; echo SHOULD_NOT_RUN")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 2);
+    assert!(
+        !result.text_out().contains("SHOULD_NOT_RUN"),
+        "a statement after the -e failure must not run: {}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn test_errexit_success_continues() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("set -e; true; echo CONTINUED")
+        .await
+        .unwrap();
+    assert!(result.ok());
+    assert_eq!(result.code, 0);
+    assert_eq!(result.text_out().trim(), "CONTINUED");
+}
+
+// `exit N` (not triggered by `-e`) must keep carrying no message of its own —
+// pinned so a future change to `ControlFlow::exit_code` cannot quietly widen
+// its scope back into borrowing the -e fix.
+#[tokio::test]
+async fn test_exit_n_carries_no_message_of_its_own() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("echo hi; exit 3").await.unwrap();
+    assert_eq!(result.code, 3);
+    assert_eq!(result.text_out().trim(), "hi");
+    assert!(
+        result.err.is_empty(),
+        "exit N has no message of its own: {}",
+        result.err
+    );
+}
+
+// `return N` (function return, not `-e`) is unaffected by this fix — pinned
+// for the same reason as `exit N` above.
+#[tokio::test]
+async fn test_return_n_carries_no_message_of_its_own() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("f() { echo hi; return 3; }; f")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 3);
+    assert_eq!(result.text_out().trim(), "hi");
+    assert!(
+        result.err.is_empty(),
+        "return N has no message of its own: {}",
+        result.err
+    );
+}
+

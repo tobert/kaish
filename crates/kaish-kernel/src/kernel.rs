@@ -2362,7 +2362,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
                 Ok(ControlFlow::ok(result))
@@ -2381,7 +2386,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
 
@@ -2395,7 +2405,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
 
@@ -2562,7 +2577,15 @@ impl Kernel {
                                         drop(scope);
                                         let mut scope = self.scope.write().await;
                                         scope.pop_frame();
-                                        return Ok(ControlFlow::exit_code(r.code));
+                                        // `result` already carries `r`'s out/err
+                                        // via accumulate_result above — hand it to
+                                        // the Exit signal so `-e` still aborts the
+                                        // loop but the reason survives.
+                                        let code = r.code;
+                                        return Ok(ControlFlow::Exit {
+                                            code,
+                                            result: std::mem::take(&mut result),
+                                        });
                                     }
                                 }
                             }
@@ -2637,7 +2660,15 @@ impl Kernel {
                                 if !r.ok() {
                                     let scope = self.scope.read().await;
                                     if scope.error_exit_enabled() {
-                                        return Ok(ControlFlow::exit_code(r.code));
+                                        // `result` already carries `r`'s out/err
+                                        // via accumulate_result above — hand it to
+                                        // the Exit signal so `-e` still aborts the
+                                        // loop but the reason survives.
+                                        let code = r.code;
+                                        return Ok(ControlFlow::Exit {
+                                            code,
+                                            result: std::mem::take(&mut result),
+                                        });
                                     }
                                 }
                             }
@@ -2880,7 +2911,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
                 Ok(ControlFlow::ok(result))
