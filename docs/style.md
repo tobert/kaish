@@ -1,36 +1,35 @@
 # kaish writing style
 
-kaish keeps a small, predictable subset of `sh`, chosen so existing `sh` skill transfers.
-This guide keeps a small, predictable subset of English, chosen for the same reason. A
-reader who understands the language already understands the prose.
+kaish keeps a small, predictable subset of `sh`, so existing `sh` skill transfers. This
+guide keeps a small, predictable subset of English for the same reason. Transfer language
+skill into prose skill.
 
-These are weights, not gates. There is no linter and there is no compliance pass. Apply
-them when you write, and groom the text you touch.
+These are weights, not gates. There is no linter and no compliance pass. Use the weights
+when you write, and groom the text you touch.
 
-Inspired by the structure of ASD-STE100 Simplified Technical English — a small constraint
-set plus a project term list — but not STE and not claiming to be. The STE approved-word
-dictionary is copyrighted and aerospace-shaped, so we keep our own.
+The guide is self-referential on purpose. It uses its own terms in its own rules, reasons,
+and examples. Repeat each term in a stable context until it becomes part of the working
+vocabulary.
 
 ## Where the weights apply
 
 | Weight | Files |
 |---|---|
-| Full | `crates/kaish-help/content/en/`, fragment bodies in `crates/kaish-help/src/fragments.rs`, every builtin `description`, `about`, example label, and `///` argument doc, and **every error and diagnostic string a builtin or the kernel returns** |
-| Partial (terms and boundary; relax the rest) | `docs/LANGUAGE.md`, `docs/EMBEDDING.md`, `docs/NAMING.md`, and `///` rustdoc on `pub` items in `kaish-kernel`, `kaish-types`, and `kaish-tool-api` |
-| Terms only, plus one line per bullet | `CHANGELOG.md` |
-| Terms only | `README.md` and the design docs under `docs/` |
-| Exempt | `signoff.md`, `docs/designing-syntax-with-llms.md` |
+| Full | `crates/kaish-help/content/en/`; fragment bodies in `crates/kaish-help/src/fragments.rs`; every builtin `description`, `about`, example label, and `///` argument doc; every error and diagnostic string a builtin or the kernel returns |
+| Partial | `docs/LANGUAGE.md`, `docs/EMBEDDING.md`, `docs/NAMING.md`, and `///` rustdoc on `pub` items in `kaish-kernel`, `kaish-types`, and `kaish-tool-api` — use the terms and respect the action boundary; relax the other weights |
+| Terms and one line per bullet | `CHANGELOG.md` |
+| Terms | `README.md` and the design docs under `docs/` |
+| Exempt | `signoff.md` and `docs/designing-syntax-with-llms.md` |
 
 Exempt text tells a story from a point of view, and a story needs a voice.
 
-Error strings are full weight because an agent reads them more often than it reads any
-help topic. A failure message is the one piece of our prose that arrives exactly when the
-reader is stuck.
+Give error strings full weight — make the next action visible at the point of failure,
+without requiring a help topic first.
 
-`CHANGELOG.md` is the one place where "Keep the why" does **not** win. A bullet carries
-the rule and one clause of rationale, on one line. The full narrative belongs in the pull
-request body, which becomes the merge commit. If a bullet needs three numbers and three
-reasons, it is three bullets.
+`CHANGELOG.md` is the one place where keep the why does not win. Put the rule and one
+clause of rationale on one line. Put the full narrative in the pull request body, which
+becomes the merge commit. If a bullet needs three numbers and three reasons, write three
+bullets.
 
 kaibo and kaish-extras adopt this guide by reference as they evolve. kaijutsu is exempt.
 
@@ -38,218 +37,199 @@ kaibo and kaish-extras adopt this guide by reference as they evolve. kaijutsu is
 
 ### Subset, not slang
 
-Keep the vocabulary small. This is a constraint on how many **distinct** words the corpus
-uses, not on how long the text is — a smaller vocabulary usually costs words, and that is
-the correct trade.
+Keep the vocabulary small. This limits the number of distinct words, not the length of the
+text — familiar words may require a longer sentence.
 
-The class to avoid is the metaphor that names a mental act as a physical one: "reach for,"
-"the defensive-quoting dance." A reader who learned English second, or a model working
-from a partial context, cannot recover the intent from the figure.
+Use plain words instead of figures of speech. Make the intended meaning available from the
+words themselves, including in second-language or partial-context use.
 
-Colloquial hazard metaphors are retired as terms (2026-08-17). They read
-human-friendly, but the usual reader is a model, and a colloquialism lights
-pathways trained on other people's prose — the reader gets the affect without
-the definition. The migration notes live in the working plan, not here; this
-guide states what to write instead, defined the way the term table in
-`CLAUDE.md` defines one:
+Use an established technical term when kaish gives it one meaning. Do not introduce a
+term because it sounds apt — count its existing uses and check that they agree.
 
 | Write | Meaning |
 |---|---|
-| hazard | A condition with a predictable failure. Name the hazard and the fix kaish ships for it; lead with neither. |
-| override | A documented, supported way past a restriction kaish enforces. Never a workaround: an override is part of the design, and every restriction that has one names it. |
-| affordance | What an output signals can be done next — an error that names its fix affords the fix. Design the output so the next action is visible in it. |
-| plain words | For the design thesis, write "familiar syntax" or "your `sh` habits apply" — existing skill transfers because the syntax is a subset, not because of a property of memory. |
+| hazard | A condition with a predictable failure. Name the condition and the fix kaish provides. |
+| override | A documented way past a restriction. An override is part of the design, not a workaround; every restriction that has one names it. |
+| affordance | A visible cue for the next available action. An error that names its fix affords that fix. |
+| familiar syntax | Existing `sh` skill transfers because kaish preserves familiar syntax. |
 
-Vocabulary comes from the fields kaish is built in — cybernetics, cognitive
-science, resilience and reliability engineering — and from user-experience
-design. Prefer their terms (constraint, guarantee, hazard, override, recovery,
-affordance) over colloquialism, and keep each term to one meaning. This table
-is writing guidance; the terms that carry a guarantee live in the table in
-`CLAUDE.md`.
+This table uses the terms it defines: a missing fix is a hazard; a documented way past a
+restriction is an override; a visible next action is an affordance. Use the terms this way
+until they become ordinary kaish vocabulary.
 
-**The list grows only on evidence.** A candidate must already be in consistent use across
-the corpus with one meaning — never on the argument that it would read well. One
-candidate once won its count — about thirty uses, one sense, no drift — and the guide
-changed to match the corpus. Count the uses before you argue.
+Terms that carry a behavioral guarantee live in the table in `CLAUDE.md`, which is the
+source. `README.md` mirrors that table; keep the two in step. Do not copy the table here —
+three copies drift.
 
-Evidence also retires a term. The same word's count re-opened on 2026-08-17, when
-the audience sharpened: most readers are models, and a colloquialism that lands
-with a human lights the wrong pathways in a model. The uses were consistent; the
-reader had changed. The table above is the rule now.
+Use the public word instead of a tool's private term. `dhat` calls an allocation a
+"block"; write "18% fewer allocations," not "18% fewer blocks."
 
-Borrowed jargon is a separate problem from metaphor. When a tool has a private word for
-something the reader can count, use the reader's word: `dhat` calls an allocation a
-"block", so a changelog says "18% fewer allocations", not "18% fewer blocks".
-
-American spelling, to match the corpus (`modeled`, not `modelled`).
+Use American spelling to match the corpus: `modeled`, not `modelled`.
 
 > Before: Reach for `test` where the plain-command form is wanted.
 >
-> After: Use `test` when you want a plain command, or when the `sh` habit is faster to type.
+> After: Use `test` when you want a plain command, or when the familiar `sh` form is
+> faster to type.
 
 ### One term, one meaning
 
-Pick one word for each concept and keep it. Do not vary the word for style — a synonym
-reads as a new concept, and the reader spends attention deciding whether it is one.
+Pick one word for each concept and keep it. Do not vary a word for style — every synonym
+creates a second concept until the text proves otherwise.
 
-Terms that carry a guarantee live in the table in `CLAUDE.md`, which is the source.
-`README.md` mirrors it for readers who never open `CLAUDE.md`; keep the two in step. This
-guide does not copy it — three copies drifted within a day of being written.
+`dialect` is reserved for a ShellCheck language mode or a regex flavor. Do not use it
+about prose.
 
-`dialect` is reserved for its technical senses: a ShellCheck language mode, or a regex
-flavor. Do not use it about prose.
+`surface` can hide the thing it names. In published text, name the tool schema, error
+message, help topic, or API.
 
-`surface` is doing too much work across the corpus ("the real surface for", "two execution
-surfaces", "the surface to use for"). In reader-facing text, name the thing: the tool
-schema, the error message, the help topic.
+Write `boundary`, not `seam`. Use a boundary to separate available actions from mechanism
+that does not affect those actions.
 
-`seam` was a synonym for `boundary`, borrowed from legacy-refactoring jargon, and
-the sewing metaphor is undefined for a general reader. Write `boundary`.
+Example labels are imperative. Write "Send STOP by name," not "Named shorthand." The
+label sits next to a command, so it should read like one.
 
-**Example labels are imperative.** "Send STOP by name", not "Named shorthand" and not
-"Alternation (ERE or GNU BRE)". The label sits next to a command, so it should read like
-one.
+Cross-references take one form: ``see `help <topic>` `` for a help topic, and
+`docs/LANGUAGE.md`, "Section name" for the language reference. Link instead of
+re-explaining.
 
-**Cross-references take one form:** ``see `help <topic>` `` for a help topic, and
-`docs/LANGUAGE.md`, "Section name" for the reference. Link rather than re-explaining.
+This section keeps one term for each concept because one term, one meaning applies to the
+guide itself.
 
 ### State the number
 
-Agents act on our numbers. Give the exact exit code, the exact size, the exact flag, and
-the exact default. A vague verb is a defect in this corpus.
+Give the exact exit code, size, flag, default, and condition. Agents act on numbers; a
+vague verb hides part of the contract.
 
 > Before: Oversize output fails.
 >
 > After: Oversize output spills to a file and exits 3.
 
-State the default and the condition too: "reads stdin when no files are given," "off by
+State the default and condition too: "reads stdin when no files are given" and "off by
 default; applies to `-r` only."
 
 ### Fail loud
 
-Put the constraint and its consequence at the front of the sentence. Do not bury a hazard
-in a subordinate clause, and do not soften it with a hedge. This mirrors what the shell
-itself promises: the boundary is loud.
+Put the constraint and consequence at the front of the sentence. Do not bury a hazard in
+a subordinate clause or soften it with a hedge. At a loud boundary, state what failed and
+what happens next.
 
-The first sentence must also work alone. The always-on onboarding spine is capped at 3500
-characters (`compose.rs`, `onboarding_spine_stays_within_budget`) and readers skim, so
-write so that a truncated fragment still carries the rule.
+The first sentence must work alone. The always-on onboarding spine is capped at 3500
+characters (`compose.rs`, `onboarding_spine_stays_within_budget`). Put the rule before
+anything truncation can remove.
 
 > Before: Note that files removed this way may not be recoverable in some configurations.
 >
-> After: `rm` deletes the file permanently unless `set -o trash` is active. Turn on `trash`
-> first if you want a recoverable copy.
+> After: `rm` deletes the file permanently unless `set -o trash` is active. Turn on
+> `trash` first if you want a recoverable copy.
+
+The second example fails loud: it leads with the consequence, names the condition, and
+affords the fix.
 
 ### Keep the why
 
-A rule earns its rationale. The house pattern is `<rule> — <why>`, and the clause after
-the dash is load-bearing: a reader who knows why can guess correctly at the edges, and a
-reader who has only the rule cannot.
+A rule earns its rationale. Use `<rule> — <why>` when it makes the relationship clear.
+The clause after the dash is load-bearing: keep enough why to apply the rule at its edges.
 
-When a sentence gets tangled, split it. Never drop the rationale to fit. There is no word
-budget — counting words instead of judging the sentence is how this weight goes wrong.
+Split a tangled sentence instead of dropping its rationale. There is no word budget;
+counting words instead of judging the sentence is how keep the why goes wrong.
 
-**When the source records no rationale, leave the rule bare.** Do not invent one. A bare
-rule next to an explained one is honest, and it marks where a real answer is missing.
+When the source records no rationale, leave the rule bare. Do not invent one. A bare rule
+is honest and makes the missing reason visible.
 
-**Contrast is a rationale.** Comparing against bash is one of the most effective moves in
-this corpus, and it is endorsed: "Bash splits unquoted `$VAR` on `$IFS`; kaish never does."
+Contrast can supply the why: "Bash splits unquoted `$VAR` on `$IFS`; kaish never does."
 
-**Tables carry the same weights.** A table cell is prose with the subject moved into the
-column header. Write cells as complete clauses — a fragment forces the reader to
-reconstruct the verb, and a model reading one cell out of context cannot. Put the rule in
-the cell and the rationale after a dash. Expect a table rewritten this way to get longer.
-That is the correct trade.
+Tables carry the same weights. A table cell is prose with its subject in the column
+header. Write a complete clause instead of requiring the verb to be reconstructed. Put the
+rule in the cell and the rationale after a dash. A clear table may be a longer table.
+
+This section keeps its own why: the rationale is part of the rule because it helps the
+rule travel beyond the example.
 
 ### Do not leak the kernel
 
-Reader-facing text describes what the reader must predict. The test is not whether a
-sentence names an internal — it is whether the reader needs that internal to predict
-behavior. `[[ ]]` lexes as two bracket tokens is a mechanism *and* the whole contract for
-why `[ -f x ]` fails, so it stays. `to_argv()` joins the pair is neither, so it goes.
+Describe the behavior that must be predicted. Include an internal name only when it makes
+that behavior predictable. `[[ ]]` lexes as two bracket tokens explains why `[ -f x ]`
+fails, so it stays. `to_argv()` joins the pair does not change an available action, so it
+goes.
 
-The boundary has a precise location in the builtins. A `///` comment on an **argument** is
-published: `params_from_clap` copies it into `ParamSchema.description`, the kernel exposes
-it through `Kernel::tool_schemas()`, and the embedder ships it to the model. A `///` on the
-**struct** is never published — `schema_from_clap` reads `cmd.get_about()` instead — so
-struct docs and `//` comments are both safe places for mechanism.
+Separate the agent from the embedder. When only the host can fix a failure, write "this
+session is configured to…" and label the action for the embedder. Put `KernelConfig::`
+spellings in `docs/EMBEDDING.md`, where the embedder can act on them.
+
+#### Published builtin text
+
+A `///` comment on a builtin argument is published to agents. `params_from_clap` copies
+it into `ParamSchema.description`, and the kernel exposes it through
+`Kernel::tool_schemas()`. Describe the argument's behavior there. Put implementation
+notes in `//` comments.
+
+A `///` comment on the clap struct is not published; `schema_from_clap` reads
+`cmd.get_about()` instead. Struct docs and `//` comments are safe places for mechanism.
 
 > Before: `/// Unset a variable (-u VAR). Repeatable: -u A -u B. Clap sees a single`
 > `/// occurrence via to_argv() ... This field is a validation sink only.`
 >
 > After: `/// Unset a variable (-u VAR). Repeatable: -u A -u B.`
 
-A **blank `///` line** is the third safe place, and the least obvious one. clap splits a
-doc comment there: everything before the blank line becomes short help, everything after
-becomes long help, and `params_from_clap` publishes short help only. `env`'s `-u` and
-`uname`'s `--host` both keep four lines of mechanism this way, directly under the field
-they explain, and neither ships a word of it. Use it when the mechanism belongs next to
-the published line rather than below it.
+A blank `///` line also splits clap short help from long help. Everything before the blank
+line is published; everything after it is not. Use the split when an implementation note
+belongs next to the field.
 
-That split is also why you cannot audit this by reading the source. A reviewer grepping
-`env.rs` for `to_argv` finds the mechanism and reports a leak that does not exist; only
-the published surface settles it. Read `Kernel::tool_schemas()`, or run the test named
-below.
+Do not infer the published text by grepping the source. Read `Kernel::tool_schemas()` or
+run the published-prose test. When you touch a builtin, audit every `///` on its clap
+struct — the visit supplies the context needed to judge each line.
 
-**When you touch a builtin, audit every `///` on its clap struct.** Grooming alone cannot
-reach this class: the mechanism leaks sit in files nobody has reason to open, so the audit
-has to ride along with any visit to the file.
+## Write for model context
 
-### Writing for the model reader
+Use the same prose in human and model contexts. Assume the context may be truncated. Teach
+syntax with examples. Repeat a rule in its error. These instructions strengthen the
+weights above; they do not replace them.
 
-The reader is usually a language model: it skims under truncation, it
-pattern-matches from examples, and it meets a rule the second time as an error
-message. These weights apply on top of the ones above, full weight wherever the
-table says full weight.
+### The example is the rule
 
-**Example before rule.** The example is the rule; the sentence after it names what
-the example shows. A model completes patterns it saw, not rules it read — a
-section that leads with prose teaches the skim path nothing.
+Show the correct example before explaining it. Continue the correct pattern when the
+surrounding prose is missing. Make the example carry the rule by itself.
 
-> Before: **Quote to join.** `$VAR`, `$(cmd)`, and globs are each a separate word
-> unless quoted — kaish never pastes adjacent unquoted tokens.
+> Before: **Quote to join.** `$VAR`, `$(cmd)`, and globs are each a separate word unless
+> quoted — kaish never pastes adjacent unquoted tokens.
 >
-> After: `"$dir/file.txt"` — one path. kaish keeps `$VAR`, `$(cmd)`, and globs
-> each a separate word; quote the whole word to join text with interpolation.
+> After: `"$dir/file.txt"` — one path. kaish keeps `$VAR`, `$(cmd)`, and globs as
+> separate words; quote the whole word to join text with interpolation.
 
-**Show the wrong way, marked.** The reader's prior already contains the wrong
-form, so print it and cross it out: the correct form first, the wrong form
-explicitly marked (`# error — use …`), the two adjacent. Never show an unmarked
-wrong example — a code block reads as an invitation, and an invitation gets
-accepted.
+Show a likely wrong form only when it is explicitly marked. Put the correct form first and
+the marked error next to it: `echo "$dir/file.txt"`; `echo $dir/file.txt # error — quote
+the whole path`. An unmarked code block is an affordance, even when nearby prose calls it
+wrong.
 
-> Before: Unquoted text adjacent to an expansion is a PARSE ERROR (quote the word).
->
-> After: `echo "$dir/file.txt"` is one path; the unquoted `echo $dir/file.txt`
-> is a parse error — shown marked, next to the fix, wherever it appears.
+The section demonstrates its rule: its examples carry useful syntax even if the
+explanation is truncated.
 
-**Quote the error.** A rule that fails loud quotes its failure text, and the
-failure text names its help topic — the reader meets the rule twice, once in each
-direction, and the second meeting is where recall happens. `help syntax` says a
-bare `for x in $xs` is an error (E012); the E012 message says "bare variable in
-for loop iterates once" and hands back six runnable fixes. Keep both ends of that
-loop in sync when either end changes.
+### Close the error loop
 
-**Three registers.** Each guarantee lives in exactly three working places —
-the onboarding spine, the topic doc, and the error string — and nowhere else.
-Repetition across those registers is design: a model that missed the spine still
-meets the rule in the topic, and again in the error. The README and the help
-overview may *name* a guarantee — they are the invitation — but they do not
-restate its mechanism. A fourth working copy is drift waiting to happen — when
-a guarantee needs a new home, vacate an old one.
+When a rule fails loud, quote the failure text in its help topic and make the error name
+that topic. Meet the same vocabulary in both directions: rule to error and error to rule.
 
-**Separate the embedder from the agent.** When only the host can fix a failure,
-write "this session is configured to…" — name the setting in prose, not the Rust
-struct. `KernelConfig::` spellings belong in `docs/EMBEDDING.md`, or in a message
-that labels the embedder as the reader who can act. This is the dual-audience
-rule: the test is still "can the reader act on it", and when the answer is
-"only the embedder", the message writes for both readers and labels which half
-can act.
+For example, `help syntax` says bare `for x in $xs` is error E012. The E012 message says
+"bare variable in for loop iterates once" and supplies runnable fixes. Keep the help and
+error in step when either changes.
 
-### Groom at the point of touch
+### Three registers
 
-When you edit a file, bring the part you edited into voice. Leave the rest alone.
+Each guarantee has three working copies: the onboarding spine, its topic, and its error
+string. Repetition across these registers is design. Miss the spine, then meet the rule in
+the topic; miss the topic, then meet it in the error.
 
-We are not scheduling a rewrite. A bulk pass would freeze this guide before we know
-whether it works, and it would separate the style decision from the person who understands
-the text. Grooming keeps both together.
+The README and help overview may name a guarantee as an invitation, but they do not repeat
+its mechanism. A fourth working copy creates drift. When a guarantee needs a new home,
+vacate an old one.
+
+The terms recur across all three registers because one term, one meaning makes repetition
+useful instead of noisy.
+
+## Groom at the point of touch
+
+When you edit a file, bring the part you edit into voice. Leave the rest alone.
+
+Do not schedule a bulk rewrite. A bulk pass freezes the guide before use has tested it and
+separates the style decision from the person who understands the text. Grooming keeps the
+decision and its context together.
