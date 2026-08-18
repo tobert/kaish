@@ -749,7 +749,18 @@ chains, `;` sequences, multi-line bodies, `#` comments, and control structures
 (`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
 way. Output accumulates across the statements (no separator inserted, like
 `;`), and the body's side effects (`cd`, assignments) stay contained — only the
-captured stdout escapes.
+captured stdout becomes the value.
+
+**stderr is not captured.** A substitution's stderr joins the enclosing
+statement's stderr, so a command that fails inside `$(...)` still reports why:
+
+```sh
+x=$(cat /nope)     # x is empty, $? is 1, and `cat: /nope: ...` reaches stderr
+x=$(cat /nope 2>/dev/null)   # redirect inside the body suppresses it
+```
+
+This matches `sh`, where `$(...)` inherits the shell's own stderr. Only stdout
+is substituted, so a message written to stderr can never contaminate the value.
 
 ```sh
 HEAD=$(cd "$repo" && git rev-parse HEAD)   # && chain

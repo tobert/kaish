@@ -3799,6 +3799,12 @@ impl Kernel {
                     ec.output_limit = output_limit;
                 }
 
+                // A substitution's stderr belongs to the enclosing statement,
+                // never to its value. Emit it before the value is built.
+                if let Ok(ref r) = run_result {
+                    self.emit_cmdsubst_stderr(&r.err).await;
+                }
+
                 // Now propagate the error
                 let result = run_result?;
 
@@ -4195,6 +4201,12 @@ impl Kernel {
                     ec.output_limit = output_limit;
                 }
 
+                // A substitution's stderr belongs to the enclosing statement,
+                // never to its value. Emit it before the value is built.
+                if let Ok(ref r) = run_result {
+                    self.emit_cmdsubst_stderr(&r.err).await;
+                }
+
                 // Now propagate the error
                 let result = run_result?;
 
@@ -4392,6 +4404,38 @@ impl Kernel {
             ));
         }
         Ok(guard)
+    }
+
+    /// Hand a finished command substitution's stderr to the kernel's stderr
+    /// stream.
+    ///
+    /// bash gives `$(…)` the shell's own fd 2, so a substitution's stderr goes
+    /// straight to the terminal and is never captured alongside its stdout.
+    /// kaish runs the block captured, so the equivalent is to write the block's
+    /// stderr to the same channel pipeline stages use: the enclosing
+    /// statement's drain folds it into that statement's `err`, ahead of the
+    /// statement's own output. `x=$(cat /nope)` kept the exit code and lost the
+    /// reason until this existed.
+    ///
+    /// Nesting composes without a stack. Each level drains at its own statement
+    /// boundary, so an inner substitution's stderr is already inside the outer
+    /// block's result by the time this runs for the outer one — which is why it
+    /// is written exactly once, here, rather than also accumulated by callers.
+    async fn emit_cmdsubst_stderr(&self, err: &str) {
+        if err.is_empty() {
+            return;
+        }
+        match self.exec_ctx.read().await.stderr.as_ref() {
+            Some(stream) => stream.write_str(err),
+            // The kernel seeds this stream in both `new` and `fork`, so it is
+            // always present on the kernel's own context; the `Option` exists
+            // for tool contexts built elsewhere. If it is ever absent there is
+            // no channel to carry the bytes and no drain to collect them, which
+            // is the same condition under which every pipeline stage's stderr
+            // is dropped — so record it rather than failing an interactive
+            // shell over it.
+            None => tracing::warn!("command substitution stderr dropped: no stderr stream"),
+        }
     }
 
     async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
