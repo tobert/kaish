@@ -2228,6 +2228,17 @@ enum Frame {
     /// Plain `( ... )` grouping (function parameter lists): inert, tracked
     /// only so `)` pops the right frame.
     Paren,
+    /// `case ... in ... esac`. A `)` seen here is a branch pattern
+    /// terminator (`case $x in a) …`, no matching `(`), not a close of some
+    /// enclosing `Subst`/`Paren` — see the `RParen` arm below.
+    /// `awaiting_pattern` is `true` right after `case … in` and right
+    /// after a `;;` (a pattern or `esac` is expected next) and `false`
+    /// once a pattern's `)` is consumed, for the rest of that branch's
+    /// body — `Esac` closes this frame only while `awaiting_pattern` is
+    /// `true`, so `esac` used as an ordinary word inside a still-open
+    /// branch's own body doesn't get read as its closer. See the
+    /// `Esac`/`DoubleSemi`/`RParen` arms below.
+    Case { awaiting_pattern: bool },
 }
 
 /// Statement-head DFA: decides whether an `=` is an ASSIGNMENT (which puts
@@ -2481,11 +2492,70 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
             Token::LParen => {
                 frames.push(Frame::Paren);
             }
+            Token::Case => {
+                // `case` opens a case-statement frame UNLESS it's
+                // immediately followed by `=` — kaish permits shell
+                // keywords as `key=value` argv keys (`in=a`, `do=b`; see
+                // `keyword_word` in parser.rs), and `case` is no exception.
+                // Pushing a frame for `case=x` would leave it stuck open
+                // (nothing but a bareword `esac` or a stray `)` would ever
+                // touch it again), corrupting fusion decisions for the
+                // rest of the scan — see `CmdSubstFrames::step` in
+                // parser.rs, which shares this exact rule.
+                let is_argv_key =
+                    matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::Eq));
+                if !is_argv_key {
+                    frames.push(Frame::Case { awaiting_pattern: true });
+                }
+                // `Case` is also a statement boundary (see
+                // `is_statement_boundary`), but pushing a frame needs its
+                // own arm, so replicate that arm's DFA reset here — this
+                // reset applies either way, matching how `do=b`/`if=x`/
+                // `for=c` already reset the DFA through the boundary
+                // catch-all even though those keywords never push a frame.
+                *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                    StmtHead::Start;
+            }
+            Token::DoubleSemi => {
+                // A branch's own terminator: the innermost `Case` frame (if
+                // any) is now awaiting the next pattern, or `esac` — see the
+                // `Esac` arm below. Otherwise behaves exactly like the
+                // `is_statement_boundary` catch-all does for `;;` (DFA
+                // reset, pop dangling Test/List/Record frames): `;;` needs
+                // its own arm only because it ALSO carries the
+                // `awaiting_pattern` update.
+                if let Some(Frame::Case { awaiting_pattern }) = frames.last_mut() {
+                    *awaiting_pattern = true;
+                }
+                *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                    StmtHead::Start;
+                while frames.len() > floor
+                    && matches!(frames.last(), Some(Frame::Test) | Some(Frame::List) | Some(Frame::Record))
+                {
+                    frames.pop();
+                }
+            }
+            Token::Esac => {
+                // Pop the `Case` frame only while it is innermost AND
+                // awaiting a pattern (right after `case … in` or a `;;`) —
+                // an `esac` used as an ordinary bareword INSIDE a branch's
+                // own body (`case a in a) y=esac;; b) …`, still-open case)
+                // is not a closer just because it spells the same word, and
+                // popping there would corrupt the scan for the branch's
+                // real `;;`/pattern/`esac` tokens the same way a flat
+                // counter did. See `CmdSubstFrames` in parser.rs, which
+                // shares this exact rule for the unquoted `$(...)` form.
+                if matches!(frames.last(), Some(Frame::Case { awaiting_pattern: true })) {
+                    frames.pop();
+                }
+                *scopes.last_mut().unwrap_or_else(|| unreachable!("scopes never empty")) =
+                    StmtHead::Start;
+            }
             Token::RParen => {
                 // Pop through any dangling literal/test frames to the
-                // nearest Subst/Paren — an unterminated literal inside
+                // nearest Subst/Paren/Case — an unterminated literal inside
                 // `$( )` must not leak into the enclosing scope.
-                while let Some(f) = frames.last() {
+                while let Some(f) = frames.last().copied() {
                     match f {
                         Frame::Subst => {
                             frames.pop();
@@ -2513,6 +2583,30 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
                         }
                         Frame::Paren => {
                             frames.pop();
+                            // The paren just closed may have been a
+                            // case-branch pattern's optional leading `(`
+                            // (`(a)` is `a)` with an inert wrapper — the
+                            // same word either way), so this `)` also
+                            // consumed the pattern if a `Case` frame
+                            // awaiting one sits directly beneath. A POSIX
+                            // function's empty `()`, or a case-branch
+                            // body's own paren once `awaiting_pattern` is
+                            // already `false`, leave it untouched either
+                            // way.
+                            if let Some(Frame::Case { awaiting_pattern }) = frames.last_mut() {
+                                *awaiting_pattern = false;
+                            }
+                            break;
+                        }
+                        Frame::Case { .. } => {
+                            // Branch pattern terminator (`case $x in a) …`)
+                            // — no matching open on this stack. Leave the
+                            // frame alone (but it's no longer awaiting a
+                            // pattern — see the `Esac` arm above); the `)`
+                            // is ordinary body text.
+                            if let Some(Frame::Case { awaiting_pattern }) = frames.last_mut() {
+                                *awaiting_pattern = false;
+                            }
                             break;
                         }
                         _ => {
@@ -3265,6 +3359,7 @@ mod tests {
             .map(|s| s.token)
             .collect()
     }
+
 
     // ═══════════════════════════════════════════════════════════════════
     // Keyword tests
@@ -4872,6 +4967,163 @@ mod tests {
                 Token::Comma,
                 Token::Ident("ts".into()),
                 Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn case_pattern_paren_inside_list_literal_cmd_subst_does_not_leak_list_frame() {
+        // `compute_value_context`'s Frame stack has no `Case` variant, so a
+        // case-branch pattern's unpaired `)` (`case b in b) …`, no leading
+        // `(`) used to fall through the `RParen` handler's dangling-frame
+        // sweep and pop the nearest `Subst`/`Paren` — here the `$(...)`
+        // that the case is actually inside. When that `$(...)` sits inside
+        // an outer `[...]` list literal, popping it early exposes the
+        // outer `List` frame, and the (still relative) floor check reads
+        // it as still open: a glob argument inside the case body then gets
+        // misread as being at value/list-literal position and its
+        // `[...]` bracket pair does not glob-fuse. Compare against the
+        // same case body with no outer list literal, where it fuses.
+        assert_eq!(
+            lex("x=[a $(case b in b) echo [dog];; esac) c]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::Ident("a".into()),
+                Token::CmdSubstStart,
+                Token::Case,
+                Token::Ident("b".into()),
+                Token::In,
+                Token::Ident("b".into()),
+                Token::RParen,
+                Token::Ident("echo".into()),
+                Token::GlobWord("[dog]".into()),
+                Token::DoubleSemi,
+                Token::Esac,
+                Token::RParen,
+                Token::Ident("c".into()),
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn esac_bareword_inside_still_open_case_does_not_leak_list_frame() {
+        // The sharper form of the previous test: an `esac` bareword INSIDE
+        // a case that is genuinely still open (`y=esac` is branch `v)`'s
+        // whole body; the case's real closer comes two branches later).
+        // Popping the `Case` frame whenever it's merely innermost — rather
+        // than only while `awaiting_pattern` (right after `case … in` or a
+        // `;;`) — treats this bareword as the closer too, exposing the
+        // outer `List` frame early the same way the unpaired-`)` case did,
+        // so `[dog]` in the LAST branch does not glob-fuse either.
+        assert_eq!(
+            lex("x=[a $(case v in v) y=esac;; w) echo [dog];; esac) c]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::Ident("a".into()),
+                Token::CmdSubstStart,
+                Token::Case,
+                Token::Ident("v".into()),
+                Token::In,
+                Token::Ident("v".into()),
+                Token::RParen,
+                Token::Ident("y".into()),
+                Token::Eq,
+                Token::Esac,
+                Token::DoubleSemi,
+                Token::Ident("w".into()),
+                Token::RParen,
+                Token::Ident("echo".into()),
+                Token::GlobWord("[dog]".into()),
+                Token::DoubleSemi,
+                Token::Esac,
+                Token::RParen,
+                Token::Ident("c".into()),
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn case_pattern_parenthesized_paren_inside_list_literal_cmd_subst_does_not_leak_list_frame() {
+        // The parenthesized twin of `esac_bareword_inside_still_open_case_
+        // does_not_leak_list_frame` above: the FIRST branch's pattern is
+        // spelled `(v)` instead of bare `v)`. Popping the `Paren` frame the
+        // leading `(` pushed used to leave the `Case` frame beneath stuck at
+        // `awaiting_pattern: true` (the docstring's contract — "false once a
+        // pattern's `)` has been consumed" — went unmet for this spelling),
+        // so the bareword `esac` in `y=esac` (branch `v)`'s whole body) then
+        // read as the case's own closer, popping the frame early and
+        // exposing the outer `List` frame the same way an unpaired `)`
+        // does — `[dog]` in the LAST branch fails to glob-fuse.
+        assert_eq!(
+            lex("x=[a $(case v in (v) y=esac;; w) echo [dog];; esac) c]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::Ident("a".into()),
+                Token::CmdSubstStart,
+                Token::Case,
+                Token::Ident("v".into()),
+                Token::In,
+                Token::LParen,
+                Token::Ident("v".into()),
+                Token::RParen,
+                Token::Ident("y".into()),
+                Token::Eq,
+                Token::Esac,
+                Token::DoubleSemi,
+                Token::Ident("w".into()),
+                Token::RParen,
+                Token::Ident("echo".into()),
+                Token::GlobWord("[dog]".into()),
+                Token::DoubleSemi,
+                Token::Esac,
+                Token::RParen,
+                Token::Ident("c".into()),
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn case_eq_argv_key_inside_cmd_subst_does_not_leak_open_scope() {
+        // `case` is a valid `key=value` argv key (`case=x`, same as `in=a`/
+        // `do=b` — see `keyword_key_argv_assignment_parses` in
+        // parser_tests.rs), but `case` is the only one of those keywords
+        // that pushes a structural frame. Pushing one unconditionally on
+        // every `Token::Case` — including `case=x`'s — leaves a phantom
+        // `Case` frame that nothing but a stray `)` or bareword `esac` ever
+        // touches again. Here that phantom frame swallows the `$(...)`'s
+        // own closing `)` (an `RParen` while a `Case` frame is innermost
+        // only clears `awaiting_pattern`; it never pops), so the `Subst`
+        // scope never closes and the outer list literal's own closing `]`
+        // gets fused into a bogus glob token along with the unrelated
+        // `[dog]` that follows — proof the corruption reaches past the
+        // substitution's own boundary, not just within it.
+        assert_eq!(
+            lex("x=[a $(echo case=x) echo [dog]]"),
+            vec![
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::LBracket,
+                Token::Ident("a".into()),
+                Token::CmdSubstStart,
+                Token::Ident("echo".into()),
+                Token::Case,
+                Token::Eq,
+                Token::Ident("x".into()),
+                Token::RParen,
+                Token::Ident("echo".into()),
+                Token::LBracket,
+                Token::Ident("dog".into()),
+                Token::RBracket,
+                Token::RBracket,
             ]
         );
     }
