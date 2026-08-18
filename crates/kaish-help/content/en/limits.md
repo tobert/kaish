@@ -36,7 +36,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | Builtin | Limitation |
 |---------|------------|
 | `alias` | First word only; not in pipelines or compound commands |
-| `set` | `-e`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (no `-u`, `-x`, `pipefail`) |
+| `set` | `-e`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (`-u`, `-x` ignored; `-o pipefail` and any other unknown `-o` name exit 1) |
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `ps` | Linux-only (reads `/proc`) |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |

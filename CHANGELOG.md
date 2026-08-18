@@ -107,6 +107,12 @@ breaking entries are marked **BREAKING**.
   and `$café` are still loud lexer errors (matching bash's name rule), now
   reported as a dedicated diagnostic instead of silently splitting into a
   truncated flag/name plus a stray bareword argument.
+- **`set -o <name>` / `set +o <name>` on an unrecognized name exits 1 and
+  names the valid set** (`glob`, `output-limit[=SIZE]`, `trash`) instead of
+  silently no-opping — `set -o pipefail` used to exit 0 and leave an agent
+  believing bash's pipefail safety was on, when `limits.md` documents kaish
+  has none. `set -o output-limit=<unparseable size>` fails the same way
+  instead of leaving the limit unchanged.
 
 ## [0.14.1] - 2026-08-14
 
