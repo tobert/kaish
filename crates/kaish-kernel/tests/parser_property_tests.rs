@@ -7,6 +7,12 @@
 //! a name boundary where two scanners disagreed — so the generators build
 //! *structure*, not random bytes. Random bytes hit a lexer error in
 //! microseconds and never reach the shapes that break things.
+//!
+//! Fragments that are only valid as an *argument* (command substitution,
+//! interpolation, `${x}`, `${x:-d}`) are pre-wrapped with a leading `echo ` —
+//! `command_name` never accepts a bare expression, so an unwrapped fragment
+//! would make the whole joined source unparseable and starve property 3 of
+//! the renderer arms those forms exercise.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -20,11 +26,17 @@ fn source_fragment() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("echo x".to_string()),
         Just("x=1".to_string()),
-        Just("$(echo x)".to_string()),
-        Just("\"$x\"".to_string()),
-        Just("'$x'".to_string()),
-        Just("${x}".to_string()),
-        Just("${x:-d}".to_string()),
+        // Command substitution, interpolation, and var-default forms are not
+        // valid statement heads on their own (`command_name` in parser.rs
+        // accepts only `ident | path | true | false | : | . | ./path`) — they
+        // must appear as an argument to reach the renderer arms in
+        // `render_expr`/`render_part` (`CommandSubst`, `Interpolated`,
+        // `VarWithDefault`) via property 3 below.
+        Just("echo $(echo x)".to_string()),
+        Just("echo \"$x\"".to_string()),
+        Just("echo '$x'".to_string()),
+        Just("echo ${x}".to_string()),
+        Just("echo ${x:-d}".to_string()),
         Just("for f in a b; do echo $f; done".to_string()),
         Just("if true; then echo y; fi".to_string()),
         Just("case x in x) echo m ;; esac".to_string()),
@@ -66,10 +78,14 @@ proptest! {
         }
     }
 
-    /// Planning is a pure function of source text and must agree with parsing
-    /// about what is well-formed: a program that parses can be planned, and one
-    /// that does not cannot. A divergence means an embedder's `--plan` sees a
-    /// different language than the kernel runs.
+    /// `plan_program` (`crates/kaish-kernel/src/ast/plan.rs`) has exactly one
+    /// fallible step, `parse(source)?`; every statement it builds after that is
+    /// infallible. So today `parsed == planned` holds by construction and this
+    /// property cannot fail — it is not yet a differential. It stays as a
+    /// regression guard: if planning ever grows a rejection path of its own
+    /// (an already-parsed construct planning refuses, say), this is the
+    /// property that catches an embedder's `--plan` disagreeing with the
+    /// kernel about what runs.
     #[test]
     fn plan_agrees_with_parse(fragments in proptest::collection::vec(source_fragment(), 1..5)) {
         let source = fragments.join("; ");
