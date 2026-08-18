@@ -184,6 +184,16 @@ breaking entries are marked **BREAKING**.
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
   operator" word rule instead of an ASCII-only character class.
+- **Flag names and `$name` variable references stay ASCII-only** — `--café`
+  and `$café` are still loud lexer errors (matching bash's name rule), now
+  reported as a dedicated diagnostic instead of silently splitting into a
+  truncated flag/name plus a stray bareword argument.
+- **`set -o <name>` / `set +o <name>` on an unrecognized name exits 1 and
+  names the valid set** (`glob`, `output-limit[=SIZE]`, `trash`) instead of
+  silently no-opping — `set -o pipefail` used to exit 0 and leave an agent
+  believing bash's pipefail safety was on, when `limits.md` documents kaish
+  has none. `set -o output-limit=<unparseable size>` fails the same way
+  instead of leaving the limit unchanged.
 - **Variable names are identifiers in any script plus emoji, and are NFC-normalized** —
   `café=au-lait` and `😁=grin` work, and a name spelled with a combining mark and
   one spelled precomposed reach the same variable. Diverges from bash, which

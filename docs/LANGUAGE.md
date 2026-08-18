@@ -902,10 +902,18 @@ set +o glob                      # disable bare glob expansion
 
 Environment variable `KAISH_TRASH=1` enables trash at kernel startup.
 
-`set` ignores an unknown `-o` name and exits **0**, for bash compatibility. So
-`set -o approvals` and `set -o latch` — retired spellings from the removed
-approval subsystem and confirmation latch — turn nothing on and report
-nothing.
+`set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
+**1** and names the valid set (`glob`, `output-limit[=SIZE]`, `trash`) — an
+unknown name is never silently ignored, because a caller that thinks it
+turned something on needs to know it didn't. `set -o pipefail` fails this
+way too: `limits.md` documents pipefail as a deliberate omission, not an
+oversight. `set -o approvals` and `set -o latch` — retired spellings from
+the removed approval subsystem and confirmation latch — fail the same way;
+they turn nothing on. `set -o output-limit=<unparseable size>` also exits 1
+instead of leaving the limit unchanged. A bare unrecognized short flag
+(`set -q`, `set -u`, `set -x`) is still silently ignored — bash has dozens
+kaish doesn't implement, with no fixed set to check a typo against the way
+`-o`'s names allow.
 
 With `trash` enabled, `rm` snapshots the file into Trash before removing it,
 and a truncating overwrite (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`,
@@ -1361,7 +1369,7 @@ These are documented limitations of the current implementation:
 
 ### Builtins
 
-- **`set` supports `-e`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
+- **`set` supports `-e`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. A bare unrecognized short flag (`-u`, `-x`) is silently ignored for compatibility, but an unrecognized `-o`/`+o` name — including `pipefail` — exits 1 and names the valid set instead of no-opping (see Shell Options).
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`head`/`tail -c` counts bytes** — POSIX semantics, deliberately. A byte count can split a multi-byte UTF-8 sequence; use line-based forms (`-n`) for text.
 - **`sed` is a "muscle-memory" subset, not full sed** — kaish's `sed` deliberately implements the slice of GNU/BSD (AT&T) `sed` that humans and agents actually reach for by reflex — closest in spirit to **busybox** `sed`, which is a strong influence (the supported set was [chosen from a cross-model usability panel](designing-syntax-with-llms.md)). It covers:
