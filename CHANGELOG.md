@@ -106,6 +106,39 @@ breaking entries are marked **BREAKING**.
   out of scope. The body now parses through the same full program grammar as
   everywhere else, and a malformed body reports its error at the actual
   failure point instead of a generic message anchored at `$(`.
+- **A `case` inside a nested `$(...)` no longer closes the substitution early
+  on the case branch's own pattern `)`** — `X=$(echo $(case b in b) echo
+  x;; esac))` exited 1 with "unterminated command substitution"; the body
+  boundary is now a stack of `$(`/`(`/`case` frames instead of a flat depth
+  counter, so a `)` resolves against the frame it actually belongs to.
+- **`esac` used as an ordinary word inside `$(...)` no longer closes a case
+  it doesn't belong to** — `esac` is also the literal bareword `"esac"` in
+  argument position (same as `done`/`fi`), and a `case` genuinely still open
+  around it (`X=$(case a in a) y=esac;; b) echo two;; esac)`) exited 1;
+  the frame stack above pops a `case` frame only where a branch pattern (or
+  the real `esac`) is actually expected — right after `case … in` or a `;;`
+  — never mid-branch.
+- **The same case-branch-`)` bug is fixed in `"$(...)"` (quoted) and in the
+  lexer's argument-fusion pass** — both had their own, separately-broken
+  version of the same flat counter; the quoted form now reuses the unquoted
+  form's frame-stack scan instead of counting raw `(`/`)` characters, which
+  also fixes a literal `(`/`)` inside a quoted argument of the substitution
+  (`$(echo "(")`) breaking the same way.
+- **A parenthesized case-branch pattern inside `$(...)` no longer leaves the
+  branch stuck "awaiting a pattern"** — `X=$(case a in (a) y=esac;; b) echo
+  two;; esac)` exited 1, because the `(` in `(a)` popped on its own `)`
+  without telling the `case` frame beneath it the pattern was consumed, so a
+  later bareword `esac` in the branch body closed the case early. The
+  unparenthesized spelling (`a)`) already worked; both frame stacks (parser
+  and lexer) now clear the case frame's `awaiting_pattern` when a pattern's
+  leading `(` closes too.
+- **`case` works as a `key=value` argv key inside `$(...)`** —
+  `X=$(echo case=x)` exited 1 ("unterminated command substitution"), because
+  the balance tracker pushed a case-statement frame on every `case` token,
+  including one immediately followed by `=` (kaish already permits keywords
+  as argv keys — `in=a`, `do=b`); the phantom frame then absorbed the
+  substitution's real closing `)`. `case` is now excluded exactly like its
+  keyword siblings when the next token is `=`.
 - **Unquoted barewords and paths accept any non-ASCII character** —
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
