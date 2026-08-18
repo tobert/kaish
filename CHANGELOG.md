@@ -166,6 +166,13 @@ breaking entries are marked **BREAKING**.
 - **Flag names stay ASCII-only** — `--café` is ambiguous between a flag and a
   literal word, so it is a loud lexer error naming the fix, rather than the
   generic "unexpected character" it was before.
+- **`set -e` keeps the failing command's message, not just its exit code** —
+  every site that turns a failure into `set -e`'s abort (a bare statement, a
+  `for`/`while` loop body, a failed assignment substitution) discarded
+  `out`/`err`/`data` in favor of an empty placeholder, so `set -e; cat /nope`
+  exited 1 with nothing on stderr. `-e` still aborts the statement list
+  exactly as before; only the reason now survives with it. `exit N`/`return
+  N` are unaffected — those never carried a message of their own.
 
 ## [0.14.1] - 2026-08-14
 
