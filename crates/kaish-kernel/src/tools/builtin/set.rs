@@ -34,6 +34,9 @@ const VALID_SET_O_NAMES: &[&str] = &["glob", "output-limit[=SIZE]", "trash"];
 /// arrives as the only flag on its token. Keeping one function means the two
 /// shapes can't drift into accepting different names.
 fn apply_set_o(ctx: &mut ExecContext, name: &str, enable: bool) -> Result<(), String> {
+    // Quote back the sigil the author actually typed. `set +o bogus` reporting
+    // `set: -o bogus` sends them looking at a line they did not write.
+    let sigil = if enable { '-' } else { '+' };
     match name {
         "trash" => ctx.scope.set_trash_enabled(enable),
         "glob" => ctx.scope.set_glob_enabled(enable),
@@ -51,19 +54,18 @@ fn apply_set_o(ctx: &mut ExecContext, name: &str, enable: bool) -> Result<(), St
         _ if enable && name.starts_with("output-limit=") => {
             let size_str = &name["output-limit=".len()..];
             let bytes = crate::output_limit::parse_size(size_str)
-                .map_err(|e| format!("set: -o output-limit={size_str}: {e}"))?;
+                .map_err(|e| format!("set: {sigil}o output-limit={size_str}: {e}"))?;
             ctx.output_limit.set_limit(Some(bytes));
         }
         "pipefail" => {
-            return Err(
-                "set: -o pipefail: not implemented — kaish has no pipefail; \
+            return Err(format!(
+                "set: {sigil}o pipefail: not implemented — kaish has no pipefail; \
                  see `help limits` for the deliberate omission and its workaround"
-                    .to_string(),
-            );
+            ));
         }
         _ => {
             return Err(format!(
-                "set: -o {name}: unknown option — valid names are {}",
+                "set: {sigil}o {name}: unknown option — valid names are {}",
                 VALID_SET_O_NAMES.join(", ")
             ));
         }
