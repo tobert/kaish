@@ -2925,7 +2925,11 @@ where
                 }
                 Some(tok) => {
                     let span = inp.span_since(&before);
-                    if tracker.step(&tok) {
+                    // `inp.peek()` now shows the token AFTER `tok` — `next()`
+                    // already advanced the cursor past it — giving `step`
+                    // its one-token lookahead without consuming anything.
+                    let next = inp.peek();
+                    if tracker.step(&tok, next.as_ref()) {
                         return Ok((body, span));
                     }
                     body.push((tok, span));
@@ -2941,13 +2945,19 @@ enum CmdSubstFrame {
     /// Opened by a nested `$(` (`Token::CmdSubstStart`); closed by a `)`.
     Subst,
     /// Opened by a literal `(` (`Token::LParen`) — e.g. a parenthesized
-    /// case-branch pattern `(a)`; closed by a `)`.
+    /// case-branch pattern `(a)`; closed by a `)`. A `case`-pattern's
+    /// leading `(` is popped by [`CmdSubstFrames::step`]'s `RParen` arm,
+    /// which also clears the `Case` frame directly beneath it out of
+    /// `awaiting_pattern` — see that arm's comment.
     Paren,
-    /// Opened by `Token::Case`. `awaiting_pattern` is `true` right after
-    /// `case … in` and right after a `;;` — a branch pattern (or `esac`) is
-    /// expected next — and `false` once a pattern's `)` has been consumed,
-    /// for the rest of that branch's body. `Esac` closes this frame only
-    /// while `awaiting_pattern` is `true`; see [`CmdSubstFrames`].
+    /// Opened by `Token::Case`, unless the very next token is `Token::Eq`
+    /// (`case=x` is a `key=value` argv key spelled with the keyword, not a
+    /// case-statement opener — see [`CmdSubstFrames::step`]'s `Case` arm).
+    /// `awaiting_pattern` is `true` right after `case … in` and right after
+    /// a `;;` — a branch pattern (or `esac`) is expected next — and `false`
+    /// once a pattern's `)` has been consumed, for the rest of that
+    /// branch's body. `Esac` closes this frame only while `awaiting_pattern`
+    /// is `true`; see [`CmdSubstFrames`].
     Case { awaiting_pattern: bool },
 }
 
@@ -2965,7 +2975,14 @@ enum CmdSubstFrame {
 /// - innermost is `Case` — the `)` is a branch pattern terminator; it's
 ///   part of the body and nothing pops (but `awaiting_pattern` flips to
 ///   `false` — see below).
-/// - innermost is `Paren` or `Subst` — that frame closes; pop it.
+/// - innermost is `Paren` — that frame closes; pop it. If a `Case` frame
+///   awaiting its pattern is directly beneath, its `)` was also the
+///   pattern's own closer (`(a)` is `a)` with an optional leading paren —
+///   the same word either way), so clear that `Case`'s `awaiting_pattern`
+///   too; otherwise this `Paren` closed something else (a POSIX function's
+///   empty `()`, or a case-branch body's own paren once `awaiting_pattern`
+///   is already `false`) and the frame beneath is untouched either way.
+/// - innermost is `Subst` — that frame closes; pop it.
 /// - stack empty — this is the substitution's own closing `)`; stop, and
 ///   the token is not part of the body.
 ///
@@ -2992,24 +3009,44 @@ enum CmdSubstFrame {
 struct CmdSubstFrames(Vec<CmdSubstFrame>);
 
 impl CmdSubstFrames {
-    /// Feed one token. Returns `true` when `tok` is the substitution's own
-    /// closing `)` — the scan must stop, and `tok` itself is not part of the
-    /// body. Returns `false` when `tok` belongs to the body and scanning
-    /// continues.
-    fn step(&mut self, tok: &Token) -> bool {
+    /// Feed one token, plus the token right after it (`None` at end of
+    /// input) so a bareword `case` can be told apart from a `case=value`
+    /// argv key one token early — see the `Case` arm. Returns `true` when
+    /// `tok` is the substitution's own closing `)` — the scan must stop, and
+    /// `tok` itself is not part of the body. Returns `false` when `tok`
+    /// belongs to the body and scanning continues.
+    fn step(&mut self, tok: &Token, next: Option<&Token>) -> bool {
         match tok {
             Token::RParen => match self.0.last_mut() {
                 None => return true,
                 Some(CmdSubstFrame::Case { awaiting_pattern }) => {
                     *awaiting_pattern = false;
                 }
-                Some(CmdSubstFrame::Paren | CmdSubstFrame::Subst) => {
+                Some(CmdSubstFrame::Paren) => {
+                    self.0.pop();
+                    // The paren just closed may have been a case-branch
+                    // pattern's optional leading `(` (`(a)` == `a)`) — if
+                    // so, this same `)` also consumed the pattern.
+                    if let Some(CmdSubstFrame::Case { awaiting_pattern }) = self.0.last_mut() {
+                        *awaiting_pattern = false;
+                    }
+                }
+                Some(CmdSubstFrame::Subst) => {
                     self.0.pop();
                 }
             },
             Token::LParen => self.0.push(CmdSubstFrame::Paren),
             Token::CmdSubstStart => self.0.push(CmdSubstFrame::Subst),
-            Token::Case => self.0.push(CmdSubstFrame::Case { awaiting_pattern: true }),
+            // `case` opens a case-statement frame UNLESS it's immediately
+            // followed by `=` — kaish permits shell keywords as `key=value`
+            // argv keys (`in=a`, `do=b`; see `keyword_word`), and `case` is
+            // no exception. Pushing a frame for `case=x` would leave it
+            // stuck open (nothing but a bareword `esac` or a stray `)`
+            // would ever touch it again), corrupting the rest of the scan.
+            Token::Case if !matches!(next, Some(Token::Eq)) => {
+                self.0.push(CmdSubstFrame::Case { awaiting_pattern: true });
+            }
+            Token::Case => {}
             Token::DoubleSemi => {
                 if let Some(CmdSubstFrame::Case { awaiting_pattern }) = self.0.last_mut() {
                     *awaiting_pattern = true;
@@ -3038,7 +3075,10 @@ impl CmdSubstFrames {
 /// function's doc comment for why a second, non-chumsky scan exists at all.
 fn find_cmd_subst_close(tokens: &[(Token, Span)]) -> Option<usize> {
     let mut tracker = CmdSubstFrames::default();
-    tokens.iter().position(|(tok, _)| tracker.step(tok))
+    (0..tokens.len()).find(|&i| {
+        let next = tokens.get(i + 1).map(|(t, _)| t);
+        tracker.step(&tokens[i].0, next)
+    })
 }
 
 /// Re-validate every unquoted `$(...)` body in `tokens` on its own, outside
@@ -4443,6 +4483,127 @@ mod tests {
     }
 
     #[test]
+    fn parse_cmd_subst_unquoted_case_parenthesized_pattern_with_bareword_esac_in_body() {
+        // The parenthesized twin of
+        // `parse_cmd_subst_unquoted_esac_as_bareword_inside_still_open_case`:
+        // the FIRST branch's pattern is `(a)` instead of bare `a)`. Popping
+        // the `Paren` frame the leading `(` pushed used to leave the `Case`
+        // frame beneath stuck at `awaiting_pattern: true` — the contract
+        // `CmdSubstFrame::Case`'s own docstring states ("false once a
+        // pattern's `)` has been consumed") went unmet for this spelling —
+        // so the bareword `esac` in `y=esac` (branch `a)`'s whole body) read
+        // as the case's own closer, popping the frame early and corrupting
+        // everything the tracker reads after it.
+        let result = parse("X=$(case a in (a) y=esac;; b) echo two;; esac)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::Case(c)] => {
+                assert_eq!(c.branches.len(), 2);
+                assert_eq!(c.branches[0].patterns, vec!["a".to_string()]);
+                assert_eq!(c.branches[1].patterns, vec!["b".to_string()]);
+            }
+            other => panic!("expected a single Case statement with two branches, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_nested_case_parenthesized_pattern_esac_in_outer_body() {
+        // Nesting: a `case` inside a `case` branch's body, both inside
+        // `$(...)`, both patterns parenthesized. The inner case resolves
+        // and closes cleanly (its own `;;` sets `awaiting_pattern` back to
+        // `true` before its `esac`, independent of the bug), which masked
+        // this defect in isolation — the outer `Case` frame's stuck
+        // `awaiting_pattern: true` only surfaces once the inner case's
+        // frame is popped and the outer frame is innermost again: the
+        // bareword `esac` in the outer branch's own `y=esac`, reached AFTER
+        // the inner case fully closes, must not read as the outer case's
+        // closer either.
+        let result = parse(
+            "X=$(case a in (a) case b in (b) echo z;; esac; y=esac;; c) echo two;; esac)",
+        )
+        .unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::Case(c)] => {
+                assert_eq!(c.branches.len(), 2);
+                assert_eq!(c.branches[0].patterns, vec!["a".to_string()]);
+                assert_eq!(c.branches[1].patterns, vec!["c".to_string()]);
+            }
+            other => panic!("expected a single Case statement with two branches, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_case_eq_argv_key() {
+        // `case` is a valid `key=value` argv key (same as `in=a`/`do=b` —
+        // see `keyword_key_argv_assignment_parses` in parser_tests.rs), but
+        // it's the only one of those keywords that pushes a structural
+        // frame on the `$(...)` balance tracker. Pushing one unconditionally
+        // reads `case=x` as a case-statement opener, then reads the
+        // substitution's real closing `)` as a pattern terminator instead —
+        // the tracker never sees a `)` to stop on and reports "unterminated"
+        // even though the input is well-formed.
+        let result = parse("X=$(echo case=x)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        let cmd = match stmts.as_slice() {
+            [Stmt::Command(c)] => c,
+            other => panic!("expected a single echo command, got {:?}", other),
+        };
+        assert_eq!(cmd.name, "echo");
+        match &cmd.args[0] {
+            Arg::WordAssign { key, value } => {
+                assert_eq!(key, "case");
+                match value {
+                    Expr::Literal(Value::String(s)) => assert_eq!(s, "x"),
+                    other => panic!("expected string \"x\", got {:?}", other),
+                }
+            }
+            other => panic!("expected WordAssign arg, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cmd_subst_unquoted_case_eq_argv_key_with_sibling_keyword_keys() {
+        // `case=x` alongside the already-covered sibling keyword keys
+        // (`do=y`), inside `$(...)` — the balance tracker must treat all of
+        // them uniformly.
+        let result = parse("X=$(tool case=x do=y)").unwrap();
+        let stmts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::CommandSubst(s) => s,
+                other => panic!("expected command subst, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        let cmd = match stmts.as_slice() {
+            [Stmt::Command(c)] => c,
+            other => panic!("expected a single tool command, got {:?}", other),
+        };
+        assert_eq!(cmd.name, "tool");
+        assert_eq!(cmd.args.len(), 2);
+        assert!(matches!(&cmd.args[0], Arg::WordAssign { key, .. } if key == "case"));
+        assert!(matches!(&cmd.args[1], Arg::WordAssign { key, .. } if key == "do"));
+    }
+
+    #[test]
     fn parse_cmd_subst_unquoted_case_inside_nested_subst() {
         // A flat depth counter conflates a case-branch pattern's unpaired
         // `)` with a nested `$(...)`'s own close once both are open at
@@ -4558,6 +4719,67 @@ mod tests {
             matches!(stmts.as_slice(), [Stmt::Case(c)] if c.branches.len() == 1),
             "expected a single Case statement inside the quoted $(...), got {stmts:?}"
         );
+    }
+
+    #[test]
+    fn parse_quoted_cmd_subst_case_parenthesized_pattern_esac_in_body_not_miscounted() {
+        // `find_cmd_subst_close` (shared with `CmdSubstFrames::step`) drives
+        // `parse_interpolated_string`'s own `$(...)` scan too — the
+        // parenthesized-pattern defect must not resurface there either.
+        let result = parse(r#"X="pre $(case a in (a) y=esac;; b) echo two;; esac) post""#).unwrap();
+        let parts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::Interpolated(parts) => parts,
+                other => panic!("expected an interpolated string, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        let stmts = match parts.as_slice() {
+            [StringPart::Literal(pre), StringPart::CommandSubst(stmts), StringPart::Literal(post)] =>
+            {
+                assert_eq!(pre, "pre ");
+                assert_eq!(post, " post");
+                stmts
+            }
+            other => panic!("expected [literal, command subst, literal], got {:?}", other),
+        };
+        match stmts.as_slice() {
+            [Stmt::Case(c)] => {
+                assert_eq!(c.branches.len(), 2);
+                assert_eq!(c.branches[0].patterns, vec!["a".to_string()]);
+                assert_eq!(c.branches[1].patterns, vec!["b".to_string()]);
+            }
+            other => panic!("expected a single Case statement with two branches, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_quoted_cmd_subst_case_eq_argv_key_not_miscounted() {
+        // Same shared-scan concern for the `case=x` defect: the quoted
+        // `$(...)` form must accept it too.
+        let result = parse(r#"X="pre $(echo case=x) post""#).unwrap();
+        let parts = match &result.statements[0] {
+            Stmt::Assignment(a) => match &a.value {
+                Expr::Interpolated(parts) => parts,
+                other => panic!("expected an interpolated string, got {:?}", other),
+            },
+            other => panic!("expected assignment, got {:?}", other),
+        };
+        let stmts = match parts.as_slice() {
+            [StringPart::Literal(pre), StringPart::CommandSubst(stmts), StringPart::Literal(post)] =>
+            {
+                assert_eq!(pre, "pre ");
+                assert_eq!(post, " post");
+                stmts
+            }
+            other => panic!("expected [literal, command subst, literal], got {:?}", other),
+        };
+        let cmd = match stmts.as_slice() {
+            [Stmt::Command(c)] => c,
+            other => panic!("expected a single echo command, got {:?}", other),
+        };
+        assert_eq!(cmd.name, "echo");
+        assert!(matches!(&cmd.args[0], Arg::WordAssign { key, .. } if key == "case"));
     }
 
     #[test]
