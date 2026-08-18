@@ -157,9 +157,9 @@ impl fmt::Display for LexerError {
             ),
             LexerError::HashInsideWord => write!(
                 f,
-                "`#` starts a comment only at the start of a word, so a comment here \
-                 would drop the rest of the line — quote the whole word to keep `#` \
-                 inside it, e.g. \"$x#3\". Put a space before `#` to start a comment."
+                "`#` starts a comment only at the start of a word — quote the whole \
+                 word to keep `#` inside it, e.g. \"$x#3\", or put a space before `#` \
+                 to start a comment."
             ),
         }
     }

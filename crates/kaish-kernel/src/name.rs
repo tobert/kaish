@@ -58,18 +58,15 @@ impl fmt::Display for NameError {
         if self.kind == NameErrorKind::DottedName {
             return write!(
                 f,
-                "variable name contains `.` (U+002E) — kaish reads a dot as collection \
-                 access, not as part of a name, so write `name[key]` instead. Quote the \
-                 word to use it as a literal string instead"
+                "variable name contains `.` (U+002E) — write `name[key]` for collection \
+                 access, or quote the word to use it as a literal string"
             );
         }
         if self.kind == NameErrorKind::AmbiguousAscii {
             return write!(
                 f,
                 "variable name contains `{}` (U+{:04X}) — an ASCII name is letters, \
-                 digits, and `_`, because anything else fails to read back through \
-                 some spelling of a reference: `$a-b` reads `$a` and then the \
-                 literal text. Quote the word to use it as a literal string instead",
+                 digits, and `_`; quote the word to use it as a literal string",
                 self.ch, self.ch as u32
             );
         }
