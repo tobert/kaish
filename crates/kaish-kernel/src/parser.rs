@@ -1088,9 +1088,12 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
             }
         }
         // The quoted spelling of a read: `"$x"` arrives whole, so its names
-        // have to be dug out rather than met as tokens.
+        // have to be dug out rather than met as tokens. An all-ASCII string
+        // cannot hold a name this rule refuses — every character the rule
+        // rejects is non-ASCII — so the common string never pays for the
+        // second parse.
         if let Token::String(s) = tok {
-            if s.contains('$') {
+            if !s.is_ascii() && s.contains('$') {
                 if let Ok(parts) = parse_interpolated_string(s) {
                     if let Some(bad) = bad_name_in_parts(&parts) {
                         return Err(vec![ParseError { span: *span, message: bad.to_string() }]);
