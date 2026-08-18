@@ -5,7 +5,8 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// Unset tool: removes variables from the current scope.
 pub struct Unset;
@@ -37,6 +38,22 @@ impl Tool for Unset {
                 ("Remove multiple", "unset A B C"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+        // Every positional is a variable `unset` will remove — and a name that
+        // was never bindable was never bound, so the spelling matters here too.
+        issues.extend(
+            args.positional
+                .iter()
+                .filter_map(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .filter_map(super::mixed_script_issue),
+        );
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

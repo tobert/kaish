@@ -385,6 +385,18 @@ Typography and mathematics are not names either — `a->b` spelled with an arrow
 character, or `a` and `b` joined by a command symbol, are errors. Quote the word
 to use any of these as a literal string.
 
+A name spelled in **two scripts** binds, and warns — `W007` on stderr, exit code
+0. `PАTH=/bin`, with CYRILLIC CAPITAL LETTER A (U+0410) where Latin `A` belongs,
+binds a second variable and leaves `$PATH` alone; the warning names the
+character, its codepoint, and the plain spelling the name reads as. The rule is
+Unicode [UAX #39]'s Highly Restrictive profile, so `café`, `переменная`, and
+`変数x` stay quiet — Latin beside Japanese, Chinese, or Korean is a writing
+system, not a confusable. A warning rather than an error, because only the
+author knows which name they meant. Every door reports it: an assignment,
+`export`, `read`, `unset`, `push`, and `scatter --as`.
+
+[UAX #39]: https://www.unicode.org/reports/tr39/
+
 This is a deliberate divergence from bash, which restricts names to
 `[a-zA-Z_][a-zA-Z0-9_]*`.
 

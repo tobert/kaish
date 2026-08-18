@@ -140,6 +140,16 @@ impl<'a> Validator<'a> {
             }
         }
 
+        // A name spelled in two scripts binds one variable and reads as
+        // another, with exit code 0 either way. A warning, not an error — see
+        // `crate::name::mixed_script`.
+        if let Some(mixed) = crate::name::mixed_script(name) {
+            self.issues.push(
+                ValidationIssue::warning(IssueCode::MixedScriptName, mixed.to_string())
+                    .with_suggestion(mixed.suggestion()),
+            );
+        }
+
         if assign.path.segments.len() == 1 {
             if let Some(dot) = name.find('.') {
                 let (root, rest) = (&name[..dot], &name[dot + 1..]);
@@ -159,10 +169,6 @@ impl<'a> Validator<'a> {
                 // word — but `$abc#3` is a lexer error, so this assignment
                 // would bind a variable that can never be read back. Silent
                 // creation of an unreachable name is worse than a refusal.
-                //
-                // TODO: `-` has the same disease and predates this check —
-                // `a-b=5` binds `a-b`, and `$a-b` reads `$a` then `-b`. Left
-                // alone here because the name class is #349/#351's to settle.
                 self.issues.push(
                     ValidationIssue::error(
                         IssueCode::UnreadableAssignmentTarget,

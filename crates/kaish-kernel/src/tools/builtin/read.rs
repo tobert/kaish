@@ -13,7 +13,8 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// Read tool: reads a line from stdin into variable(s).
 pub struct Read;
@@ -53,6 +54,21 @@ impl Tool for Read {
                 ("Read with prompt", "read -p 'Enter value: ' VAR"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+        // Every positional is a variable `read` will bind.
+        issues.extend(
+            args.positional
+                .iter()
+                .filter_map(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .filter_map(super::mixed_script_issue),
+        );
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

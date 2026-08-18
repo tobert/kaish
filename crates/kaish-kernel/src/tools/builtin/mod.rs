@@ -112,6 +112,28 @@ mod write;
 mod xxd;
 
 use super::ToolRegistry;
+use crate::validator::{IssueCode, ValidationIssue};
+
+/// Warn when a name argument is spelled in two scripts.
+///
+/// The validator walker sees an assignment target and nothing else, so the
+/// builtins that take a name as an argument word — `export`, `read`, `unset`,
+/// `push`, and `scatter --as` — report the same rule from their own
+/// `Tool::validate`. `PАTH=/bin` and `export PАTH=/bin` have to agree.
+///
+/// `<dynamic>` is the walker's placeholder for a word it cannot read before
+/// execution (`unset "$name"`). There is no spelling to judge, so it is
+/// skipped rather than reported.
+pub(crate) fn mixed_script_issue(name: &str) -> Option<ValidationIssue> {
+    if name == "<dynamic>" {
+        return None;
+    }
+    let mixed = crate::name::mixed_script(name)?;
+    Some(
+        ValidationIssue::warning(IssueCode::MixedScriptName, mixed.to_string())
+            .with_suggestion(mixed.suggestion()),
+    )
+}
 
 /// Read a repeatable string-valued flag off the raw `ToolArgs`.
 ///

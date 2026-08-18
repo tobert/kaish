@@ -11,6 +11,12 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`W007` warns when a variable name mixes scripts** — `PАTH=/bin` with CYRILLIC
+  CAPITAL LETTER A (U+0410) binds a second variable and leaves `$PATH` alone. The
+  warning names the character, its codepoint, and the plain spelling the name
+  reads as, on stderr at exit code 0; it fires for an assignment, `export`,
+  `read`, `unset`, `push`, and `scatter --as`. UAX #39's Highly Restrictive
+  profile is the rule, so `café`, `переменная`, and `変数x` stay quiet.
 - **`E018` rejects an assignment target containing `#`** — `abc#3=5` bound a
   variable that nothing could read back, because `$abc#3` is itself an error.
 - **Property tests over the parser** — `parse` answers rather than panicking for

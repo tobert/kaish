@@ -14,7 +14,8 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// Export tool: marks variables for export to child processes.
 ///
@@ -56,6 +57,20 @@ impl Tool for Export {
                 ("List exports", "export -p"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+        // `export PATH` is a positional; `export PATH=/bin` is a `key=value`
+        // word whose key is the name. A quoted `export "PATH=/bin"` arrives as
+        // one positional string, so a positional is cut at the first `=` too.
+        let positional = args.positional.iter().filter_map(|v| match v {
+            Value::String(s) => Some(s.split('=').next().unwrap_or(s)),
+            _ => None,
+        });
+        let assigned = args.named.keys().map(String::as_str);
+        issues.extend(positional.chain(assigned).filter_map(super::mixed_script_issue));
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

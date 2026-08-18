@@ -15,7 +15,8 @@ use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::{extract_items, parse_scatter_options};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// Scatter tool: fan out items for parallel processing.
 ///
@@ -72,6 +73,15 @@ impl Tool for Scatter {
         // itself, and the kernel-wide --json flag must REACH the tool (it
         // selects the array view) instead of being consumed upstream.
         .with_owned_output()
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+        // `--as NAME` is the worker binding — the one name scatter creates.
+        if let Some(crate::ast::Value::String(name)) = args.named.get("as") {
+            issues.extend(super::mixed_script_issue(name));
+        }
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

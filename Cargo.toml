@@ -67,6 +67,13 @@ unicode-width = "0.2"
 unicode-normalization = "0.1"
 unicode-ident = "1"
 
+# UAX #39 confusable/mixed-script detection, and the UAX #24 script data it
+# reads. `unicode-security` carries the restriction-level and skeleton
+# algorithms with real Unicode tables; `unicode-script` names the scripts a
+# message has to report.
+unicode-security = "0.1.2"
+unicode-script = "0.5.8"
+
 # Unix process/signal/terminal syscalls behind the `subprocess` axis (kernel)
 # and the REPL's PTY tests. Each crate picks its own features.
 nix = "0.29"

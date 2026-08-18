@@ -41,6 +41,8 @@ schemars = { workspace = true, optional = true }
 unicode-width = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-ident = { workspace = true }
+unicode-security = { workspace = true }
+unicode-script = { workspace = true }
 
 # Logging / Telemetry. opentelemetry + its SDK propagators turn the
 # embedder-supplied W3C trace context on ExecuteOptions into an OTel Context
