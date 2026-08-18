@@ -2362,7 +2362,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
                 Ok(ControlFlow::ok(result))
@@ -2381,7 +2386,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
 
@@ -2395,7 +2405,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
 
@@ -2562,7 +2577,15 @@ impl Kernel {
                                         drop(scope);
                                         let mut scope = self.scope.write().await;
                                         scope.pop_frame();
-                                        return Ok(ControlFlow::exit_code(r.code));
+                                        // `result` already carries `r`'s out/err
+                                        // via accumulate_result above — hand it to
+                                        // the Exit signal so `-e` still aborts the
+                                        // loop but the reason survives.
+                                        let code = r.code;
+                                        return Ok(ControlFlow::Exit {
+                                            code,
+                                            result: std::mem::take(&mut result),
+                                        });
                                     }
                                 }
                             }
@@ -2637,7 +2660,15 @@ impl Kernel {
                                 if !r.ok() {
                                     let scope = self.scope.read().await;
                                     if scope.error_exit_enabled() {
-                                        return Ok(ControlFlow::exit_code(r.code));
+                                        // `result` already carries `r`'s out/err
+                                        // via accumulate_result above — hand it to
+                                        // the Exit signal so `-e` still aborts the
+                                        // loop but the reason survives.
+                                        let code = r.code;
+                                        return Ok(ControlFlow::Exit {
+                                            code,
+                                            result: std::mem::take(&mut result),
+                                        });
                                     }
                                 }
                             }
@@ -2880,7 +2911,12 @@ impl Kernel {
                 if !result.ok() {
                     let scope = self.scope.read().await;
                     if scope.error_exit_enabled() {
-                        return Ok(ControlFlow::exit_code(result.code));
+                        // `-e` aborts the statement list, but the reason the
+                        // command died must survive with it — carry `result`
+                        // (its `out`/`err`/`data`) into the Exit signal instead
+                        // of `ControlFlow::exit_code`'s empty placeholder.
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
                     }
                 }
                 Ok(ControlFlow::ok(result))
@@ -7820,18 +7856,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_ignores_unknown_options() {
+    async fn test_set_ignores_unknown_bare_flags_but_rejects_o_pipefail() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Bash idiom: set -euo pipefail (we support -e, ignore the rest)
+        // Bash idiom: set -euo pipefail. kaish implements -e, silently
+        // ignores the bare -u (no fixed set to check it against), and now
+        // fails loudly on -o pipefail — kaish has no pipefail (limits.md
+        // documents it as a deliberate omission), so this must not
+        // silently no-op.
+        //
+        // Not asserted here: `result.err`. When the same statement both
+        // enables -e and fails, `Stmt::Command`'s `-e` check replaces the
+        // result with `ControlFlow::exit_code(result.code)`
+        // (`control_flow.rs`), which carries only the numeric code and
+        // discards the failing result's error text — a pre-existing,
+        // general bug (confirmed with `cat` on a missing file too, nothing
+        // specific to `set`) outside this fix's scope. `set_option_tests.rs`
+        // covers the message text without `-e` in the mix.
         let result = kernel
             .execute("set -e -u -o pipefail")
             .await
             .expect("set with unknown options failed");
 
-        assert!(result.ok(), "set should succeed with unknown options");
+        assert!(!result.ok(), "set -o pipefail must fail, not silently no-op");
 
-        // -e should still be enabled
+        // -e should still be enabled: it's a separate flag applied before
+        // the positional loop reaches the failing -o pipefail.
         kernel
             .execute(r#"
                 BEFORE="yes"
@@ -7842,7 +7892,7 @@ mod tests {
             .ok();
 
         let after = kernel.get_var("AFTER").await;
-        assert!(after.is_none(), "-e should be enabled despite unknown options");
+        assert!(after.is_none(), "-e should be enabled despite the -o pipefail failure");
     }
 
     #[tokio::test]

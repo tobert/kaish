@@ -68,7 +68,7 @@ command's, so check gather's code directly or gate with `if`/`&&`.
 (`30`, `5s`, `500ms`, `2m`, `1h`) — per-worker timeout; cancels the worker,
 kills its external children, row gets `code` 124 + `timed_out:true`.
 
-**gather:** `--lines` — raw text escape hatch (above). `--json` — one JSON
+**gather:** `--lines` — raw text override (above). `--json` — one JSON
 array instead of JSONL rows.
 
 ## Examples

@@ -71,7 +71,7 @@ High-level feature summary table. Verify claims match implementation.
 
 ## CLAUDE.md
 
-### Crate Structure (under `### Crate Structure`)
+### Crate Structure (under `## Crate structure`)
 
 Tree diagram of `crates/`. Verify against `ls crates/` and each crate's
 `Cargo.toml` description.
@@ -85,7 +85,7 @@ and the "What's Intentionally Missing" list.
 
 Kernel diagram and component list. Verify component names and descriptions.
 
-### Build Commands (under `## Build Commands`)
+### Build Commands (under `## Build commands`)
 
 Build and test commands. Verify these still work.
 

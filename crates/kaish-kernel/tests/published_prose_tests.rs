@@ -11,8 +11,8 @@
 //! caught wherever the text comes from: a doc comment, a hand-written
 //! `ToolSchema::param` call, or a builtin that composes its schema at runtime.
 //!
-//! `docs/style.md`, "Do not leak the kernel" is the rule; the "Known debt"
-//! section records the sweep that motivated this test.
+//! `docs/style.md`, "Do not leak the kernel" is the rule; the sweep that
+//! motivated this test is recorded in the git history.
 //!
 //! Coverage depends on features: the registry only holds what the build
 //! enabled, so a default run does not walk `timeout`, `tokens`, or `ps`. Run

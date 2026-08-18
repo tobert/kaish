@@ -12,9 +12,66 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Supports:
 /// - `-e` / `+e`: Enable/disable error-exit mode (exit on command failure)
 /// - `-o trash` / `+o trash`: Enable/disable trash-on-delete for rm
+/// - `-o glob` / `+o glob`: Enable/disable bare glob expansion
+/// - `-o output-limit[=SIZE]` / `+o output-limit`: Cap or uncap output size
 ///
-/// Unrecognized options are silently ignored for bash compatibility.
+/// An unrecognized bare short flag (`set -q`, `set -v`) is silently ignored
+/// for bash compatibility — kaish implements one small, enumerable subset of
+/// bash's option surface, not the rest. `-o NAME` is different: NAME names
+/// one specific thing out of that small set, so a typo or a bash option
+/// kaish doesn't have (`pipefail`) fails loudly instead of no-opping — see
+/// `apply_set_o`.
 pub struct Set;
+
+/// The `-o`/`+o` names kaish implements.
+const VALID_SET_O_NAMES: &[&str] = &["glob", "output-limit[=SIZE]", "trash"];
+
+/// Applies one `-o NAME` (`enable = true`) or `+o NAME` (`enable = false`).
+///
+/// Shared by both parse shapes `set` can end up with for `-o NAME`: the
+/// ordinary `positional = ["-o", "NAME"]` shape, and the flags-split shape
+/// (`flags = {"o"}, positional = ["NAME"]`) the binder produces when `-o`
+/// arrives as the only flag on its token. Keeping one function means the two
+/// shapes can't drift into accepting different names.
+fn apply_set_o(ctx: &mut ExecContext, name: &str, enable: bool) -> Result<(), String> {
+    // Quote back the sigil the author actually typed. `set +o bogus` reporting
+    // `set: -o bogus` sends them looking at a line they did not write.
+    let sigil = if enable { '-' } else { '+' };
+    match name {
+        "trash" => ctx.scope.set_trash_enabled(enable),
+        "glob" => ctx.scope.set_glob_enabled(enable),
+        "output-limit" => {
+            if enable {
+                if ctx.output_limit.max_bytes().is_none() {
+                    ctx.output_limit.set_limit(Some(
+                        crate::output_limit::OutputLimitConfig::default_limit(),
+                    ));
+                }
+            } else {
+                ctx.output_limit.set_limit(None);
+            }
+        }
+        _ if enable && name.starts_with("output-limit=") => {
+            let size_str = &name["output-limit=".len()..];
+            let bytes = crate::output_limit::parse_size(size_str)
+                .map_err(|e| format!("set: {sigil}o output-limit={size_str}: {e}"))?;
+            ctx.output_limit.set_limit(Some(bytes));
+        }
+        "pipefail" => {
+            return Err(format!(
+                "set: {sigil}o pipefail: not implemented — kaish has no pipefail; \
+                 see `help limits` for the deliberate omission and its workaround"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "set: {sigil}o {name}: unknown option — valid names are {}",
+                VALID_SET_O_NAMES.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// clap-derived argv layer for set.
 ///
@@ -93,7 +150,17 @@ impl Tool for Set {
             match flag.as_str() {
                 "e" => ctx.scope.set_error_exit(true),
                 "o" => {} // handled below with positional args
-                _ => {}   // silently ignore for bash compatibility
+                // Deliberately left silent: unlike `-o NAME`, a bare short
+                // flag here (`-u`, `-x`, `-v`, a stray "q" from `set -q`,
+                // ...) isn't drawn from one small named set we can check
+                // against and report — bash has dozens, kaish implements
+                // only `-e`/`-o`, and scripts written for bash routinely
+                // carry the rest (`set -x` for tracing, `-u`/`-v` and more).
+                // Rejecting them would break real scripts that already
+                // tolerate kaish ignoring what it doesn't implement, for no
+                // gain: there's no fixed list to name in the error the way
+                // `apply_set_o` names its valid `-o` set.
+                _ => {}
             }
         }
 
@@ -117,36 +184,25 @@ impl Tool for Set {
                 "-o" => {
                     // Consume next positional as option name
                     if let Some(&name) = positionals.get(i + 1) {
-                        match name {
-                            "trash" => ctx.scope.set_trash_enabled(true),
-                            "glob" => ctx.scope.set_glob_enabled(true),
-                            _ => {
-                                if name == "output-limit" || name.starts_with("output-limit=") {
-                                    if let Some(size_str) = name.strip_prefix("output-limit=") {
-                                        if let Ok(bytes) = crate::output_limit::parse_size(size_str) {
-                                            ctx.output_limit.set_limit(Some(bytes));
-                                        }
-                                    } else if ctx.output_limit.max_bytes().is_none() {
-                                        ctx.output_limit.set_limit(Some(crate::output_limit::OutputLimitConfig::default_limit()));
-                                    }
-                                }
-                            }
+                        if let Err(msg) = apply_set_o(ctx, name, true) {
+                            return ExecResult::failure(1, msg);
                         }
                         i += 1; // skip the option name
                     }
                 }
                 "+o" => {
                     if let Some(&name) = positionals.get(i + 1) {
-                        match name {
-                            "trash" => ctx.scope.set_trash_enabled(false),
-                            "glob" => ctx.scope.set_glob_enabled(false),
-                            "output-limit" => ctx.output_limit.set_limit(None),
-                            _ => {}
+                        if let Err(msg) = apply_set_o(ctx, name, false) {
+                            return ExecResult::failure(1, msg);
                         }
                         i += 1;
                     }
                 }
-                _ => {} // silently ignore
+                // Same reasoning as the flags loop above: a bare token here
+                // is a bash short flag/word kaish doesn't implement (e.g.
+                // "-u" arriving as a positional in some parses), not a `-o`
+                // name — no fixed list to check it against.
+                _ => {}
             }
             i += 1;
         }
@@ -154,27 +210,18 @@ impl Tool for Set {
         // Handle case where parser split `-o` into flags and the option name
         // ended up as a bare positional (flags=["o"], positional=["trash"]).
         // Only fire if no "-o" or "+o" appeared in positionals (which would have
-        // already consumed the option name above).
+        // already consumed the option name above). Only "-o" reaches here as a
+        // bare flag: `+o` always arrives as a literal "+o" positional (see the
+        // `PlusFlag` handling in parser.rs), so this path never needs to
+        // disable — it always calls `apply_set_o` with `enable = true`, same
+        // as the ordinary `"-o"` branch above, so the two shapes agree on
+        // which names are valid (`apply_set_o` is the single source of truth).
         if args.flags.contains("o")
             && !positionals.iter().any(|p| *p == "-o" || *p == "+o")
         {
-            // The first positional that matches a known option name gets enabled
-            for &name in &positionals {
-                match name {
-                    "trash" => { ctx.scope.set_trash_enabled(true); break; }
-                    "glob" => { ctx.scope.set_glob_enabled(true); break; }
-                    _ => {
-                        if name == "output-limit" || name.starts_with("output-limit=") {
-                            if let Some(size_str) = name.strip_prefix("output-limit=") {
-                                if let Ok(bytes) = crate::output_limit::parse_size(size_str) {
-                                    ctx.output_limit.set_limit(Some(bytes));
-                                }
-                            } else if ctx.output_limit.max_bytes().is_none() {
-                                ctx.output_limit.set_limit(Some(crate::output_limit::OutputLimitConfig::default_limit()));
-                            }
-                            break;
-                        }
-                    }
+            if let Some(&name) = positionals.first() {
+                if let Err(msg) = apply_set_o(ctx, name, true) {
+                    return ExecResult::failure(1, msg);
                 }
             }
         }
@@ -233,17 +280,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_ignores_unknown_options() {
+    async fn test_set_ignores_unknown_bare_flags() {
+        // Bare short flags kaish doesn't implement (-u, -x) are still
+        // silently ignored for bash compatibility — see the comment on the
+        // flags-loop `_ => {}` arm. `-o pipefail` is different: it now
+        // fails loudly (test_set_o_pipefail_fails below), so it's dropped
+        // from this case.
         let mut ctx = make_ctx();
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("-u".into()));
-        args.positional.push(Value::String("-o".into()));
-        args.positional.push(Value::String("pipefail".into()));
         args.positional.push(Value::String("-x".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
+    }
+
+    #[tokio::test]
+    async fn test_set_o_pipefail_fails() {
+        let mut ctx = make_ctx();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("pipefail".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert!(result.err.contains("pipefail"));
     }
 
     #[tokio::test]
@@ -258,8 +321,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_euo_pipefail() {
-        // Common bash idiom: set -euo pipefail
+    async fn test_set_euo_pipefail_fails_on_pipefail() {
+        // Common bash idiom: set -euo pipefail. kaish has no pipefail (see
+        // limits.md), so this now fails loudly instead of silently
+        // no-opping — but -e, processed earlier in the same positional
+        // loop, has already taken effect by the time -o pipefail errors.
         let mut ctx = make_ctx();
 
         let mut args = ToolArgs::new();
@@ -269,7 +335,8 @@ mod tests {
         args.positional.push(Value::String("pipefail".into()));
 
         let result = Set.execute(args, &mut ctx).await;
-        assert!(result.ok());
+        assert!(!result.ok());
+        assert!(result.err.contains("pipefail"));
         assert!(ctx.scope.error_exit_enabled());
     }
 
@@ -331,15 +398,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_o_unknown_ignored() {
+    async fn test_set_o_unknown_name_fails() {
         let mut ctx = make_ctx();
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("-o".into()));
-        args.positional.push(Value::String("pipefail".into()));
+        args.positional.push(Value::String("bogusname".into()));
 
         let result = Set.execute(args, &mut ctx).await;
-        assert!(result.ok());
+        assert!(!result.ok());
+        assert!(result.err.contains("bogusname"));
+        assert!(
+            result.err.contains("glob") && result.err.contains("trash") && result.err.contains("output-limit"),
+            "error should name the valid set: {:?}",
+            result.err
+        );
     }
 
     #[tokio::test]

@@ -273,6 +273,24 @@ async fn external_command_not_found() {
     );
 }
 
+// A failing external command loses its message under `set -e` exactly like a
+// failing builtin does (kaish-errexit-message bug) — same `Stmt::Command`
+// path in kernel.rs handles both, so this pins that they behave the same.
+#[tokio::test]
+async fn external_command_not_found_under_errexit_keeps_message() {
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute("set -e; definitely_not_a_real_command_12345")
+        .await
+        .unwrap();
+    assert_eq!(result.code, 127, "set -e must not change the exit code");
+    assert!(
+        result.err.contains("command not found"),
+        "set -e must not discard the external command's error message: {}",
+        result.err
+    );
+}
+
 // ============================================================================
 // Date Format String Tests (requires lexer +bare handling)
 // ============================================================================

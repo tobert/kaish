@@ -60,6 +60,19 @@ breaking entries are marked **BREAKING**.
 - **Parsing a `$(...)`-heavy script is ~20-25% slower per token** — the fix
   below parses each substitution body through the full grammar via its own
   recursive parse call instead of a narrower hand-rolled one.
+- **Agent-facing help and onboarding now lead with what kaish does** — the
+  tagline and guidance state the capabilities (typed values, structured output,
+  pre-execution validation) instead of defining against bash's hazards, because
+  agents learn what to write from what the prose writes.
+- **Help prose replaces colloquial terms with engineering terms** — `override`
+  (a documented way past a restriction) and `hazard` (named with its fix) carry
+  the old meanings, because engineering vocabulary transfers to a model reader
+  without colloquial connotation.
+- **`docs/style.md` gained weights for the model reader** — example before
+  rule, marked wrong pairs, quoted error text, three registers, and the
+  embedder/agent split, because the corpus is mostly read by LLMs.
+- **The known-debt ledger moved out of `docs/style.md`** — the guide primes
+  agents to write the style; its history lives in git.
 
 ### Removed
 - **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
@@ -69,6 +82,11 @@ breaking entries are marked **BREAKING**.
   variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **An unterminated `$(` inside a double-quoted string is a loud parse error**
+  — `echo "pre $(echo hi"` used to fabricate a closing `)` and run the
+  substitution anyway whenever the remainder happened to parse on its own; it
+  now reports "unterminated command substitution: missing `)`", matching the
+  unquoted form.
 - **`#` starts a comment only at the start of a word** — `echo abc#3` printed `abc`
   and silently dropped the rest of the line, `;` separators and whole commands
   included, at exit 0. It prints `abc#3` now, as bash and `sh` do.
@@ -190,6 +208,16 @@ breaking entries are marked **BREAKING**.
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
   operator" word rule instead of an ASCII-only character class.
+- **Flag names and `$name` variable references stay ASCII-only** — `--café`
+  and `$café` are still loud lexer errors (matching bash's name rule), now
+  reported as a dedicated diagnostic instead of silently splitting into a
+  truncated flag/name plus a stray bareword argument.
+- **`set -o <name>` / `set +o <name>` on an unrecognized name exits 1 and
+  names the valid set** (`glob`, `output-limit[=SIZE]`, `trash`) instead of
+  silently no-opping — `set -o pipefail` used to exit 0 and leave an agent
+  believing bash's pipefail safety was on, when `limits.md` documents kaish
+  has none. `set -o output-limit=<unparseable size>` fails the same way
+  instead of leaving the limit unchanged.
 - **Variable names are identifiers in any script plus emoji, and are NFC-normalized** —
   `café=au-lait` and `😁=grin` work, and a name spelled with a combining mark and
   one spelled precomposed reach the same variable. Diverges from bash, which
@@ -202,6 +230,13 @@ breaking entries are marked **BREAKING**.
 - **Flag names stay ASCII-only** — `--café` is ambiguous between a flag and a
   literal word, so it is a loud lexer error naming the fix, rather than the
   generic "unexpected character" it was before.
+- **`set -e` keeps the failing command's message, not just its exit code** —
+  every site that turns a failure into `set -e`'s abort (a bare statement, a
+  `for`/`while` loop body, a failed assignment substitution) discarded
+  `out`/`err`/`data` in favor of an empty placeholder, so `set -e; cat /nope`
+  exited 1 with nothing on stderr. `-e` still aborts the statement list
+  exactly as before; only the reason now survives with it. `exit N`/`return
+  N` are unaffected — those never carried a message of their own.
 
 ## [0.14.1] - 2026-08-14
 

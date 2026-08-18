@@ -85,9 +85,14 @@ fn parse_var_expr(raw: &str) -> Expr {
         // Extract default value (between :- and }) and recursively parse it,
         // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
-        // This `${VAR:-WORD}` expr path is infallible; a malformed `$()` inside
-        // the default word stays literal here (rare edge). The common quoted
-        // `"$(…)"` path is the loud one (see `parse_interpolated_string`).
+        // TODO: this discards a real error. `parse_interpolated_string` now
+        // reports an unterminated `$(`, but this path returns `Expr` and has
+        // nowhere to put a failure, so `echo ${x:-$(echo hi}` still exits 0
+        // with the body kept as literal text — the same silent shape the
+        // quoted path just stopped doing. Closing it needs the check on the
+        // token stream, where `validate_interpolated_strings` already lives;
+        // it only inspects `Token::String` today and would have to read a
+        // `VarRef`'s default word too.
         let default_word = unquote_default_word(default_str);
         let default = parse_interpolated_string(&default_word)
             .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
@@ -625,6 +630,15 @@ fn parse_interpolated_string_spanned(
                         cmd_content.push(c);
                     }
                 }
+                // TODO(#unfiled): `depth` running out before finding the closing
+                // `)` (unterminated) and `parse(&cmd_content)` returning `Err`
+                // (malformed body) both fall through to the literal-text
+                // fallback below with no error — an unquoted heredoc body never
+                // reports a bad `$(...)`. `parse_interpolated_string` (double-
+                // quoted strings) had both the same silent-unterminated bug
+                // (fixed) and the same silent-malformed-body bug (fixed
+                // earlier, see `quoted_cmdsubst_error_tests.rs`); this sibling
+                // was not in scope for either fix. Ask before filing an issue.
                 let inserted = if let Ok(program) = parse(&cmd_content) {
                     // The full statement block runs as the substitution body
                     // (pipelines, `&&`/`||`, `;`/newline sequences, comments).
@@ -862,16 +876,17 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                         .collect();
                     find_cmd_subst_close(&toks).map(|idx| toks[idx].1)
                 });
-                // On a genuinely unterminated substitution (no close found,
-                // or the remainder doesn't even tokenize), fall back to the
-                // whole remainder as the body — `parse` below then reports
-                // the loud syntax error, same as it always did.
-                let (cmd_content, consume_bytes) = match close {
-                    Some(rparen_span) => {
-                        (remainder[..rparen_span.start].to_string(), rparen_span.end)
-                    }
-                    None => (remainder.clone(), remainder.len()),
+                // No close — or a remainder that does not even tokenize —
+                // means the substitution ran past the closing quote. Report
+                // it before `parse` sees the body: the body can be a valid
+                // program on its own (`echo hi`), so falling back to it runs
+                // a substitution nobody closed, and the plan then renders a
+                // `)` the writer never typed.
+                let Some(rparen_span) = close else {
+                    return Err("unterminated command substitution: missing `)`".to_string());
                 };
+                let (cmd_content, consume_bytes) =
+                    (remainder[..rparen_span.start].to_string(), rparen_span.end);
                 let mut consumed = 0usize;
                 while consumed < consume_bytes {
                     match chars.next() {
@@ -1200,6 +1215,12 @@ fn parse_tokens(
         // Cheap on the common (successful) path — this only runs once the
         // grammar has already failed.
         if let Err(specific) = validate_cmd_subst_bodies(&tokens) {
+            return specific;
+        }
+        // Same chumsky bookkeeping loss, for `$(...)` inside a double-quoted
+        // string instead of the unquoted grammar (see
+        // `validate_interpolated_strings`'s doc comment).
+        if let Err(specific) = validate_interpolated_strings(&tokens) {
             return specific;
         }
         errs.into_iter()
@@ -3242,6 +3263,28 @@ fn validate_cmd_subst_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseEr
         // this level's.
         parse_tokens(body.to_vec(), end_span, start_span)?;
         i += 1 + close_rel + 1;
+    }
+    Ok(())
+}
+
+/// Re-validate every double-quoted string's interpolation directly, outside
+/// chumsky's `choice`/`try_map` alternative machinery — called only after
+/// [`parse_tokens`]'s main grammar pass has already failed, the same way and
+/// for the same reason as [`validate_cmd_subst_bodies`] (its doc comment has
+/// the mechanism): a `$(...)` inside a `Token::String` fails deep inside
+/// `interpolated_string_parser`'s `try_map`, so a `choice` alternative
+/// elsewhere in the grammar that never had a chance of matching can still win
+/// chumsky's furthest-error bookkeeping and bury the real message (an
+/// unterminated or malformed quoted `$(...)` reporting a generic "expected
+/// expression" pointing at the string's start, instead of naming the actual
+/// problem).
+fn validate_interpolated_strings(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
+    for (tok, span) in tokens {
+        if let Token::String(s) = tok
+            && let Err(message) = parse_interpolated_string(s)
+        {
+            return Err(vec![ParseError { span: *span, message }]);
+        }
     }
     Ok(())
 }

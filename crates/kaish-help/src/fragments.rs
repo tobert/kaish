@@ -62,9 +62,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "kaish (会sh) is a Bourne-like shell for AI agents: familiar syntax, fewer \
-         footguns, validated before execution. Builtins run in-process; external \
-         commands run via `PATH`.",
+        "kaish (会sh) is a Bourne-like shell for AI agents: familiar syntax, typed \
+         values, structured output from every builtin, and pre-execution validation — \
+         the whole command is checked before it runs, so it never half-runs. Builtins \
+         run in-process; external commands run via `PATH`.",
     ),
     en(
         Concept::Model,
@@ -125,10 +126,11 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Contrast,
         Depth::Reference,
         None,
-        "Bash pastes adjacent tokens, so bare `$dir/file` is one word. kaish keeps \
-         them separate: bare `$dir/file` becomes two arguments, and a bare \
-         interpolated redirect target (`> $dir/out`) is a parse error. Always quote \
-         interpolated words — the same thing `shellcheck` (SC2086) asks for.",
+        "Quote the whole word to join text with interpolation — `echo \"$dir/file.txt\"` \
+         is one path. Bash pastes adjacent tokens into one word; kaish keeps each \
+         unquoted piece separate and whole, so the unquoted `echo $dir/file.txt` is a \
+         parse error, marked as such wherever it appears, and the quote is the fix — \
+         the same discipline `shellcheck` (SC2086) asks for, enforced by the parser.",
     ),
     en(
         Concept::Foundations,
@@ -665,9 +667,13 @@ set +o glob               # disable bare glob expansion
 
 Env var: `KAISH_TRASH=1` enables trash at startup.
 
-`set` ignores an unknown `-o` name and exits **0**. `set -o approvals` and
-`set -o latch` are retired spellings — from the removed approval subsystem
-and the confirmation latch — and turn nothing on.
+`set -o NAME` / `set +o NAME` on a name kaish doesn't implement exits **1**
+and names the valid set (`glob`, `output-limit[=SIZE]`, `trash`) — it never
+silently no-ops. `set -o pipefail` fails this way: kaish has no pipefail.
+`set -o approvals` and `set -o latch` — retired spellings from the removed
+approval subsystem and the confirmation latch — fail the same way; they
+turn nothing on. A bare unrecognized short flag (`-u`, `-x`) is still
+silently ignored — there's no fixed set to check it against.
 
 **Trash:** `rm` and a truncating overwrite (`cp`, `dd`, `mv`, `patch`,
 `sed -i`, `tee`, `write`) snapshot the prior content under `set -o trash`
