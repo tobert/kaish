@@ -3091,6 +3091,27 @@ impl Kernel {
             ec.stdin_data = None;
         }
 
+        // Carry the enclosing command's pipe writer the same way, and for the
+        // same reason: `ec` is one shared slot, and the snapshot above was
+        // built with `pipe_stdout: None`. Left in `ec`, a writer belonging to
+        // an outer pipeline stage is overwritten with `None` by the first
+        // nested `dispatch_command` and dropped — the stage then produced
+        // correct bytes with nowhere to send them, and `echo $(echo sub) | cat`
+        // printed nothing at exit 0. Moving it into `ctx` parks it for the
+        // duration; the sync-back below returns it.
+        //
+        // This is the choke point for every nested dispatch — a `$(…)` in a
+        // command's own argument list, a function body, a `source`d file — so
+        // it belongs here rather than at each caller that re-enters.
+        //
+        // Nothing downstream can write to it by mistake: `child_for_pipeline`
+        // starts every stage at `pipe_stdout: None`, and only stages before
+        // the last are handed a writer, which the runner creates itself.
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ctx.pipe_stdout = ec.pipe_stdout.take();
+        }
+
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 
         // Post-hoc spill check + exit-3 remap (catches builtins and fast
@@ -3120,6 +3141,10 @@ impl Kernel {
             // single-command and the pipeline case alike.
             ec.stdin = ctx.stdin.take();
             ec.pipe_stdin = ctx.pipe_stdin.take();
+            // The parked writer goes home. A pipeline never sets this on its
+            // own `ctx` — its stages get writers the runner owns — so what is
+            // here is what was carried in.
+            ec.pipe_stdout = ctx.pipe_stdout.take();
         }
         {
             let mut scope = self.scope.write().await;

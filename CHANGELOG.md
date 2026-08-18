@@ -101,6 +101,18 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **A pipeline stage's stdout survives a `$(…)` or a function call inside it** —
+  `echo $(echo sub) | cat` printed nothing at exit 0, and so did
+  `f() { echo out; }; f | cat`. The kernel's `exec_ctx` is one shared slot: a
+  stage moves its pipe writer into it for the whole dispatch, and a nested
+  dispatch (a substitution in the stage's own argument list, a function body)
+  snapshotted that writer and dropped it, leaving the stage with correct bytes
+  and nowhere to send them. `source foo.kai | cat` lost its output the same
+  way. Only a *non-last* stage was affected, and only when the nested work was
+  a single command — a pipeline inside the substitution
+  (`echo "$(echo a | cat)" | cat`) already worked, as did an assignment, which
+  is not a pipeline stage at all. A substitution still reads the stage's
+  stdin, as in bash.
 - **A background job's stderr is the same stderr the foreground would see** —
   `execute_background` runs the pipeline without the statement-boundary drains
   that collect the kernel's stderr channel, so a pipeline stage's stderr and a
