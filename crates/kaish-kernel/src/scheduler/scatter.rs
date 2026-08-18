@@ -432,8 +432,8 @@ pub fn extract_items(data: Option<&Value>, text: &str) -> Result<Vec<ScatterItem
             for (i, elem) in arr.iter().enumerate() {
                 if elem.is_null() {
                     return Err(format!(
-                        "scatter: item {i} is null — refusing to bind a worker to null \
-                         (filter it out first, e.g. jq 'map(select(. != null))')"
+                        "scatter: item {i} is null — filter nulls out first, \
+                         e.g. jq 'map(select(. != null))'"
                     ));
                 }
                 items.push(ScatterItem::new(elem.clone()));

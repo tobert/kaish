@@ -173,8 +173,8 @@ impl<'a> Validator<'a> {
                     ValidationIssue::error(
                         IssueCode::UnreadableAssignmentTarget,
                         format!(
-                            "'{name}' is not a valid assignment target — `#` is a word \
-                             character, so `${name}` would not read this variable back"
+                            "'{name}' is not a valid assignment target — a variable name \
+                             cannot contain `#`"
                         ),
                     )
                     .with_suggestion(format!(

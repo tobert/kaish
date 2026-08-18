@@ -57,6 +57,12 @@ breaking entries are marked **BREAKING**.
   spelling at all). All three are now a loud error naming the character, at every
   door including `read`, `unset`, `push`, `scatter --as`, and `export`. Words are
   unaffected — `echo a-b`, `ls -l`, and `my-file.txt` still work.
+- **Diagnostics are clinical: the fact, the data, and the fix — no rationale** —
+  a name error keeps the character, codepoint, rule, and fix but drops the
+  clause explaining why the rule exists; the `#`-in-target and mid-word-`#`
+  messages state the rule and the fix; scatter's null-item message names the
+  filter instead of narrating the refusal. The why stays in comments and docs;
+  an agent reading a failure gets what is wrong and what to write next.
 - **The parser graph is built once per thread instead of once per `parse()`** — an
   embedder's `execute()` round trip drops 63% of its allocations and 77% of its bytes.
 - **BREAKING (embedders):** a heredoc's `PlannedRedirect.target` is now its
