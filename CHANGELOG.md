@@ -88,6 +88,13 @@ breaking entries are marked **BREAKING**.
   variant for the same reason — an exhaustive match must add an arm.
 
 ### Fixed
+- **Every diagnostic kaish writes ends its own line** — `kaish -c 'cat /nope'`
+  printed `cat: /nope: … (os error 2)` with no trailing newline, so the next
+  output ran into it. kaish's own failure messages (builtins, the kernel's
+  command-not-found and timeout) now end with exactly one newline; an external
+  command's stderr stays byte-faithful, and a `read -p` prompt or a `1>&2`
+  fold still passes through unterminated, as in bash. The `--json` error
+  envelope carries the message as written.
 - **A command substitution's stderr reaches the caller** — `x=$(cat /nope)` kept
   the exit code and discarded the reason; `echo $(cat /nope)` reported nothing at
   all. A substitution's stderr now joins the enclosing statement's stderr, as in

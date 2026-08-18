@@ -89,7 +89,7 @@ impl Tool for Realpath {
 
         let mut result = ExecResult::with_output(OutputData::text(output));
         if let Some(msg) = last_err {
-            result.err = msg;
+            result.err = ExecResult::terminate_diagnostic(msg);
             result = result.with_code(exit_code);
         }
         result

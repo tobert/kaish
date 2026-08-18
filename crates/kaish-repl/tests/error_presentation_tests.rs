@@ -88,7 +88,9 @@ fn cli_runtime_command_not_found_is_unchanged() {
     let (stdout, stderr, code) = run_kaish(&["-c", "totally_bogus_cmd_xyz"]);
     assert_eq!(code, 127);
     assert_eq!(stdout, "");
-    assert_eq!(stderr, "command not found: totally_bogus_cmd_xyz");
+    // Unwrapped AND line-terminated (#363): the message ends its own line, so
+    // nothing printed next can fuse onto it.
+    assert_eq!(stderr, "command not found: totally_bogus_cmd_xyz\n");
 }
 
 #[test]

@@ -1713,7 +1713,8 @@ impl Kernel {
                     if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
                         res.code = 124;
                         if res.err.is_empty() {
-                            res.err = format!("timeout: timed out after {:?}", d);
+                            res.err =
+                                ExecResult::terminate_diagnostic(format!("timeout: timed out after {:?}", d));
                         }
                     }
                     Ok(res)

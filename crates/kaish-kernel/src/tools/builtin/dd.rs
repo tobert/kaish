@@ -182,13 +182,13 @@ impl Tool for Dd {
                 }
                 // Status to stderr, like dd; stdout stays empty.
                 let mut result = ExecResult::success("");
-                result.err = format!("{copied} bytes copied\n");
+                result.err = ExecResult::terminate_diagnostic(format!("{copied} bytes copied"));
                 result
             }
             // No of=: the bytes are the result (hex dump in REPL, base64 under --json).
             None => {
                 let mut result = ExecResult::success_bytes(data);
-                result.err = format!("{copied} bytes copied\n");
+                result.err = ExecResult::terminate_diagnostic(format!("{copied} bytes copied"));
                 result
             }
         }

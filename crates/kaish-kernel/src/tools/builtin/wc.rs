@@ -172,7 +172,7 @@ impl Tool for Wc {
             // Return with error but include the output we did get
             let mut result = ExecResult::with_output_and_text(output, text);
             result.code = 1;
-            result.err = error_messages.join("\n");
+            result.err = ExecResult::terminate_diagnostic(error_messages.join("\n"));
             result
         } else {
             ExecResult::with_output_and_text(output, text)
