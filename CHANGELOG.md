@@ -101,6 +101,12 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **The structured value a pipeline carries survives a `$(…)` or a function
+  call in the consuming stage** — `seq 1 3 | jq -c .` returned `[1,2,3]` but
+  `seq 1 3 | jq -c $(echo .)` failed with "trailing characters … looks like
+  JSONL", because the nested dispatch took the sideband receiver out of the
+  shared context and `jq` fell back to parsing the pipe text. Found by
+  auditing the class below rather than by report.
 - **A pipeline stage's stdout survives a `$(…)` or a function call inside it** —
   `echo $(echo sub) | cat` printed nothing at exit 0, and so did
   `f() { echo out; }; f | cat`. The kernel's `exec_ctx` is one shared slot: a

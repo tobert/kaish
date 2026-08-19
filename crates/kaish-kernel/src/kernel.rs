@@ -3107,9 +3107,17 @@ impl Kernel {
         // Nothing downstream can write to it by mistake: `child_for_pipeline`
         // starts every stage at `pipe_stdout: None`, and only stages before
         // the last are handed a writer, which the runner creates itself.
+        //
+        // The structured-data sideband is the same resource in typed form and
+        // parks for the same reason. The snapshot above sets
+        // `stdin_data_rx: None`, so a receiver left in `ec` is overwritten by
+        // the first nested `dispatch_command` and the outer consumer never
+        // gets its value: `seq 1 3 | jq -c $(echo .)` lost the array and fell
+        // back to parsing the pipe text as JSONL.
         {
             let mut ec = self.exec_ctx.write().await;
             ctx.pipe_stdout = ec.pipe_stdout.take();
+            ctx.stdin_data_rx = ec.stdin_data_rx.take();
         }
 
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
@@ -3145,6 +3153,8 @@ impl Kernel {
             // own `ctx` — its stages get writers the runner owns — so what is
             // here is what was carried in.
             ec.pipe_stdout = ctx.pipe_stdout.take();
+            // And the parked sideband receiver, unconsumed, by the same rule.
+            ec.stdin_data_rx = ctx.stdin_data_rx.take();
         }
         {
             let mut scope = self.scope.write().await;
@@ -3602,6 +3612,14 @@ impl Kernel {
             // reader. Without this it dies with the tool's context and
             // `read x; read y` loses the second line.
             ec.stdin = ctx.stdin.take();
+            // The structured sideband is stdin in typed form, so it goes back
+            // by the same rule. Taken in above and returned nowhere, an
+            // unconsumed value died with the tool's context — and a nested
+            // dispatch is a tool context that ends while the outer command is
+            // still waiting for it: `seq 1 3 | jq -c $(echo .)` lost the array
+            // and fell back to parsing the pipe text as JSONL.
+            ec.stdin_data = ctx.stdin_data.take();
+            ec.stdin_data_rx = ctx.stdin_data_rx.take();
         }
 
         // Builtins parse --json via the GlobalFlags flatten in their clap
@@ -5845,6 +5863,11 @@ impl Kernel {
             // Without this the caller writes its stale `None` over the
             // remainder and the rest of the stream is gone.
             ctx.stdin = ec.stdin.take();
+            // The structured sideband rides home with it, for the same reason
+            // and by the same rule — see the matching return in
+            // `execute_command`.
+            ctx.stdin_data = ec.stdin_data.take();
+            ctx.stdin_data_rx = ec.stdin_data_rx.take();
             // Same take-don't-clone discipline as stdin, and for the same
             // reason: these belong to exactly one dispatch, and a copy left
             // behind would let the next command adopt it.
