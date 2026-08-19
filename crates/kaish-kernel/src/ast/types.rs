@@ -416,7 +416,7 @@ pub enum RecordKey {
 /// turned out not to be a list. Shared between the sync (`interpreter/eval.rs`)
 /// and async (`kernel.rs::eval_expr_async`) literal evaluators so the two
 /// paths can't diverge on wording (same convention as `StringTestOp::matches_shape`).
-pub fn spread_value_kind(value: &Value) -> &'static str {
+pub(crate) fn spread_value_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "a bool",
@@ -432,7 +432,7 @@ pub fn spread_value_kind(value: &Value) -> &'static str {
 
 /// Full teaching message for a non-list spread: "`[...$scalar]`" — the operand
 /// must be a list; spread only flattens a list's elements into the new one.
-pub fn spread_non_list_message(value: &Value) -> String {
+pub(crate) fn spread_non_list_message(value: &Value) -> String {
     format!(
         "cannot spread `...` — value is {}, not a list; spread only flattens a list's elements, e.g. `[...$xs date]`",
         spread_value_kind(value)
@@ -566,7 +566,7 @@ impl VarPath {
 
 /// NFC-normalize a variable name, skipping the allocation when it is already
 /// normalized — which every ASCII name is.
-pub fn normalize_name(name: String) -> String {
+pub(crate) fn normalize_name(name: String) -> String {
     use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
     if name.is_ascii() || is_nfc_quick(name.chars()) == IsNormalized::Yes {
         return name;

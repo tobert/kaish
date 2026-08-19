@@ -160,7 +160,7 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Example,
         Depth::Reference,
         None,
-        "```\nls --json | jq '.[].name'\n```",
+        "```\nls -l --json | jq -r '.[].NAME'\n```",
     ),
     en(
         Concept::Foundations,

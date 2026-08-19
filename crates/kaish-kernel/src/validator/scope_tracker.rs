@@ -99,7 +99,9 @@ impl ScopeTracker {
         name.starts_with('_')
     }
 
-    /// Get the current nesting depth.
+    /// Get the current nesting depth. Only the tests below read it — the
+    /// walker tracks nesting through `push_frame`/`pop_frame` alone.
+    #[cfg(test)]
     pub fn depth(&self) -> usize {
         self.frames.len()
     }
