@@ -1,30 +1,26 @@
 //! A nested dispatch must not consume the enclosing command's pipe writer.
 //!
-//! The kernel's `exec_ctx` is one shared slot. A pipeline stage moves its
-//! `pipe_stdout` into it for the duration of the dispatch, and anything that
-//! dispatches *while that command is still running* — a `$(…)` in its own
-//! argument list, a user function's body — snapshots that same slot. The
-//! nested dispatch then carried the writer away and dropped it with its own
-//! context, so the stage produced correct bytes with nowhere to send them:
+//! `exec_ctx` is one shared slot. A pipeline stage parks its `pipe_stdout`
+//! there for the dispatch, and anything dispatching *while that command runs*
+//! — a `$(…)` in its own arguments, a function body, a `source`d file — took
+//! the writer and dropped it with its own context:
 //!
 //! ```text
 //! echo $(echo sub) | cat      →  (nothing), exit 0      bash: sub
 //! f() { echo out; }; f | cat  →  (nothing), exit 0      bash: out
+//! source foo.kai | cat        →  (nothing), exit 0      bash: hello
 //! ```
 //!
-//! Silent: zero bytes, exit 0, no diagnostic. It shipped in 0.14.1, so these
-//! rows are a regression net for behavior that was never right, not a guard on
-//! a recent change.
+//! Silent — zero bytes, exit 0, no diagnostic — and it shipped in 0.14.1, so
+//! these are a net for behavior that was never right.
 //!
-//! The fix carries the writer through `execute_pipeline`'s context for the
-//! duration, exactly as `pipe_stdin` was already carried. That asymmetry —
-//! stdin carried, stdout left behind — *was* the bug, so the two endpoints now
-//! read the same at that site.
+//! The fix carries the writer through `execute_pipeline`'s context, as
+//! `pipe_stdin` already was. That asymmetry was the bug.
 //!
-//! stdin's own semantics are unchanged and deliberately different: bash lets a
-//! substitution consume the stage's stdin (`echo hi | echo $(cat)` prints
-//! `hi`), and kaish matches. `substitution_still_consumes_the_stage_stdin`
-//! pins that, so nobody "fixes" the read end into isolation later.
+//! stdin's semantics are unchanged and deliberately different: bash lets a
+//! substitution consume the stage's stdin, and kaish matches.
+//! `substitution_still_consumes_the_stage_stdin` pins it, so nobody isolates
+//! the read end later.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -212,29 +208,23 @@ async fn a_sourced_or_scripted_stage_keeps_its_stdout(
 
 // --- The rest of the class, pinned ----------------------------------------
 //
-// `ExecContext` has 28 fields, but only five are per-invocation I/O resources
-// with move semantics — the shape that can be stolen from an outer command by
-// a nested dispatch. The other 23 are `Arc` handles (cloning is correct, no
-// ownership) or configuration that is *supposed* to propagate.
+// `ExecContext` has 28 fields; five are per-invocation I/O with move
+// semantics — the shape a nested dispatch can steal. The other 23 are `Arc`
+// handles (nothing owned) or config that is meant to propagate.
 //
-//   stdin           consumed-once buffer      pinned below
-//   stdin_data      consumed-once value       pinned below
-//   stdin_data_rx   oneshot receiver          pinned in pipeline_structured_data_tests.rs
-//   pipe_stdin      read end                  pinned below + substitution_still_consumes…
-//   pipe_stdout     write end                 pinned above
+//   stdin, stdin_data, pipe_stdin   pinned below
+//   stdin_data_rx                   pinned in pipeline_structured_data_tests.rs
+//   pipe_stdout                     pinned above
 //
-// These rows are the audit's result, not a bug report: they passed when
-// written. They are here so that adding a sixth resource to `ExecContext`, or
-// changing how one of these crosses a sync site, has to break something
-// visible first.
+// These three passed when written. They are a tripwire, not a bug report:
+// a sixth resource, or a changed sync site, has to break something here first.
 //
-// Three predictions from a `kaibo deliberate` (gemini-pro) were tested and all
-// three were WRONG on this codebase: that `timeout`'s re-dispatch bypasses the
-// fix (it does not — `execute_command` moves the resource into the builtin's
-// own context, so it rides along), that cloned `stdin` causes a nested `$()`
-// and its parent to each read the same bytes (they do not — kaish matches
-// bash), and that background jobs race the shared slot (they fork their own
-// kernel). The rows below are what those predictions would have broken.
+// They are also what three wrong predictions would have broken. A kaibo
+// deliberate (gemini-pro) claimed `timeout`'s re-dispatch bypasses the fix, that
+// cloned `stdin` makes a nested `$()` and its parent read the same bytes, and
+// that background jobs race the slot. None hold: `execute_command` moves the
+// resource into the builtin's own ctx, kaish matches bash, and background jobs
+// fork their own kernel. Run these before believing the argument again.
 
 /// stdin is consumed once across a nested dispatch, not re-served. bash agrees:
 /// the second reader gets what the first left, not a replay.

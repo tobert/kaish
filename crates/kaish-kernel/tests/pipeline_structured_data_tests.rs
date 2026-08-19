@@ -65,29 +65,22 @@ async fn seq_into_scatter_sees_structured_items() {
     }
 }
 
-// --- The sideband survives a nested dispatch in the consuming stage --------
+// --- The sideband survives a nested dispatch in the consuming stage -------
 //
-// Same assertion as `seq_into_jq_uses_structured_data` above, with one thing
-// added to the consuming stage: a `$(…)` in its own argument list, or a
-// function body around it. That nested dispatch destroys the structured
-// value, and `jq` falls back to parsing the pipe *text* — the exact failure
-// the sideband was built to prevent, re-entered through a different door:
+// Same assertion as `seq_into_jq_uses_structured_data`, with a `$(…)` or a
+// function body added to the consuming stage. That nested dispatch took the
+// structured value and `jq` fell back to reading the pipe as text — the exact
+// failure the sideband exists to prevent, through a different door:
 //
 //     seq 1 3 | jq -c .            → [1,2,3]
 //     seq 1 3 | jq -c $(echo .)    → "trailing characters … looks like JSONL"
 //
-// Same root shape as the `pipe_stdout` loss (see
-// `pipeline_nested_dispatch_tests.rs`): a per-invocation IO resource lives in
-// the kernel's one shared `exec_ctx` slot, and a nested dispatch takes it and
-// does not put it back. `stdin_data`/`stdin_data_rx` are moved *into* a
-// command's context at every sync site and never returned, so an outer stage
-// that has not consumed them yet loses them to the inner call.
+// Same root as the `pipe_stdout` loss (see pipeline_nested_dispatch_tests.rs):
+// a per-invocation resource in the one shared `exec_ctx` slot, taken by a
+// nested dispatch and not returned. This one fails loudly rather than at
+// exit 0.
 //
-// Unlike the `pipe_stdout` loss, this one fails loudly — a wrong answer with
-// an error message attached, not silence at exit 0.
-//
-// Deterministic, so no loop: the race the tests above defend against is a
-// different mechanism.
+// Deterministic, so no loop — the race above is a different mechanism.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_substitution_in_the_consumer_does_not_eat_the_structured_value() {
