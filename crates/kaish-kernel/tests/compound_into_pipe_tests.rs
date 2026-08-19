@@ -52,6 +52,52 @@ async fn a_compound_statement_can_feed_a_pipe(#[case] source: &str, #[case] expe
     );
 }
 
+/// A compound in a *later* stage, which bash also allows. Modeling stages
+/// uniformly (rather than a special first-position head) is what makes these
+/// fall out of the same change instead of being a second feature later.
+#[rstest]
+#[case::while_consumes_a_pipe(
+    "printf \"a\\nb\\n\" | while read l; do echo \"got $l\"; done",
+    "got a\ngot b\n"
+)]
+#[case::if_in_last_stage("echo x | if true; then cat; fi", "x\n")]
+#[case::case_in_last_stage("echo hit | case a in a) cat ;; esac", "hit\n")]
+// Compound on both ends of the same pipe.
+#[case::compound_both_ends(
+    "for f in a b; do echo $f; done | while read l; do echo \"L:$l\"; done",
+    "L:a\nL:b\n"
+)]
+#[tokio::test]
+async fn a_compound_can_be_a_later_stage(#[case] source: &str, #[case] expected: &str) {
+    let kernel = kernel();
+    let result = kernel.execute(source).await.expect("execution failed");
+
+    assert_eq!(
+        result.text_out(),
+        expected,
+        "`{source}` (exit {}, stderr {:?})",
+        result.code,
+        result.err
+    );
+}
+
+/// A compound stage buffers: its whole output is collected before the next
+/// stage sees a byte. bash streams, so `… | head -1` over a long loop exits
+/// early there and runs to completion here. Deliberate for now — streaming
+/// means plumbing a stage's writer into nested statement execution, which is
+/// the shared-slot machinery GH #369 is about. This row pins the *result*, not
+/// the timing, so it stays true if streaming lands later.
+#[tokio::test]
+async fn a_buffered_compound_stage_still_produces_the_right_answer() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("for f in a b c; do echo $f; done | head -n 1")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "a\n");
+}
+
 /// A compound stage must not disturb the statement before it. This is the row
 /// that fails if the grammar change makes the compound swallow too much.
 #[tokio::test]
