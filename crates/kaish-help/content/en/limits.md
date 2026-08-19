@@ -29,7 +29,6 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's native list literals |
 | Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
 | No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. A bare `,` is NOT one of these — it's significant only inside a `[...]`/`{...}` literal or pattern, so `sed -n 1,3p file` and `sort -k 2,2n` need no quoting. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
-| A compound statement can't feed a pipe | `for`/`while`/`if`/`case` can't sit on the left of `|` — `for f in a b; do echo $f; done | grep a` is a parse error (`found '|' expected '&&', '||', 'NEWLINE', ';' ...`). | Capture the block's output first, then pipe the variable: `out="$(for f in a b; do echo $f; done)"; echo "$out" | grep a` |
 
 ## Builtin Constraints
 
@@ -47,6 +46,8 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 ## Execution
 
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
+- **A compound pipeline stage buffers.** `for`/`while`/`if`/`case` may sit in any pipeline position, but such a stage runs to completion before the next stage sees a byte — `for f in $(seq 1 100000); do echo $f; done | head -n 1` runs every iteration where `sh` stops at the first line. Same answer, more work. Command stages still stream.
+- **`scatter`/`gather` cannot share a pipeline with a compound stage** — exits 2. Run the compound on its own and pipe its output in.
 - **Scatter results are in item order**, never completion order — a row's position identifies its item.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
 - **Recursion is depth-capped at 48** — nested `$(...)`, recursive shell functions, and `.kai` scripts sourcing each other are bounded so a runaway (or a missing base case) returns a loud `maximum recursion depth exceeded` error instead of overflowing the stack. Real recursion nests far shallower; this only stops runaways.

@@ -249,6 +249,11 @@ esac
 
 break; continue; return [N]; exit [N]
 
+# A compound statement is a pipeline stage, in any position. It buffers:
+# the whole block runs before the next stage sees a byte.
+for f in a b; do echo $f; done | grep a
+printf "a\nb\n" | while read l; do echo "got $l"; done
+
 # `:` is the null command — does nothing, exits 0, another spelling of `true`:
 if [[ -f log.txt ]]; then :; else touch log.txt; fi   # empty branch
 : > log.txt                                           # truncate to zero bytes

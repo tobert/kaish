@@ -784,9 +784,23 @@ VER=$(                                      # multi-line + comment
 LINES=$(for f in *.txt; do wc -l < "$f"; done)  # control structure, unquoted
 ```
 
-A control structure as one stage of a *pipeline* (`for f in a b; do echo $f; done | grep a`)
-is not supported at any level, inside `$(...)` or out — a pipeline stage is a
-single command.
+A control structure can be one stage of a *pipeline*, in any position, inside
+`$(...)` or out:
+
+```sh
+for f in a b; do echo $f; done | grep a     # compound feeds the pipe
+printf "a\nb\n" | while read l; do echo "got $l"; done   # compound consumes it
+echo hi | if true; then cat; fi | wc -c     # compound in the middle
+```
+
+**A compound stage buffers.** It runs to completion and its whole output goes
+to the pipe at once, so `for f in $(seq 1 100000); do echo $f; done | head -n 1`
+runs every iteration where `sh` would stop at the first line. The answer is the
+same; the work is not. A command stage still streams.
+
+`scatter`/`gather` cannot share a pipeline with a compound stage — that
+combination exits 2 and names the condition. Run the compound on its own and
+pipe its output in.
 
 ### Structured Data and Newline Splitting in Command Substitution
 
