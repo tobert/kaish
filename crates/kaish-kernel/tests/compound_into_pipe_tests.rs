@@ -221,3 +221,47 @@ fn a_compound_stage_is_not_opaque_to_the_plan(#[case] source: &str, #[case] expe
 
     assert_eq!(names, expected, "`{source}`");
 }
+
+/// A backgrounded compound is the one route that reaches `run_single` with a
+/// compound stage — everywhere else `pipeline_into_stmt` unwraps a lone
+/// compound back to a bare statement, and `&` is what keeps it a `Pipeline`.
+/// So this pair covers a code path the foreground rows never touch.
+#[rstest]
+#[case::bare_compound_backgrounded("for f in a b; do echo $f; done", "a\nb\n")]
+#[case::compound_into_pipe_backgrounded("for f in a b; do echo $f; done | wc -l", "2\n")]
+#[tokio::test]
+async fn a_backgrounded_compound_still_produces_its_output(
+    #[case] body: &str,
+    #[case] expected: &str,
+) {
+    let kernel = kernel();
+    let announcement = kernel
+        .execute(&format!("{body} &"))
+        .await
+        .expect("execution failed");
+    assert!(
+        announcement.err.contains("[1]"),
+        "expected a job announcement, got {:?}",
+        announcement.err
+    );
+
+    // Poll rather than sleep: the job is done when its status says so.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let status = kernel
+            .execute("cat /v/jobs/1/status")
+            .await
+            .expect("status check failed");
+        if status.text_out().trim().starts_with("done:") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "job 1 never finished");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let out = kernel
+        .execute("cat /v/jobs/1/stdout")
+        .await
+        .expect("reading job stdout failed");
+    assert_eq!(out.text_out(), expected, "`{body} &`");
+}
