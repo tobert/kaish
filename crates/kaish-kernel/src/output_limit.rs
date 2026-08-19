@@ -245,15 +245,21 @@ pub async fn spill_if_needed(
         }
 
         // If we have structured OutputData, estimate size before materializing
-        if let Some(output) = result.output() {
-            let estimate = output.estimated_byte_size();
+        let estimate = result.output().map(|o| o.estimated_byte_size());
+        if let Some(estimate) = estimate {
             if estimate <= max {
-                // Small enough — materialize normally
-                result.materialize();
-                // Re-check actual size (estimate is a lower bound)
+                // Re-check the actual size (the estimate is a lower bound) —
+                // but measure WITHOUT folding the tree into `.out`. `text_out()`
+                // renders the canonical string from `.output` when `.out` is
+                // empty, so the exact size is observable while the tree
+                // survives for an embedder to render: an `ls` listing keeps the
+                // per-node `EntryType` that makes colorizing possible at all.
                 if result.text_out().len() <= max {
                     return None;
                 }
+                // Spilling replaces `.out` with a summary, so the tree stops
+                // describing this result and must not outlive it.
+                result.materialize();
                 return spill_string(result, config, max, ring_already_overflowed).await;
             }
 
@@ -333,11 +339,14 @@ fn truncate_in_memory(
                 head, estimate, max
             );
             result.set_out(truncated);
+            // `.out` is now a truncation summary, not a rendering of the tree.
+            // Every renderer prefers `.output`, so leaving it would show the
+            // full listing and hide the fact that output was capped.
+            result.set_output(None);
             result.did_spill = true;
             return None;
         }
-        // Small enough to materialize safely.
-        result.materialize();
+        // Small enough to measure exactly, without folding the tree in.
     }
 
     let total = result.text_out().len();
@@ -355,6 +364,8 @@ fn truncate_in_memory(
         head, tail, total
     );
     result.set_out(truncated);
+    // Same reason as above: the text is a summary now, not the tree.
+    result.set_output(None);
     result.did_spill = true;
     None
 }
