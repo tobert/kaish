@@ -140,3 +140,84 @@ async fn the_forms_that_already_worked_keep_working(
 
     assert_eq!(result.text_out(), expected, "`{source}` regressed");
 }
+
+/// The pipeline's exit code is its last stage's, whichever kind of stage that
+/// is. `for … done | grep zzz` is 1 because `grep` found nothing, not because
+/// the loop had an opinion.
+#[rstest]
+#[case::last_stage_command_succeeds("for f in a; do false; done | cat", 0)]
+#[case::last_stage_command_fails("for f in a b; do echo $f; done | grep zzz", 1)]
+#[case::last_stage_loop_takes_its_last_command("echo x | for f in a; do false; done", 1)]
+#[case::last_stage_if_with_no_branch_taken("echo x | if false; then echo a; fi", 0)]
+#[tokio::test]
+async fn the_last_stage_sets_the_exit_code(#[case] source: &str, #[case] expected: i64) {
+    let kernel = kernel();
+    let result = kernel.execute(source).await.expect("execution failed");
+
+    assert_eq!(result.code, expected, "`{source}` (stderr {:?})", result.err);
+}
+
+/// A non-last stage's session changes stay in that stage, compound or not.
+/// bash runs every stage in a subshell; kaish syncs only the last stage back.
+#[tokio::test]
+async fn a_cd_in_a_non_last_compound_stage_does_not_leak() {
+    let kernel = kernel();
+    let before = kernel.cwd().await;
+    kernel
+        .execute("for f in a; do cd /; done | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(kernel.cwd().await, before);
+}
+
+/// A compound stage nests: the inner loop's output reaches the pipe through
+/// the outer one.
+#[tokio::test]
+async fn a_compound_stage_nests() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("for f in a b; do for g in 1 2; do echo \"$f$g\"; done; done | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "a1\na2\nb1\nb2\n");
+}
+
+/// Scatter splits a pipeline across workers that run plain commands, so a
+/// compound stage in the same pipeline has nowhere to run. Refuse it by name
+/// rather than dropping the parallelism quietly.
+#[tokio::test]
+async fn scatter_gather_refuses_a_compound_stage_by_name() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("for f in a b; do echo $f; done | scatter | echo x | gather")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.code, 2, "stderr {:?}", result.err);
+    assert!(
+        result.err.contains("scatter/gather cannot share a pipeline"),
+        "the error must name the condition, got {:?}",
+        result.err
+    );
+}
+
+/// The plan sees every command inside a compound stage. An embedder that gates
+/// on `rm` must still see the `rm` in a loop body that feeds a pipe — this is
+/// the row that fails if a compound stage becomes opaque to `plan_program`.
+#[rstest]
+#[case::first_stage("for f in a b; do rm $f; done | wc -l", vec!["rm", "wc"])]
+#[case::last_stage("echo x | while read l; do rm $l; done", vec!["echo", "read", "rm"])]
+#[test]
+fn a_compound_stage_is_not_opaque_to_the_plan(#[case] source: &str, #[case] expected: Vec<&str>) {
+    let plans = kaish_kernel::plan_program(source).expect("parses");
+    let names: Vec<&str> = plans[0]
+        .plan
+        .commands
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+
+    assert_eq!(names, expected, "`{source}`");
+}
