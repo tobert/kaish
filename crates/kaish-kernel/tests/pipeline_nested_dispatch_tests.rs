@@ -209,3 +209,75 @@ async fn a_sourced_or_scripted_stage_keeps_its_stdout(
         result.err
     );
 }
+
+// --- The rest of the class, pinned ----------------------------------------
+//
+// `ExecContext` has 28 fields, but only five are per-invocation I/O resources
+// with move semantics — the shape that can be stolen from an outer command by
+// a nested dispatch. The other 23 are `Arc` handles (cloning is correct, no
+// ownership) or configuration that is *supposed* to propagate.
+//
+//   stdin           consumed-once buffer      pinned below
+//   stdin_data      consumed-once value       pinned below
+//   stdin_data_rx   oneshot receiver          pinned in pipeline_structured_data_tests.rs
+//   pipe_stdin      read end                  pinned below + substitution_still_consumes…
+//   pipe_stdout     write end                 pinned above
+//
+// These rows are the audit's result, not a bug report: they passed when
+// written. They are here so that adding a sixth resource to `ExecContext`, or
+// changing how one of these crosses a sync site, has to break something
+// visible first.
+//
+// Three predictions from a `kaibo deliberate` (gemini-pro) were tested and all
+// three were WRONG on this codebase: that `timeout`'s re-dispatch bypasses the
+// fix (it does not — `execute_command` moves the resource into the builtin's
+// own context, so it rides along), that cloned `stdin` causes a nested `$()`
+// and its parent to each read the same bytes (they do not — kaish matches
+// bash), and that background jobs race the shared slot (they fork their own
+// kernel). The rows below are what those predictions would have broken.
+
+/// stdin is consumed once across a nested dispatch, not re-served. bash agrees:
+/// the second reader gets what the first left, not a replay.
+#[tokio::test]
+async fn stdin_is_consumed_once_not_duplicated_by_a_nested_dispatch() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("x=$(head -n 1); y=$(head -n 1); echo \"x=$x y=$y\"")
+        .await
+        .expect("execution failed");
+
+    // No stdin at all here, so both reads come back empty — the point is that
+    // they agree, and that neither replays a buffer the other consumed.
+    assert_eq!(result.text_out(), "x= y=\n");
+}
+
+/// A nested dispatch must not steal the *read* end from the statement that
+/// follows it. `echo "pre $(echo z)"; cat` prints `pre z` then the piped input.
+#[tokio::test]
+async fn a_nested_dispatch_leaves_the_read_end_for_the_next_statement() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("echo \"pre $(echo z)\"; echo tail | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "pre z\ntail\n");
+}
+
+/// stderr is shared by design — every writer appends to one stream — so it is
+/// not a steal candidate. A function body's stderr still reaches the caller
+/// even when the function is a non-last pipeline stage.
+#[tokio::test]
+async fn stderr_is_shared_not_owned_so_a_stage_body_still_reports() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("f() { echo e1 >&2; }; f | cat")
+        .await
+        .expect("execution failed");
+
+    assert!(
+        result.err.contains("e1"),
+        "a non-last stage's stderr should reach the caller, got {:?}",
+        result.err
+    );
+}

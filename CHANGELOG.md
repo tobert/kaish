@@ -101,6 +101,15 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.
 
 ### Fixed
+- **A whole class of dropped-I/O bugs was swept, not just patched** — a
+  per-invocation I/O resource lived in one shared execution context, and a
+  nested dispatch (a `$(…)` in a command's own arguments, a function body, a
+  `source`d file) could take it and never give it back. Two instances were
+  found and fixed; the remaining three members of the class were then audited
+  field by field and pinned with tests that pass, so a sixth resource cannot
+  join the class unnoticed. Each fix was written test-first, and the tests
+  earned it: they rejected a wrong fix for the second instance, and they
+  caught a case where only part of a stage's output was recovered.
 - **The structured value a pipeline carries survives a `$(…)` or a function
   call in the consuming stage** — `seq 1 3 | jq -c .` returned `[1,2,3]` but
   `seq 1 3 | jq -c $(echo .)` failed with "trailing characters … looks like
