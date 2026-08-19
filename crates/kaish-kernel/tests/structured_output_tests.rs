@@ -5,13 +5,17 @@
 //! embedder that wants to lay out or colorize that listing itself needs the
 //! tree, not the tab-separated rendering of it.
 //!
-//! Before this, `Kernel::execute` always returned `output() == None`:
-//! `accumulate_result` calls `materialize()`, which renders the tree into
-//! `.out` and drops it. The rule here is the one the rest of the code already
-//! assumes (`take_output_for_stream`, the REPL's renderer): **structured
-//! output survives only when it is the whole of the output.** Two statements
-//! cannot both keep a tree — there is no meaningful concatenation of two, and
-//! a half-structured result would render one and silently drop the other.
+//! The kernel already *intends* this: `Kernel::execute`'s statement loop
+//! carries the last statement's tree out explicitly ("for MCP TOON encoding",
+//! kernel.rs). It never arrived, because `apply_redirects` ended with an
+//! unconditional `materialize()` that folded the tree into `.out` and dropped
+//! it before the carry could read it. Nothing needed that eager fold: every
+//! reader goes through `text_out()`, which already renders `.output` when
+//! `.out` is empty.
+//!
+//! So the contract under test is the kernel's existing one — **the last
+//! statement's tree reaches the caller** — plus the guarantee that making it
+//! arrive changes no text anywhere.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -81,42 +85,43 @@ async fn the_text_rendering_is_unchanged() {
     assert_eq!(lines, vec!["plain.txt", "subdir"]);
 }
 
-/// Two statements fall back to text. There is no meaningful concatenation of
-/// two trees, and keeping the second while `.out` holds the first would render
-/// one statement and silently drop the other — the exact bug the old
-/// unconditional `materialize()` was avoiding.
+/// Across statements it is the LAST one's tree — the kernel's existing rule,
+/// chosen at the loop rather than in `accumulate_result` precisely because
+/// accumulation also runs per loop iteration. The earlier statements' text is
+/// still all there, so nothing is lost by carrying the tree.
 #[tokio::test]
-async fn two_producing_statements_fall_back_to_text() {
+async fn the_last_statements_tree_is_the_one_carried() {
     let dir = fixture();
     let kernel = kernel_at(dir.path());
 
     let result = kernel.execute("ls; ls").await.expect("execution failed");
 
-    assert!(
-        result.output().is_none(),
-        "a two-statement program must not present one statement's tree as the whole result"
-    );
+    let output = result.output().expect("the last statement's tree");
+    assert_eq!(output.root.len(), 2, "one tree, not two concatenated");
     let text = result.text_out();
     assert_eq!(
         text.matches("subdir").count(),
         2,
-        "both statements' output must survive as text, got {text:?}"
+        "both statements' text must survive, got {text:?}"
     );
 }
 
-/// Text before a tree also falls back — the invariant is "structured output is
-/// the WHOLE output", not "the last statement wins".
+/// A statement that produces no tree carries none — `echo` last means the
+/// caller gets text, not a stale listing from the statement before it.
 #[tokio::test]
-async fn text_before_a_tree_falls_back_to_text() {
+async fn a_text_only_last_statement_carries_no_tree() {
     let dir = fixture();
     let kernel = kernel_at(dir.path());
 
     let result = kernel
-        .execute("echo hello; ls")
+        .execute("ls; echo hello")
         .await
         .expect("execution failed");
 
-    assert!(result.output().is_none(), "echo's text must not be dropped");
+    assert!(
+        result.output().is_none(),
+        "echo has no tree, so none may be carried from the ls before it"
+    );
     let text = result.text_out();
     assert!(text.contains("hello"), "lost the echo: {text:?}");
     assert!(text.contains("subdir"), "lost the listing: {text:?}");

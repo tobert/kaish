@@ -194,11 +194,14 @@ pub(crate) async fn apply_redirects(
             RedirectKind::Stdin | RedirectKind::HereDoc(_) | RedirectKind::HereString => {}
         }
     }
-    // Materialize any remaining OutputData into result.out.
-    // Callers (accumulate_result, pipeline piping) expect .out to be populated
-    // after apply_redirects returns. File redirects above consume .output directly
-    // via streaming; this only fires when no redirect consumed it.
-    result.materialize();
+    // No trailing materialize. Every reader of a result goes through
+    // `text_out()` / `out_bytes()` / `take_output_for_stream()`, and the first
+    // of those already renders `.output` when `.out` is empty — so folding the
+    // tree in here bought nothing and cost the structured form. Keeping it
+    // means an embedder can render an `ls` listing itself, and the pipe's own
+    // `take_output_for_stream()` fast path (which requires `.out` empty) can
+    // actually fire. Redirects that replace the text materialize themselves,
+    // above.
     result
 }
 
