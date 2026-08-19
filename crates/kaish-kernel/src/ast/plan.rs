@@ -36,7 +36,8 @@ use kaish_types::Value;
 
 use super::types::{
     Arg, Assignment, BinaryOp, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    RecordKey, Redirect, RedirectKind, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment,
+    PipelineStage, RecordKey, Redirect, RedirectKind, Stmt, StringPart, TestExpr, ToolDef, VarPath,
+    VarSegment,
     WhileLoop,
 };
 
@@ -349,8 +350,17 @@ fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
         }
         Stmt::Command(cmd) => collect_command(cmd, background, out),
         Stmt::Pipeline(p) => {
-            for cmd in &p.commands {
-                collect_command(cmd, background || p.background, out);
+            for stage in &p.stages {
+                match stage {
+                    PipelineStage::Command(cmd) => {
+                        collect_command(cmd, background || p.background, out)
+                    }
+                    // A compound stage's commands belong to the enclosing
+                    // statement, same as a loop body's do.
+                    PipelineStage::Compound(stmt) => {
+                        collect_stmt(stmt, background || p.background, out)
+                    }
+                }
             }
         }
         Stmt::If(s) => {
@@ -742,9 +752,12 @@ fn render_redirect(redirect: &Redirect) -> String {
 
 fn render_pipeline(p: &Pipeline) -> String {
     let body = p
-        .commands
+        .stages
         .iter()
-        .map(render_command)
+        .map(|stage| match stage {
+            PipelineStage::Command(cmd) => render_command(cmd),
+            PipelineStage::Compound(stmt) => render_stmt(stmt),
+        })
         .collect::<Vec<_>>()
         .join(" | ");
     if p.background {

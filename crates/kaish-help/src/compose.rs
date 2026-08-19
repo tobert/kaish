@@ -456,8 +456,8 @@ mod tests {
     }
 
     /// Three rules an embedded agent hits early must reach both agent-facing
-    /// recipes: a compound statement cannot feed a pipe, `[ … ]` is not a
-    /// command, and only lowercase `true`/`false` are booleans. These recipes
+    /// recipes: a compound statement is a pipeline stage and buffers, `[ … ]`
+    /// is not a command, and only lowercase `true`/`false` are booleans. These recipes
     /// are the surfaces an embedded agent actually reads, so a rule missing
     /// here is a rule it meets for the first time as a failure.
     ///
@@ -468,7 +468,7 @@ mod tests {
     fn agent_onboarding_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());
         for needle in [
-            "compound statement can't feed a pipe",
+            "compound statement is a pipeline stage",
             "is not a command",
             "lowercase `true`/`false` are booleans",
         ] {
@@ -480,7 +480,7 @@ mod tests {
     fn tool_description_covers_the_verified_syntax_gaps() {
         let out = compose(&Recipe::tool_description(), &no_content());
         for needle in [
-            "compound statement can't feed a pipe",
+            "compound statement is a pipeline stage",
             "is not a command",
             "lowercase `true`/`false` are booleans",
         ] {

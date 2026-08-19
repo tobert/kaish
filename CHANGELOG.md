@@ -11,6 +11,23 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **A compound statement can be a pipeline stage, in any position** —
+  `for f in a b; do echo $f; done | grep a`, `printf "a\nb\n" | while read l; do
+  echo "got $l"; done`, and a compound on both ends of the same pipe all run.
+  Every form (`if`, `for`, `while`, `case`) reaches one grammar site, so they
+  arrive together. A compound stage **buffers**: it runs to completion before
+  the next stage sees a byte, so `for … done | head -n 1` runs every iteration
+  where `sh` stops at the first line — same answer, more work. Streaming needs
+  a writer threaded through nested statement execution (GH #369).
+- **BREAKING (embedders):** `kaish_kernel::ast::Pipeline` now holds
+  `stages: Vec<PipelineStage>` instead of `commands: Vec<Command>`, where
+  `PipelineStage` is `Command(Command)` or `Compound(Box<Stmt>)`. A pipeline
+  can no longer be assumed to be a list of commands. `CommandDispatcher` gains
+  `dispatch_stmt`, defaulted to reject a compound stage, so an out-of-tree
+  dispatcher keeps compiling.
+- **`scatter`/`gather` in a pipeline with a compound stage exits 2** and names
+  the condition — scatter's workers run plain commands, so a compound stage has
+  nowhere to run there.
 - **`W007` warns when a variable name mixes scripts** — `PАTH=/bin` with CYRILLIC
   CAPITAL LETTER A (U+0410) binds a second variable and leaves `$PATH` alone. The
   warning names the character, its codepoint, and the plain spelling the name

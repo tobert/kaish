@@ -131,7 +131,14 @@ pub fn format_stmt_block(stmts: &[Stmt]) -> String {
 }
 
 pub fn format_pipeline(p: &Pipeline) -> String {
-    let cmds: Vec<String> = p.commands.iter().map(format_command).collect();
+    let cmds: Vec<String> = p
+        .stages
+        .iter()
+        .map(|stage| match stage {
+            PipelineStage::Command(cmd) => format_command(cmd),
+            PipelineStage::Compound(stmt) => format_stmt(stmt),
+        })
+        .collect();
 
     if p.background {
         if cmds.len() == 1 {

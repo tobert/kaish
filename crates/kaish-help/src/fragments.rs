@@ -134,14 +134,14 @@ pub const FRAGMENTS: &[Fragment] = &[
     ),
     en(
         Concept::Foundations,
-        "pipe-needs-capture",
+        "compound-pipeline-stage",
         Variant::Rule,
         Depth::Summary,
         None,
-        "**A compound statement can't feed a pipe.** `for`/`while`/`if`/`case` \
-         can't sit left of `|` — `for f in a b; do echo $f; done | grep a` is a \
-         parse error. Capture first, then pipe: \
-         `out=\"$(for f in a b; do echo $f; done)\"; echo \"$out\" | grep a`.",
+        "**A compound statement is a pipeline stage.** `for f in a b; do echo $f; \
+         done | grep a` works, in any pipeline position. Such a stage *buffers*: \
+         the whole block runs before the next stage sees a byte, so \
+         `for … done | head -n 1` runs every iteration.",
     )
     .ranked(3),
     en(
@@ -551,6 +551,11 @@ case $VAR in
 esac
 
 break; continue; return [N]; exit [N]
+
+# A compound statement is a pipeline stage, in any position. It buffers:
+# the whole block runs before the next stage sees a byte.
+for f in a b; do echo $f; done | grep a
+printf "a\nb\n" | while read l; do echo "got $l"; done
 
 # `:` is the null command — does nothing, exits 0, another spelling of `true`:
 if [[ -f log.txt ]]; then :; else touch log.txt; fi   # empty branch

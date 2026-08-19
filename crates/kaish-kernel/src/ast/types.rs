@@ -110,10 +110,41 @@ pub struct Command {
     pub redirects: Vec<Redirect>,
 }
 
-/// A pipeline of commands connected by pipes.
+/// One stage of a pipeline. A stage is a command, or a compound statement
+/// (`if`, `for`, `while`, `case`) whose output feeds the pipe.
+///
+/// A compound stage buffers: its whole output is collected before the next
+/// stage sees a byte. See `PipelineRunner::run_pipeline` for why, and for the
+/// streaming work that would retire it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PipelineStage {
+    Command(Command),
+    Compound(Box<Stmt>),
+}
+
+impl PipelineStage {
+    /// The command this stage runs, or `None` for a compound stage.
+    pub fn as_command(&self) -> Option<&Command> {
+        match self {
+            PipelineStage::Command(cmd) => Some(cmd),
+            PipelineStage::Compound(_) => None,
+        }
+    }
+
+    /// Redirects attached to this stage. A compound stage carries none — the
+    /// grammar does not accept a redirect after `done`/`fi`/`esac`.
+    pub fn redirects(&self) -> &[Redirect] {
+        match self {
+            PipelineStage::Command(cmd) => &cmd.redirects,
+            PipelineStage::Compound(_) => &[],
+        }
+    }
+}
+
+/// A pipeline of stages connected by pipes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pipeline {
-    pub commands: Vec<Command>,
+    pub stages: Vec<PipelineStage>,
     pub background: bool,
 }
 
