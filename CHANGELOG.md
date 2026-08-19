@@ -320,6 +320,11 @@ breaking entries are marked **BREAKING**.
   error** — `case $x in a)# note` and `[[ -f f ]]# note` need a space before
   the `#`, where bash starts a comment. The lexer cannot tell a case pattern's
   `)` from a substitution's, and guessing would drop the rest of the line.
+  This breaks *scripts*, not Rust: an embedder shipping `.kai` files should
+  grep them for `)#`, `]#`, and `}#`, because the failure lands at runtime
+  rather than at compile time. It is also a fix — `echo $(cmd)#7` used to
+  silently become a comment and drop the rest of the line at exit 0, and is
+  now loud. A `#` glued to a plain word (`abc12345#7`) is unaffected.
 - **Unquoted barewords and paths accept any non-ASCII character** —
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
