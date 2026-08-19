@@ -1,30 +1,26 @@
 //! A nested dispatch must not consume the enclosing command's pipe writer.
 //!
-//! The kernel's `exec_ctx` is one shared slot. A pipeline stage moves its
-//! `pipe_stdout` into it for the duration of the dispatch, and anything that
-//! dispatches *while that command is still running* — a `$(…)` in its own
-//! argument list, a user function's body — snapshots that same slot. The
-//! nested dispatch then carried the writer away and dropped it with its own
-//! context, so the stage produced correct bytes with nowhere to send them:
+//! `exec_ctx` is one shared slot. A pipeline stage parks its `pipe_stdout`
+//! there for the dispatch, and anything dispatching *while that command runs*
+//! — a `$(…)` in its own arguments, a function body, a `source`d file — took
+//! the writer and dropped it with its own context:
 //!
 //! ```text
 //! echo $(echo sub) | cat      →  (nothing), exit 0      bash: sub
 //! f() { echo out; }; f | cat  →  (nothing), exit 0      bash: out
+//! source foo.kai | cat        →  (nothing), exit 0      bash: hello
 //! ```
 //!
-//! Silent: zero bytes, exit 0, no diagnostic. It shipped in 0.14.1, so these
-//! rows are a regression net for behavior that was never right, not a guard on
-//! a recent change.
+//! Silent — zero bytes, exit 0, no diagnostic — and it shipped in 0.14.1, so
+//! these are a net for behavior that was never right.
 //!
-//! The fix carries the writer through `execute_pipeline`'s context for the
-//! duration, exactly as `pipe_stdin` was already carried. That asymmetry —
-//! stdin carried, stdout left behind — *was* the bug, so the two endpoints now
-//! read the same at that site.
+//! The fix carries the writer through `execute_pipeline`'s context, as
+//! `pipe_stdin` already was. That asymmetry was the bug.
 //!
-//! stdin's own semantics are unchanged and deliberately different: bash lets a
-//! substitution consume the stage's stdin (`echo hi | echo $(cat)` prints
-//! `hi`), and kaish matches. `substitution_still_consumes_the_stage_stdin`
-//! pins that, so nobody "fixes" the read end into isolation later.
+//! stdin's semantics are unchanged and deliberately different: bash lets a
+//! substitution consume the stage's stdin, and kaish matches.
+//! `substitution_still_consumes_the_stage_stdin` pins it, so nobody isolates
+//! the read end later.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -206,6 +202,72 @@ async fn a_sourced_or_scripted_stage_keeps_its_stdout(
         expected,
         "`{source_text}` lost its stdout in the pipe (exit {}, stderr {:?})",
         result.code,
+        result.err
+    );
+}
+
+// --- The rest of the class, pinned ----------------------------------------
+//
+// `ExecContext` has 28 fields; five are per-invocation I/O with move
+// semantics — the shape a nested dispatch can steal. The other 23 are `Arc`
+// handles (nothing owned) or config that is meant to propagate.
+//
+//   stdin, stdin_data, pipe_stdin   pinned below
+//   stdin_data_rx                   pinned in pipeline_structured_data_tests.rs
+//   pipe_stdout                     pinned above
+//
+// These three passed when written. They are a tripwire, not a bug report:
+// a sixth resource, or a changed sync site, has to break something here first.
+//
+// They are also what three wrong predictions would have broken. A kaibo
+// deliberate (gemini-pro) claimed `timeout`'s re-dispatch bypasses the fix, that
+// cloned `stdin` makes a nested `$()` and its parent read the same bytes, and
+// that background jobs race the slot. None hold: `execute_command` moves the
+// resource into the builtin's own ctx, kaish matches bash, and background jobs
+// fork their own kernel. Run these before believing the argument again.
+
+/// stdin is consumed once across a nested dispatch, not re-served. bash agrees:
+/// the second reader gets what the first left, not a replay.
+#[tokio::test]
+async fn stdin_is_consumed_once_not_duplicated_by_a_nested_dispatch() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("x=$(head -n 1); y=$(head -n 1); echo \"x=$x y=$y\"")
+        .await
+        .expect("execution failed");
+
+    // No stdin at all here, so both reads come back empty — the point is that
+    // they agree, and that neither replays a buffer the other consumed.
+    assert_eq!(result.text_out(), "x= y=\n");
+}
+
+/// A nested dispatch must not steal the *read* end from the statement that
+/// follows it. `echo "pre $(echo z)"; cat` prints `pre z` then the piped input.
+#[tokio::test]
+async fn a_nested_dispatch_leaves_the_read_end_for_the_next_statement() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("echo \"pre $(echo z)\"; echo tail | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "pre z\ntail\n");
+}
+
+/// stderr is shared by design — every writer appends to one stream — so it is
+/// not a steal candidate. A function body's stderr still reaches the caller
+/// even when the function is a non-last pipeline stage.
+#[tokio::test]
+async fn stderr_is_shared_not_owned_so_a_stage_body_still_reports() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("f() { echo e1 >&2; }; f | cat")
+        .await
+        .expect("execution failed");
+
+    assert!(
+        result.err.contains("e1"),
+        "a non-last stage's stderr should reach the caller, got {:?}",
         result.err
     );
 }

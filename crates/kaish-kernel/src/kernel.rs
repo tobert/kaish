@@ -3091,25 +3091,20 @@ impl Kernel {
             ec.stdin_data = None;
         }
 
-        // Carry the enclosing command's pipe writer the same way, and for the
-        // same reason: `ec` is one shared slot, and the snapshot above was
-        // built with `pipe_stdout: None`. Left in `ec`, a writer belonging to
-        // an outer pipeline stage is overwritten with `None` by the first
-        // nested `dispatch_command` and dropped — the stage then produced
-        // correct bytes with nowhere to send them, and `echo $(echo sub) | cat`
-        // printed nothing at exit 0. Moving it into `ctx` parks it for the
-        // duration; the sync-back below returns it.
+        // Park the enclosing command's write end and sideband receiver here for
+        // the duration. `ec` is one shared slot and the snapshot above zeroes
+        // both, so a nested dispatch — `$(…)` in a command's own arguments, a
+        // function body, a `source`d file — overwrites whatever is left in it.
+        // `echo $(echo sub) | cat` printed nothing at exit 0;
+        // `seq 1 3 | jq -c $(echo .)` fell back to reading the pipe as text.
         //
-        // This is the choke point for every nested dispatch — a `$(…)` in a
-        // command's own argument list, a function body, a `source`d file — so
-        // it belongs here rather than at each caller that re-enters.
-        //
-        // Nothing downstream can write to it by mistake: `child_for_pipeline`
-        // starts every stage at `pipe_stdout: None`, and only stages before
-        // the last are handed a writer, which the runner creates itself.
+        // Here rather than at each re-entering caller: this is the one path
+        // they all take. The shared slot is the actual defect — threading a
+        // ctx through the interpreter would retire this whole dance.
         {
             let mut ec = self.exec_ctx.write().await;
             ctx.pipe_stdout = ec.pipe_stdout.take();
+            ctx.stdin_data_rx = ec.stdin_data_rx.take();
         }
 
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
@@ -3141,10 +3136,10 @@ impl Kernel {
             // single-command and the pipeline case alike.
             ec.stdin = ctx.stdin.take();
             ec.pipe_stdin = ctx.pipe_stdin.take();
-            // The parked writer goes home. A pipeline never sets this on its
-            // own `ctx` — its stages get writers the runner owns — so what is
-            // here is what was carried in.
+            // The parked handles go home. Stages get writers the runner owns,
+            // so what is here is what was carried in.
             ec.pipe_stdout = ctx.pipe_stdout.take();
+            ec.stdin_data_rx = ctx.stdin_data_rx.take();
         }
         {
             let mut scope = self.scope.write().await;
@@ -3602,6 +3597,10 @@ impl Kernel {
             // reader. Without this it dies with the tool's context and
             // `read x; read y` loses the second line.
             ec.stdin = ctx.stdin.take();
+            // The sideband is stdin in typed form and returns by the same
+            // rule; taken in above, an unconsumed value would die here.
+            ec.stdin_data = ctx.stdin_data.take();
+            ec.stdin_data_rx = ctx.stdin_data_rx.take();
         }
 
         // Builtins parse --json via the GlobalFlags flatten in their clap
@@ -5845,6 +5844,9 @@ impl Kernel {
             // Without this the caller writes its stale `None` over the
             // remainder and the rest of the stream is gone.
             ctx.stdin = ec.stdin.take();
+            // The sideband rides home with stdin, same rule.
+            ctx.stdin_data = ec.stdin_data.take();
+            ctx.stdin_data_rx = ec.stdin_data_rx.take();
             // Same take-don't-clone discipline as stdin, and for the same
             // reason: these belong to exactly one dispatch, and a copy left
             // behind would let the next command adopt it.

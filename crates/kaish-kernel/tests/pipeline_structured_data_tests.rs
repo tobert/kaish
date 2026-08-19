@@ -64,3 +64,53 @@ async fn seq_into_scatter_sees_structured_items() {
         );
     }
 }
+
+// --- The sideband survives a nested dispatch in the consuming stage -------
+//
+// Same assertion as `seq_into_jq_uses_structured_data`, with a `$(…)` or a
+// function body added to the consuming stage. That nested dispatch took the
+// structured value and `jq` fell back to reading the pipe as text — the exact
+// failure the sideband exists to prevent, through a different door:
+//
+//     seq 1 3 | jq -c .            → [1,2,3]
+//     seq 1 3 | jq -c $(echo .)    → "trailing characters … looks like JSONL"
+//
+// Same root as the `pipe_stdout` loss (see pipeline_nested_dispatch_tests.rs):
+// a per-invocation resource in the one shared `exec_ctx` slot, taken by a
+// nested dispatch and not returned. This one fails loudly rather than at
+// exit 0.
+//
+// Deterministic, so no loop — the race above is a different mechanism.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_substitution_in_the_consumer_does_not_eat_the_structured_value() {
+    let (code, out) = run("seq 1 3 | jq -c $(echo .)").await;
+    assert_eq!(code, 0, "seq | jq $(echo .) should succeed, got out={out:?}");
+    assert_eq!(
+        out, "[1,2,3]",
+        "a `$()` in the consumer's argv must not cost it the structured value"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quoted_substitution_in_the_consumer_is_the_same_case() {
+    let (code, out) = run("seq 1 3 | jq -c \"$(echo .)\"").await;
+    assert_eq!(code, 0, "quoted form should succeed, got out={out:?}");
+    assert_eq!(out, "[1,2,3]");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_function_body_consumer_keeps_the_structured_value() {
+    let (code, out) = run("f() { jq -c .; }; seq 1 3 | f").await;
+    assert_eq!(code, 0, "function-body consumer should succeed, got out={out:?}");
+    assert_eq!(out, "[1,2,3]");
+}
+
+/// The control that says this is about the sideband and not about stdin bytes:
+/// a text consumer reads the pipe directly and was never affected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_consumer_was_never_affected() {
+    let (code, out) = run("seq 1 3 | wc -l").await;
+    assert_eq!(code, 0);
+    assert_eq!(out, "3");
+}
