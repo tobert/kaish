@@ -26,7 +26,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::ast::{Command, Expr, Value};
+use crate::ast::{Command, Expr, Stmt, Value};
 use crate::interpreter::ExecResult;
 use crate::tools::ExecContext;
 
@@ -113,6 +113,23 @@ pub trait CommandDispatcher: Send + Sync {
     /// Implementations should handle schema-aware argument parsing and
     /// output format extraction internally.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult>;
+
+    /// Dispatch a compound statement (`if`, `for`, `while`, `case`) that sits
+    /// in a pipeline stage.
+    ///
+    /// The statement runs to completion and its whole output comes back in the
+    /// `ExecResult`; `PipelineRunner` then writes those bytes to the pipe. So
+    /// `ctx.pipe_stdout` must stay with the runner — hand it to the statement
+    /// and the first nested command inside it would take the writer and the
+    /// rest of the loop would write nowhere.
+    ///
+    /// The default rejects the form. Only a dispatcher that can execute a
+    /// whole statement (the `Kernel`) overrides it; a dispatcher that resolves
+    /// one command at a time has nothing to run a loop body with, and saying
+    /// so beats returning empty output at exit 0.
+    async fn dispatch_stmt(&self, _stmt: &Stmt, _ctx: &mut ExecContext) -> Result<ExecResult> {
+        anyhow::bail!("this dispatcher cannot run a compound statement in a pipeline stage")
+    }
 
     /// Evaluate an expression through the full async chain.
     ///

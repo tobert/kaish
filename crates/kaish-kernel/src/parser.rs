@@ -5,8 +5,9 @@
 
 use crate::ast::{
     Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop,
-    HereDocMeta, IfStmt, ListElem, Pipeline, Program, RecordEntry, RecordKey, Redirect,
-    RedirectKind, SpannedPart, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr, ToolDef, Value,
+    HereDocMeta, IfStmt, ListElem, Pipeline, PipelineStage, Program, RecordEntry, RecordKey,
+    Redirect, RedirectKind, SpannedPart, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr,
+    ToolDef, Value,
     VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
@@ -1466,11 +1467,26 @@ where
             .repeated()
             .at_least(1)
             .collect::<Vec<_>>()
-            .then(pipeline_parser().map(pipeline_into_stmt))
+            .then(pipeline_parser(command_stage_parser()).map(pipeline_into_stmt))
             .map(|(assignments, body)| Stmt::EnvScoped {
                 assignments,
                 body: Box::new(body),
             });
+
+        // The compound statements. They reach `base_statement` only through
+        // `pipeline_parser`, which parses a lone compound and hands it back
+        // unwrapped — a compound and a compound-headed pipeline are the same
+        // alternative, so neither can shadow the other. Parsing them as
+        // separate alternatives is what produced "found '|' expected '&&'":
+        // `for_parser` sat ahead of the pipeline, consumed through `done`, and
+        // the `&&`/`||` fold below then met the `|`.
+        let compound = choice((
+            if_parser(stmt.clone()).map(Stmt::If),
+            for_parser(stmt.clone()).map(Stmt::For),
+            while_parser(stmt.clone()).map(Stmt::While),
+            case_parser(stmt.clone()).map(Stmt::Case),
+        ))
+        .boxed();
 
         // Base statement (without chaining)
         let base_statement = choice((
@@ -1481,17 +1497,17 @@ where
             // Shell-style functions (use $1, $2 positional params)
             posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
             bash_function_parser(stmt.clone()).map(Stmt::ToolDef),   // function name { }
-            if_parser(stmt.clone()).map(Stmt::If),
-            for_parser(stmt.clone()).map(Stmt::For),
-            while_parser(stmt.clone()).map(Stmt::While),
-            case_parser(stmt.clone()).map(Stmt::Case),
             break_stmt,
             continue_stmt,
             return_stmt,
             exit_stmt,
             test_expr_stmt_parser().map(Stmt::Test),
             // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
-            pipeline_parser().map(pipeline_into_stmt),
+            pipeline_parser(choice((
+                compound.map(|s| PipelineStage::Compound(Box::new(s))),
+                command_stage_parser(),
+            )))
+            .map(pipeline_into_stmt),
         ))
         .boxed();
 
@@ -1962,23 +1978,41 @@ where
         .boxed()
 }
 
-/// Pipeline: `cmd | cmd | cmd [&]`
-fn pipeline_parser<'tokens, I>(
+/// Pipeline: `stage | stage | stage [&]`.
+///
+/// `stage` is the caller's stage parser — `command_stage_parser()` alone where
+/// only a command is legal, or a compound statement ahead of it in the
+/// positions that host one. Taking it as a parameter keeps every compound
+/// inside the single `recursive(|stmt| …)` in `statement_parser`, and lets one
+/// alternative serve both a bare compound and a compound-headed pipeline:
+/// `pipeline_into_stmt` unwraps a lone compound stage back to its statement.
+fn pipeline_parser<'tokens, I, S>(
+    stage: S,
 ) -> impl Parser<'tokens, I, Pipeline, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, PipelineStage, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
-    command_parser()
+    stage
         .separated_by(just(Token::Pipe))
         .at_least(1)
         .collect::<Vec<_>>()
         .then(just(Token::Amp).or_not())
-        .map(|(commands, bg)| Pipeline {
-            commands,
+        .map(|(stages, bg)| Pipeline {
+            stages,
             background: bg.is_some(),
         })
         .labelled("pipeline")
         .boxed()
+}
+
+/// A single command as a pipeline stage.
+fn command_stage_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, PipelineStage, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    command_parser().map(PipelineStage::Command)
 }
 
 /// Command: `name args... [redirects...]`
@@ -2030,9 +2064,13 @@ where
 /// the parser). Shared by the top-level statement parser, `$()` bodies, and
 /// inline env-prefix bodies so the unwrap rule lives in one place.
 fn pipeline_into_stmt(p: Pipeline) -> Stmt {
-    if p.commands.len() == 1 && !p.background && p.commands[0].redirects.is_empty() {
-        match p.commands.into_iter().next() {
-            Some(cmd) => Stmt::Command(cmd),
+    if p.stages.len() == 1 && !p.background && p.stages[0].redirects().is_empty() {
+        match p.stages.into_iter().next() {
+            // A lone compound stage is just that statement — `for … done` on
+            // its own parses to `Stmt::For`, exactly as it did before the
+            // pipeline position learned to host one.
+            Some(PipelineStage::Compound(stmt)) => *stmt,
+            Some(PipelineStage::Command(cmd)) => Stmt::Command(cmd),
             None => Stmt::Empty, // unreachable (len checked) but safe
         }
     } else {
@@ -2066,7 +2104,10 @@ fn first_ambiguous_stdin(stmts: &[Stmt]) -> bool {
 fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Command(c) => command_has_ambiguous_stdin(c),
-        Stmt::Pipeline(p) => p.commands.iter().any(command_has_ambiguous_stdin),
+        Stmt::Pipeline(p) => p.stages.iter().any(|stage| match stage {
+            PipelineStage::Command(cmd) => command_has_ambiguous_stdin(cmd),
+            PipelineStage::Compound(inner) => stmt_has_ambiguous_stdin(inner),
+        }),
         Stmt::If(i) => {
             first_ambiguous_stdin(&i.then_branch)
                 || i.else_branch
@@ -3504,6 +3545,16 @@ mod tests {
     use super::*;
     use proptest::strategy::Strategy;
 
+    /// The commands of a command-only pipeline. Panics on a compound stage —
+    /// every assertion below is about a pipeline of plain commands, and a
+    /// compound appearing in one would be the bug, not a case to skip.
+    fn pipeline_commands(p: &Pipeline) -> Vec<&Command> {
+        p.stages
+            .iter()
+            .map(|stage| stage.as_command().expect("expected a command stage"))
+            .collect()
+    }
+
     /// Extract the single `Command` from a one-statement `$(cmd)` body.
     fn subst_cmd(expr: &Expr) -> &Command {
         match expr {
@@ -3573,7 +3624,7 @@ mod tests {
         assert!(result.is_ok());
         let program = result.expect("ok");
         match &program.statements[0] {
-            Stmt::Pipeline(p) => assert_eq!(p.commands.len(), 3),
+            Stmt::Pipeline(p) => assert_eq!(pipeline_commands(p).len(), 3),
             _ => panic!("expected Pipeline"),
         }
     }
@@ -3790,8 +3841,8 @@ mod tests {
         // Commands with redirects stay as Pipeline, not Command
         match &program.statements[0] {
             Stmt::Pipeline(p) => {
-                assert_eq!(p.commands.len(), 1);
-                let cmd = &p.commands[0];
+                assert_eq!(pipeline_commands(p).len(), 1);
+                let cmd = pipeline_commands(p)[0];
                 assert_eq!(cmd.redirects.len(), 1);
                 assert!(matches!(cmd.redirects[0].kind, RedirectKind::StdoutOverwrite));
             }
@@ -3837,7 +3888,7 @@ mod tests {
         assert!(result.is_ok());
         let program = result.expect("ok");
         match &program.statements[0] {
-            Stmt::Pipeline(p) => assert_eq!(p.commands.len(), 3),
+            Stmt::Pipeline(p) => assert_eq!(pipeline_commands(p).len(), 3),
             _ => panic!("expected Pipeline"),
         }
     }
@@ -4513,9 +4564,9 @@ mod tests {
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 let pipeline = subst_pipeline(&a.value);
-                assert_eq!(pipeline.commands.len(), 2);
-                assert_eq!(pipeline.commands[0].name, "cat");
-                assert_eq!(pipeline.commands[1].name, "grep");
+                assert_eq!(pipeline_commands(pipeline).len(), 2);
+                assert_eq!(pipeline_commands(pipeline)[0].name, "cat");
+                assert_eq!(pipeline_commands(pipeline)[1].name, "grep");
             }
             other => panic!("expected assignment, got {:?}", other),
         }
@@ -4531,8 +4582,8 @@ mod tests {
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 let pipeline = subst_pipeline(&a.value);
-                assert_eq!(pipeline.commands.len(), 1);
-                let cmd = &pipeline.commands[0];
+                assert_eq!(pipeline_commands(pipeline).len(), 1);
+                let cmd = pipeline_commands(pipeline)[0];
                 assert_eq!(cmd.name, "echo");
                 assert_eq!(cmd.redirects.len(), 1);
                 assert!(matches!(
@@ -4555,8 +4606,8 @@ mod tests {
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 let pipeline = subst_pipeline(&a.value);
-                assert_eq!(pipeline.commands.len(), 1);
-                let cmd = &pipeline.commands[0];
+                assert_eq!(pipeline_commands(pipeline).len(), 1);
+                let cmd = pipeline_commands(pipeline)[0];
                 assert_eq!(cmd.name, "echo");
                 assert_eq!(cmd.redirects.len(), 1);
                 assert!(
@@ -4593,9 +4644,9 @@ mod tests {
                 // `echo b > out.txt` carries a redirect → stays Stmt::Pipeline.
                 match &**right {
                     Stmt::Pipeline(p) => {
-                        assert_eq!(p.commands.len(), 1);
-                        assert_eq!(p.commands[0].name, "echo");
-                        assert_eq!(p.commands[0].redirects.len(), 1);
+                        assert_eq!(pipeline_commands(p).len(), 1);
+                        assert_eq!(pipeline_commands(p)[0].name, "echo");
+                        assert_eq!(pipeline_commands(p)[0].redirects.len(), 1);
                     }
                     other => panic!("right should be a redirect-bearing pipeline, got {:?}", other),
                 }
@@ -5068,8 +5119,8 @@ mod tests {
             other => panic!("expected assignment, got {:?}", other),
         };
         let pipeline = subst_pipeline(&value);
-        assert_eq!(pipeline.commands.len(), 3);
-        assert_eq!(pipeline.commands[2].name, "wc");
+        assert_eq!(pipeline_commands(pipeline).len(), 3);
+        assert_eq!(pipeline_commands(pipeline)[2].name, "wc");
     }
 
     #[test]
@@ -5181,7 +5232,7 @@ mod tests {
             Stmt::EnvScoped { assignments, body } => {
                 assert_eq!(assignments[0].name(), "FOO");
                 match body.as_ref() {
-                    Stmt::Pipeline(p) => assert_eq!(p.commands.len(), 2),
+                    Stmt::Pipeline(p) => assert_eq!(pipeline_commands(p).len(), 2),
                     other => panic!("expected pipeline body, got {other:?}"),
                 }
             }
@@ -5553,7 +5604,7 @@ long-running-task &
         match stmts[4] {
             Stmt::Pipeline(p) => {
                 assert!(p.background);
-                assert_eq!(p.commands[0].name, "long-running-task");
+                assert_eq!(pipeline_commands(p)[0].name, "long-running-task");
             }
             other => panic!("expected pipeline (background), got {:?}", other),
         }
@@ -5585,7 +5636,7 @@ fi
         match stmts[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name(), "RESULT");
-                assert_eq!(subst_pipeline(&a.value).commands.len(), 3);
+                assert_eq!(pipeline_commands(subst_pipeline(&a.value)).len(), 3);
             }
             other => panic!("expected assignment, got {:?}", other),
         }
@@ -5665,7 +5716,7 @@ cmd < "input.txt"
 
         match bg_stmt.unwrap() {
             Stmt::Pipeline(p) => {
-                assert_eq!(p.commands.len(), 5);
+                assert_eq!(pipeline_commands(p).len(), 5);
                 assert!(p.background);
             }
             _ => unreachable!(),

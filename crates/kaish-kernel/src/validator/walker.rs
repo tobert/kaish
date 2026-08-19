@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    Program, SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop,
+    PipelineStage, Program, SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment,
+    WhileLoop,
     Value,
 };
 use crate::kernel::{bind_glued_short_value, push_repeatable_value};
@@ -282,8 +283,14 @@ impl<'a> Validator<'a> {
     /// Validate a pipeline.
     fn validate_pipeline(&mut self, pipe: &Pipeline) {
         // Check for scatter without gather
-        let has_scatter = pipe.commands.iter().any(|c| c.name == "scatter");
-        let has_gather = pipe.commands.iter().any(|c| c.name == "gather");
+        let named = |name: &str| {
+            pipe.stages
+                .iter()
+                .filter_map(|s| s.as_command())
+                .any(|c| c.name == name)
+        };
+        let has_scatter = named("scatter");
+        let has_gather = named("gather");
         if has_scatter && !has_gather {
             self.issues.push(
                 ValidationIssue::error(
@@ -293,8 +300,11 @@ impl<'a> Validator<'a> {
             );
         }
 
-        for cmd in &pipe.commands {
-            self.validate_command(cmd);
+        for stage in &pipe.stages {
+            match stage {
+                PipelineStage::Command(cmd) => self.validate_command(cmd),
+                PipelineStage::Compound(stmt) => self.validate_stmt(stmt),
+            }
         }
     }
 
@@ -1330,7 +1340,7 @@ mod tests {
 
         let program = Program {
             statements: vec![Stmt::Pipeline(Pipeline {
-                commands: vec![
+                stages: vec![
                     Command { name: "seq".to_string(), args: vec![
                         Arg::Positional(Expr::Literal(Value::String("1".into()))),
                         Arg::Positional(Expr::Literal(Value::String("3".into()))),
@@ -1339,7 +1349,10 @@ mod tests {
                     Command { name: "echo".to_string(), args: vec![
                         Arg::Positional(Expr::Literal(Value::String("hi".into()))),
                     ], redirects: vec![] },
-                ],
+                ]
+                .into_iter()
+                .map(PipelineStage::Command)
+                .collect(),
                 background: false,
             })],
         };
@@ -1356,7 +1369,7 @@ mod tests {
 
         let program = Program {
             statements: vec![Stmt::Pipeline(Pipeline {
-                commands: vec![
+                stages: vec![
                     Command { name: "seq".to_string(), args: vec![
                         Arg::Positional(Expr::Literal(Value::String("1".into()))),
                         Arg::Positional(Expr::Literal(Value::String("3".into()))),
@@ -1366,7 +1379,10 @@ mod tests {
                         Arg::Positional(Expr::Literal(Value::String("hi".into()))),
                     ], redirects: vec![] },
                     Command { name: "gather".to_string(), args: vec![], redirects: vec![] },
-                ],
+                ]
+                .into_iter()
+                .map(PipelineStage::Command)
+                .collect(),
                 background: false,
             })],
         };

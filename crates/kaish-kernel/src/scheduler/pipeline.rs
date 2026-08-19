@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 use crate::arithmetic;
-use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
+use crate::ast::{Arg, Command, Expr, PipelineStage, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, ExecResult, OutputFormat, PathError};
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
@@ -308,6 +308,32 @@ async fn setup_stdin_redirects(
     Ok(())
 }
 
+/// Set up stdin redirects for a stage. A compound stage carries no redirects
+/// (`for … done < file` is not grammar kaish accepts), so this is a no-op for
+/// one.
+async fn setup_stdin_redirects_for(
+    stage: &PipelineStage,
+    ctx: &mut ExecContext,
+    dispatcher: &dyn CommandDispatcher,
+) -> Result<(), String> {
+    match stage {
+        PipelineStage::Command(cmd) => setup_stdin_redirects(cmd, ctx, dispatcher).await,
+        PipelineStage::Compound(_) => Ok(()),
+    }
+}
+
+/// Run one stage through the dispatcher.
+async fn dispatch_stage(
+    stage: &PipelineStage,
+    ctx: &mut ExecContext,
+    dispatcher: &dyn CommandDispatcher,
+) -> anyhow::Result<ExecResult> {
+    match stage {
+        PipelineStage::Command(cmd) => dispatcher.dispatch(cmd, ctx).await,
+        PipelineStage::Compound(stmt) => dispatcher.dispatch_stmt(stmt, ctx).await,
+    }
+}
+
 /// Runs pipelines by spawning tasks and connecting them via channels.
 #[derive(Clone)]
 pub struct PipelineRunner {
@@ -331,20 +357,39 @@ impl PipelineRunner {
     /// I/O routing: stdin redirects, piping between commands, and output redirects.
     pub async fn run(
         &self,
-        commands: &[Command],
+        stages: &[PipelineStage],
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        if commands.is_empty() {
+        if stages.is_empty() {
             return ExecResult::success("");
         }
 
-        // Check for scatter/gather pipeline
-        if let Some((scatter_idx, gather_idx)) = find_scatter_gather(commands) {
-            return self.run_scatter_gather(commands, scatter_idx, gather_idx, ctx, dispatcher).await;
+        // Check for scatter/gather pipeline. Scatter splits work across
+        // workers that each run a slice of the pipeline as plain commands, so
+        // a compound stage anywhere in that pipeline has no place to run.
+        // Refuse it by name rather than dropping the parallelism silently.
+        if let Some((scatter_idx, gather_idx)) = find_scatter_gather(stages) {
+            let commands: Vec<Command> = match stages
+                .iter()
+                .map(|s| s.as_command().cloned())
+                .collect::<Option<Vec<_>>>()
+            {
+                Some(commands) => commands,
+                None => {
+                    return ExecResult::failure(
+                        2,
+                        "scatter/gather cannot share a pipeline with an if/for/while/case \
+                         stage. Run the compound on its own and pipe its output in.",
+                    )
+                }
+            };
+            return self
+                .run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher)
+                .await;
         }
 
-        self.run_sequential(commands, ctx, dispatcher).await
+        self.run_stage_sequence(stages, ctx, dispatcher).await
     }
 
     /// Execute commands sequentially without scatter/gather detection.
@@ -357,17 +402,32 @@ impl PipelineRunner {
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        if commands.is_empty() {
+        let stages: Vec<PipelineStage> = commands
+            .iter()
+            .cloned()
+            .map(PipelineStage::Command)
+            .collect();
+        self.run_stage_sequence(&stages, ctx, dispatcher).await
+    }
+
+    /// Execute pipeline stages sequentially without scatter/gather detection.
+    async fn run_stage_sequence(
+        &self,
+        stages: &[PipelineStage],
+        ctx: &mut ExecContext,
+        dispatcher: &dyn CommandDispatcher,
+    ) -> ExecResult {
+        if stages.is_empty() {
             return ExecResult::success("");
         }
 
-        if commands.len() == 1 {
-            // Single command, no piping needed
-            return self.run_single(&commands[0], ctx, None, dispatcher).await;
+        if stages.len() == 1 {
+            // Single stage, no piping needed
+            return self.run_single(&stages[0], ctx, None, dispatcher).await;
         }
 
-        // Multi-command pipeline
-        self.run_pipeline(commands, ctx, dispatcher).await
+        // Multi-stage pipeline
+        self.run_pipeline(stages, ctx, dispatcher).await
     }
 
     /// Run a scatter/gather pipeline.
@@ -471,13 +531,13 @@ impl PipelineRunner {
     /// The runner handles stdin setup (redirects + pipeline) and output redirects.
     async fn run_single(
         &self,
-        cmd: &Command,
+        stage: &PipelineStage,
         ctx: &mut ExecContext,
         stdin: Option<Vec<u8>>,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Set up stdin from redirects (< file, <<heredoc)
-        if let Err(e) = setup_stdin_redirects(cmd, ctx, dispatcher).await {
+        if let Err(e) = setup_stdin_redirects_for(stage, ctx, dispatcher).await {
             return ExecResult::failure(1, e);
         }
 
@@ -490,13 +550,13 @@ impl PipelineRunner {
         ctx.pipeline_position = PipelinePosition::Only;
 
         // Execute via dispatcher (full resolution chain)
-        let result = match dispatcher.dispatch(cmd, ctx).await {
+        let result = match dispatch_stage(stage, ctx, dispatcher).await {
             Ok(result) => result,
             Err(e) => ExecResult::failure(1, e.to_string()),
         };
 
         // Apply post-execution redirects
-        apply_redirects(result, &cmd.redirects, ctx, dispatcher).await
+        apply_redirects(result, stage.redirects(), ctx, dispatcher).await
     }
 
     /// Run a multi-command pipeline concurrently.
@@ -508,13 +568,20 @@ impl PipelineRunner {
     /// - Early termination (e.g., `seq 1 1000000 | head -n 5`)
     ///
     /// Structured data (`stdin_data`) is passed via oneshot channels alongside pipes.
+    /// A compound stage (`for … done | wc -l`) is the one exception to the
+    /// streaming description above: it buffers. `dispatch_stmt` keeps the
+    /// stage's pipe writer here rather than handing it to the statement, so
+    /// the loop runs to completion and its whole output is written to the pipe
+    /// at once — `for … done | head -1` therefore runs every iteration where
+    /// bash would stop early. Streaming needs a writer threaded through nested
+    /// statement execution; see GH #369.
     async fn run_pipeline(
         &self,
-        commands: &[Command],
+        stages: &[PipelineStage],
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        let stage_count = commands.len();
+        let stage_count = stages.len();
         let last_idx = stage_count - 1;
 
         // Create N-1 pipe pairs connecting adjacent stages
@@ -548,9 +615,9 @@ impl PipelineRunner {
         // with a stage that never got it, silently dropping the live reader.
         let mut stage0_took_session_pipe_stdin = false;
 
-        for (i, cmd) in commands.iter().enumerate() {
+        for (i, stage) in stages.iter().enumerate() {
             let mut stage_ctx = ctx.child_for_pipeline();
-            let cmd = cmd.clone();
+            let stage = stage.clone();
 
             // Fork attached: each concurrent pipeline stage needs independent
             // mutable state, but cancellation should still cascade from the
@@ -561,7 +628,7 @@ impl PipelineRunner {
             // Set up stdin from redirects on the child context. A failure here
             // (e.g. `cmd < missing`) fails this stage; surface it from inside
             // the spawned task so the normal join/collection path reports it.
-            let stdin_setup = setup_stdin_redirects(&cmd, &mut stage_ctx, dispatcher).await;
+            let stdin_setup = setup_stdin_redirects_for(&stage, &mut stage_ctx, dispatcher).await;
 
             // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
             if i == 0 {
@@ -632,8 +699,8 @@ impl PipelineRunner {
                 // dropped structured data (`seq 1 3 | jq .` → text → parse error).
                 stage_ctx.stdin_data_rx = data_receiver;
 
-                // Execute the command
-                let mut result = match task_dispatcher.dispatch(&cmd, &mut stage_ctx).await {
+                // Execute the stage
+                let mut result = match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
                     Ok(result) => result,
                     Err(e) => ExecResult::failure(1, e.to_string()),
                 };
@@ -642,7 +709,7 @@ impl PipelineRunner {
                 // (forked) dispatcher — the borrowed `dispatcher` can't cross
                 // the spawn boundary, and `stage_ctx.dispatcher` is `None` on a
                 // bare kernel, which is exactly the GH #90 gap.
-                result = apply_redirects(result, &cmd.redirects, &stage_ctx, &*task_dispatcher).await;
+                result = apply_redirects(result, stage.redirects(), &stage_ctx, &*task_dispatcher).await;
 
                 // Flush buffered stderr to the kernel's stderr stream.
                 // This delivers error output from intermediate pipeline stages
@@ -1146,9 +1213,14 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
 ///
 /// Returns Some((scatter_index, gather_index)) if both are found with scatter before gather.
 /// Returns None if the pipeline doesn't have a valid scatter/gather pattern.
-fn find_scatter_gather(commands: &[Command]) -> Option<(usize, usize)> {
-    let scatter_idx = commands.iter().position(|c| c.name == "scatter")?;
-    let gather_idx = commands.iter().position(|c| c.name == "gather")?;
+fn find_scatter_gather(stages: &[PipelineStage]) -> Option<(usize, usize)> {
+    let named = |name: &str| {
+        stages
+            .iter()
+            .position(|s| s.as_command().is_some_and(|c| c.name == name))
+    };
+    let scatter_idx = named("scatter")?;
+    let gather_idx = named("gather")?;
 
     // Gather must come after scatter
     if gather_idx > scatter_idx {
@@ -1343,6 +1415,11 @@ mod tests {
         (runner, ctx, dispatcher)
     }
 
+    /// Wrap plain commands as pipeline stages.
+    fn stages(commands: impl IntoIterator<Item = Command>) -> Vec<PipelineStage> {
+        commands.into_iter().map(PipelineStage::Command).collect()
+    }
+
     fn make_cmd(name: &str, args: Vec<&str>) -> Command {
         Command {
             name: name.to_string(),
@@ -1356,7 +1433,7 @@ mod tests {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
         let cmd = make_cmd("echo", vec!["hello"]);
 
-        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert_eq!(result.text_out().trim(), "hello");
     }
@@ -1377,7 +1454,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([echo_cmd, grep_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert_eq!(result.text_out().trim(), "world");
     }
@@ -1394,7 +1471,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cat_cmd, grep_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.text_out().contains("hello"));
     }
@@ -1404,7 +1481,7 @@ mod tests {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
         let cmd = make_cmd("nonexistent", vec![]);
 
-        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cmd]), &mut ctx, &dispatcher).await;
         assert!(!result.ok());
         assert_eq!(result.code, 127);
         assert!(result.err.contains("not found"));
@@ -1425,7 +1502,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cat_cmd, grep_cmd]), &mut ctx, &dispatcher).await;
         // Exit code comes from last command (grep), not from cat
         assert!(!result.ok());
     }
@@ -1438,7 +1515,7 @@ mod tests {
         let echo_cmd = make_cmd("echo", vec!["hello"]);
         let cat_cmd = make_cmd("cat", vec![]);
 
-        let result = runner.run(&[echo_cmd, cat_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([echo_cmd, cat_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.text_out().contains("hello"));
     }
@@ -1446,7 +1523,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_pipeline() {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
-        let result = runner.run(&[], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
     }
 
@@ -1460,7 +1537,7 @@ mod tests {
             make_cmd("process", vec![]),
             make_cmd("gather", vec![]),
         ];
-        let result = find_scatter_gather(&commands);
+        let result = find_scatter_gather(&stages(commands));
         assert_eq!(result, Some((1, 3)));
     }
 
@@ -1470,7 +1547,7 @@ mod tests {
             make_cmd("echo", vec!["a"]),
             make_cmd("gather", vec![]),
         ];
-        let result = find_scatter_gather(&commands);
+        let result = find_scatter_gather(&stages(commands));
         assert!(result.is_none());
     }
 
@@ -1480,7 +1557,7 @@ mod tests {
             make_cmd("echo", vec!["a"]),
             make_cmd("scatter", vec![]),
         ];
-        let result = find_scatter_gather(&commands);
+        let result = find_scatter_gather(&stages(commands));
         assert!(result.is_none());
     }
 
@@ -1490,7 +1567,7 @@ mod tests {
             make_cmd("gather", vec![]),
             make_cmd("scatter", vec![]),
         ];
-        let result = find_scatter_gather(&commands);
+        let result = find_scatter_gather(&stages(commands));
         assert!(result.is_none());
     }
 
@@ -1512,7 +1589,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[split_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([split_cmd, scatter_cmd, process_cmd, gather_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with structured data should succeed: {}", result.err);
         // Each echo should output the item
         assert!(result.text_out().contains("a"));
@@ -1538,7 +1615,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([echo_cmd, scatter_cmd, process_cmd, gather_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
         assert!(result.text_out().trim().is_empty());
     }
@@ -1559,7 +1636,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([scatter_cmd, process_cmd, gather_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with structured stdin should succeed: {}", result.err);
         assert!(result.text_out().contains("x"));
         assert!(result.text_out().contains("y"));
@@ -1582,7 +1659,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([scatter_cmd, process_cmd, gather_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with JSON data should succeed: {}", result.err);
         assert!(result.text_out().contains("one"));
         assert!(result.text_out().contains("two"));
@@ -1612,7 +1689,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[split_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([split_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with post_gather should succeed: {}", result.err);
         assert!(result.text_out().contains("a"));
         assert!(!result.text_out().contains("b"));
@@ -1642,7 +1719,7 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([scatter_cmd, process_cmd, gather_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with custom var should succeed: {}", result.err);
         assert!(result.text_out().contains("test1"));
         assert!(result.text_out().contains("test2"));
@@ -1669,7 +1746,7 @@ mod tests {
 
         // Single command should route through backend
         let cmd = make_cmd("test-tool", vec!["arg1"]);
-        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cmd]), &mut ctx, &dispatcher).await;
 
         assert!(result.ok(), "Mock backend should return success");
         assert_eq!(call_count.load(Ordering::SeqCst), 1, "call_tool should be invoked once");
@@ -1694,7 +1771,7 @@ mod tests {
         let cmd2 = make_cmd("tool2", vec![]);
         let cmd3 = make_cmd("tool3", vec![]);
 
-        let result = runner.run(&[cmd1, cmd2, cmd3], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cmd1, cmd2, cmd3]), &mut ctx, &dispatcher).await;
 
         assert!(result.ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "call_tool should be invoked for each command");
@@ -2695,7 +2772,7 @@ mod tests {
             }],
         };
 
-        let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok());
         // echo produces no stderr, so this just validates the redirect doesn't break anything
         assert!(result.text_out().contains("hello"));
@@ -2721,7 +2798,7 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        let result = runner.run(&stages([echo_cmd, grep_cmd]), &mut ctx, &dispatcher).await;
         assert!(result.ok(), "result failed: code={}, err={}", result.code, result.err);
         assert!(result.text_out().contains("output"));
     }

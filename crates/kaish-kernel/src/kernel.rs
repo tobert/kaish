@@ -1657,7 +1657,7 @@ impl Kernel {
         };
 
         let pipeline = crate::ast::Pipeline {
-            commands: vec![command],
+            stages: vec![crate::ast::PipelineStage::Command(command)],
             background: false,
         };
         let work = async {
@@ -2377,7 +2377,7 @@ impl Kernel {
                 // Route single commands through execute_pipeline for a unified path.
                 // This ensures all commands go through the dispatcher chain.
                 let pipeline = crate::ast::Pipeline {
-                    commands: vec![cmd.clone()],
+                    stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
                     background: false,
                 };
                 let result = Box::pin(self.execute_pipeline(&pipeline)).await?;
@@ -3043,7 +3043,7 @@ impl Kernel {
 
     /// Execute a pipeline.
     async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
-        if pipeline.commands.is_empty() {
+        if pipeline.stages.is_empty() {
             return Ok(ExecResult::success(""));
         }
 
@@ -3107,7 +3107,7 @@ impl Kernel {
             ctx.stdin_data_rx = ec.stdin_data_rx.take();
         }
 
-        let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
+        let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
 
         // Post-hoc spill check + exit-3 remap (catches builtins and fast
         // external commands; also catches a ring overflow that already
@@ -3163,7 +3163,7 @@ impl Kernel {
     /// `Job::stdout_stream` for exactly which bytes reach them.
     ///
     /// Returns immediately with a job ID like "[1]".
-    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.commands.len()))]
+    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.stages.len()))]
     async fn execute_background(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
         use tokio::sync::oneshot;
 
@@ -3191,7 +3191,7 @@ impl Kernel {
         let jobs = self.jobs.clone();
         let fork = self.fork_for_background(cancel, job_id).await;
         let runner = self.runner.clone();
-        let commands = pipeline.commands.clone();
+        let stages = pipeline.stages.clone();
 
         // Snapshot the fork's exec_ctx for the spawned task. We have to do
         // this before tokio::spawn because the fork's exec_ctx is behind a
@@ -3211,7 +3211,7 @@ impl Kernel {
         tokio::spawn(crate::telemetry::bind_current_context(async move {
             // runner.run needs a &dyn CommandDispatcher; fork.as_ref()
             // gives us that (Kernel implements CommandDispatcher).
-            let mut result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
+            let mut result = runner.run(&stages, &mut bg_ctx, fork.as_ref()).await;
 
             // A background task is its own statement boundary. Pipeline stages
             // and command substitutions flush stderr to the fork's stderr
@@ -3253,9 +3253,18 @@ impl Kernel {
 
     /// Format a pipeline as a command string for display.
     fn format_pipeline(&self, pipeline: &crate::ast::Pipeline) -> String {
-        pipeline.commands
+        pipeline
+            .stages
             .iter()
-            .map(|cmd| {
+            .map(|stage| {
+                let cmd = match stage {
+                    crate::ast::PipelineStage::Command(cmd) => cmd,
+                    // A compound stage renders through the plan renderer,
+                    // which already knows every statement form.
+                    crate::ast::PipelineStage::Compound(stmt) => {
+                        return crate::ast::plan::render_stmt(stmt)
+                    }
+                };
                 let mut parts = vec![cmd.name.clone()];
                 for arg in &cmd.args {
                     match arg {
@@ -5756,6 +5765,89 @@ impl Kernel {
         Ok(())
     }
 
+    /// Run a compound statement that occupies a pipeline stage.
+    ///
+    /// Same ctx↔exec_ctx sync as `dispatch_command`, with one deliberate
+    /// difference: the stage's pipe writer stays behind with the runner. The
+    /// statement buffers — its whole output comes back in the `ExecResult` and
+    /// the runner writes it to the pipe once. Handing the writer down instead
+    /// would give it to whichever nested command grabbed the slot first, and
+    /// every later iteration would write nowhere.
+    ///
+    /// Streaming a stage would mean threading a writer through nested
+    /// statement execution, which is the shared-slot machinery GH #369 is
+    /// about. Revisit once the interpreter takes a ctx parameter.
+    async fn dispatch_statement(&self, stmt: &Stmt, ctx: &mut ExecContext) -> Result<ExecResult> {
+        if let Some(d) = self.dispatcher() {
+            ctx.dispatcher = Some(d);
+        }
+
+        // 1. Sync ctx → self internals
+        {
+            let mut scope = self.scope.write().await;
+            *scope = ctx.scope.clone();
+        }
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.cwd = ctx.cwd.clone();
+            ec.prev_cwd = ctx.prev_cwd.clone();
+            ec.stdin = ctx.stdin.take();
+            ec.stdin_data = ctx.stdin_data.take();
+            ec.stdin_data_rx = ctx.stdin_data_rx.take();
+            ec.pipe_stdin = ctx.pipe_stdin.take();
+            // The writer is NOT handed over — see this function's doc comment.
+            // Clearing the slot keeps a writer left by an earlier dispatch from
+            // catching the first command inside the loop body.
+            ec.pipe_stdout = None;
+            if let Some(stderr) = ctx.stderr.clone() {
+                ec.stderr = Some(stderr);
+            }
+            ec.aliases = ctx.aliases.clone();
+            ec.ignore_config = ctx.ignore_config.clone();
+            ec.output_limit = ctx.output_limit.clone();
+            ec.pipeline_position = ctx.pipeline_position;
+            ec.cancel = ctx.cancel.clone();
+            ec.watchdog = ctx.watchdog.clone();
+        }
+
+        // 2. Run the statement. A stage is its own execution unit, so a
+        // `break`, `continue`, `return`, or `exit` that reaches the top of the
+        // statement stops here rather than escaping into the enclosing script —
+        // the same boundary bash draws by running each stage in a subshell.
+        // Whatever output the statement produced before the signal still comes
+        // back and still reaches the pipe.
+        let result = match self.execute_stmt_flow(stmt).await? {
+            ControlFlow::Normal(result)
+            | ControlFlow::Break { result, .. }
+            | ControlFlow::Continue { result, .. }
+            | ControlFlow::Return { value: result } => result,
+            ControlFlow::Exit { code, mut result } => {
+                result.code = code;
+                result
+            }
+        };
+
+        // 3. Sync self → ctx
+        {
+            let scope = self.scope.read().await;
+            ctx.scope = scope.clone();
+        }
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ctx.cwd = ec.cwd.clone();
+            ctx.prev_cwd = ec.prev_cwd.clone();
+            ctx.aliases = ec.aliases.clone();
+            ctx.ignore_config = ec.ignore_config.clone();
+            ctx.output_limit = ec.output_limit.clone();
+            ctx.pipe_stdin = ec.pipe_stdin.take();
+            ctx.stdin = ec.stdin.take();
+            ctx.stdin_data = ec.stdin_data.take();
+            ctx.stdin_data_rx = ec.stdin_data_rx.take();
+        }
+
+        Ok(result)
+    }
+
     /// Dispatch a single command using the full resolution chain.
     ///
     /// This is the core of `CommandDispatcher` — it syncs state between the
@@ -6636,6 +6728,11 @@ impl CommandDispatcher for Kernel {
     /// user tools → builtins → .kai scripts → external commands → backend tools.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
         self.dispatch_command(cmd, ctx).await
+    }
+
+    /// Run a compound pipeline stage through the kernel's statement executor.
+    async fn dispatch_stmt(&self, stmt: &Stmt, ctx: &mut ExecContext) -> Result<ExecResult> {
+        self.dispatch_statement(stmt, ctx).await
     }
 
     /// Evaluate an expression through the kernel's async chain, including
