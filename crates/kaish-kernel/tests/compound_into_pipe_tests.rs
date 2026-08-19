@@ -265,3 +265,121 @@ async fn a_backgrounded_compound_still_produces_its_output(
         .expect("reading job stdout failed");
     assert_eq!(out.text_out(), expected, "`{body} &`");
 }
+
+/// A compound in the *true middle* — piped stdin AND piped stdout on the same
+/// stage. The earlier rows put a compound at index 0 or at the last index; this
+/// is the only position where the runner wires both ends of one stage.
+#[tokio::test]
+async fn a_compound_can_be_a_middle_stage() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("printf \"a\\nb\\n\" | while read l; do echo \"got $l\"; done | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "got a\ngot b\n");
+}
+
+/// Structured data reaching a compound stage. `seq` carries a JSON array on
+/// `.data` alongside its text, and the sideband is a oneshot the stage hands
+/// down — the exact machinery #368 was about. Text-only rows would not catch a
+/// regression in it.
+#[rstest]
+#[case::structured_into_a_compound("seq 1 3 | while read l; do echo \"n=$l\"; done", "n=1\nn=2\nn=3\n")]
+#[case::structured_through_a_compound("seq 1 3 | while read l; do echo $l; done | wc -l", "3\n")]
+#[tokio::test]
+async fn structured_data_reaches_a_compound_stage(#[case] source: &str, #[case] expected: &str) {
+    let kernel = kernel();
+    let result = kernel.execute(source).await.expect("execution failed");
+
+    assert_eq!(result.text_out(), expected, "`{source}`");
+}
+
+/// Control flow stops at the stage boundary — bash draws the same line with a
+/// subshell. Output produced before the signal still reaches the pipe.
+#[tokio::test]
+async fn continue_inside_a_compound_stage_skips_only_that_iteration() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("for f in a b c; do if [[ $f == b ]]; then continue; fi; echo $f; done | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "a\nc\n");
+}
+
+/// `exit` in a non-last stage stops that stage, not the script. In the last
+/// stage its code becomes the pipeline's, because the last stage always sets it.
+#[rstest]
+#[case::exit_in_a_non_last_stage("for f in a b; do exit 7; done | cat; echo after=$?", "after=0\n")]
+#[case::exit_in_the_last_stage("echo x | for f in a; do exit 7; done; echo after=$?", "after=7\n")]
+#[tokio::test]
+async fn exit_inside_a_compound_stage_stops_at_the_stage(
+    #[case] source: &str,
+    #[case] expected: &str,
+) {
+    let kernel = kernel();
+    let result = kernel.execute(source).await.expect("execution failed");
+
+    assert_eq!(result.text_out(), expected, "`{source}`");
+}
+
+/// `return` in a compound stage returns from the STAGE, not from the enclosing
+/// function — so the statement after the pipeline still runs. This is the row
+/// that fails if the stage boundary ever starts leaking control flow outward.
+#[tokio::test]
+async fn return_inside_a_compound_stage_does_not_return_from_the_function() {
+    let kernel = kernel();
+    let result = kernel
+        .execute("f() { for x in 1 2; do echo $x; return; done | cat; echo after; }; f")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "1\nafter\n");
+}
+
+/// The direct witnesses that the buffering seam holds. Each of these re-enters
+/// the interpreter from inside a compound stage — the paths that would steal
+/// the stage's pipe writer if it had been handed down instead of kept with the
+/// runner. A stolen writer shows up as missing output, so an empty result here
+/// is the failure.
+#[rstest]
+#[case::timeout_redispatch("for f in a b; do timeout 5 echo $f; done | cat", "a\nb\n")]
+#[case::user_tool_body("g() { echo \"g:$1\"; }; for f in a b; do g $f; done | cat", "g:a\ng:b\n")]
+#[case::nested_pipeline("for f in a b; do echo $f | cat; done | cat", "a\nb\n")]
+#[case::command_substitution("for f in a b; do echo $(echo $f); done | cat", "a\nb\n")]
+#[tokio::test]
+async fn a_nested_dispatch_inside_a_compound_stage_cannot_steal_the_pipe(
+    #[case] source: &str,
+    #[case] expected: &str,
+) {
+    let kernel = kernel();
+    let result = kernel.execute(source).await.expect("execution failed");
+
+    assert_eq!(result.text_out(), expected, "`{source}`");
+}
+
+/// `source` is the fourth re-entry path, and the one that needs a real file.
+/// It re-runs a whole statement list inside the compound stage, so it is the
+/// closest analogue to the shape that broke in #367.
+#[tokio::test]
+async fn a_sourced_script_inside_a_compound_stage_cannot_steal_the_pipe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let kernel = Kernel::new(
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_trash(false),
+    )
+    .expect("failed to create kernel");
+
+    kernel
+        .execute("echo 'echo from-script' > inner.kai")
+        .await
+        .expect("writing the fixture failed");
+    let result = kernel
+        .execute("for f in a b; do source inner.kai; done | cat")
+        .await
+        .expect("execution failed");
+
+    assert_eq!(result.text_out(), "from-script\nfrom-script\n");
+}

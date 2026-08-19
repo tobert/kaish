@@ -2260,10 +2260,11 @@ where
 ///
 /// Lets keywords serve as the *key* of a `key=value` argv assignment, so
 /// `dd if=/dev/urandom` works (`if` is `Token::If`, not an `Ident`). Safe
-/// because: statement-level `if`/`for`/… are decided before arg parsing (their
-/// productions precede `pipeline_parser`), `command_name` never accepts these
-/// tokens, and the `key=value` rule requires the key span-adjacent to `=` — a
-/// real `if <cond>` has a space and never matches. See docs/binary-data.md.
+/// because: a statement-level `if`/`for`/… is decided before arg parsing (the
+/// compound parsers are the pipeline's first stage alternative, tried ahead of
+/// `command_parser`), `command_name` never accepts these tokens, and the
+/// `key=value` rule requires the key span-adjacent to `=` — a real `if <cond>`
+/// has a space and never matches. See docs/binary-data.md.
 fn keyword_word<'tokens, I>(
 ) -> impl Parser<'tokens, I, String, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
