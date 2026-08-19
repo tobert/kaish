@@ -129,7 +129,7 @@ pub enum Concept {
 /// lives in the `Foundations` concept and is rendered through these same variants.
 pub enum Variant {
     Rule,      // terse imperative ("use --json for structured output")
-    Example,   // worked snippet (`ls --json | jq '.[].name'`)
+    Example,   // worked snippet (`ls -l --json | jq -r '.[].NAME'`)
     Contrast,  // how bash differs ("bash makes you parse `ls` text")
     Rationale, // why kaish chose this ("every builtin emits structured data")
 }

@@ -64,7 +64,7 @@ impl Concept {
 pub enum Variant {
     /// Terse imperative ("use `--json` for structured output").
     Rule,
-    /// Worked snippet (`ls --json | jq '.[].name'`).
+    /// Worked snippet (`ls -l --json | jq -r '.[].NAME'`).
     Example,
     /// How bash differs ("bash makes you parse `ls` text").
     Contrast,

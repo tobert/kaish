@@ -128,6 +128,14 @@ breaking entries are marked **BREAKING**.
   guide's history lives in git.
 
 ### Removed
+- **BREAKING (embedders):** seven internal helpers are no longer public —
+  `validator::ScopeTracker`, `ast::spread_value_kind`,
+  `ast::spread_non_list_message`, and the plan walk's `plan_statement`,
+  `render_stmt`, `render_command`, and `render_expr`. They are kernel
+  machinery that was reachable by accident, not API. The plan surface an
+  embedder needs is unchanged: `plan_program`, `planned_commands`,
+  `strip_confirm_tokens` (what a `PlanDigest` digests over), and `redact_keys`
+  all stay public.
 - **BREAKING (embedders):** the `LexerError::AmbiguousBoolean` and
   `AmbiguousBooleanLike` variants are gone — `LexerError` is public and not
   `#[non_exhaustive]`, so an embedder matching it exhaustively must drop the arms.

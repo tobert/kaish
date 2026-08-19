@@ -5,7 +5,7 @@
 //! embedder judges what was asked, not what it resolved to, and the
 //! substitution that would resolve them has not run.
 //!
-//! Two products, one AST walk each: [`render_stmt`] produces the text, and
+//! Two products, one AST walk each: `render_stmt` produces the text, and
 //! [`planned_commands`] produces one [`PlannedCommand`] per command the
 //! statement contains — control-structure bodies, `if` conditions, and
 //! command substitutions included, because every one of them is a command
@@ -115,7 +115,7 @@ pub fn plan_program(
 /// Build the plan for one top-level statement. Every value is
 /// [`PlannedValue::Plain`] except a presented confirm key, which the kernel
 /// redacts unconditionally.
-pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
+pub(crate) fn plan_statement(stmt: &Stmt) -> StatementPlan {
     let collected = collect(stmt);
     // Free = read and never written in-statement. A name that is both read
     // and written lands in `bound` — the safe direction: an embedder that
@@ -333,7 +333,7 @@ fn collect<'a>(stmt: &'a Stmt) -> Collected<'a> {
 /// This is the **same walk** that numbers them, not a second one that agrees
 /// with it — `heredoc_targets(stmt)[i]` is the target of the heredoc the plan
 /// published with `index == i`, by construction rather than by test.
-pub fn heredoc_targets(stmt: &Stmt) -> Vec<&Expr> {
+pub(crate) fn heredoc_targets(stmt: &Stmt) -> Vec<&Expr> {
     collect(stmt).heredoc_targets
 }
 
@@ -553,7 +553,7 @@ fn collect_test<'a>(test: &'a TestExpr, background: bool, out: &mut Collected<'a
 // ───────────────────────── Rendering ─────────────────────────
 
 /// Render one statement back to shell text, unexpanded.
-pub fn render_stmt(stmt: &Stmt) -> String {
+pub(crate) fn render_stmt(stmt: &Stmt) -> String {
     match stmt {
         Stmt::Assignment(a) => render_assignment(a),
         Stmt::Command(cmd) => render_command(cmd),
@@ -608,7 +608,7 @@ fn render_assignment(a: &Assignment) -> String {
 }
 
 /// Render one command: argv0, every argument form, and every redirect.
-pub fn render_command(cmd: &Command) -> String {
+pub(crate) fn render_command(cmd: &Command) -> String {
     let mut parts = vec![cmd.name.clone()];
     for arg in &cmd.args {
         parts.push(plan_arg(arg).0);
@@ -829,7 +829,7 @@ fn render_tooldef(def: &ToolDef) -> String {
 
 /// Render one expression back to shell text, unexpanded: a variable
 /// reference stays `${NAME}` and a substitution stays `$(…)`.
-pub fn render_expr(expr: &Expr) -> String {
+pub(crate) fn render_expr(expr: &Expr) -> String {
     match expr {
         Expr::Literal(v) => render_literal(v),
         Expr::VarRef(path) => format!("${{{}}}", render_varpath(path)),
