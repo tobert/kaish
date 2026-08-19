@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-19
+
 ### Added
 - **A compound statement can be a pipeline stage, in any position** —
   `for f in a b; do echo $f; done | grep a`, `printf "a\nb\n" | while read l; do
@@ -86,9 +88,22 @@ breaking entries are marked **BREAKING**.
   an agent reading a failure gets what is wrong and what to write next.
 - **The parser graph is built once per thread instead of once per `parse()`** — an
   embedder's `execute()` round trip drops 63% of its allocations and 77% of its bytes.
+- **BREAKING (embedders):** `ast::RedirectKind::HereDoc` carries a
+  `HereDocMeta` payload (delimiter, `literal`, `strip_tabs`, verbatim body,
+  `body_offset`) — a match arm on the unit variant becomes `HereDoc(_)`.
+- **BREAKING (embedders):** `LexerError` gained a `HashInsideWord` variant, and
+  `lexer::HereDocData` gained `source_body` and `delimiter` fields — neither
+  type is `#[non_exhaustive]`, so an exhaustive match or a struct literal
+  needs updating.
+- **BREAKING (embedders):** `IssueCode` gained `UnreadableAssignmentTarget`
+  (E018), `InvisibleAssignmentTarget` (E019), and `MixedScriptName` (W007).
+  The enum is not `#[non_exhaustive]`, so an exhaustive match needs three arms.
 - **BREAKING (embedders):** a heredoc's `PlannedRedirect.target` is now its
   delimiter word (`'PY'`), not a rendering of its body — the rendering spelled
   every delimiter `EOF`, and the body is `PlannedCommand.heredocs`'s job.
+- **BREAKING (embedders):** `ExecContext::read_stdin_to_bytes` returns
+  `Result<Option<Vec<u8>>, String>` — a broken pipe is `Err`, never `Ok(None)`,
+  so an out-of-tree tool must handle the error arm.
 - **BREAKING (embedders):** `validator::Validator::new` takes a third argument,
   `catalog: &[ToolSchema]` — the validator reads schemas from the kernel's
   catalog instead of rebuilding each one. Pass `ExecContext.tool_schemas`, or
@@ -293,14 +308,18 @@ breaking entries are marked **BREAKING**.
   as argv keys — `in=a`, `do=b`); the phantom frame then absorbed the
   substitution's real closing `)`. `case` is now excluded exactly like its
   keyword siblings when the next token is `=`.
+- **BREAKING: a comment glued to a closing `)`, `]`, or `}` is a lexer
+  error** — `case $x in a)# note` and `[[ -f f ]]# note` need a space before
+  the `#`, where bash starts a comment. The lexer cannot tell a case pattern's
+  `)` from a substitution's, and guessing would drop the rest of the line.
 - **Unquoted barewords and paths accept any non-ASCII character** —
   `echo café`, `ls /tmp/日本語`, and `cd ~/文書` were lexer errors before this;
   every bareword/path rule now matches bash's "not whitespace, not an
   operator" word rule instead of an ASCII-only character class.
-- **Flag names and `$name` variable references stay ASCII-only** — `--café`
-  and `$café` are still loud lexer errors (matching bash's name rule), now
+- **Flag names stay ASCII-only** — `--café` is still a loud lexer error,
   reported as a dedicated diagnostic instead of silently splitting into a
-  truncated flag/name plus a stray bareword argument.
+  truncated flag plus a stray bareword argument. `$café` is *not* an error:
+  a later change in this release made variable names accept any script.
 - **`set -o <name>` / `set +o <name>` on an unrecognized name exits 1 and
   names the valid set** (`glob`, `output-limit[=SIZE]`, `trash`) instead of
   silently no-opping — `set -o pipefail` used to exit 0 and leave an agent
@@ -2128,7 +2147,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/tobert/kaish/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/tobert/kaish/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/tobert/kaish/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/tobert/kaish/compare/v0.12.0...v0.13.0

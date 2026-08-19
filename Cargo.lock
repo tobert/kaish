@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-client"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-glob"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1039,14 +1039,14 @@ dependencies = [
 
 [[package]]
 name = "kaish-help"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "kaish-types",
 ]
 
 [[package]]
 name = "kaish-kernel"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-repl"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-tool-api"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-tools-host"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-types"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "base64",
  "schemars",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-vfs"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-wasi"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "kaish-kernel",
  "kaish-types",

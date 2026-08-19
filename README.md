@@ -165,7 +165,7 @@ Construct a `Kernel`, point it at a sandbox root, call `execute()`:
 
 ```toml
 [dependencies]
-kaish-kernel = "0.14"
+kaish-kernel = "0.15"
 tokio = { version = "1", features = ["full"] }
 ```
 
