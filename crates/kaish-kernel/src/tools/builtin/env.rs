@@ -16,16 +16,24 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// Env tool: print environment or run command with modified environment.
 pub struct Env;
 
 /// clap-derived argv layer for env.
 ///
-/// `args.named` and `args.flags` are read directly for VAR=value & -0/-i/-u
-/// because env's positional layer is (env-overrides, command, child-argv) —
-/// can't be reflected as named clap positionals cleanly.
+/// env's positional layer is (env-overrides, command, child-argv), which can't
+/// be reflected as named clap positionals cleanly, so `execute` reads the raw
+/// `ToolArgs` directly: `-0`/`-i`/`-u` off `flags`/`named`, and every
+/// `VAR=value` override off `positional` — `env` is not on
+/// `WORD_ASSIGN_BUILTINS`, so the runtime binder stringifies a `key=value` word
+/// into a positional rather than into `named`.
+///
+/// `Tool::validate` sees a different decomposition: the validation binder
+/// routes every `key=value` into `named` regardless of that allowlist. The
+/// check below has to cover both shapes for that reason.
 #[derive(Parser, Debug)]
 #[command(name = "env", about = "Print environment variables or run command with modified environment")]
 struct EnvArgs {
@@ -70,6 +78,47 @@ impl Tool for Env {
                 ("Run with modified env", "env MY_VAR=hello command"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let schema = self.schema();
+        let mut issues = validate_against_schema(args, &schema);
+
+        // `env` names variables in argv words, so no assignment reaches the
+        // walker and the check has to live here.
+        //
+        // Two shapes have to be covered, because the validation binder and the
+        // runtime binder decompose `env` differently. An unquoted `VAR=value`
+        // reaches validate in `named`, alongside env's own flags — so skip the
+        // names the schema declares and judge the rest.
+        let own: std::collections::HashSet<&str> =
+            schema.params.iter().map(|p| p.name.as_str()).collect();
+        issues.extend(
+            args.named
+                .keys()
+                .filter(|key| !own.contains(key.as_str()))
+                .filter_map(|key| super::mixed_script_issue(key)),
+        );
+
+        // A quoted `'VAR=value'` stays one positional word in both binders, and
+        // `execute` applies it as an override all the same — so judging only
+        // `named` would set a variable nobody warned about. Stop at the first
+        // word without `=`, exactly where `execute` stops: past that is the
+        // command, and its arguments are not env's to name.
+        for word in &args.positional {
+            let Value::String(word) = word else { break };
+            let Some(eq) = word.find('=') else { break };
+            issues.extend(super::mixed_script_issue(&word[..eq]));
+        }
+
+        // `-u VAR`, repeatable: the names are the flag's value, not its key.
+        // Read them the way `execute` reads them, so a spelling the run would
+        // act on is a spelling this judges.
+        if let Ok(unset) = collect_unset_vars(args) {
+            issues.extend(unset.iter().filter_map(|name| super::mixed_script_issue(name)));
+        }
+
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
