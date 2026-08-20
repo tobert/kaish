@@ -24,9 +24,16 @@ pub struct Env;
 
 /// clap-derived argv layer for env.
 ///
-/// `args.named` and `args.flags` are read directly for VAR=value & -0/-i/-u
-/// because env's positional layer is (env-overrides, command, child-argv) —
-/// can't be reflected as named clap positionals cleanly.
+/// env's positional layer is (env-overrides, command, child-argv), which can't
+/// be reflected as named clap positionals cleanly, so `execute` reads the raw
+/// `ToolArgs` directly: `-0`/`-i`/`-u` off `flags`/`named`, and every
+/// `VAR=value` override off `positional` — `env` is not on
+/// `WORD_ASSIGN_BUILTINS`, so the runtime binder stringifies a `key=value` word
+/// into a positional rather than into `named`.
+///
+/// `Tool::validate` sees a different decomposition: the validation binder
+/// routes every `key=value` into `named` regardless of that allowlist. The
+/// check below has to cover both shapes for that reason.
 #[derive(Parser, Debug)]
 #[command(name = "env", about = "Print environment variables or run command with modified environment")]
 struct EnvArgs {
@@ -80,8 +87,10 @@ impl Tool for Env {
         // `env` names variables in argv words, so no assignment reaches the
         // walker and the check has to live here.
         //
-        // A `VAR=value` word binds into `named`, alongside env's own flags —
-        // so skip the names the schema declares and judge the rest.
+        // Two shapes have to be covered, because the validation binder and the
+        // runtime binder decompose `env` differently. An unquoted `VAR=value`
+        // reaches validate in `named`, alongside env's own flags — so skip the
+        // names the schema declares and judge the rest.
         let own: std::collections::HashSet<&str> =
             schema.params.iter().map(|p| p.name.as_str()).collect();
         issues.extend(
@@ -90,6 +99,17 @@ impl Tool for Env {
                 .filter(|key| !own.contains(key.as_str()))
                 .filter_map(|key| super::mixed_script_issue(key)),
         );
+
+        // A quoted `'VAR=value'` stays one positional word in both binders, and
+        // `execute` applies it as an override all the same — so judging only
+        // `named` would set a variable nobody warned about. Stop at the first
+        // word without `=`, exactly where `execute` stops: past that is the
+        // command, and its arguments are not env's to name.
+        for word in &args.positional {
+            let Value::String(word) = word else { break };
+            let Some(eq) = word.find('=') else { break };
+            issues.extend(super::mixed_script_issue(&word[..eq]));
+        }
 
         // `-u VAR`, repeatable: the names are the flag's value, not its key.
         // Read them the way `execute` reads them, so a spelling the run would

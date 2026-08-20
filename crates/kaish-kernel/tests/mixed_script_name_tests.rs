@@ -84,6 +84,7 @@ async fn single_script_names_are_quiet_at_every_door() {
         "for 名前 in a; do echo hi; done",
         "env café=ok",
         "env -u café",
+        "env 'café=ok'",
         "unset café",
         "xs=[a]; push xs b",
         "read v",
@@ -129,6 +130,10 @@ async fn the_runtime_name_doors_warn_too() {
         // assignment to judge — the check has to live in env's own validate.
         format!("env {name}=x"),
         format!("env -u {name}"),
+        // Quoted, so it stays one positional word in both binders — and
+        // `execute` still applies it as an override, so it still has to be
+        // judged. This spelling was silent until it was tested.
+        format!("env '{name}=/bin'"),
     ] {
         let (_, _, err) = run(&source).await;
         assert!(err.contains("W007"), "{source} should warn: {err:?}");
@@ -187,6 +192,6 @@ async fn env_also_judges_a_command_argument_that_looks_like_an_assignment() {
     let (_, _, quiet) = run(&format!("env FOO=1 mycmd '{name}=2'")).await;
     assert!(
         !quiet.contains("W007"),
-        "a quoted argument stays positional and is not judged: {quiet:?}"
+        "a quoted argument after the command is not judged: {quiet:?}"
     );
 }
