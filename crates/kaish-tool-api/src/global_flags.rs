@@ -66,9 +66,10 @@ impl GlobalFlags {
 /// raw_argv ones — a real regression this comment exists to prevent
 /// reintroducing.
 ///
-/// `--json=VALUE`'s truthiness mirrors `ToolArgs::has_flag`'s String-value
-/// rule exactly (truthy unless empty, `"false"`, or `"0"`), so the two paths
-/// agree on what counts as "on".
+/// `--json=VALUE`'s truthiness comes from
+/// [`global_flag_value_is_truthy`](kaish_types::global_flag_value_is_truthy),
+/// the one rule the typed and verbatim binders also ask, so every path agrees
+/// on what counts as "on".
 fn positional_json_flag(args: &ToolArgs) -> bool {
     args.positional
         .iter()
@@ -78,7 +79,10 @@ fn positional_json_flag(args: &ToolArgs) -> bool {
             if s == "--json" {
                 return true;
             }
-            s.strip_prefix("--json=")
-                .is_some_and(|val| !val.is_empty() && val != "false" && val != "0")
+            // raw_argv keeps every word as written, so the value arrives as
+            // text and is judged as text.
+            s.strip_prefix("--json=").is_some_and(|val| {
+                kaish_types::global_flag_value_is_truthy(&Value::String(val.to_string()))
+            })
         })
 }

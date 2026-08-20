@@ -25,7 +25,11 @@ Builtins return structured data. Use `--json` for machine-readable output:
 ls --json                # JSON array of file nodes
 kaish-vars --json        # JSON array of {NAME, VALUE} objects
 ps --json                # JSON array of process info
+ls --json=$WANT_JSON     # switch it from a variable
 ```
+
+`--json=VALUE` is off for `0`, `false`, and an empty value; on for anything
+else. Every builtin reads it the same way.
 
 ## Quick Examples
 
