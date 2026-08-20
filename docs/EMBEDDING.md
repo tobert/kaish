@@ -945,9 +945,8 @@ separately, wherever it sits.
 
 `plan` executes nothing, so a hook can judge a statement it has not run.
 
-`index` is the statement's position in the **parsed** program, counted before
-empty statements are dropped — a comment or blank line leaves a gap, so
-filtering and then indexing by position reads the wrong statement.
+`index` is the statement's position in the `statements` list, counted from 0
+with no gaps, so indexing the list by it reads the statement it names.
 
 **Check the binary's version before you trust the contract.** "Always a JSON
 object" is a promise about a kaish that has `--plan`; an older one prints

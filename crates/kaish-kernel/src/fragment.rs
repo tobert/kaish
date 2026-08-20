@@ -98,17 +98,22 @@ pub fn expand_fragment(
     scope: &[(String, Value)],
 ) -> Result<Expansion, FragmentError> {
     let program = parser::parse(source).map_err(FragmentError::Parse)?;
-    // Index the statements as parsed, because that is the position
-    // `plan_program` publishes — it numbers before dropping the empty ones, so
-    // a blank line or a comment shifts a filtered list out from under every
-    // address after it. An empty statement carries no heredoc and falls out as
-    // `NoSuchHeredoc` below.
-    let stmt = program
+    // Drop the empty statements before indexing, because that is what
+    // `plan_program` numbers. Both sides apply the same rule — an empty
+    // statement does not exist at this surface — so an address published by one
+    // resolves to the same statement in the other. Keeping the two rules
+    // different is how an address comes to name a different body than the one
+    // it was read from.
+    let planned: Vec<&Stmt> = program
         .statements
+        .iter()
+        .filter(|stmt| !matches!(stmt, Stmt::Empty))
+        .collect();
+    let stmt = *planned
         .get(addr.statement)
         .ok_or(FragmentError::NoSuchStatement {
             asked: addr.statement,
-            statements: program.statements.len(),
+            statements: planned.len(),
         })?;
 
     // The plan's own walk, so the index that resolves here is the index the

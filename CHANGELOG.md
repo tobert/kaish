@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: plan `index` is now the position in the `statements` list**, with
+  no gaps — `statements[i].index == i`, always. It previously counted dropped
+  empty statements, so any source opening with a comment or a blank line
+  numbered every statement one too high while the list stayed dense. The gap
+  existed to line up with `Capture::Statement`, approval-ledger vocabulary that
+  was removed before 0.14.0, so it had no remaining consumer. A consumer that
+  read `index` as a list position was already right and needs no change; one
+  that compensated for the offset must stop.
+
 ### Added
 - **`plan` builtin — the statement projection, reachable from a kaish body.**
   `plan '<statement>' --json` emits the same object `kaish --plan` does, byte

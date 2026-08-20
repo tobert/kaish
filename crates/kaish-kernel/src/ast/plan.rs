@@ -54,17 +54,16 @@ pub struct StatementPlan {
     pub presented_keys: Vec<String>,
 }
 
-/// One statement of a planned program: its [`Plan`] and where it sits in the
-/// parsed source.
+/// One statement of a planned program: its [`Plan`] and where it sits among
+/// the planned statements.
 ///
-/// `index` is the statement's position in the parsed program, so an embedder
+/// `index` is the statement's position in the returned list, so an embedder
 /// can name which statement it is talking about.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlannedStatement {
-    /// The statement's position in the parsed program. Counted **before**
-    /// empty statements are dropped, so a comment or a blank line leaves a
-    /// gap — a consumer that filters and then indexes by this number reads
-    /// the wrong statement.
+    /// The statement's position in the returned list, counted from 0 with no
+    /// gaps: `plans[i].index == i`, always. Indexing the list by this number
+    /// reads the statement it names.
     pub index: usize,
     /// What the statement was asked to run, with every credential redacted.
     pub plan: Plan,
@@ -101,10 +100,12 @@ pub fn plan_program(
     Ok(program
         .statements
         .iter()
+        // An empty statement runs nothing and plans nothing. Dropping it
+        // BEFORE numbering is what keeps `index` equal to the position in the
+        // returned list: numbering first left a gap whenever the source opened
+        // with a comment or a blank line, which is most scripts.
+        .filter(|stmt| !matches!(stmt, Stmt::Empty))
         .enumerate()
-        // An empty statement runs nothing and plans nothing; skipping it here
-        // is why `index` is carried explicitly instead of implied by position.
-        .filter(|(_, stmt)| !matches!(stmt, Stmt::Empty))
         .map(|(index, stmt)| PlannedStatement {
             index,
             plan: plan_statement(stmt).plan,
@@ -1249,26 +1250,48 @@ mod tests {
 
     // ── plan_program: the program-level surface ──
 
+    /// `index` is the position in the returned list, so indexing the list by it
+    /// reads the statement it names.
+    ///
+    /// This used to preserve the gap left by a dropped `Stmt::Empty`, to line
+    /// up with `Capture::Statement`'s index. That type was approval-ledger
+    /// vocabulary; it was cut in 2481a3f3 and the ledger was deleted whole in
+    /// 0c36dba1, before 0.14.0. The correspondence had no remaining consumer,
+    /// and what it cost was an off-by-one in every script that opens with a
+    /// comment.
     #[test]
-    fn plan_program_indexes_agree_with_the_parsed_program() {
+    fn plan_program_indexes_are_dense_and_ordered() {
         let source = "echo one\n\n# a comment\necho two && echo three\nX=5";
         let program = parse(source).expect("the fixture parses");
-        let expected: Vec<(usize, String)> = program
+        let expected: Vec<String> = program
             .statements
             .iter()
-            .enumerate()
-            .filter(|(_, s)| !matches!(s, Stmt::Empty))
-            .map(|(i, s)| (i, s.kind_name().to_string()))
+            .filter(|s| !matches!(s, Stmt::Empty))
+            .map(|s| s.kind_name().to_string())
             .collect();
         let plans = plan_program(source).expect("the fixture parses");
         assert_eq!(
-            plans
-                .iter()
-                .map(|p| (p.index, p.plan.statement_kind.clone()))
-                .collect::<Vec<_>>(),
+            plans.iter().map(|p| p.plan.statement_kind.clone()).collect::<Vec<_>>(),
             expected,
-            "an index here must be usable against Capture::Statement's index"
+            "every non-empty statement is planned, in source order"
         );
+        for (position, planned) in plans.iter().enumerate() {
+            assert_eq!(
+                planned.index, position,
+                "index must be the position in the returned list"
+            );
+        }
+    }
+
+    /// The shape that made the old numbering wrong. A leading comment parses to
+    /// a `Stmt::Empty` the plan drops, and numbering before the drop started
+    /// every later statement one too high.
+    #[test]
+    fn a_leading_comment_does_not_shift_the_indexes() {
+        let plans = plan_program("# lead\necho a\necho b").expect("parses");
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].index, 0, "a leading comment must not shift index");
+        assert_eq!(plans[1].index, 1);
     }
 
     #[test]

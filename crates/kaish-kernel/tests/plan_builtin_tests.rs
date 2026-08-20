@@ -118,3 +118,22 @@ async fn plan_reports_the_variables_a_statement_reads_and_writes() {
         .expect("free_variables");
     assert!(free.iter().any(|v| v == "d"), "the echo reads d: {doc}");
 }
+
+/// The index a hook reads is the position in the list it got.
+///
+/// A script that opens with a comment is the common case, and it used to be
+/// exactly the case where `index` and list position disagreed — so a hook that
+/// reported "statement 2" pointed at statement 1.
+#[tokio::test]
+async fn indexes_match_list_position_even_with_a_leading_comment() {
+    let doc = plan_json("plan '# lead\necho a\necho b' --json").await;
+    let statements = doc["statements"].as_array().expect("statements");
+    assert_eq!(statements.len(), 2, "the comment is not a statement: {doc}");
+    for (position, statement) in statements.iter().enumerate() {
+        assert_eq!(
+            statement["index"].as_u64(),
+            Some(position as u64),
+            "index must equal list position: {doc}"
+        );
+    }
+}

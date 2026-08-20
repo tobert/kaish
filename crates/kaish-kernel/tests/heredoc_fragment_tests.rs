@@ -486,10 +486,11 @@ fn a_planned_redirect_names_the_real_delimiter() {
 
 // ───────── The address must mean the same thing at both ends ──────────
 
-/// `plan_program` numbers statements **before** dropping the empty ones, so a
-/// comment or a blank line leaves a gap in the published indices. A resolver
-/// that filtered first would read every address after the gap off by one and
-/// return a different statement's body, saying nothing.
+/// A comment or a blank line is not a statement at this surface. `plan_program`
+/// drops the empty ones **before** numbering, and `expand_fragment` drops them
+/// before indexing — one rule on both sides, so an address read from a plan
+/// resolves to the body it was read from. A version where only one side
+/// filtered would return a different statement's body, saying nothing.
 ///
 /// A leading comment is the most ordinary thing in a script, which is what
 /// makes this worth a test of its own.
@@ -512,8 +513,9 @@ fn a_leading_comment_does_not_shift_the_addresses() {
         }))
         .collect();
 
-    // The published index skips 0: that is the comment.
-    assert_eq!(addressed[0].0, 1);
+    // The published index is the position among planned statements, so the
+    // leading comment does not shift it.
+    assert_eq!(addressed[0].0, 0);
     for (statement, published, expanded) in addressed {
         assert_eq!(
             expanded,
