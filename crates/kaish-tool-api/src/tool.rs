@@ -170,8 +170,13 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
 ///
 /// External commands (no schema) bypass clap entirely and the kernel
 /// doesn't touch their argv — `cargo --json` and similar work as
-/// expected. `is_global_output_flag` is retained for the validator's
-/// unknown-flag check.
+/// expected.
+///
+/// Every binder asks this before deciding the flag is the kernel's: the
+/// typed, `raw_argv`, and verbatim arms in the kernel, both arms of the
+/// validator's binder, and scatter/gather's early-error path. A tool that
+/// declares its own value-taking `--json` would have its value taken by
+/// them; `schema_from_clap` skips the name for exactly that reason.
 pub fn is_global_output_flag(name: &str) -> bool {
     name == "json"
 }

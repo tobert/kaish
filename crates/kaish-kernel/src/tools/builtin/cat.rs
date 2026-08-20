@@ -120,7 +120,18 @@ impl Tool for Cat {
                 if trailing_newline {
                     numbered.push('\n');
                 }
-                return ExecResult::with_output(OutputData::text(numbered));
+                // Same rows as the file-operand path below. `cat -n f` and
+                // `… | cat -n` number the same lines, so they must answer
+                // `--json` the same way.
+                let rows: Vec<crate::interpreter::OutputNode> = stdin
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        crate::interpreter::OutputNode::new(line).at_line(i as u64 + 1)
+                    })
+                    .collect();
+                let table = OutputData::table(vec!["TEXT".to_string()], rows);
+                return ExecResult::with_output_and_text(table, numbered);
             }
             let stdin = match ctx.read_stdin_to_bytes().await {
                 Ok(s) => s.unwrap_or_default(),
@@ -167,6 +178,10 @@ impl Tool for Cat {
         }
 
         let mut all_content = String::new();
+        // Under `-n` the same lines also become rows, so the number the text
+        // formats with `%6d\t` is reachable as data instead of only as
+        // characters a consumer would have to parse back out.
+        let mut rows: Vec<crate::interpreter::OutputNode> = Vec::new();
         let mut line_num = 1;
         // Track whether the last file processed ends with a newline so we can
         // restore it after `.lines()` strips it (`.lines()` is newline-agnostic
@@ -180,12 +195,21 @@ impl Tool for Cat {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if number_lines {
-                            last_had_trailing_newline = content.ends_with('\n');
+                            // An empty operand contributes no line, so it must
+                            // not answer the trailing-newline question for the
+                            // file before it: `cat -n a.txt empty.txt` ends the
+                            // same way `cat -n a.txt` does.
+                            if !content.is_empty() {
+                                last_had_trailing_newline = content.ends_with('\n');
+                            }
                             for line in content.lines() {
                                 if !all_content.is_empty() {
                                     all_content.push('\n');
                                 }
                                 all_content.push_str(&format!("{:6}\t{}", line_num, line));
+                                rows.push(
+                                    crate::interpreter::OutputNode::new(line).at_line(line_num),
+                                );
                                 line_num += 1;
                             }
                         } else {
@@ -209,6 +233,12 @@ impl Tool for Cat {
             all_content.push('\n');
         }
 
+        if number_lines && !rows.is_empty() {
+            // Both forms: the text is byte-identical to GNU `cat -n`, and the
+            // table carries the anchor for `--json`.
+            let table = OutputData::table(vec!["TEXT".to_string()], rows);
+            return ExecResult::with_output_and_text(table, all_content);
+        }
         ExecResult::with_output(OutputData::text(all_content))
     }
 }

@@ -45,6 +45,12 @@ pub enum EntryType {
 /// - Some(""): this IS a text node whose content is empty (e.g. `echo ""`)
 ///
 /// The `is_text_only()` method depends on this distinction.
+///
+/// `#[non_exhaustive]` for the same reason [`OutputData`] is: this struct grows
+/// — `line` was added in 0.16 — and an out-of-tree struct literal would break
+/// on each addition. Build one with [`OutputNode::new`] or
+/// [`OutputNode::text`] and the builder methods.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
@@ -66,6 +72,17 @@ pub struct OutputNode {
     pub cells: Vec<String>,
     /// Child nodes (for tree, find).
     pub children: Vec<OutputNode>,
+    /// Which line of the file or stream this row is, 1-based.
+    ///
+    /// The anchor a builtin declares and every consumer reads: `--json`
+    /// renders it as an integer named `line`, and the REPL and embedders read
+    /// the same field. `None` means the row has no line to point at (a
+    /// directory entry, a process, an environment variable), not line zero.
+    ///
+    /// Set it with [`OutputNode::at_line`]. Do not re-derive it from `cells` —
+    /// a cell is a rendering choice, positional and per-builtin, and reading
+    /// one back is what this field exists to stop.
+    pub line: Option<u64>,
 }
 
 impl OutputNode {
@@ -88,6 +105,21 @@ impl OutputNode {
     /// Set the entry type for rendering hints.
     pub fn with_entry_type(mut self, entry_type: EntryType) -> Self {
         self.entry_type = entry_type;
+        self
+    }
+
+    /// Declare which line of the file or stream this row is, 1-based.
+    ///
+    /// A builtin says *which line*; the kernel decides how to render it.
+    ///
+    /// ```
+    /// use kaish_types::OutputNode;
+    ///
+    /// let node = OutputNode::new("fn main() {").at_line(42);
+    /// assert_eq!(node.line, Some(42));
+    /// ```
+    pub fn at_line(mut self, line: u64) -> Self {
+        self.line = Some(line);
         self
     }
 
@@ -472,6 +504,13 @@ impl OutputData {
                 // Remaining headers map to cells
                 for (header, cell) in headers.iter().skip(1).zip(node.cells.iter()) {
                     map.insert(header.clone(), serde_json::Value::String(cell.clone()));
+                }
+                // The line anchor is a typed field, not a column: it is an
+                // integer, it is named the same thing for every builtin, and
+                // it is absent rather than null when the row has no line — so
+                // `has("line")` is a real question to ask of a row.
+                if let Some(line) = node.line {
+                    map.insert("line".to_string(), serde_json::Value::from(line));
                 }
                 if !node.children.is_empty() {
                     let children: Vec<serde_json::Value> = node

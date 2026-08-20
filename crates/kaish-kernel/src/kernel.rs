@@ -105,7 +105,10 @@ use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
 use crate::scheduler::{drain_to_stream_teed, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
-use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
+use crate::tools::{
+    global_flag_value_is_truthy, register_builtins, ExecContext, GlobalFlags, ToolArgs,
+    ToolRegistry,
+};
 #[cfg(feature = "subprocess")]
 use crate::tools::{resolve_in_path, virtual_cwd_error};
 use crate::validator::{Severity, Validator};
@@ -6194,19 +6197,6 @@ async fn consume_flag_positionals(
 ///   boolean flag.
 ///
 /// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
-/// Is `--json=VALUE` on? Off for empty, `false`, `0`; on otherwise.
-///
-/// The raw-argv rule, spelled for typed values, so `--json=0` means the same
-/// thing whichever path binds it.
-fn global_flag_value_is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Bool(b) => *b,
-        Value::Int(i) => *i != 0,
-        Value::String(s) => !s.is_empty() && s != "false" && s != "0",
-        _ => true,
-    }
-}
-
 pub(crate) async fn bind_tool_args(
     args: &[Arg],
     schema: Option<&crate::tools::ToolSchema>,
@@ -6502,6 +6492,20 @@ pub(crate) async fn bind_tool_args(
                         tool_args
                             .positional
                             .push(Value::String(format!("--{key}={val_str}")));
+                        i += 1;
+                        continue;
+                    }
+                    // The kernel's own `--json=VALUE`, decided here and never
+                    // placed in `named`. Left there it reaches the builtin's
+                    // clap parser as a value on a `bool` field, whose `SetTrue`
+                    // action rejects every spelling but `true`/`false` — so
+                    // `seq --json=1` exited 2 while the raw-argv and verbatim
+                    // binders were quietly accepting the same word. One rule,
+                    // asked in one place, for all three.
+                    if !past_double_dash && crate::tools::is_global_output_flag(key) {
+                        if global_flag_value_is_truthy(&val) {
+                            tool_args.flags.insert(key.clone());
+                        }
                         i += 1;
                         continue;
                     }

@@ -784,6 +784,38 @@ fn value_to_argv_token(value: &Value) -> String {
     }
 }
 
+/// Is a kernel-owned global flag written as `--flag=VALUE` on?
+///
+/// Off for the empty string, `false`, `0`, and a numeric zero; on for
+/// everything else, including a value the kernel could not evaluate. `--json`
+/// is bound by three different binders — typed, `raw_argv`, and `verbatim` —
+/// and each one asks this question. Asking it in one place is what keeps
+/// `--json=0` meaning the same thing on all three.
+///
+/// This is deliberately NOT [`ToolArgs::has_flag`]'s rule. `has_flag` answers
+/// "was this key provided", which is what a value-taking flag needs
+/// (`head -n 0` provided `-n`), so it treats a numeric zero as present. A
+/// global flag has no value of its own to carry, so for it zero means off.
+///
+/// ```
+/// use kaish_types::{global_flag_value_is_truthy, Value};
+///
+/// assert!(global_flag_value_is_truthy(&Value::String("yes".into())));
+/// assert!(!global_flag_value_is_truthy(&Value::Int(0)));
+/// assert!(!global_flag_value_is_truthy(&Value::String("0".into())));
+/// ```
+pub fn global_flag_value_is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(b) => *b,
+        Value::Int(i) => *i != 0,
+        Value::Float(f) => *f != 0.0,
+        Value::String(s) => !s.is_empty() && s != "false" && s != "0",
+        // A collection, JSON payload, or binary blob is not a spelling of
+        // "off" — treat the flag as given rather than silently dropping it.
+        _ => true,
+    }
+}
+
 fn json_value_to_token(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),

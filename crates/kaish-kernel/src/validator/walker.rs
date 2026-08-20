@@ -11,7 +11,10 @@ use crate::ast::{
 use crate::kernel::{bind_glued_short_value, push_repeatable_value};
 use crate::scheduler::{is_bool_type, schema_param_lookup};
 use crate::validator::issue::Span;
-use crate::tools::{is_global_output_flag, ArgBinding, ToolArgs, ToolRegistry, ToolSchema};
+use crate::tools::{
+    global_flag_value_is_truthy, is_global_output_flag, ArgBinding, ToolArgs, ToolRegistry,
+    ToolSchema,
+};
 use kaish_types::CommandKind;
 
 use super::issue::{IssueCode, ValidationIssue};
@@ -817,12 +820,16 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                         words.push(Value::String(format!("--{name}")));
                     }
                 }
-                Arg::Named { key, .. } => {
+                Arg::Named { key, value } => {
                     if lift_global_flags && !past_double_dash && is_global_output_flag(key) {
-                        // The value is a placeholder here, so truthiness cannot
-                        // be judged; execution decides whether it is on. Record
-                        // the flag so a custom `validate` sees the same shape.
-                        tool_args.flags.insert(key.clone());
+                        // Same truthiness rule execution applies. A literal
+                        // survives `expr_to_placeholder` intact and is judged;
+                        // anything dynamic becomes the `<dynamic>` string,
+                        // which the rule reads as on, so a custom `validate`
+                        // sees the flag whenever execution might set it.
+                        if global_flag_value_is_truthy(&expr_to_placeholder(value)) {
+                            tool_args.flags.insert(key.clone());
+                        }
                     } else {
                         words.push(Value::String(format!("--{key}=<value>")));
                     }
@@ -862,6 +869,18 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     tool_args
                         .positional
                         .push(Value::String(format!("--{key}={}", crate::interpreter::value_to_string(&v))));
+                    continue;
+                }
+                // The kernel's own flag, bound the way execution binds it:
+                // by truthiness, into `flags`, never into `named`. A value
+                // validation cannot evaluate arrives as the `<dynamic>`
+                // placeholder, which the shared rule reads as on — the same
+                // "execution decides, so report it present" choice the
+                // verbatim arm above makes.
+                if !past_double_dash && is_global_output_flag(key) {
+                    if global_flag_value_is_truthy(&v) {
+                        tool_args.flags.insert(key.clone());
+                    }
                     continue;
                 }
                 match param_lookup.get(key.as_str()) {
@@ -1105,6 +1124,68 @@ mod tests {
         register_builtins(&mut registry);
         let user_tools = HashMap::new();
         (registry, user_tools)
+    }
+
+    /// The two binders must agree on the kernel's own flag. Execute routes
+    /// `--json=VALUE` into `flags` by truthiness and never into `named`; a
+    /// `Tool::validate` reading `has_flag("json")` has to see the same thing,
+    /// or it judges a shape execution never produces (the drift class behind
+    /// GH #376 and the `env` fix).
+    #[test]
+    fn validation_binds_json_value_the_way_execution_does() {
+        let schema = ToolSchema::new("probe", "probe");
+        let named = |v: Value| {
+            vec![Arg::Named { key: "json".to_string(), value: Expr::Literal(v) }]
+        };
+
+        for on in [Value::Int(1), Value::String("yes".into()), Value::Bool(true)] {
+            let args = build_tool_args_for_validation(&named(on.clone()), Some(&schema));
+            assert!(args.flags.contains("json"), "{on:?} should bind --json on");
+            assert!(!args.named.contains_key("json"), "{on:?} must not reach named");
+        }
+
+        for off in [Value::Int(0), Value::String("0".into()), Value::Bool(false)] {
+            let args = build_tool_args_for_validation(&named(off.clone()), Some(&schema));
+            assert!(!args.flags.contains("json"), "{off:?} should bind --json off");
+            assert!(!args.named.contains_key("json"), "{off:?} must not reach named");
+        }
+    }
+
+    /// A value validation cannot evaluate (`--json=$MODE`) binds as ON, the
+    /// same choice the verbatim validation arm already makes: execution
+    /// decides, and over-reporting the kernel's flag costs a `validate`
+    /// nothing while under-reporting hides it.
+    #[test]
+    fn validation_binds_dynamic_json_value_as_on() {
+        let schema = ToolSchema::new("probe", "probe");
+        let args = build_tool_args_for_validation(
+            &[Arg::Named {
+                key: "json".to_string(),
+                value: Expr::VarRef(VarPath::simple("MODE")),
+            }],
+            Some(&schema),
+        );
+        assert!(args.flags.contains("json"));
+    }
+
+    /// Past `--` the same token is not the kernel's flag. (Where it DOES
+    /// land differs between the binders, and the parser cannot produce this
+    /// shape at all — `echo -- --json=true` is a parse error today — so this
+    /// asserts only the part that matters: it is not lifted into `flags`.)
+    #[test]
+    fn validation_keeps_json_after_double_dash_out_of_flags() {
+        let schema = ToolSchema::new("probe", "probe");
+        let args = build_tool_args_for_validation(
+            &[
+                Arg::DoubleDash,
+                Arg::Named {
+                    key: "json".to_string(),
+                    value: Expr::Literal(Value::Bool(true)),
+                },
+            ],
+            Some(&schema),
+        );
+        assert!(!args.flags.contains("json"), "flags: {:?}", args.flags);
     }
 
     #[test]

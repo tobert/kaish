@@ -610,11 +610,7 @@ impl Tool for Grep {
                 return if render.match_count == 0 {
                     ExecResult::from_output(1, render.text, "")
                 } else {
-                    let headers = if line_number {
-                        vec!["MATCH".to_string(), "LINE".to_string()]
-                    } else {
-                        vec!["MATCH".to_string()]
-                    };
+                    let headers = vec!["MATCH".to_string()];
                     let output = OutputData::table(headers, render.nodes)
                         .with_rich_json(serde_json::Value::Array(render.rich));
                     ExecResult::with_output_and_text(output, render.text)
@@ -694,11 +690,7 @@ impl Tool for Grep {
         } else if render.match_count == 0 {
             ExecResult::from_output(1, render.text, "")
         } else {
-            let headers = if grep_opts.show_line_numbers {
-                vec!["MATCH".to_string(), "LINE".to_string()]
-            } else {
-                vec!["MATCH".to_string()]
-            };
+            let headers = vec!["MATCH".to_string()];
             let output = OutputData::table(headers, render.nodes)
                 .with_rich_json(serde_json::Value::Array(render.rich));
             ExecResult::with_output_and_text(output, render.text)
@@ -887,11 +879,7 @@ impl Grep {
             ExecResult::from_output(1, total_output, "")
         } else {
             // Return structured output
-            let headers = if opts.show_line_numbers {
-                vec!["MATCH".to_string(), "FILE".to_string(), "LINE".to_string()]
-            } else {
-                vec!["MATCH".to_string(), "FILE".to_string()]
-            };
+            let headers = vec!["MATCH".to_string(), "FILE".to_string()];
             let output = OutputData::table(headers, total_nodes)
                 .with_rich_json(serde_json::Value::Array(total_rich));
             ExecResult::with_output_and_text(output, total_output)
@@ -1139,12 +1127,12 @@ impl<'r> GrepLineScanner<'r> {
             self.text.push('\n');
         }
 
-        let mut cells = Vec::new();
-        if self.show_line_numbers {
-            cells.push(self.line_number.to_string());
-        }
+        // The line number is the typed anchor, set whether or not `-n` was
+        // given: the searcher numbers unconditionally and `rich_json` has
+        // always reported it that way. `-n` governs the text rendering above,
+        // never whether a consumer can find the line.
         self.nodes
-            .push(OutputNode::new(line).with_cells(cells));
+            .push(OutputNode::new(line).at_line(self.line_number));
 
         // Rich JSON: must be byte-identical to `match_record_to_json` for the
         // same line — path (the filename arg), the real line number (the
@@ -1171,7 +1159,7 @@ impl<'r> GrepLineScanner<'r> {
         };
         self.rich.push(serde_json::json!({
             "path": path_v,
-            "line_number": self.line_number,
+            "line": self.line_number,
             "byte_offset": byte_offset,
             "line_text": line,
             "submatches": submatches,
@@ -1231,8 +1219,8 @@ fn grep_lines_structured(
 /// the intended usage — `search_slice` takes `&mut self` and resets per search,
 /// which is how ripgrep itself drives it.
 ///
-/// `line_number` is always on so the renderer can emit `LINE` cells when
-/// requested; `show_line_numbers` gates *display*, not the underlying numbering.
+/// `line_number` is always on so every node carries its typed `line` anchor;
+/// `show_line_numbers` gates *display*, not the underlying numbering.
 fn build_searcher(opts: &GrepOptions) -> Result<Searcher, String> {
     let mut sb = SearcherBuilder::new();
     sb.line_number(true)
@@ -1319,7 +1307,11 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
         }
         match event {
             SearchEvent::Match(m) => {
+                // `0` is the text renderer's fallback for an unnumbered
+                // searcher, never an anchor: a row that does not know its
+                // line carries none rather than claiming line zero.
                 let line_num = m.line_number.unwrap_or(0);
+                let anchor = m.line_number;
                 if opts.only_matching && !opts.invert && !m.submatches.is_empty() {
                     for sub in &m.submatches {
                         output.push_str(&prefix(line_num, ':'));
@@ -1332,10 +1324,11 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                         {
                             cells.push(f.to_string());
                         }
-                        if opts.show_line_numbers {
-                            cells.push(line_num.to_string());
+                        let mut node = OutputNode::new(&sub.text).with_cells(cells);
+                        if let Some(n) = anchor {
+                            node = node.at_line(n);
                         }
-                        nodes.push(OutputNode::new(&sub.text).with_cells(cells));
+                        nodes.push(node);
                     }
                 } else {
                     output.push_str(&prefix(line_num, ':'));
@@ -1348,10 +1341,11 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                     {
                         cells.push(f.to_string());
                     }
-                    if opts.show_line_numbers {
-                        cells.push(line_num.to_string());
+                    let mut node = OutputNode::new(&m.line_text).with_cells(cells);
+                    if let Some(n) = anchor {
+                        node = node.at_line(n);
                     }
-                    nodes.push(OutputNode::new(&m.line_text).with_cells(cells));
+                    nodes.push(node);
                 }
 
                 rich.push(match_record_to_json(m, filename));
@@ -1390,7 +1384,7 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
 /// ```json
 /// {
 ///   "path": "src/main.rs",  // null when reading stdin
-///   "line_number": 42,       // null when line numbering is off
+///   "line": 42,              // the shared anchor; null only if unnumbered
 ///   "byte_offset": 1234,
 ///   "line_text": "...",
 ///   "submatches": [
@@ -1415,7 +1409,7 @@ fn match_record_to_json(
         Some(p) => Value::String(p),
         None => Value::Null,
     };
-    let line_number_v = match m.line_number {
+    let line_v = match m.line_number {
         Some(n) => Value::Number(n.into()),
         None => Value::Null,
     };
@@ -1432,7 +1426,7 @@ fn match_record_to_json(
         .collect();
     json!({
         "path": path_v,
-        "line_number": line_number_v,
+        "line": line_v,
         "byte_offset": m.absolute_byte_offset,
         "line_text": m.line_text,
         "submatches": submatches,
@@ -1742,10 +1736,11 @@ mod tests {
         );
     }
 
-    /// `--json` emits a richer per-match shape than the legacy
-    /// `MATCH/FILE/LINE` table: each row is an object with `path`,
-    /// `line_number`, `byte_offset`, `line_text`, and a `submatches`
-    /// array carrying per-submatch text + byte ranges.
+    /// `--json` emits a richer per-match shape than the `MATCH`/`FILE`
+    /// table: each row is an object with `path`, `line`, `byte_offset`,
+    /// `line_text`, and a `submatches` array carrying per-submatch text +
+    /// byte ranges. `line` is the same anchor `head`, `tail`, and `cat -n`
+    /// emit — one name, one integer type, across every builtin.
     #[tokio::test]
     async fn test_grep_json_rich_schema() {
         use kaish_types::output::{OutputFormat, apply_output_format};
@@ -1765,12 +1760,16 @@ mod tests {
 
         let first = &arr[0];
         // Required keys.
-        for key in ["path", "line_number", "byte_offset", "line_text", "submatches"] {
+        for key in ["path", "line", "byte_offset", "line_text", "submatches"] {
             assert!(
                 first.get(key).is_some(),
                 "missing key {key:?} in rich JSON: {first:#?}",
             );
         }
+        assert!(
+            first.get("line").and_then(serde_json::Value::as_u64).is_some(),
+            "`line` must be an integer, not a string: {first:#?}",
+        );
         // `submatches` is an array; each entry has text/start/end.
         let subs = first
             .get("submatches")

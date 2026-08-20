@@ -28,6 +28,17 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
 
     // Use OutputData if present
     if let Some(output) = result.output() {
+        // Line-anchored rows: the builtin already decided how these lines
+        // read — `grep -n`'s `3:` prefix, `cat -n`'s six-column pad, `head`'s
+        // bare lines. Print that text rather than re-deriving a rendering
+        // from the rows, so an interactive session shows what `kaish -c`
+        // shows and no gutter appears that the command never asked for.
+        if output.root.iter().any(|n| n.line.is_some()) {
+            let text = result.text_out();
+            if !text.is_empty() {
+                return text.trim_end_matches('\n').to_string();
+            }
+        }
         return format_output_data(output, context);
     }
 
@@ -39,6 +50,7 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
 ///
 /// Rendering rules:
 /// - Single text node → Print text
+/// - Nodes carrying a line anchor → One per line, in order
 /// - Flat nodes with name only → Multi-column (interactive) or one-per-line
 /// - Flat nodes with cells → Aligned table
 /// - Nested children → Box-drawing tree (interactive) or brace notation
@@ -56,6 +68,20 @@ pub fn format_output_data(output: &OutputData, context: OutputContext) -> String
     // Check if we have nested children (tree structure)
     if !output.is_flat() {
         return format_tree_from_output_data(output);
+    }
+
+    // A line anchor means the rows ARE lines of a file, in order. Columnizing
+    // them puts line 1 beside line 2 and reads as nonsense, and an aligned
+    // table would print a number the builtin never asked to display — `grep`
+    // sets the anchor with or without `-n`. One per line, as the command's own
+    // text says.
+    if output.root.iter().any(|n| n.line.is_some()) {
+        return output
+            .root
+            .iter()
+            .map(|n| n.display_name())
+            .collect::<Vec<_>>()
+            .join("\n");
     }
 
     // Check if we have tabular data (cells present)
@@ -294,6 +320,51 @@ fn colorize_entry(name: &str, entry_type: Option<EntryType>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Line-anchored rows print the builtin's own text, one line per line.
+    ///
+    /// Before the typed anchor, `head` carried a `NUM` cell, so `is_tabular()`
+    /// was true and an interactive session got an aligned `LINE`/`NUM` table.
+    /// Dropping the cell alone would have sent those rows to the multi-column
+    /// renderer, which prints line 1 beside line 2 — caught by running the
+    /// real REPL under a pty, not by `kaish -c`, which never takes this path.
+    #[test]
+    fn line_anchored_rows_print_one_per_line() {
+        let rows = vec![
+            OutputNode::new("alpha").at_line(1),
+            OutputNode::new("bravo").at_line(2),
+        ];
+        let data = OutputData::table(vec!["TEXT".to_string()], rows);
+        let result = ExecResult::with_output_and_text(data, "alpha\nbravo\n");
+        assert_eq!(
+            format_output(&result, OutputContext::Interactive),
+            "alpha\nbravo"
+        );
+    }
+
+    /// `grep -n`'s `3:` prefix is a display decision the builtin already made;
+    /// the renderer must not drop it, and must not invent one for `grep`
+    /// without `-n` (which sets the anchor either way).
+    #[test]
+    fn line_anchored_rows_keep_the_builtin_s_own_prefix() {
+        let rows = vec![OutputNode::new("match me").at_line(3)];
+        let data = OutputData::table(vec!["MATCH".to_string()], rows);
+        let with_n = ExecResult::with_output_and_text(data.clone(), "3:match me\n");
+        assert_eq!(format_output(&with_n, OutputContext::Interactive), "3:match me");
+
+        let without_n = ExecResult::with_output_and_text(data, "match me\n");
+        assert_eq!(format_output(&without_n, OutputContext::Interactive), "match me");
+    }
+
+    /// A row with no anchor still columnizes — `ls` is unaffected.
+    #[test]
+    fn rows_without_an_anchor_still_columnize() {
+        let data = OutputData::nodes(vec![OutputNode::new("a.txt"), OutputNode::new("b.txt")]);
+        let result = ExecResult::with_output(data);
+        let out = format_output(&result, OutputContext::Interactive);
+        assert!(out.contains("a.txt") && out.contains("b.txt"), "{out:?}");
+        assert!(!out.contains('\n'), "two short names share a line: {out:?}");
+    }
 
     #[test]
     fn test_format_output_raw() {

@@ -42,5 +42,6 @@ pub use tool::{is_global_output_flag, validate_against_schema, Tool};
 // Re-export the data types tool authors need most often, so a tool crate can
 // depend on just `kaish-tool-api` for the common case.
 pub use kaish_types::{
-    ArgBinding, ExecResult, OutputData, OutputFormat, ParamSchema, ToolArgs, ToolSchema, Value,
+    global_flag_value_is_truthy, ArgBinding, ExecResult, OutputData, OutputFormat, ParamSchema,
+    ToolArgs, ToolSchema, Value,
 };
