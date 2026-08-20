@@ -679,6 +679,12 @@ as an inert placeholder whose real bytes stay at the same index in `words`.
   `flags`, so `args.has_flag("json")` answers it and the kernel applies the
   output format exactly as for a typed tool. Past a literal `--` it is your
   operand, not the kernel's flag.
+
+  **Unless you also call `.with_owned_output()`**, in which case `--json`
+  stays in your words and the kernel renders nothing. That is the point of
+  owning output: you emit the final bytes, so you parse the flag that asks for
+  them. Lifting it would strip it from your argv *and* skip rendering, leaving
+  the request handled by nobody.
 - **`--help`/`-h` reach your parser.** `flags` is empty of them, so the
   kernel's generic help router stands aside — the same responsibility
   `.with_owned_output()` carries, and the two combine.

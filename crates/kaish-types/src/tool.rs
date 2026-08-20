@@ -321,6 +321,9 @@ impl ToolSchema {
 
     /// Declare that this tool wants its argv in source order with types
     /// preserved (no flag/positional split). See [`ToolSchema::raw_argv`].
+    ///
+    /// Setting this and [`ToolSchema::with_verbatim_argv`] together is a
+    /// mistake; verbatim wins.
     pub fn with_raw_argv(mut self) -> Self {
         self.raw_argv = true;
         self
@@ -341,6 +344,11 @@ impl ToolSchema {
     ///
     /// Distinct from [`ToolSchema::with_raw_argv`], which also keeps source
     /// order but binds into `positional` and does not lift the global flags.
+    /// Setting both is a mistake; verbatim wins.
+    ///
+    /// With [`ToolSchema::with_owned_output`] the tool keeps `--json` in its
+    /// own words — the kernel renders nothing for such a tool, so lifting the
+    /// flag would leave it handled by no one.
     pub fn with_verbatim_argv(mut self) -> Self {
         self.arg_binding = ArgBinding::Verbatim;
         self

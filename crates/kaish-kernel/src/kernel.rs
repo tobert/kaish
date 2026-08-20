@@ -6226,9 +6226,14 @@ pub(crate) async fn bind_tool_args(
     // set-shaped and drops the order and multiplicity a clap subcommand tree
     // needs, which no inversion can recover.
     //
-    // `--json` is still the kernel's. It is lifted into `flags` wherever it
-    // sits, so `apply_from_args` handles it as it does for a typed tool.
+    // `--json` is still the kernel's, so it is lifted into `flags` wherever it
+    // sits and `apply_from_args` handles it as it does for a typed tool —
+    // unless the tool owns its output, in which case the kernel renders
+    // nothing and the flag has to reach the tool's own argv instead. Lifting it
+    // there would strip it from the words AND skip rendering, so asking for
+    // JSON would do nothing at all.
     if schema.is_some_and(|s| matches!(s.arg_binding, crate::tools::ArgBinding::Verbatim)) {
+        let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
         let mut words: Vec<Value> = Vec::new();
         let mut past_double_dash = false;
         for arg in args {
@@ -6260,7 +6265,10 @@ pub(crate) async fn bind_tool_args(
                 }
                 Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
                 Arg::LongFlag(name) => {
-                    if !past_double_dash && crate::tools::is_global_output_flag(name) {
+                    if lift_global_flags
+                        && !past_double_dash
+                        && crate::tools::is_global_output_flag(name)
+                    {
                         tool_args.flags.insert(name.clone());
                         continue;
                     }
@@ -6271,7 +6279,10 @@ pub(crate) async fn bind_tool_args(
                         anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
                     })?;
                     let val = apply_tilde_expansion(val, home.as_deref());
-                    if !past_double_dash && crate::tools::is_global_output_flag(key) {
+                    if lift_global_flags
+                        && !past_double_dash
+                        && crate::tools::is_global_output_flag(key)
+                    {
                         // Removed from the words whether or not it is on: the
                         // tool must not meet the kernel's flag in any form.
                         if global_flag_value_is_truthy(&val) {

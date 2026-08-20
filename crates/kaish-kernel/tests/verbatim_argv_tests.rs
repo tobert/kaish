@@ -112,6 +112,32 @@ impl Tool for TypedTool {
     }
 }
 
+/// A verbatim tool that also owns its output — the `kj` shape, and the reason
+/// both knobs exist. `with_owned_output()` promises the tool consumes `--json`
+/// itself and emits final bytes, so the flag has to reach its argv.
+struct OwnedVerbTool;
+
+#[async_trait]
+impl Tool for OwnedVerbTool {
+    fn name(&self) -> &str {
+        "ownedverb"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("ownedverb", "verbatim tool that renders its own output")
+            .with_verbatim_argv()
+            .with_owned_output()
+    }
+
+    async fn execute(&self, args: ToolArgs, _ctx: &mut dyn ToolCtx) -> ExecResult {
+        let words = match args.words.as_deref() {
+            Some(words) => words.iter().map(show).collect::<Vec<_>>().join("|"),
+            None => "<none>".to_string(),
+        };
+        ExecResult::with_output(OutputData::text(format!("WORDS[{words}]")))
+    }
+}
+
 fn kernel_with_tools() -> Arc<Kernel> {
     let mut vfs = VfsRouter::new();
     vfs.mount("/", MemoryFs::new());
@@ -119,6 +145,7 @@ fn kernel_with_tools() -> Arc<Kernel> {
     Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |tools| {
         tools.register(VerbTool);
         tools.register(TypedTool);
+        tools.register(OwnedVerbTool);
     })
     .expect("with_backend kernel")
     .into_arc()
@@ -250,4 +277,46 @@ async fn typed_tool_json_still_applies() {
         "typed --json should still render JSON; got {out:?}",
     );
     assert!(out.contains("FLAGS[json]"), "typed --json should still reach flags; got {out:?}");
+}
+
+/// A tool that owns its output must receive `--json` in its own argv.
+///
+/// The two knobs cite the same exemplar (`kj`), so the combination is the
+/// realistic case, not a corner. Before this was fixed the kernel stripped
+/// `--json` from the words on the tool's behalf and then declined to render
+/// JSON itself, because `owns_output` suppresses `apply_output_format` — so the
+/// flag reached nobody and asking for JSON did nothing at all.
+#[tokio::test]
+async fn an_owned_output_tool_receives_json_in_its_own_words() {
+    let out = run("ownedverb block list --json").await;
+    assert_eq!(
+        out, "WORDS[block|list|--json]",
+        "a tool that renders its own output must see --json among its words"
+    );
+}
+
+/// The `--json=VALUE` spelling reaches an owned-output tool intact too — the
+/// tool decides what the value means, because it is the one rendering.
+#[tokio::test]
+async fn an_owned_output_tool_receives_the_json_equals_form_too() {
+    let out = run("ownedverb block --json=false").await;
+    assert_eq!(
+        out, "WORDS[block|--json=false]",
+        "the tool owns the flag, including deciding its value is off"
+    );
+}
+
+/// The lift still happens for a verbatim tool that does NOT own its output —
+/// the fix must not hand every verbatim tool a flag the kernel is handling.
+#[tokio::test]
+async fn a_verbatim_tool_that_does_not_own_output_still_has_json_lifted() {
+    let out = run("verb block list --json").await;
+    assert!(
+        out.contains("WORDS[block|list]") && !out.contains("--json"),
+        "--json stays kernel-owned for a tool that does not render its own: {out}"
+    );
+    assert!(out.contains("JSON[yes]"), "and is still applied: {out}");
+    // The kernel rendered the tool's text as a JSON string, which is the half
+    // an owned-output tool suppresses — the two rows differ in both directions.
+    assert!(out.starts_with('"'), "the kernel rendered this one: {out}");
 }

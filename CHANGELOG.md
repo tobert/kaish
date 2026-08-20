@@ -38,8 +38,9 @@ breaking entries are marked **BREAKING**.
   after the tool name, in source order, instead of splitting them into
   `positional`/`named`/`flags` — so order and repeated flags survive for a tool
   with a clap subcommand tree, which the split cannot represent. `--json` stays
-  kernel-owned and never reaches the words. `Typed` is the default; nothing
-  existing changes.
+  kernel-owned and never reaches the words, unless the tool also declares
+  `with_owned_output()` — then it reaches the tool, which is rendering. `Typed`
+  is the default; nothing existing changes.
 - **`KernelBackend::patch` states its batch contract.** The trait doc now says
   what all three implementations already do: operations apply in order to one
   snapshot and the result is written once, so an operation that fails — a CAS
