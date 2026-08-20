@@ -75,38 +75,43 @@ async fn a_compound_in_a_condition_stops_the_statement() {
     );
 }
 
-/// The check reads BOTH shapes, and each half is load-bearing.
+/// The validation binder hands a `raw_argv` tool the same words execution
+/// does, in source order.
 ///
-/// `test` is `raw_argv`, so execution gets every word in `positional`; the
-/// validation binder has no raw_argv twin and splits by token shape instead —
-/// `-a`/`-o` look like flags and land in `flags`, `(`/`)` are barewords and
-/// land in `positional`. I first wrote this off as the raw_argv/typed drift
-/// behind GH #376 and #378, which sounded right and was not the reason.
-/// Deleting either half was measured: without the positional half
-/// `test '(' a = a ')'` goes unreported; without the flags half the other
-/// four cases do.
+/// It did not before: it split by token shape, so `-a`/`-o` landed in `flags`
+/// and `(`/`)` in `positional`, and the ORDER — the only thing separating an
+/// operator from a literal — was gone. `test "-a" = "-a"` and
+/// `test a = a -a b = b` decomposed identically, so no `Tool::validate` could
+/// tell them apart, and the first version of this rule refused both.
+///
+/// The verbatim arm exists for exactly this reason; raw_argv never got one.
 #[tokio::test]
-async fn the_rule_sees_the_shape_validation_actually_binds() {
+async fn validation_binds_raw_argv_in_source_order() {
     use kaish_kernel::tools::{register_builtins, ToolRegistry};
 
     let mut registry = ToolRegistry::new();
     register_builtins(&mut registry);
     let tool = registry.get("test").expect("test builtin");
 
-    let mut as_flag = kaish_kernel::tools::ToolArgs::new();
-    as_flag.flags.insert("o".to_string());
-    assert!(
-        !tool.validate(&as_flag).is_empty(),
-        "`-o` arriving in `flags` (the validation binder's shape) must be caught"
-    );
+    // The operator slot: caught.
+    let refused = kernel().execute("test a = a -o b = c").await;
+    assert!(refused.is_err(), "an operator in the operator slot is refused");
 
-    let mut as_positional = kaish_kernel::tools::ToolArgs::new();
-    as_positional
-        .positional
-        .push(kaish_types::Value::String("-o".to_string()));
+    // The same word one slot over: not caught, because it is data.
+    let allowed = kernel()
+        .execute("test \"-o\" = \"-o\"")
+        .await
+        .expect("an operator word as an operand must run");
+    assert_eq!(allowed.code, 0);
+
+    // And directly: a decomposed `ToolArgs` with the words out of order can
+    // no longer occur, so `validate` reads `positional` alone.
+    let mut flags_only = kaish_kernel::tools::ToolArgs::new();
+    flags_only.flags.insert("o".to_string());
     assert!(
-        !tool.validate(&as_positional).is_empty(),
-        "`-o` arriving in `positional` (execution's shape) must be caught"
+        tool.validate(&flags_only).is_empty(),
+        "nothing routes `-o` into `flags` any more; reading it there would \
+         resurrect the position-blind check"
     );
 }
 
@@ -210,4 +215,34 @@ async fn set_dash_o_with_a_name_still_applies() {
     let k = kernel();
     assert_eq!(k.execute("set -o trash").await.expect("exec").code, 0);
     assert_eq!(k.execute("set -o bogus").await.expect("exec").code, 1);
+}
+
+// --- an operator word in OPERAND position is data, not an operator ---------
+
+/// E020 must fire on the operator slot only. A file named `-a`, or the string
+/// `-a` compared against itself, is an ordinary `test` — bash answers it and
+/// so must kaish.
+///
+/// The first version of this rule scanned every word regardless of position
+/// and refused all of these. It could not do better: for a `raw_argv` tool the
+/// validation binder had no twin, so it split the words by token shape and the
+/// operand ORDER — the only thing that distinguishes an operator from a
+/// literal — was gone before `validate` ever ran.
+#[rstest]
+#[case("test -f \"-a\"", 1)]
+#[case("test \"-a\" = \"-a\"", 0)]
+#[case("test \"-o\" = \"-o\"", 0)]
+#[case("test \"(\" = \"(\"", 0)]
+#[case("test \"-a\" != \"-o\"", 0)]
+#[case("test -n \"-o\"", 0)]
+#[tokio::test]
+async fn an_operator_word_in_operand_position_is_data(
+    #[case] script: &str,
+    #[case] expected: i64,
+) {
+    let r = kernel()
+        .execute(script)
+        .await
+        .unwrap_or_else(|e| panic!("`{script}` must not be refused: {e}"));
+    assert_eq!(r.code, expected, "`{script}`");
 }

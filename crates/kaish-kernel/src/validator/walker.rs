@@ -798,6 +798,45 @@ fn is_special_command(name: &str) -> bool {
 pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
 
+    // A `raw_argv` tool keeps every word in source order, in `positional`,
+    // with no flag/operand split — mirroring the runtime binder's raw-argv
+    // arm (kernel.rs). Without this, validation split the words by token
+    // shape and destroyed the ORDER, which for `test` is the only thing that
+    // separates an operator from a literal: `test "-a" = "-a"` and
+    // `test a = a -a b = b` decomposed to the same flags/positional sets, so
+    // no `Tool::validate` could tell them apart. The verbatim arm below
+    // exists for exactly this reason; raw_argv simply never got one.
+    if schema.is_some_and(|s| s.raw_argv) {
+        let mut past_double_dash = false;
+        for arg in args {
+            match arg {
+                Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
+                Arg::ShortFlag(name) => {
+                    tool_args.positional.push(Value::String(format!("-{name}")))
+                }
+                Arg::LongFlag(name) => {
+                    tool_args.positional.push(Value::String(format!("--{name}")))
+                }
+                Arg::Named { key, value } => tool_args.positional.push(Value::String(format!(
+                    "--{key}={}",
+                    crate::interpreter::value_to_string(&expr_to_placeholder(value))
+                ))),
+                Arg::WordAssign { key, value } => tool_args.positional.push(Value::String(
+                    format!(
+                        "{key}={}",
+                        crate::interpreter::value_to_string(&expr_to_placeholder(value))
+                    ),
+                )),
+                Arg::DoubleDash => {
+                    past_double_dash = true;
+                    tool_args.positional.push(Value::String("--".to_string()));
+                }
+            }
+        }
+        let _ = past_double_dash;
+        return tool_args;
+    }
+
     // Validation binds the way execution does — placeholders in source order,
     // into `words` — so the schema checks never judge a decomposition the tool
     // will not receive.

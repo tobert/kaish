@@ -104,13 +104,22 @@ breaking entries are marked **BREAKING**.
   is a synonym for `-e`, `-o NAME` an option query), which is what makes the
   binary form ambiguous, and three of its operand-count rules outrank `!`
   (`test ! = x` compares two strings, `test ! x -o x` negates the whole
-  expression). Compose with `&&`/`||`, or use `[[ ]]`.
+  expression). Compose with `&&`/`||`, or use `[[ ]]`. Only the operator slot
+  is judged: `test "-a" = "-a"` compares two strings and `test -f "-a"` stats
+  a file named `-a`, as before.
 - **`set -o` reports every option and its state** (`glob`, `output-limit`,
   `trash`), as bash does, and as a table so `--json` answers too. Option state
   could not be queried at all before: bare `set` prints only what differs from
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **Validation binds a `raw_argv` tool's words in source order**, the way
+  execution does. It split them by token shape instead, so a leading-dash word
+  went to `flags` and a bareword to `positional` and the operand ORDER was
+  gone — leaving `test "-a" = "-a"` and `test a = a -a b = b` with identical
+  `ToolArgs`. A `Tool::validate` on a raw_argv tool could not tell an operator
+  from a literal. The verbatim binder already had this arm; raw_argv never
+  did.
 - **`test -e ""` is false.** The empty path resolved to the working directory,
   so every file operator answered true for it.
 - **`test` with no operands is false**, as in bash, rather than exit 2. An

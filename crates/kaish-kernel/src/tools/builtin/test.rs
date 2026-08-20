@@ -77,32 +77,44 @@ impl Tool for Test {
     /// statement — and a runtime refusal inside an `if` condition is worth
     /// very little, since the branch is chosen from the exit code.
     ///
-    /// **Both operand shapes are checked, and each one is load-bearing.**
-    /// `test` is `raw_argv`, so execution hands it every word in
-    /// `positional`; the validation binder has no raw_argv twin, and it
-    /// splits by token shape — `-a`/`-o` look like flags and land in `flags`,
-    /// while `(`/`)` are barewords and land in `positional`. Measured, not
-    /// assumed: deleting either half leaves real programs unreported
-    /// (`test '(' a = a ')'` needs the positional half, the rest need the
-    /// flags half).
+    /// Reads `positional` in source order, because `test` is `raw_argv` and
+    /// the validation binder now mirrors that (see
+    /// `build_tool_args_for_validation`). Order is the whole point: an
+    /// operator word is only an operator in an operator SLOT. `test "-a" =
+    /// "-a"` compares two strings and `test -f "-a"` stats a file named
+    /// `-a` — both legal, both refused by the first version of this rule,
+    /// which scanned every word because a decomposed `ToolArgs` had no order
+    /// left to read.
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
-        let from_positional = args
+        let words: Vec<&str> = args
             .positional
             .iter()
             .filter_map(|v| match v {
                 Value::String(s) => Some(s.as_str()),
                 _ => None,
             })
-            .find(|w| is_compound_op(w));
-        let from_flags = args
-            .flags
-            .iter()
-            .map(String::as_str)
-            .find(|f| is_compound_op(&format!("-{f}")) || is_compound_op(f));
+            .collect();
 
-        let found = from_positional.map(str::to_string).or_else(|| {
-            from_flags.map(|f| if is_compound_op(f) { f.to_string() } else { format!("-{f}") })
-        });
+        // A placeholder means an unevaluated expansion; its runtime value is
+        // unknown, so judging it would report a program that may be fine.
+        if words.iter().any(|w| *w == "<dynamic>") {
+            return Vec::new();
+        }
+
+        // Same slots `eval_test`/`eval_primary` read: skip the leading `!`
+        // run, then the operator is the first word of a two-operand primary
+        // and the middle word of a three-operand one. Anything longer is
+        // already an error, and `-a`/`-o` is why it usually happens.
+        let mut rest = words.as_slice();
+        while rest.len() >= 2 && rest[0] == "!" {
+            rest = &rest[1..];
+        }
+        let found = match rest.len() {
+            2 => Some(rest[0]).filter(|w| is_compound_op(w)),
+            3 => Some(rest[1]).filter(|w| is_compound_op(w)),
+            n if n > 3 => rest.iter().copied().find(|w| is_compound_op(w)),
+            _ => None,
+        };
 
         match found {
             Some(op) => vec![
