@@ -79,6 +79,7 @@ impl<T> Spanned<T> {
 
 /// Lexer error types.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub enum LexerError {
     #[default]
     UnexpectedCharacter,
@@ -224,6 +225,7 @@ pub struct HereDocData {
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(error = LexerError)]
 #[logos(skip r"[ \t]+")]
+#[non_exhaustive]
 pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
     // Keywords (must come before Ident for priority)
@@ -722,6 +724,12 @@ pub enum Token {
 ///
 /// Stable enum that groups tokens by purpose. Consumers match on categories
 /// instead of individual tokens, insulating them from lexer evolution.
+///
+/// Not `#[non_exhaustive]`, deliberately: this is the enum `Token` (which
+/// *is* `#[non_exhaustive]`) exists to protect embedders from — it is the
+/// small, closed vocabulary a syntax highlighter matches exhaustively so a
+/// new `Token` variant never breaks it. Making this one grow too would
+/// defeat the reason it exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenCategory {
     /// Keywords: if, then, else, for, while, function, return, etc.

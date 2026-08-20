@@ -123,6 +123,7 @@ use kaish_vfs::OverlayFs;
 /// - `Sandboxed` restricts access to a subtree (safer for agents)
 /// - `NoLocal` provides complete isolation (tests, pure memory mode)
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum VfsMountMode {
     /// LocalFs at "/" — native paths work directly.
     ///

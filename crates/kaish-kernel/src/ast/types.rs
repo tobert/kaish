@@ -10,6 +10,7 @@ pub struct Program {
 
 /// A single statement in kaish.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Stmt {
     /// Variable assignment: `NAME=value` or `local NAME = value`
     Assignment(Assignment),
@@ -117,6 +118,7 @@ pub struct Command {
 /// stage sees a byte. See `PipelineRunner::run_pipeline` for why, and for the
 /// streaming work that would retire it.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PipelineStage {
     Command(Command),
     Compound(Box<Stmt>),
@@ -216,6 +218,7 @@ pub struct ParamDef {
 
 /// Parameter type annotation.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ParamType {
     String,
     Int,
@@ -225,6 +228,7 @@ pub enum ParamType {
 
 /// A command argument (positional or named).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Arg {
     /// Positional argument: `value`
     Positional(Expr),
@@ -255,6 +259,7 @@ pub struct Redirect {
 
 /// Type of redirection.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RedirectKind {
     /// `>` stdout to file (overwrite)
     StdoutOverwrite,
@@ -317,6 +322,7 @@ pub struct SpannedPart {
 
 /// An expression that evaluates to a value.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
     /// Literal value
     Literal(Value),
@@ -383,6 +389,7 @@ pub enum Expr {
 
 /// One element of a list literal.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ListElem {
     /// A plain element: `[a b c]` — each word nests as ONE element (no implicit
     /// splitting of a variable's contents).
@@ -406,6 +413,7 @@ pub struct RecordEntry {
 /// quotes keep a literal `$`). See `docs/LANGUAGE.md`, "Construction —
 /// list/record literals".
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RecordKey {
     Bare(String),
     Quoted(String),
@@ -441,6 +449,7 @@ pub(crate) fn spread_non_list_message(value: &Value) -> String {
 
 /// Test expression for `[[ ... ]]` conditionals.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TestExpr {
     /// File test: `[[ -f path ]]`, `[[ -d path ]]`, etc.
     FileTest { op: FileTestOp, path: Box<Expr> },
@@ -464,6 +473,7 @@ pub enum TestExpr {
 
 /// File test operators for `[[ ]]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FileTestOp {
     /// `-e` - exists
     Exists,
@@ -481,6 +491,7 @@ pub enum FileTestOp {
 
 /// String test operators for `[[ ]]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StringTestOp {
     /// `-z` - string is empty
     IsEmpty,
@@ -504,6 +515,7 @@ pub enum StringTestOp {
 /// (lexicographic) comparisons, while `-eq`/`-ne`/`-gt`/`-lt`/`-ge`/`-le`
 /// are arithmetic comparisons that coerce string operands to numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TestCmpOp {
     /// `==` / `=` — string equality
     Eq,
@@ -581,6 +593,7 @@ pub(crate) fn normalize_name(name: String) -> String {
 /// represents a dotted `.field` access, which — kaish being brackets-only —
 /// resolves to a loud error with the bracket form in the message.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum VarSegment {
     /// The root variable name, or (illegally, past the root) a dotted `.field`.
     Field(String),
@@ -597,6 +610,7 @@ pub enum VarSegment {
 
 /// Part of an interpolated string.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StringPart {
     /// Literal text
     Literal(String),
@@ -628,6 +642,12 @@ pub enum StringPart {
 ///
 /// Value-level comparisons (`==`, `-eq`, `-gt`, …) live on
 /// [`TestCmpOp`] inside `[[ ]]` and are not part of this enum.
+///
+/// Not `#[non_exhaustive]`, deliberately: this enum exists only to name the
+/// two POSIX statement-chaining operators, and nothing else belongs here by
+/// design — a third would be a new grammar construct, not a variant this
+/// enum quietly grows. An embedder's exhaustive match is meant to break loud
+/// if that ever happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     /// `&&` - logical and (short-circuit)

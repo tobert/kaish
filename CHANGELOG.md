@@ -41,6 +41,24 @@ breaking entries are marked **BREAKING**.
   Persisting the result stays `write`'s business, including its I/O-error
   behavior. Pinned by tests that run against every in-tree backend.
 
+### Changed
+- **BREAKING:** Public enums in `kaish-kernel`'s AST, lexer, and error types
+  are now `#[non_exhaustive]` — `Stmt`, `Expr`, `Arg`, `RedirectKind`,
+  `PipelineStage`, `ParamType`, `ListElem`, `RecordKey`, `TestExpr`,
+  `FileTestOp`, `StringTestOp`, `TestCmpOp`, `VarSegment`, `StringPart`,
+  `Token`, `LexerError`, `EvalError`, `PathError`, `TrashError`,
+  `FragmentError`, `NameErrorKind`, `KernelOperation`, `ControlFlow`,
+  `OutputContext`, `OverwriteExpectation`, `SpillMode`, `IgnoreScope`,
+  `VfsMountMode`, and (Unix, `subprocess` feature) `WaitResult`. Every one of
+  0.15.0's five undeclared breaking changes was the same shape: a public
+  kaish-kernel enum grew a variant and silently broke an embedder's exhaustive
+  `match`. An embedder that matches any of these exhaustively must add a
+  `_ => …` arm — one that does something loud (a fallback error, a logged
+  "unrecognized variant"), never a silent default, so a future variant is
+  caught rather than misclassified. `BinaryOp`, `PipelinePosition`, and
+  `TokenCategory` are deliberately left exhaustive — see their doc comments
+  for why each is closed by design.
+
 ### Fixed
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
   `env -u PАTH cmd` were both silent — `env` names variables in argv words, so

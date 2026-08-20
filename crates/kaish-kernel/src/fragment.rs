@@ -36,6 +36,7 @@ use crate::parser::{self, ParseError};
 /// for and what was there instead — an expansion that quietly returned
 /// nothing would be read as a body that runs and produces nothing.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum FragmentError {
     /// The source did not parse.
     Parse(Vec<ParseError>),

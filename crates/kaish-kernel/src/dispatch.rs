@@ -88,6 +88,11 @@ pub(crate) fn arm_parent_death_signal(parent_pid: u32) -> std::io::Result<()> {
 /// Used by external command execution to decide stdio inheritance:
 /// - `Only` or `Last` in interactive mode → inherit terminal
 /// - `First` or `Middle` → always capture
+///
+/// Not `#[non_exhaustive]`, deliberately: kaish pipelines are a strictly
+/// linear chain of stages, so these four variants exhaust every position a
+/// stage can occupy. A fifth would mean pipelines stopped being linear — a
+/// grammar change, not a variant this enum grows on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PipelinePosition {
     /// Single command, no pipe.

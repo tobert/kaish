@@ -20,6 +20,7 @@ mod unix {
 
     /// Result of waiting for a foreground process.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum WaitResult {
         /// Process exited with a status code.
         Exited(i32),
