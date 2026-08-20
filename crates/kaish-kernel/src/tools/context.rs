@@ -841,6 +841,11 @@ impl ExecContext {
     /// `expected` to `overwrite_checked` for a binary-safe compare-and-swap.
     /// `Err(result)` is what the caller must return verbatim — a trash failure
     /// is an error, never a fall-through to a destructive overwrite.
+    // `ExecResult` IS the error here — `Err(result)` is what the caller
+    // returns verbatim, which is the point of the signature. Boxing it to
+    // satisfy `result_large_err` would put a `*deref` at every call site to
+    // save an allocation on a path that already reads and copies file bytes.
+    #[allow(clippy::result_large_err)]
     pub async fn snapshot_overwrites(
         &mut self,
         command: &str,
