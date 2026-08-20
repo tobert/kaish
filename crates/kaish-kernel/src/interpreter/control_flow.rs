@@ -10,6 +10,7 @@ use super::result::ExecResult;
 /// Normal execution returns `Normal(result)`. Loop control uses `Break` and `Continue`.
 /// Function returns use `Return`, and script exits use `Exit`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ControlFlow {
     /// Normal completion with a result.
     Normal(ExecResult),

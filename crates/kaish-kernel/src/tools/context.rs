@@ -32,6 +32,7 @@ use super::traits::ToolSchema;
 /// - **Model** — Token-efficient compact formats (MCP server / agent context)
 /// - **Script** — Non-interactive script execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum OutputContext {
     /// Interactive TTY/REPL - use human-friendly format with colors.
     #[default]
@@ -202,6 +203,7 @@ pub(crate) enum MutationAction {
 /// The trash path already holds the prior bytes (it had to copy them to the
 /// trash), so the expectation compares bytes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum OverwriteExpectation {
     /// The exact prior bytes, from the trash snapshot.
     Bytes(Vec<u8>),

@@ -12,6 +12,7 @@ use async_trait::async_trait;
 
 /// Errors from trash operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TrashError {
     #[error("{0}")]
     Backend(String),

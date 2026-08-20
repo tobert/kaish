@@ -36,6 +36,7 @@ use super::result::ExecResult;
 /// A loud error is surfaced everywhere, including inside strings; it is NEVER
 /// silently swallowed to an empty expansion.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PathError {
     /// The root variable is not in scope (or an unset dynamic `$k` subscript).
     UndefinedRoot(String),

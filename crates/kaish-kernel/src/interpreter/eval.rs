@@ -108,6 +108,7 @@ impl HeredocAssembler {
 
 /// Errors that can occur during expression evaluation.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum EvalError {
     /// Variable not found in scope.
     UndefinedVariable(String),

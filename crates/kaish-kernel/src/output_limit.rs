@@ -39,6 +39,7 @@ const DEFAULT_TAIL_BYTES: usize = 512;
 /// A build without `localfs` always behaves as [`SpillMode::Memory`] regardless
 /// of this setting, since disk I/O is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SpillMode {
     /// Write overflow to a disk spill file under `paths::spill_dir()` and keep a
     /// head+tail preview in the result (the message carries the file path).

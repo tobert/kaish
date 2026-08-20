@@ -149,6 +149,12 @@ fn format_token(token: &Token) -> String {
         Token::InvalidFloatNoLeading => "INVALID_FLOAT_NO_LEADING".to_string(),
         Token::InvalidFloatNoTrailing => "INVALID_FLOAT_NO_TRAILING".to_string(),
         Token::BacktickRejected => "BACKTICK_REJECTED".to_string(),
+
+        // `Token` is `#[non_exhaustive]` (kaish-kernel enums grow as the
+        // language does). This formatter is a full inventory of every
+        // variant on purpose — a new one must be added above, loudly, not
+        // silently rendered as a mislabeled existing variant.
+        _ => panic!("format_token: unhandled Token variant {token:?} — add a case above"),
     }
 }
 

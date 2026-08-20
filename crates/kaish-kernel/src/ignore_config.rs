@@ -12,6 +12,7 @@ use crate::walker::{IgnoreFilter, WalkerFs};
 
 /// Controls which tools respect the ignore configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IgnoreScope {
     /// Polite tools (glob, tree, grep, ls, expand_glob) respect config.
     /// `find` remains unrestricted — traditional POSIX behavior.

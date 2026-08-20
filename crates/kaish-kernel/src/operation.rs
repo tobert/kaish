@@ -14,6 +14,7 @@
 
 /// Every operation an in-tree builtin can declare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KernelOperation {
     /// `rm` removing a path permanently — the trash did not catch it.
     FsRemove,

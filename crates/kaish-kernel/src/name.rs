@@ -39,6 +39,7 @@ pub struct NameError {
 
 /// The class of character that made a name unreadable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NameErrorKind {
     /// Whitespace: the name looks like more than one word.
     Whitespace,
