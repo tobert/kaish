@@ -160,20 +160,15 @@ impl Tool for Tail {
         if output_lines.is_empty() {
             ExecResult::with_output(OutputData::new())
         } else {
-            // Build nodes with line numbers as cells (actual line number in file)
+            // The anchor is the line's position in the FILE, not among the
+            // rows `tail` emitted — `skip_count` is what makes the difference.
             let nodes: Vec<OutputNode> = output_lines
                 .iter()
                 .enumerate()
-                .map(|(i, line)| {
-                    let line_num = skip_count + i + 1;
-                    OutputNode::new(*line).with_cells(vec![line_num.to_string()])
-                })
+                .map(|(i, line)| OutputNode::new(*line).at_line((skip_count + i + 1) as u64))
                 .collect();
 
-            let output_data = OutputData::table(
-                vec!["LINE".to_string(), "NUM".to_string()],
-                nodes,
-            );
+            let output_data = OutputData::table(vec!["TEXT".to_string()], nodes);
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
         }
     }

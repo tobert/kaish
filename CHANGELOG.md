@@ -11,6 +11,27 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: `--json` carries one line anchor, named `line`, typed as an
+  integer.** "Which line of the file is this" had three spellings: `grep`
+  emitted an integer `line_number` in its rich payload, `head`/`tail` emitted a
+  *string* under `NUM` beside a `LINE` column holding the line's text, and
+  `cat -n` formatted the number into the text and emitted nothing structured.
+  `LINE` therefore named the text in one builtin and the number in another.
+  Now every row that came from a line of a file carries `line` as an integer,
+  and a row with no line to point at has no `line` key at all. `head`/`tail`
+  rows are `{"TEXT": …, "line": N}`; `grep`'s rich payload renames
+  `line_number` to `line` and drops its `LINE` column; `cat -n --json` returns
+  rows instead of one formatted string, on the file and stdin paths alike.
+  Builtins declare it with `OutputNode::at_line(n)`; nothing above them reads a
+  number back out of `cells` any more. Text output is unchanged everywhere,
+  including GNU's `%6d\t` from `cat -n`. `OutputNode` is now
+  `#[non_exhaustive]` — build one with `OutputNode::new`/`text` and the
+  builders rather than a struct literal.
+- **The interactive REPL prints line-anchored output as the builtin wrote it.**
+  `head`/`tail` used to render an aligned `LINE`/`NUM` table and `grep -n` a
+  `MATCH`/`LINE` one; plain `grep` columnized its matches side by side. All of
+  them now print what `kaish -c` prints — `head`'s bare lines, `grep -n`'s
+  `3:` prefix, one line per line.
 - **BREAKING: plan `index` is now the position in the `statements` list**, with
   no gaps — `statements[i].index == i`, always. It previously counted dropped
   empty statements, so any source opening with a comment or a blank line
@@ -78,6 +99,10 @@ breaking entries are marked **BREAKING**.
   `--json=false` forms are unchanged. scatter/gather's own option-parse errors
   read the same rule, so `scatter --limit x --json=1` reports as JSON instead
   of silently falling back to text.
+- **`cat -n` keeps the trailing newline past an empty operand.** An empty file
+  contributes no line but still answered the trailing-newline question for the
+  file before it, so `cat -n a.txt empty.txt` ended without the newline
+  `cat -n a.txt` has.
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
   `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
   no assignment reached the validator and `env` had no check of its own. An

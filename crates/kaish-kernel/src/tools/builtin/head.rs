@@ -198,19 +198,15 @@ impl Tool for Head {
         if output_lines.is_empty() {
             ExecResult::with_output(OutputData::new())
         } else {
-            // Build nodes with line numbers as cells
+            // The line number is the typed anchor, not a column: `head`
+            // starts at line 1, so the index IS the file line number.
             let nodes: Vec<OutputNode> = output_lines
                 .iter()
                 .enumerate()
-                .map(|(i, line)| {
-                    OutputNode::new(*line).with_cells(vec![(i + 1).to_string()])
-                })
+                .map(|(i, line)| OutputNode::new(*line).at_line(i as u64 + 1))
                 .collect();
 
-            let output_data = OutputData::table(
-                vec!["LINE".to_string(), "NUM".to_string()],
-                nodes,
-            );
+            let output_data = OutputData::table(vec!["TEXT".to_string()], nodes);
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
         }
     }
@@ -337,12 +333,9 @@ impl Head {
             let nodes: Vec<OutputNode> = output_lines
                 .iter()
                 .enumerate()
-                .map(|(i, line)| OutputNode::new(*line).with_cells(vec![(i + 1).to_string()]))
+                .map(|(i, line)| OutputNode::new(*line).at_line(i as u64 + 1))
                 .collect();
-            let output_data = OutputData::table(
-                vec!["LINE".to_string(), "NUM".to_string()],
-                nodes,
-            );
+            let output_data = OutputData::table(vec!["TEXT".to_string()], nodes);
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
         }
     }
