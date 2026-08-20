@@ -195,7 +195,13 @@ impl Tool for Cat {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if number_lines {
-                            last_had_trailing_newline = content.ends_with('\n');
+                            // An empty operand contributes no line, so it must
+                            // not answer the trailing-newline question for the
+                            // file before it: `cat -n a.txt empty.txt` ends the
+                            // same way `cat -n a.txt` does.
+                            if !content.is_empty() {
+                                last_had_trailing_newline = content.ends_with('\n');
+                            }
                             for line in content.lines() {
                                 if !all_content.is_empty() {
                                     all_content.push('\n');

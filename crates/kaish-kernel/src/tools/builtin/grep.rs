@@ -1307,7 +1307,11 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
         }
         match event {
             SearchEvent::Match(m) => {
+                // `0` is the text renderer's fallback for an unnumbered
+                // searcher, never an anchor: a row that does not know its
+                // line carries none rather than claiming line zero.
                 let line_num = m.line_number.unwrap_or(0);
+                let anchor = m.line_number;
                 if opts.only_matching && !opts.invert && !m.submatches.is_empty() {
                     for sub in &m.submatches {
                         output.push_str(&prefix(line_num, ':'));
@@ -1320,7 +1324,11 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                         {
                             cells.push(f.to_string());
                         }
-                        nodes.push(OutputNode::new(&sub.text).with_cells(cells).at_line(line_num));
+                        let mut node = OutputNode::new(&sub.text).with_cells(cells);
+                        if let Some(n) = anchor {
+                            node = node.at_line(n);
+                        }
+                        nodes.push(node);
                     }
                 } else {
                     output.push_str(&prefix(line_num, ':'));
@@ -1333,7 +1341,11 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                     {
                         cells.push(f.to_string());
                     }
-                    nodes.push(OutputNode::new(&m.line_text).with_cells(cells).at_line(line_num));
+                    let mut node = OutputNode::new(&m.line_text).with_cells(cells);
+                    if let Some(n) = anchor {
+                        node = node.at_line(n);
+                    }
+                    nodes.push(node);
                 }
 
                 rich.push(match_record_to_json(m, filename));

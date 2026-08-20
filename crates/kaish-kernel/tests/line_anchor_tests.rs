@@ -146,6 +146,10 @@ async fn cat_dash_n_anchors_match_through_a_pipe() {
 }
 
 /// Without `--json`, `cat -n` still prints GNU's `%6d\t` text on both paths.
+///
+/// This compares the two paths to each other, so it catches them drifting
+/// apart but not both drifting together; `cat_number_newline_tests` holds the
+/// exact-byte assertions, trailing newline included.
 #[tokio::test]
 async fn cat_dash_n_text_is_unchanged_on_both_paths() {
     let dir = fixture();
@@ -156,4 +160,47 @@ async fn cat_dash_n_text_is_unchanged_on_both_paths() {
     // still carries GNU's six-column pad.
     assert!(from_file.starts_with("1\talpha\n     2\tbravo"), "{from_file:?}");
     assert_eq!(from_file, from_pipe);
+}
+
+/// An empty file as the LAST operand contributed nothing but still answered
+/// the trailing-newline question, so `cat -n a.txt empty.txt` ended without
+/// the newline `cat -n a.txt` has. Pre-existing — confirmed identical on the
+/// binary built from `main` — and fixed here because this PR is already in
+/// the numbering path.
+#[tokio::test]
+async fn cat_dash_n_keeps_the_trailing_newline_past_an_empty_operand() {
+    let dir = fixture();
+    fs::write(dir.path().join("empty.txt"), "").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let alone = kernel.execute("cat -n f.txt").await.unwrap();
+    let with_empty = kernel.execute("cat -n f.txt empty.txt").await.unwrap();
+    assert!(alone.text_out().ends_with('\n'), "{:?}", alone.text_out());
+    assert_eq!(with_empty.text_out(), alone.text_out());
+}
+
+/// `grep --json` renders `rich_json`, so the anchor tests above never touch
+/// `OutputNode.line` for grep — they would pass with grep's typed anchors
+/// removed. This one reads the rows, which is what the REPL and an embedder
+/// see.
+#[tokio::test]
+async fn grep_rows_carry_the_typed_anchor() {
+    let dir = fixture();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("grep -n match f.txt").await.unwrap();
+    let output = result.output().expect("grep returns structured output");
+    let lines: Vec<Option<u64>> = output.root.iter().map(|n| n.line).collect();
+    assert_eq!(lines, vec![Some(3), Some(5)], "rows: {:?}", output.root);
+}
+
+/// `head`/`tail` rows too — same reason, though for these the `--json` tests
+/// do go through the rows.
+#[tokio::test]
+async fn head_rows_carry_the_typed_anchor() {
+    let dir = fixture();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("tail -n 2 f.txt").await.unwrap();
+    let output = result.output().expect("tail returns structured output");
+    let lines: Vec<Option<u64>> = output.root.iter().map(|n| n.line).collect();
+    assert_eq!(lines, vec![Some(4), Some(5)]);
 }

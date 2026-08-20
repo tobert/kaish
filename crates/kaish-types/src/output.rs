@@ -45,6 +45,12 @@ pub enum EntryType {
 /// - Some(""): this IS a text node whose content is empty (e.g. `echo ""`)
 ///
 /// The `is_text_only()` method depends on this distinction.
+///
+/// `#[non_exhaustive]` for the same reason [`OutputData`] is: this struct grows
+/// — `line` was added in 0.16 — and an out-of-tree struct literal would break
+/// on each addition. Build one with [`OutputNode::new`] or
+/// [`OutputNode::text`] and the builder methods.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
