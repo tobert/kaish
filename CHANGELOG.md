@@ -94,7 +94,29 @@ breaking entries are marked **BREAKING**.
   `TokenCategory` are deliberately left exhaustive — see their doc comments
   for why each is closed by design.
 
+### Added
+- **`test` implements `-a`, `-o`, `!`, and `( )`, following bash.** They were
+  rejected with exit 2 through 0.15, on the reasoning that the XSI operators
+  are ambiguous and `&&`/`||` are clearer. The rejection was clear and
+  invisible where `test` is used: `if test a = a -o b = c` reads the exit code,
+  sees 2, and takes the `else` branch with the diagnostic swallowed — a silent
+  false. Precedence is bash's: `!` binds tightest, then `-a`, then `-o`, with
+  `( )` grouping. `[[ ]]` still uses `&&`/`||` and does not accept `-a`/`-o`,
+  as in bash. Verified by a 984-expression differential sweep against
+  `bash -c`.
+- `-a` and `-o` mean AND and OR and nothing else. bash also reads `test -a
+  FILE` as a synonym for `-e` and `test -o NAME` as "shell option NAME is on";
+  that second meaning is what makes `EXPR -a EXPR` ambiguous to parse, and
+  coreutils warns about it in its own man page. One meaning per spelling —
+  `test -a x` is a loud error, `-e` tests existence.
+
 ### Fixed
+- **`test -e ""` is false.** The empty path resolved to the working directory,
+  so every file operator answered true for it.
+- **`test` with no operands is false**, as in bash, rather than exit 2. An
+  operator missing its operand stays a loud error — that one is a deliberate
+  divergence, since bash reads `test -f` as a non-empty string and returns
+  true.
 - **`--json=VALUE` means the same thing on every builtin.** `--json=1`,
   `--json=yes`, and `--json=""` exited 2 with a clap parse error on an ordinary
   builtin while `test` and a verbatim tool accepted them, and `--json=0` *enabled*

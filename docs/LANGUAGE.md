@@ -677,8 +677,9 @@ test -f config.toml             # file tests: -e -f -d -r -w -x
 test -z "$out"                  # string tests: -z -n
 test "$mode" = release          # equality: = == != (literal, not glob)
 test "$count" -gt 0             # numeric: -eq -ne -gt -lt -ge -le
-test ! -d build                 # negation: a single leading !
-test -f a && test -f b          # compound: chain with shell && / ||
+test ! -d build                 # negation: !
+test -f a -a -f b               # compound: -a (AND), -o (OR), \( \) to group
+test -f a && test -f b          # or chain with shell && / ||
 if test -f "$path"; then …; fi  # the usual home, an `if`/`while` condition
 ```
 
@@ -686,11 +687,19 @@ if test -f "$path"; then …; fi  # the usual home, an `if`/`while` condition
 
 - **Numbers are kaish (JSON) numbers**, so `test 1.5 -gt 1` compares (it does not
   error the way POSIX `test` would); a non-numeric operand is a loud error.
-- **No `-a` / `-o` / `\( \)`** — those ambiguous XSI operators are rejected
-  loudly. Compose with shell `&&` / `||`, or use `[[ ]]`.
+- **`-a` / `-o` / `\( \)` follow bash's precedence**: `!` binds tightest, then
+  `-a`, then `-o`. `\( \)` groups. `[[ ]]` uses `&&` and `||` instead and does
+  not accept `-a`/`-o`, as in bash.
+- **`-a` and `-o` mean AND and OR, and nothing else.** bash also reads
+  `test -a FILE` as a synonym for `-e` and `test -o NAME` as "shell option
+  NAME is on"; that second meaning is what makes `EXPR -a EXPR` ambiguous to
+  parse, and coreutils' man page warns about it. kaish keeps one meaning per
+  spelling, so `test -a x` is a loud error — use `-e`.
 - **An operator missing its operand is a loud error** (`test -f` on its own),
-  never a surprise-true — kaish does no word splitting, so the classic
-  `test -n $empty` footgun can't arise.
+  never a surprise-true — this is the one place `test` deliberately differs
+  from bash, which reads `-f` as a non-empty string and returns true. kaish
+  does no word splitting either, so the classic `test -n $empty` footgun can't
+  arise. `test` with no operands at all is false, as in bash.
 - **Richer tests stay `[[ ]]`-only**: membership (`in` / `not in`), regex
   (`=~` / `!~`), and the shape guards (`-list` / `-record`).
 

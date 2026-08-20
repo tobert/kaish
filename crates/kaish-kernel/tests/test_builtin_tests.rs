@@ -146,7 +146,9 @@ async fn negation() {
 
 #[tokio::test]
 async fn arity_errors_are_loud() {
-    assert_eq!(code_of("test").await, 2, "0-arg test is a usage error");
+    // No operands is false, as in bash — an absent expression cannot be a
+    // typo'd one, so there is nothing for a loud error to protect.
+    assert_eq!(code_of("test").await, 1, "0-arg test is false, like bash");
     assert_eq!(code_of("test -f").await, 2, "operator with missing operand is loud");
     assert_eq!(code_of("test -z").await, 2, "operator with missing operand is loud");
     assert_eq!(code_of("test !").await, 2, "bare ! has no expression");
@@ -163,24 +165,31 @@ async fn arity_edge_cases() {
     assert_eq!(code_of("test ! ! x").await, 0, "! ! x is identity on non-empty");
     // A bare `!` left after the strip has no expression → loud.
     assert_eq!(code_of("test ! !").await, 2, "trailing bare ! is a usage error");
-    // `=` is a binary op, not unary — `! = x` has no valid primary → loud.
-    assert_eq!(code_of("test ! = x").await, 2, "= is not a unary operator");
+    // Three operands with a binary operator in the middle is a primary, and
+    // that rule outranks `!`: this compares the strings `!` and `x`, as bash
+    // does. It was a loud error through 0.15.
+    assert_eq!(code_of("test ! = x").await, 1, r#""!" does not equal "x""#);
     // The operator token as a literal operand: `= = =` is string-eq of "=","=".
     assert_eq!(code_of("test = = =").await, 0, r#""=" equals "=""#);
     // An operator in operand position of a unary test: file named "-f".
     assert_eq!(code_of("test -f -f").await, 1, r#"stats a file literally named "-f""#);
 }
 
-// --- compound (-a/-o) is rejected loudly, shell chaining is the path --------
+// --- compound (-a/-o) evaluates; shell chaining still works ----------------
 
+/// `-a`/`-o` were rejected with exit 2 through 0.15. The rejection was clear
+/// and invisible in the one place `test` is used: `if test a = a -o b = c`
+/// read the exit code, saw 2, and took the `else` branch with the diagnostic
+/// swallowed. See `test_compound_tests` for the bash-conformance table.
 #[tokio::test]
-async fn compound_operators_rejected() {
-    assert_eq!(code_of("test -f file.txt -a -f sub").await, 2, "-a is not supported");
-    assert_eq!(code_of("test a = a -o b = b").await, 2, "-o is not supported");
+async fn compound_operators_evaluate() {
+    assert_eq!(code_of("test -f file.txt -a -f sub").await, 1, "neither file exists");
+    assert_eq!(code_of("test a = a -o b = b").await, 0, "-o is an OR");
+    assert_eq!(code_of("test a = a -a b = b").await, 0, "-a is an AND");
 }
 
 #[tokio::test]
-async fn shell_chaining_is_the_compound_path() {
+async fn shell_chaining_is_still_a_compound_path() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "hi\n").unwrap();
     fs::create_dir(dir.path().join("sub")).unwrap();
