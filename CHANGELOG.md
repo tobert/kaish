@@ -68,6 +68,14 @@ breaking entries are marked **BREAKING**.
   for why each is closed by design.
 
 ### Fixed
+- **`--json=VALUE` means the same thing on every builtin.** `--json=1`,
+  `--json=yes`, and `--json=""` exited 2 with a clap parse error on an ordinary
+  builtin while `test` and a verbatim tool accepted them, and `--json=0` *enabled*
+  JSON before erroring. The three argument binders each decided truthiness
+  their own way; they now share one rule — off for `0`, `false`, and an empty
+  value, on for anything else — exported as `global_flag_value_is_truthy` for
+  embedders binding argv themselves. The bare `--json` and `--json=true` /
+  `--json=false` forms are unchanged.
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
   `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
   no assignment reached the validator and `env` had no check of its own. An
