@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **`for` reports a mixed-script loop variable (W007).** `for PАTH in a`, with
+  CYRILLIC CAPITAL LETTER A where Latin `A` belongs, bound a different variable
+  than the source reads as and said nothing, while `PАTH=/bin` had warned since
+  0.11. The loop head was the last static door without the check;
+  `docs/LANGUAGE.md` claimed every door reported it, and now that is true.
+
 ## [0.15.0] - 2026-08-19
 
 ### Added

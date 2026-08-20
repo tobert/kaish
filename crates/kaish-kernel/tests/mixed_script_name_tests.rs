@@ -80,6 +80,8 @@ async fn single_script_names_are_quiet_at_every_door() {
         "x😁=ok",
         "変数x=ok",
         "export café=ok",
+        "for café in a; do echo hi; done",
+        "for 名前 in a; do echo hi; done",
         "unset café",
         "xs=[a]; push xs b",
         "read v",
@@ -125,4 +127,28 @@ async fn the_runtime_name_doors_warn_too() {
         let (_, _, err) = run(&source).await;
         assert!(err.contains("W007"), "{source} should warn: {err:?}");
     }
+}
+
+/// `for` binds a name the same way an assignment does, and the source shows
+/// one name while the kernel binds another. The loop head had no check, so
+/// `for PАTH in …` was the one static door that stayed silent.
+#[tokio::test]
+async fn a_for_loop_variable_with_a_mixed_script_name_warns_on_stderr() {
+    let name = cyrillic_path();
+    let (code, _, err) = run(&format!("for {name} in a; do echo hi; done")).await;
+    assert_eq!(code, 0, "a mixed-script name is a warning, not a failure");
+    assert!(err.contains("W007"), "stderr should carry the code: {err:?}");
+    assert!(err.contains("U+0410"), "stderr should name the codepoint: {err:?}");
+    assert!(err.contains("Cyrillic"), "stderr should name the script: {err:?}");
+}
+
+/// The warning does not stop the loop, and the name still binds — the same
+/// promise every other door makes.
+#[tokio::test]
+async fn a_for_loop_with_a_mixed_script_name_still_runs_and_binds() {
+    let name = cyrillic_path();
+    let (code, out, _) =
+        run(&format!("for {name} in x y; do echo ${{{name}}}; done")).await;
+    assert_eq!(code, 0, "execution must not be blocked");
+    assert_eq!(out, "x\ny");
 }

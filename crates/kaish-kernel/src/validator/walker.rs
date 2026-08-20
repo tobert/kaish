@@ -357,6 +357,17 @@ impl<'a> Validator<'a> {
         self.loop_depth += 1;
         self.scope.push_frame();
 
+        // `for` binds a name the same way an assignment does, so it carries
+        // the same hazard: `for PАTH in …` reads as `PATH` and binds another
+        // variable, with exit code 0 either way. Warning, not error — see
+        // `crate::name::mixed_script`.
+        if let Some(mixed) = crate::name::mixed_script(&for_loop.variable) {
+            self.issues.push(
+                ValidationIssue::warning(IssueCode::MixedScriptName, mixed.to_string())
+                    .with_suggestion(mixed.suggestion()),
+            );
+        }
+
         // Bind loop variable
         self.scope.bind(&for_loop.variable);
 

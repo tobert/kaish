@@ -393,7 +393,7 @@ Unicode [UAX #39]'s Highly Restrictive profile, so `café`, `переменна�
 `変数x` stay quiet — Latin beside Japanese, Chinese, or Korean is a writing
 system, not a confusable. A warning rather than an error, because only the
 author knows which name they meant. Every door reports it: an assignment,
-`export`, `read`, `unset`, `push`, and `scatter --as`.
+`export`, a `for` loop head, `read`, `unset`, `push`, and `scatter --as`.
 
 [UAX #39]: https://www.unicode.org/reports/tr39/
 
