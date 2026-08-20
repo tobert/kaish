@@ -11,6 +11,20 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: `--json` carries one line anchor, named `line`, typed as an
+  integer.** "Which line of the file is this" had three spellings: `grep`
+  emitted an integer `line_number` in its rich payload, `head`/`tail` emitted a
+  *string* under `NUM` beside a `LINE` column holding the line's text, and
+  `cat -n` formatted the number into the text and emitted nothing structured.
+  `LINE` therefore named the text in one builtin and the number in another.
+  Now every row that came from a line of a file carries `line` as an integer,
+  and a row with no line to point at has no `line` key at all. `head`/`tail`
+  rows are `{"TEXT": …, "line": N}`; `grep`'s rich payload renames
+  `line_number` to `line` and drops its `LINE` column; `cat -n --json` returns
+  rows instead of one formatted string, on the file and stdin paths alike.
+  Builtins declare it with `OutputNode::at_line(n)`; nothing above them reads a
+  number back out of `cells` any more. Text output is unchanged everywhere,
+  including GNU's `%6d\t` from `cat -n`.
 - **BREAKING: plan `index` is now the position in the `statements` list**, with
   no gaps — `statements[i].index == i`, always. It previously counted dropped
   empty statements, so any source opening with a comment or a blank line

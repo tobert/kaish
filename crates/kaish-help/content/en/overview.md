@@ -27,6 +27,20 @@ kaish-vars --json        # JSON array of {NAME, VALUE} objects
 ps --json                # JSON array of process info
 ```
 
+A row that came from a line of a file carries `line`, a 1-based integer:
+
+```sh
+grep -n fn main.rs --json | jq '.[].line'
+head -n 3 main.rs --json                  # [{"TEXT":"…","line":1}, …]
+cat -n main.rs --json | jq 'map(select(.line > 40))'
+```
+
+`grep` sets it whether or not `-n` is given — `-n` controls the text, not
+whether the anchor exists. `tail` reports the line's position in the file, not
+its position among the rows `tail` printed. A row with no line to point at (a
+file listing, a process) has no `line` key at all, so `has("line")` is a real
+question to ask.
+
 ## Quick Examples
 
 ```sh
