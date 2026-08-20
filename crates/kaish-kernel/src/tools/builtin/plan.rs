@@ -66,9 +66,24 @@ impl Tool for PlanTool {
             };
         parsed.global.apply(ctx);
 
-        // A statement is one block on stdin, or one argument. Joining several
-        // arguments with a space would silently re-word an unquoted statement
-        // into something the caller did not write.
+        // A statement is one block on stdin, or one argument.
+        //
+        // Refusing more than one is the whole point. Joining them with a space
+        // would re-word an unquoted statement into something the caller did not
+        // write, and taking the first would plan a *different* statement than
+        // the one asked about — `plan rm build` would report a bare `rm` with no
+        // arguments. A tool whose answer decides whether a command is dangerous
+        // must never quietly answer about a shorter command.
+        if args.positional.len() > 1 {
+            let count = args.positional.len();
+            return ExecResult::failure(
+                2,
+                format!(
+                    "plan: expected one statement, got {count} words — quote the \
+                     whole statement: plan '<statement>'"
+                ),
+            );
+        }
         let source = match args.get_string("source", 0) {
             Some(s) => s,
             None => match ctx.read_stdin_to_text().await {

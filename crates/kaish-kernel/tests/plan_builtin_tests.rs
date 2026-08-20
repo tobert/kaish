@@ -137,3 +137,45 @@ async fn indexes_match_list_position_even_with_a_leading_comment() {
         );
     }
 }
+
+/// The failure that mattered most, because of what `plan` is for.
+///
+/// `plan rm build` used to plan `rm` with no arguments and discard the rest —
+/// a hook scoring the answer would have seen a bare `rm` and judged a command
+/// that was never asked about. Truncating the statement under analysis is worse
+/// than refusing to analyze it, so this refuses and names the fix.
+#[tokio::test]
+async fn more_than_one_word_is_refused_rather_than_truncated() {
+    let (code, out, err) = run("plan rm build").await;
+    assert_eq!(code, 2, "extra words are a usage error, not a shorter plan");
+    assert!(
+        !out.contains("\"rm\"") && !out.contains("rendered"),
+        "no plan may be emitted for a statement that was not fully given: {out:?}"
+    );
+    assert!(
+        err.contains("quote the whole statement"),
+        "the error must name the fix: {err:?}"
+    );
+
+    // The quoted form is the fix the message names, and it plans the whole
+    // statement — arguments included.
+    let doc = plan_json("plan 'rm build' --json").await;
+    let args = doc["statements"][0]["plan"]["commands"][0]["args"]
+        .as_array()
+        .expect("args");
+    assert_eq!(args.len(), 1, "the argument survives when quoted: {doc}");
+}
+
+/// An empty plan is where the builtin and the CLI diverge, pinned so the
+/// divergence is a decision rather than a surprise.
+///
+/// `kaish --plan ''` prints `{"statements":[]}` because the CLI promises one
+/// JSON object always. The builtin prints nothing, because the kernel's
+/// `--json` contract leaves an empty success empty — the same rule that keeps
+/// `grep`'s no-match quiet. The kernel rule wins inside the kernel.
+#[tokio::test]
+async fn an_empty_plan_stays_empty_under_the_kernel_json_rule() {
+    let (code, out, _) = run("plan '' --json").await;
+    assert_eq!(code, 0, "an empty statement is not an error");
+    assert_eq!(out, "", "an empty success stays empty under --json");
+}

@@ -52,7 +52,6 @@ mod introspect;
 mod jobs;
 mod jq_native;
 mod kaish_ast;
-mod plan;
 mod kaish_clear;
 mod kaish_last;
 mod kaish_trash;
@@ -67,6 +66,7 @@ mod mkdir;
 mod mktemp;
 mod mv;
 mod output_limit;
+mod plan;
 mod printf;
 mod push;
 mod pwd;
@@ -256,7 +256,6 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(jobs::Jobs);
     registry.register(jq_native::JqNative);
     registry.register(kaish_ast::KaishAst);
-    registry.register(plan::PlanTool);
     registry.register(kaish_clear::KaishClear);
     registry.register(kaish_last::KaishLast);
     registry.register(kaish_trash::KaishTrash);
@@ -272,6 +271,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mv::Mv);
     registry.register(output_limit::KaishOutputLimit);
     registry.register(patch::Patch);
+    registry.register(plan::PlanTool);
     registry.register(printf::Printf);
     registry.register(push::Push);
     #[cfg(all(target_os = "linux", feature = "host"))]

@@ -929,9 +929,9 @@ question about it.
 #### From a kaish hook body: the `plan` builtin
 
 An embedder whose hooks are written in kaish reaches the same analysis without
-leaving the shell. `plan '<statement>' --json` emits the object `kaish --plan`
-emits, byte for byte, and `plan` with no argument reads the statement from
-stdin:
+leaving the shell. `plan '<statement>' --json` emits the same
+`{"statements": [...]}` object `kaish --plan` emits, and `plan` with no argument
+reads the statement from stdin:
 
 ```kaish
 plan "$stmt" --json | jq '.statements[].plan.commands[].name'
@@ -944,6 +944,18 @@ classifier scoring whole statements dilutes it. `commands` lists each one
 separately, wherever it sits.
 
 `plan` executes nothing, so a hook can judge a statement it has not run.
+
+Quote the statement. `plan` takes exactly one — `plan rm build` is two words and
+exits **2** naming the fix, rather than planning `rm` and discarding `build`. A
+tool whose answer decides whether a command is dangerous must not answer about a
+shorter command.
+
+Two differences from `kaish --plan`, both following the kernel's `--json`
+contract rather than the CLI's. A failure carries the kernel's envelope,
+`{"error": …, "code": 2, "data": {"errors": [...]}}`, so the parse errors sit
+under `data` instead of at the top level. And a plan with no statements prints
+nothing, because `--json` leaves an empty success empty — the CLI prints
+`{"statements": []}` there.
 
 `index` is the statement's position in the `statements` list, counted from 0
 with no gaps, so indexing the list by it reads the statement it names.

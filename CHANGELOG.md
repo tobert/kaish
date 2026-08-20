@@ -26,9 +26,11 @@ breaking entries are marked **BREAKING**.
   for byte, and `plan` with no argument reads the statement from stdin. Nothing
   executes and no substitution runs. Its `commands` list descends into loop
   bodies, `if` conditions, and `$(...)`, so a command buried in a statement
-  surfaces on its own rather than being scored as part of the whole. Previously
-  this analysis was reachable only from Rust or the `--plan` CLI flag, so an
-  embedder whose hooks are written in kaish could not use it.
+  surfaces on its own rather than being scored as part of the whole. Takes
+  exactly one statement — `plan rm build` exits 2 naming the fix rather than
+  planning `rm` and discarding `build`. Previously this analysis was reachable
+  only from Rust or the `--plan` CLI flag, so an embedder whose hooks are
+  written in kaish could not use it.
 
 ### Added
 - **`KernelBackend::patch` states its batch contract.** The trait doc now says
