@@ -145,22 +145,26 @@ fn planning_executes_nothing() {
     assert_eq!(json["statements"][0]["plan"]["commands"][0]["name"], "rm");
 }
 
-/// The statement index is the position in the *parsed* program, counted
-/// before empty statements are dropped — so a leading comment leaves a gap.
-/// A consumer that filtered and then indexed by position would read the wrong
-/// statement, which is exactly what it did inside the kernel until review
-/// caught it.
+/// The statement index is the position in the `statements` list, counted from
+/// 0 with no gaps, so a consumer can index the list by it.
+///
+/// It used to count the empty statements dropped before it, which made a
+/// leading comment — the most ordinary thing in a script — number every
+/// statement one too high while the list stayed dense.
 #[test]
-fn the_statement_index_counts_empty_statements() {
+fn the_statement_index_is_the_position_in_the_list() {
     let (code, json) = plan("# a comment\necho one\necho two");
     assert_eq!(code, 0);
-    let indices: Vec<u64> = json["statements"]
-        .as_array()
-        .expect("statements")
+    let statements = json["statements"].as_array().expect("statements");
+    let indices: Vec<u64> = statements
         .iter()
         .map(|s| s["index"].as_u64().expect("index"))
         .collect();
-    assert_eq!(indices, vec![1, 2], "the comment holds index 0");
+    assert_eq!(indices, vec![0, 1], "a leading comment does not shift the indices");
+    assert_eq!(
+        statements[0]["plan"]["rendered"], "echo one",
+        "index 0 is the first real statement, not the comment"
+    );
 }
 
 /// `--plan` with no source is reported through the same door as a broken

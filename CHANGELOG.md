@@ -10,6 +10,28 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: plan `index` is now the position in the `statements` list**, with
+  no gaps — `statements[i].index == i`, always. It previously counted dropped
+  empty statements, so any source opening with a comment or a blank line
+  numbered every statement one too high while the list stayed dense. The gap
+  existed to line up with `Capture::Statement`, approval-ledger vocabulary that
+  was removed before 0.14.0, so it had no remaining consumer. A consumer that
+  read `index` as a list position was already right and needs no change; one
+  that compensated for the offset must stop.
+
+### Added
+- **`plan` builtin — the statement projection, reachable from a kaish body.**
+  `plan '<statement>' --json` emits the same object `kaish --plan` does, byte
+  for byte, and `plan` with no argument reads the statement from stdin. Nothing
+  executes and no substitution runs. Its `commands` list descends into loop
+  bodies, `if` conditions, and `$(...)`, so a command buried in a statement
+  surfaces on its own rather than being scored as part of the whole. Takes
+  exactly one statement — `plan rm build` exits 2 naming the fix rather than
+  planning `rm` and discarding `build`. Previously this analysis was reachable
+  only from Rust or the `--plan` CLI flag, so an embedder whose hooks are
+  written in kaish could not use it.
+
 ### Added
 - **`KernelBackend::patch` states its batch contract.** The trait doc now says
   what all three implementations already do: operations apply in order to one

@@ -66,6 +66,7 @@ mod mkdir;
 mod mktemp;
 mod mv;
 mod output_limit;
+mod plan;
 mod printf;
 mod push;
 mod pwd;
@@ -270,6 +271,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mv::Mv);
     registry.register(output_limit::KaishOutputLimit);
     registry.register(patch::Patch);
+    registry.register(plan::PlanTool);
     registry.register(printf::Printf);
     registry.register(push::Push);
     #[cfg(all(target_os = "linux", feature = "host"))]

@@ -926,9 +926,39 @@ for statement in plan["statements"]:
 measuring real traffic should not have to shell-quote a program to ask a
 question about it.
 
-`index` is the statement's position in the **parsed** program, counted before
-empty statements are dropped — a comment or blank line leaves a gap, so
-filtering and then indexing by position reads the wrong statement.
+#### From a kaish hook body: the `plan` builtin
+
+An embedder whose hooks are written in kaish reaches the same analysis without
+leaving the shell. `plan '<statement>' --json` emits the same
+`{"statements": [...]}` object `kaish --plan` emits, and `plan` with no argument
+reads the statement from stdin:
+
+```kaish
+plan "$stmt" --json | jq '.statements[].plan.commands[].name'
+```
+
+Without `--json` it prints one line per statement — index, kind, rendered text —
+then each command it would run, indented. That listing is the point: a command
+can sit deep enough inside a statement that a reader skims past it, and a
+classifier scoring whole statements dilutes it. `commands` lists each one
+separately, wherever it sits.
+
+`plan` executes nothing, so a hook can judge a statement it has not run.
+
+Quote the statement. `plan` takes exactly one — `plan rm build` is two words and
+exits **2** naming the fix, rather than planning `rm` and discarding `build`. A
+tool whose answer decides whether a command is dangerous must not answer about a
+shorter command.
+
+Two differences from `kaish --plan`, both following the kernel's `--json`
+contract rather than the CLI's. A failure carries the kernel's envelope,
+`{"error": …, "code": 2, "data": {"errors": [...]}}`, so the parse errors sit
+under `data` instead of at the top level. And a plan with no statements prints
+nothing, because `--json` leaves an empty success empty — the CLI prints
+`{"statements": []}` there.
+
+`index` is the statement's position in the `statements` list, counted from 0
+with no gaps, so indexing the list by it reads the statement it names.
 
 **Check the binary's version before you trust the contract.** "Always a JSON
 object" is a promise about a kaish that has `--plan`; an older one prints
