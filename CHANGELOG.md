@@ -11,6 +11,16 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`plan` builtin — the statement projection, reachable from a kaish body.**
+  `plan '<statement>' --json` emits the same object `kaish --plan` does, byte
+  for byte, and `plan` with no argument reads the statement from stdin. Nothing
+  executes and no substitution runs. Its `commands` list descends into loop
+  bodies, `if` conditions, and `$(...)`, so a command buried in a statement
+  surfaces on its own rather than being scored as part of the whole. Previously
+  this analysis was reachable only from Rust or the `--plan` CLI flag, so an
+  embedder whose hooks are written in kaish could not use it.
+
+### Added
 - **`KernelBackend::patch` states its batch contract.** The trait doc now says
   what all three implementations already do: operations apply in order to one
   snapshot and the result is written once, so an operation that fails — a CAS

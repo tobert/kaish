@@ -173,6 +173,7 @@ const CASES: &[Case] = &[
         expect: Expect::String,
     },
     Case { name: "printf", setup: &[], cmd: "printf 'x' --json", expect: Expect::String },
+    Case { name: "plan", setup: &[], cmd: r#"plan 'echo hi' --json"#, expect: Expect::Object },
     Case { name: "ps", setup: &[], cmd: "ps --json", expect: Expect::Array },
     // push mutates in place and is silent on success, like unset.
     Case { name: "push", setup: &["xs=[a b]"], cmd: "push xs c --json", expect: Expect::Empty },

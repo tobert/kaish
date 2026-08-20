@@ -926,6 +926,25 @@ for statement in plan["statements"]:
 measuring real traffic should not have to shell-quote a program to ask a
 question about it.
 
+#### From a kaish hook body: the `plan` builtin
+
+An embedder whose hooks are written in kaish reaches the same analysis without
+leaving the shell. `plan '<statement>' --json` emits the object `kaish --plan`
+emits, byte for byte, and `plan` with no argument reads the statement from
+stdin:
+
+```kaish
+plan "$stmt" --json | jq '.statements[].plan.commands[].name'
+```
+
+Without `--json` it prints one line per statement — index, kind, rendered text —
+then each command it would run, indented. That listing is the point: a command
+can sit deep enough inside a statement that a reader skims past it, and a
+classifier scoring whole statements dilutes it. `commands` lists each one
+separately, wherever it sits.
+
+`plan` executes nothing, so a hook can judge a statement it has not run.
+
 `index` is the statement's position in the **parsed** program, counted before
 empty statements are dropped — a comment or blank line leaves a gap, so
 filtering and then indexing by position reads the wrong statement.
