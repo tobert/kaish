@@ -2147,13 +2147,19 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
 /// so a `LongFlag` glued to a following fragment is always a pasting
 /// accident, not a feature.
 ///
-/// `Named`/`WordAssign` are excluded too — those already fuse a span-adjacent
-/// `--key=value`/`key=value` pair into ONE `Arg` before reaching this list
-/// (see `long_flag_with_value`/`word_assign_arg_parser`'s own adjacency
-/// checks), so back-to-back adjacency there is by design, not a pasting
-/// accident.
+/// `Named`/`WordAssign` ARE candidates, despite fusing a span-adjacent
+/// `--key=value`/`key=value` triple into one `Arg` themselves. That fusion
+/// covers the boundaries *inside* the word, which `windows(2)` never compares;
+/// it says nothing about a fragment glued to the END of the value.
+/// `--a=1--b=2` and `--a=$V--b` are two args with a zero source gap between
+/// them, and that is pasting by any other name. Excluding them let those split
+/// silently into separate operands — loudly wrong pre-`--` only because clap
+/// then rejected `-a` as an unknown flag, and wholly silent after `--`.
 fn is_glue_candidate(arg: &Arg) -> bool {
-    matches!(arg, Arg::Positional(_) | Arg::LongFlag(_))
+    matches!(
+        arg,
+        Arg::Positional(_) | Arg::LongFlag(_) | Arg::Named { .. } | Arg::WordAssign { .. }
+    )
 }
 
 /// Reject a run of argv fragments produced by glued (zero source-gap)
@@ -2217,7 +2223,8 @@ where
 
     // Arguments after `--` (flags become positional strings)
     let post_dash_arg = choice((
-        // `--flag=value` / `-x=value` — one operand, like `name=value` below.
+        // `--flag=value` — one operand, like `name=value` below. Long flags
+        // only; see the production's own doc for why `-x=value` is not here.
         // This must precede the bare-flag rule, which would otherwise take
         // `--flag` and leave `=value` to be rejected as a glued word. Past
         // `--` there is no flag for a value to belong to, so the pair is

@@ -232,8 +232,10 @@ pub enum ParamType {
 pub enum Arg {
     /// Positional argument: `value`
     Positional(Expr),
-    /// Long flag with attached value: `--key=value`. Always routes through
-    /// `tool_args.named` regardless of the receiving command.
+    /// Long flag with attached value: `--key=value`. Routes through
+    /// `tool_args.named` regardless of the receiving command — except past
+    /// `--`, where it is an operand and the binders stringify it into one
+    /// positional `"--key=value"`, the same collapse `WordAssign` gets there.
     Named { key: String, value: Expr },
     /// Bareword shell-assignment in argv position: `key=value`.
     ///

@@ -83,6 +83,12 @@ breaking entries are marked **BREAKING**.
   the kernel's flag by a scan that exists for `raw_argv` tools, which keep the
   bounding `--` among their positionals; that scan is now asked only of them.
   `-n=1` is still not a word on either side of `--`, as before.
+- **A fragment glued after a `--key=value` word is refused.** `echo --a=1--b=2`
+  and `echo -- --a=$V--b` split into separate arguments instead of reporting
+  the pasting — `Arg::Named`/`Arg::WordAssign` were exempt from the
+  no-token-pasting guard, which covered the boundaries inside the word but not
+  the one after the value. Loud only by accident before (clap rejected the
+  stray `-a`), and silent after `--`.
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
   `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
   no assignment reached the validator and `env` had no check of its own. An

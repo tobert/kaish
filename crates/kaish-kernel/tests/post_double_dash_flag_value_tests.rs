@@ -48,11 +48,17 @@ async fn long_flag_value_is_one_operand() {
 async fn short_flag_value_is_still_refused_on_both_sides() {
     let k = kernel();
     for script in ["echo -n=1", "echo -- -n=1"] {
-        let rejected = match k.execute(script).await {
-            Err(_) => true,
-            Ok(r) => r.code != 0,
+        let err = match k.execute(script).await {
+            Err(e) => e.to_string(),
+            Ok(r) => {
+                assert_ne!(r.code, 0, "`{script}` must not succeed");
+                r.err.clone()
+            }
         };
-        assert!(rejected, "`{script}` should still be refused");
+        assert!(
+            err.contains("adjacent words with no space between them"),
+            "`{script}` should still be the parse error, got: {err}"
+        );
     }
 }
 
@@ -116,16 +122,43 @@ async fn pre_dash_json_still_switches_the_format() {
     assert_eq!(out, "\"hi\\n\"");
 }
 
-/// Real pasting is still refused. `--a=1--b=2` is two argv fragments with no
-/// space, which is what the glue guard exists to catch; the fix must not
-/// swallow that.
+/// Real pasting is still refused — a fragment glued to the END of the value.
+///
+/// The first version of this test used an undefined `$V` and accepted any
+/// failure, so it passed on the runtime "undefined variable" error while the
+/// glue guard was being bypassed entirely. It asserts the guard's own message
+/// now, and `V` is defined so nothing else can fail first.
 #[tokio::test]
-async fn glued_words_are_still_rejected() {
+async fn a_fragment_glued_after_the_value_is_still_rejected() {
     let k = kernel();
-    let r = k.execute("echo -- --a=$V--b").await;
-    let rejected = match r {
-        Err(_) => true,
-        Ok(res) => res.code != 0,
-    };
-    assert!(rejected, "a genuinely glued post-`--` word must still fail");
+    for script in [
+        "V=hello; echo -- --a=$V--b",
+        "echo -- --a=1--b=2",
+        // and the same word before `--`, where the split used to survive as
+        // far as clap and surface as "unexpected argument '-a'".
+        "echo --a=1--b=2",
+        "V=hello; echo A=$V--b",
+    ] {
+        let err = match k.execute(script).await {
+            Err(e) => e.to_string(),
+            Ok(r) => {
+                assert_ne!(r.code, 0, "`{script}` must not succeed: {:?}", r.text_out());
+                r.err.clone()
+            }
+        };
+        assert!(
+            err.contains("adjacent words with no space between them"),
+            "`{script}` must fail with the glue error, got: {err}"
+        );
+    }
+}
+
+/// The guard compares a zero source gap, so a space is all it takes to be
+/// two words — no legitimate spelling is caught.
+#[tokio::test]
+async fn spaced_flag_values_are_not_glued() {
+    assert_eq!(echoed("echo -- --a=1 --b=2").await, "--a=1 --b=2");
+    let k = kernel();
+    let r = k.execute("export A=1; echo $A").await.expect("kernel execute");
+    assert_eq!(r.text_out().trim_end(), "1");
 }

@@ -36,8 +36,9 @@ pub use traits::{ArgBinding, is_global_output_flag, validate_against_schema, Too
 ///
 /// Add to this list only for builtins that have a documented shell-assignment
 /// argv contract (`export FOO=bar`, `alias greet='echo hi'`). Long-flag
-/// `--key=value` is a separate AST node (`Arg::Named`) and always routes
-/// through `tool_args.named` regardless.
+/// `--key=value` is a separate AST node (`Arg::Named`) and routes through
+/// `tool_args.named` regardless — except past `--`, where both spellings
+/// become literal positionals.
 pub const WORD_ASSIGN_BUILTINS: &[&str] = &["export", "alias", "unalias"];
 
 pub fn accepts_word_assign(name: &str) -> bool {
