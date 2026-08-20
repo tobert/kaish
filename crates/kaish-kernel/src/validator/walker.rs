@@ -857,6 +857,13 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
             }
             Arg::Named { key, value } => {
                 let v = expr_to_placeholder(value);
+                // Past `--` it is an operand, the way execution binds it.
+                if past_double_dash {
+                    tool_args
+                        .positional
+                        .push(Value::String(format!("--{key}={}", crate::interpreter::value_to_string(&v))));
+                    continue;
+                }
                 match param_lookup.get(key.as_str()) {
                     // Repeatable `--flag=a --flag=b` accumulates (matches execute).
                     Some(&(canonical, _, _, true)) => {

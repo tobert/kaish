@@ -3486,7 +3486,7 @@ impl Kernel {
         // read the tool's schema and nothing after this block does, so the whole
         // schema borrow is scoped here and cannot ride the `tool.execute` await
         // below (GH #48, item 7).
-        let (tool_args, wants_help, owns_output) = {
+        let (tool_args, wants_help, owns_output, raw_argv) = {
             // Prefer the kernel's schema catalog over `tool.schema()`: for a
             // clap-derived builtin, `schema()` rebuilds the entire clap
             // `Command` and reflects it into a fresh `ToolSchema` — ~34
@@ -3526,7 +3526,7 @@ impl Kernel {
                 && ((tool_args.flags.contains("help") && !schema_claims("help"))
                     || (tool_args.flags.contains("h") && !schema_claims("-h")));
 
-            (tool_args, wants_help, schema.owns_output)
+            (tool_args, wants_help, schema.owns_output, schema.raw_argv)
         };
 
         if wants_help {
@@ -3571,7 +3571,7 @@ impl Kernel {
         // parse failure (e.g. `cmd --json --bogus-flag` would otherwise drop
         // --json on the floor when `try_parse_from` returns Err early).
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
-        GlobalFlags::apply_from_args(&tool_args, &mut *ctx);
+        GlobalFlags::apply_from_args(&tool_args, raw_argv, &mut *ctx);
 
         let result = tool.execute(tool_args, &mut *ctx).await;
 
@@ -6490,6 +6490,21 @@ pub(crate) async fn bind_tool_args(
             Arg::Named { key, value } => {
                 if let Some(val) = source.eval(value).await? {
                     let val = apply_tilde_expansion(val, home.as_deref());
+                    // Past `--` this is data, not a flag: one operand spelled
+                    // `--key=value`, the same collapse the `WordAssign` arm
+                    // below does for `A=1` (GH #189). The value still expands.
+                    if past_double_dash {
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a --key=value operand after `--`",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        tool_args
+                            .positional
+                            .push(Value::String(format!("--{key}={val_str}")));
+                        i += 1;
+                        continue;
+                    }
                     // A repeatable flag in `--flag=value` form must accumulate too,
                     // not overwrite — otherwise `--expression=A --expression=B`
                     // would silently keep only B, and mixing with the `-e` space

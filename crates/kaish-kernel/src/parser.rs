@@ -2217,6 +2217,13 @@ where
 
     // Arguments after `--` (flags become positional strings)
     let post_dash_arg = choice((
+        // `--flag=value` / `-x=value` — one operand, like `name=value` below.
+        // This must precede the bare-flag rule, which would otherwise take
+        // `--flag` and leave `=value` to be rejected as a glued word. Past
+        // `--` there is no flag for a value to belong to, so the pair is
+        // simply text; the binders stringify it the way they already
+        // stringify a post-`--` `WordAssign`.
+        post_dash_flag_value_parser(),
         // Flags become positional strings
         select! {
             Token::ShortFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("-{}", name)))),
@@ -2303,6 +2310,45 @@ where
 /// `WordAssign`/positional collapse already gives `--`-following `a=b` the
 /// literal-string behavior shell users expect, so it needs no special casing
 /// after `--`.
+/// `--flag=value` after `--`, as a single `Arg::Named`.
+///
+/// The binders route a `Named` past `--` into a stringified
+/// `"--flag=value"` positional, exactly as they do for `WordAssign` — so this
+/// production only has to say "these three tokens are one word". Adjacency is
+/// checked the same way `word_assign_arg_parser` checks it, which keeps
+/// `-- --flag = value` (spaced) a separate-words error rather than silently
+/// pasting.
+///
+/// Long flags only, because `Arg::Named` means a long flag everywhere else
+/// and the binders reconstruct it with `--`. `-x=value` is refused on BOTH
+/// sides of `--` today (`echo -n=1` is the same parse error), so accepting it
+/// only after `--` would trade one asymmetry for another; that spelling is
+/// its own question about the flag grammar.
+fn post_dash_flag_value_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! { Token::LongFlag(name) => name }
+        .map_with(|s, e| -> (String, Span) { (s, e.span()) })
+    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
+    .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
+    .try_map(
+        |(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)),
+         span| {
+            if key_span.end != eq_span.start || eq_span.end != value_span.start {
+                Err(Rich::custom(
+                    span,
+                    "a flag and its value must not have spaces around '=' \
+                     (use '--flag=value' not '--flag = value')",
+                ))
+            } else {
+                Ok(Arg::Named { key, value })
+            }
+        },
+    )
+}
+
 fn word_assign_arg_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
