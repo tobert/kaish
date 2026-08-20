@@ -33,6 +33,21 @@ breaking entries are marked **BREAKING**.
   written in kaish could not use it.
 
 ### Added
+- **`ArgBinding::Verbatim` — a tool can parse its own argv.**
+  `ToolSchema::with_verbatim_argv()` tells the binder to skip the
+  `positional`/`named`/`flags` split and fill the new `ToolArgs::words` with
+  every word after the tool name, in source order, post-expansion: order and
+  repeated flags survive, and a heredoc- or pipe-bound word keeps its
+  `Value::Bytes`. `ToolArgs::words_argv()` renders that stream into argv
+  tokens. For a clap **subcommand tree** the typed decomposition is lossy by
+  construction — `kj block list --limit 5` renders back as
+  `--limit=5 -- block list`, which clap rejects — so an embedder had to
+  hand-roll an inversion that cannot recover what the split dropped. `--json`
+  stays kernel-owned: removed from `words` at any position, including last,
+  and still applied to the output format. `ArgBinding::Typed` is the default
+  and nothing existing changes behavior; `ToolArgs` and `ToolSchema` are
+  `#[non_exhaustive]`, so the new fields break no embedder construction or
+  match.
 - **`KernelBackend::patch` states its batch contract.** The trait doc now says
   what all three implementations already do: operations apply in order to one
   snapshot and the result is written once, so an operation that fails — a CAS

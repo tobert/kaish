@@ -6193,6 +6193,22 @@ async fn consume_flag_positionals(
 ///   boolean flag.
 ///
 /// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
+/// Is an explicit value on a kernel-owned global flag (`--json=VALUE`) on?
+///
+/// Off for an empty string, `false`, `0`, `Bool(false)` and `Int(0)`; on
+/// otherwise. This is the `--json=VALUE` rule `GlobalFlags::apply_from_args`
+/// already applies to a raw-argv tool's string token, spelled for the typed
+/// values the verbatim binder evaluates — `--json=0` means the same thing
+/// whichever path binds it.
+fn global_flag_value_is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(b) => *b,
+        Value::Int(i) => *i != 0,
+        Value::String(s) => !s.is_empty() && s != "false" && s != "0",
+        _ => true,
+    }
+}
+
 pub(crate) async fn bind_tool_args(
     args: &[Arg],
     schema: Option<&crate::tools::ToolSchema>,
@@ -6207,6 +6223,103 @@ pub(crate) async fn bind_tool_args(
     // pattern. The eval fallback turns `Expr::GlobPattern` into its
     // literal string.
     let glob_passthrough = schema.is_some_and(|s| s.glob_passthrough);
+
+    // Verbatim fast path: a tool that owns its own grammar (a clap subcommand
+    // tree — `kj block list --limit 5`) gets every word after its name in
+    // source order, in `words`, and nothing in `positional`/`named`. The typed
+    // split below is set-shaped, so it drops the order and multiplicity such a
+    // grammar needs and no inversion can recover them; handing the words over
+    // untouched means there is nothing to invert.
+    //
+    // The kernel still owns its global flags. `--json` is lifted out of the
+    // stream wherever it sits — a subcommand tree puts it last — and recorded
+    // in `flags` so `GlobalFlags::apply_from_args` applies it exactly as it
+    // does for a typed tool. The tool never sees it among its words.
+    if schema.is_some_and(|s| matches!(s.arg_binding, crate::tools::ArgBinding::Verbatim)) {
+        let mut words: Vec<Value> = Vec::new();
+        let mut past_double_dash = false;
+        for arg in args {
+            match arg {
+                Arg::Positional(expr) => {
+                    let glob = if let Expr::GlobPattern(p) = expr {
+                        (!glob_passthrough).then(|| p.clone())
+                    } else {
+                        None
+                    };
+                    let expanded = match &glob {
+                        Some(pattern) => source.expand_glob(pattern).await?,
+                        None => None,
+                    };
+                    match expanded {
+                        Some(paths) => {
+                            for path in paths {
+                                words.push(Value::String(path));
+                            }
+                        }
+                        None => {
+                            // A word that evaluates to nothing (an unset
+                            // variable) contributes no word, matching the
+                            // typed path's `if let Some(value)`.
+                            if let Some(value) = source.eval(expr).await? {
+                                words.push(apply_tilde_expansion(value, home.as_deref()));
+                            }
+                        }
+                    }
+                }
+                Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
+                Arg::LongFlag(name) => {
+                    if !past_double_dash && crate::tools::is_global_output_flag(name) {
+                        tool_args.flags.insert(name.clone());
+                        continue;
+                    }
+                    words.push(Value::String(format!("--{name}")));
+                }
+                Arg::Named { key, value } => {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
+                    })?;
+                    let val = apply_tilde_expansion(val, home.as_deref());
+                    if !past_double_dash && crate::tools::is_global_output_flag(key) {
+                        // `--json=VALUE`: same truthiness rule `ToolArgs::has_flag`
+                        // applies, so the two spellings agree on what counts as on.
+                        // Removed from the words either way — the tool must not
+                        // meet the kernel's flag in any form.
+                        if global_flag_value_is_truthy(&val) {
+                            tool_args.flags.insert(key.clone());
+                        }
+                        continue;
+                    }
+                    // Loud on binary (GH #116): reassembling `--k=$BIN` into a
+                    // text token would hand the tool a placeholder that looks
+                    // like data. A binary *word* is fine — it stays typed.
+                    let val_str = crate::interpreter::value_to_text_sink_named(
+                        &val,
+                        "a --key=value argument",
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    words.push(Value::String(format!("--{key}={val_str}")));
+                }
+                Arg::WordAssign { key, value } => {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("verbatim key=value could not be evaluated in this context")
+                    })?;
+                    let val = apply_tilde_expansion(val, home.as_deref());
+                    let val_str = crate::interpreter::value_to_text_sink_named(
+                        &val,
+                        "a key=value argument",
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    words.push(Value::String(format!("{key}={val_str}")));
+                }
+                Arg::DoubleDash => {
+                    past_double_dash = true;
+                    words.push(Value::String("--".to_string()));
+                }
+            }
+        }
+        tool_args.words = Some(words);
+        return Ok(tool_args);
+    }
 
     // Raw-argv fast path (POSIX `test`): bind every argument to `positional`
     // in source order with types preserved — operators (`-f`, `=`, `!`) as

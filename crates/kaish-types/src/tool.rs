@@ -191,6 +191,38 @@ impl Example {
     }
 }
 
+/// How the kernel's argv binder hands a tool its arguments.
+///
+/// The binder normally decomposes the words after a command name into
+/// [`ToolArgs::positional`], [`ToolArgs::named`] and [`ToolArgs::flags`].
+/// That split is order-independent and set-shaped, which is what most tools
+/// want and what [`ToolArgs::to_argv`] reconstructs a clap argv from.
+///
+/// It cannot serve a **subcommand tree**. `kj block list --limit 5` decomposes
+/// to `positional: [block, list]`, `named: {limit: 5}`, which renders back as
+/// `--limit=5 -- block list` — and clap rejects that, because `--limit`
+/// belongs to the `list` subcommand, not the root. Order and multiplicity are
+/// gone by then, so no inversion can recover them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArgBinding {
+    /// Decompose into `positional`/`named`/`flags`. The default; every tool
+    /// that does not ask for something else gets this.
+    #[default]
+    Typed,
+    /// Hand the tool every word after its name, in source order, as
+    /// [`ToolArgs::words`]. See [`ToolSchema::with_verbatim_argv`].
+    Verbatim,
+}
+
+impl ArgBinding {
+    /// True for the default binding. `skip_serializing_if` reads this so a
+    /// typed tool's schema carries no `"arg_binding"` key at all.
+    pub fn is_typed(&self) -> bool {
+        matches!(self, ArgBinding::Typed)
+    }
+}
+
 /// Schema describing a tool's interface.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -246,6 +278,13 @@ pub struct ToolSchema {
     /// operands. See [`ToolSchema::with_raw_argv`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub raw_argv: bool,
+    /// How the binder hands this tool its arguments. See [`ArgBinding`].
+    ///
+    /// Default [`ArgBinding::Typed`]. Set [`ArgBinding::Verbatim`] for a tool
+    /// that owns a clap grammar of its own — see
+    /// [`ToolSchema::with_verbatim_argv`].
+    #[serde(default, skip_serializing_if = "ArgBinding::is_typed")]
+    pub arg_binding: ArgBinding,
     /// The tool consumes glob patterns **as data** — the argv binder must pass
     /// a bare glob pattern through as literal text instead of expanding it to
     /// matching paths.
@@ -283,6 +322,7 @@ impl ToolSchema {
             aliases: Vec::new(),
             owns_output: false,
             raw_argv: false,
+            arg_binding: ArgBinding::Typed,
             glob_passthrough: false,
             operations: Vec::new(),
         }
@@ -292,6 +332,31 @@ impl ToolSchema {
     /// preserved (no flag/positional split). See [`ToolSchema::raw_argv`].
     pub fn with_raw_argv(mut self) -> Self {
         self.raw_argv = true;
+        self
+    }
+
+    /// Declare that this tool parses its own argv: the binder skips the
+    /// `positional`/`named`/`flags` split and fills [`ToolArgs::words`] with
+    /// every word after the tool name, in source order, post-expansion.
+    ///
+    /// Use it for a tool whose grammar is a clap **subcommand tree**
+    /// (`kj block list --limit 5`). The typed decomposition drops the order and
+    /// multiplicity such a grammar needs, and [`ToolArgs::to_argv`] cannot put
+    /// them back — a verbatim tool builds its argv from `words` with no
+    /// inversion at all ([`ToolArgs::words_argv`] does the rendering).
+    ///
+    /// The kernel still owns the global flags: `--json` is removed from
+    /// `words` wherever it appears and applied to the output format, so a
+    /// verbatim tool never sees it and cannot get it wrong. The schema is
+    /// unchanged either way — it still supplies help, completion and the
+    /// parameter list.
+    ///
+    /// Distinct from [`ToolSchema::with_raw_argv`], which keeps source order
+    /// too but binds into `positional` and does *not* lift the global flags.
+    /// `raw_argv` serves a position-sensitive POSIX command (`test`, `kill`);
+    /// verbatim serves a tool with its own parser.
+    pub fn with_verbatim_argv(mut self) -> Self {
+        self.arg_binding = ArgBinding::Verbatim;
         self
     }
 
@@ -384,12 +449,45 @@ pub struct ToolArgs {
     pub named: BTreeMap<String, Value>,
     /// Boolean flags (e.g., -l, --force).
     pub flags: HashSet<String>,
+    /// Every word after the tool name, in source order, post-expansion —
+    /// `Some` only for an [`ArgBinding::Verbatim`] tool, `None` for every
+    /// other tool.
+    ///
+    /// A text word arrives as [`Value::String`]; a heredoc- or pipe-bound word
+    /// keeps its [`Value::Bytes`], so binary never crosses the argv/text
+    /// boundary. `positional` and `named` are empty when this is `Some`, and
+    /// `flags` holds only the kernel-owned global flags the binder lifted out
+    /// of the stream (today just `json`) — so a verbatim tool can read
+    /// `has_flag("json")` to render its own envelope without ever finding
+    /// `--json` among its words.
+    ///
+    /// Render it to a clap argv with [`ToolArgs::words_argv`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<Value>>,
 }
 
 impl ToolArgs {
     /// Create empty args.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Render [`words`](Self::words) into argv tokens for a verbatim tool's
+    /// own parser. Empty when the tool is not verbatim.
+    ///
+    /// A [`Value::Bytes`] word renders as an inert placeholder token, the same
+    /// way [`to_argv`](Self::to_argv) renders a binary positional: the token
+    /// only has to satisfy the parser's argv shape, and the real bytes stay
+    /// available at the matching index in `words`. Unlike a binary *named*
+    /// value, nothing here can leak a placeholder into a field a tool reads as
+    /// data, because the tool holds the typed words itself.
+    pub fn words_argv(&self) -> Vec<String> {
+        self.words
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(value_to_argv_token)
+            .collect()
     }
 
     /// Get a positional argument by index.
@@ -1096,5 +1194,63 @@ mod to_argv_tests {
         // Value flag → value retained.
         assert!(!args.flags.contains("command"));
         assert_eq!(args.named.get("command"), Some(&Value::Bool(true)));
+    }
+}
+
+#[cfg(test)]
+mod verbatim_words_tests {
+    use super::*;
+
+    /// A typed tool never receives words, so the argv rendering is empty
+    /// rather than a stringified decomposition.
+    #[test]
+    fn typed_args_render_no_words() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("hello".into()));
+        assert!(args.words.is_none());
+        assert!(args.words_argv().is_empty());
+    }
+
+    /// Order, multiplicity and non-string types all survive into argv — the
+    /// three things the typed decomposition drops for a subcommand tree.
+    #[test]
+    fn words_render_in_order_with_repeats() {
+        let mut args = ToolArgs::new();
+        args.words = Some(vec![
+            Value::String("block".into()),
+            Value::String("list".into()),
+            Value::String("--limit".into()),
+            Value::Int(5),
+            Value::String("--include".into()),
+            Value::String("a".into()),
+            Value::String("--include".into()),
+            Value::String("b".into()),
+        ]);
+        assert_eq!(
+            args.words_argv(),
+            vec!["block", "list", "--limit", "5", "--include", "a", "--include", "b"],
+        );
+    }
+
+    /// A binary word keeps its bytes in `words` and renders as an inert
+    /// placeholder token, so the tool's parser sees an argv-shaped stream
+    /// while the real data stays reachable at the same index.
+    #[test]
+    fn binary_word_renders_as_a_placeholder_and_keeps_its_bytes() {
+        let mut args = ToolArgs::new();
+        args.words = Some(vec![
+            Value::String("write".into()),
+            Value::Bytes(vec![0, 159, 146, 150]),
+        ]);
+        let argv = args.words_argv();
+        assert_eq!(argv[0], "write");
+        assert_ne!(argv[1], "", "a binary word still needs an argv token");
+        assert!(
+            !argv[1].as_bytes().contains(&0),
+            "the placeholder must be text, not the raw bytes; got {:?}",
+            argv[1],
+        );
+        let words = args.words.as_deref().expect("words");
+        assert_eq!(words[1], Value::Bytes(vec![0, 159, 146, 150]));
     }
 }

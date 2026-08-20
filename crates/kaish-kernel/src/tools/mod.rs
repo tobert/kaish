@@ -27,7 +27,7 @@ pub use context::{ExecContext, GateExpectations, OutputContext, OverwriteExpecta
 pub(crate) use context::{cas_overwrite, is_trash_excluded};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
-pub use traits::{is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};
+pub use traits::{ArgBinding, is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};
 
 /// Commands that consume bareword `key=value` argv (Arg::WordAssign) as
 /// shell-assignment pairs and route them through `tool_args.named`. For every

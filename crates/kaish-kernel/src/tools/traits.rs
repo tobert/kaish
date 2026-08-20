@@ -9,4 +9,4 @@
 pub use kaish_tool_api::{is_global_output_flag, validate_against_schema, Tool, ToolCtx};
 
 // Data types re-exported from kaish-types.
-pub use kaish_types::{ParamSchema, ToolArgs, ToolSchema};
+pub use kaish_types::{ArgBinding, ParamSchema, ToolArgs, ToolSchema};
