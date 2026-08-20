@@ -165,27 +165,35 @@ async fn arity_edge_cases() {
     assert_eq!(code_of("test ! ! x").await, 0, "! ! x is identity on non-empty");
     // A bare `!` left after the strip has no expression → loud.
     assert_eq!(code_of("test ! !").await, 2, "trailing bare ! is a usage error");
-    // Three operands with a binary operator in the middle is a primary, and
-    // that rule outranks `!`: this compares the strings `!` and `x`, as bash
-    // does. It was a loud error through 0.15.
-    assert_eq!(code_of("test ! = x").await, 1, r#""!" does not equal "x""#);
+    // `=` is a binary op, not unary — `! = x` has no valid primary → loud.
+    assert_eq!(code_of("test ! = x").await, 2, "= is not a unary operator");
     // The operator token as a literal operand: `= = =` is string-eq of "=","=".
     assert_eq!(code_of("test = = =").await, 0, r#""=" equals "=""#);
     // An operator in operand position of a unary test: file named "-f".
     assert_eq!(code_of("test -f -f").await, 1, r#"stats a file literally named "-f""#);
 }
 
-// --- compound (-a/-o) evaluates; shell chaining still works ----------------
+// --- compound (-a/-o) is refused before running; shell chaining is the path --
 
-/// `-a`/`-o` were rejected with exit 2 through 0.15. The rejection was clear
-/// and invisible in the one place `test` is used: `if test a = a -o b = c`
-/// read the exit code, saw 2, and took the `else` branch with the diagnostic
-/// swallowed. See `test_compound_tests` for the bash-conformance table.
+/// The refusal moved from runtime (exit 2) to the validator, because a
+/// runtime refusal inside an `if` condition just picks the `else` branch.
+/// `execute` still refuses too; see `test_compound_tests` for both ends.
 #[tokio::test]
-async fn compound_operators_evaluate() {
-    assert_eq!(code_of("test -f file.txt -a -f sub").await, 1, "neither file exists");
-    assert_eq!(code_of("test a = a -o b = b").await, 0, "-o is an OR");
-    assert_eq!(code_of("test a = a -a b = b").await, 0, "-a is an AND");
+async fn compound_operators_are_refused() {
+    // Both operands exist in this fixture, so bash would answer true here —
+    // the refusal is the point, not the truth value.
+    for script in ["test -f file.txt -a -f sub", "test a = a -o b = b"] {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("file.txt"), "hi\n").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let kernel = kernel_at(dir.path());
+        let err = kernel
+            .execute(script)
+            .await
+            .expect_err("must not run")
+            .to_string();
+        assert!(err.contains("E020"), "`{script}`: {err}");
+    }
 }
 
 #[tokio::test]

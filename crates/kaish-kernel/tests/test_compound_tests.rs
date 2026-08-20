@@ -1,24 +1,27 @@
-//! `test` grows the XSI compound operators: `-a`, `-o`, `!`, and `( )`.
+//! `test` refuses `-a`, `-o`, `(` and `)` — and now refuses them *before the
+//! statement runs*.
 //!
-//! kaish deliberately omitted them in 0.11 and reported a usage error naming
-//! `&&`/`||` as the fix. The error was clear — and invisible where `test`
-//! actually gets used:
+//! The operators were already rejected at runtime with a message naming
+//! `&&`/`||`. What made that worthless is where `test` lives: an `if` reads
+//! only the exit code, so exit 2 chose the `else` branch and the message went
+//! nowhere. That is the bug that was reported as "`test -o` silently returns
+//! false rather than OR-ing".
 //!
-//! ```text
-//! if test a = a -o b = c; then echo yes; else echo no; fi   →   no
-//! ```
+//! Two changes fix it from both ends. A condition's stderr now reaches the
+//! author (see `condition_output_tests`), so a runtime refusal is audible at
+//! all; and this validator rule stops the statement before anything executes,
+//! which is the stronger promise kaish already makes for the rest of the
+//! language.
 //!
-//! An `if` condition reads the exit code, and exit 2 is not zero, so the
-//! diagnostic never reaches the author and the expression reads as false. A
-//! shell that omits an operator its users will type had better not fail that
-//! quietly, so `test` implements them instead.
-//!
-//! **Every expected exit code in this file was produced by `bash -c` and
-//! copied in.** Precedence is bash's: `!` binds tightest, then `-a`, then
-//! `-o`; `( )` groups. `-a` and `-o` are also *unary* operators in the
-//! two-operand form (`-a FILE` is "file exists", `-o NAME` is "shell option
-//! set"), which is the ambiguity POSIX warns about and the reason the
-//! operand-count rules come first.
+//! **Implementing the operators was tried and rejected.** A 984-expression
+//! differential sweep against `bash -c` matched bash exactly, and that is the
+//! argument against shipping it: bash overloads `-a`/`-o` (a unary `-a FILE`
+//! synonym for `-e`, a unary `-o NAME` option query) which is what makes the
+//! binary form ambiguous to parse, and three of its operand-count rules
+//! outrank `!` in ways a careful reader gets wrong — `test ! = x` compares two
+//! strings, `test ! -a ""` is an AND, `test ! x -o x` negates the whole
+//! expression. coreutils' own man page points at `&&`/`||` instead. kaish
+//! agrees and says so.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -26,177 +29,181 @@
 use kaish_kernel::{Kernel, KernelConfig};
 use rstest::rstest;
 
-async fn code(script: &str) -> i64 {
-    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
-    k.execute(script).await.expect("kernel execute").code
+fn kernel() -> Kernel {
+    Kernel::new(KernelConfig::isolated()).expect("kernel")
 }
 
-/// `(script, bash's exit code)`.
-///
-/// Paren cases are spelled with quoted parens because an unquoted `(` is the
-/// *shell's* subshell syntax, not an operand — `bash -c 'test ( a = a )'`
-/// measures bash's parser, not bash's `test`. Getting that wrong the first
-/// time reported exit 2 for every paren row.
+/// Rejected before execution: the kernel refuses the whole statement, so the
+/// error is an `Err`, not an exit code a condition can quietly consume.
 #[rstest]
-// ── operand-count rules, unchanged ────────────────────────────────
-#[case("test", 1)]
-#[case("test \"\"", 1)]
-#[case("test x", 0)]
-#[case("test ! x", 1)]
-#[case("test ! \"\"", 0)]
+#[case("test a = a -o b = c")]
+#[case("test a = a -a b = b")]
+#[case("test -f a -a -f b")]
+#[case("test '(' a = a ')'")]
+#[case("test -z \"\" -o -z x")]
+#[tokio::test]
+async fn compound_operators_are_refused_before_running(#[case] script: &str) {
+    let err = kernel()
+        .execute(script)
+        .await
+        .expect_err("the statement must not run")
+        .to_string();
+    assert!(err.contains("E020"), "`{script}` should carry the code: {err}");
+    assert!(
+        err.contains("&&") && err.contains("||"),
+        "`{script}` should name the fix: {err}"
+    );
+}
+
+/// The point of doing it in the validator: inside a condition, a runtime exit
+/// 2 picks a branch. A validation error stops the statement, so no branch is
+/// taken at all and the author cannot miss it.
+#[tokio::test]
+async fn a_compound_in_a_condition_stops_the_statement() {
+    // Distinctive markers: the first draft asserted on "yes"/"no" and the
+    // error text contains "not supported", so the "no" check passed on the
+    // wrong substring.
+    let err = kernel()
+        .execute("if test a = a -o b = c; then echo BRANCH_THEN; else echo BRANCH_ELSE; fi")
+        .await
+        .expect_err("must not choose a branch")
+        .to_string();
+    assert!(err.contains("E020"), "{err}");
+    assert!(
+        !err.contains("BRANCH_THEN") && !err.contains("BRANCH_ELSE"),
+        "no branch ran: {err}"
+    );
+}
+
+/// The check reads BOTH shapes on purpose. `test` is `raw_argv`, so execution
+/// gets every word in `positional`; the validation binder has no raw_argv twin
+/// and routes a leading-dash word into `flags` instead. A rule written from
+/// one shape misses the spelling the other produces — the drift behind GH #376
+/// and #378. If this ever regresses, it will regress silently, which is why it
+/// is asserted rather than assumed.
+#[tokio::test]
+async fn the_rule_sees_the_shape_validation_actually_binds() {
+    use kaish_kernel::tools::{register_builtins, ToolRegistry};
+
+    let mut registry = ToolRegistry::new();
+    register_builtins(&mut registry);
+    let tool = registry.get("test").expect("test builtin");
+
+    let mut as_flag = kaish_kernel::tools::ToolArgs::new();
+    as_flag.flags.insert("o".to_string());
+    assert!(
+        !tool.validate(&as_flag).is_empty(),
+        "`-o` arriving in `flags` (the validation binder's shape) must be caught"
+    );
+
+    let mut as_positional = kaish_kernel::tools::ToolArgs::new();
+    as_positional
+        .positional
+        .push(kaish_types::Value::String("-o".to_string()));
+    assert!(
+        !tool.validate(&as_positional).is_empty(),
+        "`-o` arriving in `positional` (execution's shape) must be caught"
+    );
+}
+
+/// Everything `test` does support is untouched.
+#[rstest]
 #[case("test a = a", 0)]
 #[case("test a = b", 1)]
 #[case("test ! a = a", 1)]
 #[case("test ! a = b", 0)]
-// ── binary OR ─────────────────────────────────────────────────────
-#[case("test a = a -o b = c", 0)]
-#[case("test a = b -o b = b", 0)]
-#[case("test a = b -o b = c", 1)]
-#[case("test x -o y", 0)]
-#[case("test \"\" -o \"\"", 1)]
-#[case("test -z \"\" -o -z x", 0)]
-// ── binary AND ────────────────────────────────────────────────────
-#[case("test a = a -a b = b", 0)]
-#[case("test a = a -a b = c", 1)]
-#[case("test a = b -a b = c", 1)]
-#[case("test -n x -a -n y", 0)]
-#[case("test -n x -a -z y", 1)]
-// ── precedence: -a binds tighter than -o ──────────────────────────
-#[case("test a = a -o b = b -a c = d", 0)]
-#[case("test a = b -a c = d -o e = e", 0)]
-// ── `!` binds tighter than -a/-o ──────────────────────────────────
-#[case("test ! a = a -o b = b", 0)]
-#[case("test ! a = a -a b = b", 1)]
 #[case("test ! ! x", 0)]
-#[case("test ! ! ! \"\"", 0)]
-// ── grouping ──────────────────────────────────────────────────────
-#[case("test '(' a = a ')'", 0)]
-#[case("test '(' a = a -o b = c ')'", 0)]
-#[case("test '(' a = b -o b = b ')' -a c = c", 0)]
-#[case("test a = b -o '(' b = b -a c = c ')'", 0)]
-#[case("test ! '(' a = a ')'", 1)]
-#[case("test '(' x ')'", 0)]
-// ── malformed: exit 2, never a surprise true/false ────────────────
-#[case("test x -a", 2)]
-#[case("test x -o", 2)]
-#[case("test a = a -o", 2)]
-#[case("test '(' ')'", 2)]
-#[case("test '(' a = a", 2)]
-#[tokio::test]
-async fn matches_bash(#[case] script: &str, #[case] expected: i64) {
-    assert_eq!(
-        code(script).await,
-        expected,
-        "`{script}` should exit {expected}, the way bash does"
-    );
-}
-
-/// Four operands beginning with `!` negate the whole three-operand
-/// expression, connective included — `test ! x -o x` is `!(x -o x)`, false,
-/// not `(!x) -o x`, true. bash's arity rule beats the precedence that governs
-/// longer expressions, and this is the shape where the two disagree.
-///
-/// Found by a 420-case differential sweep against `bash -c`, not by reading:
-/// the hand-written table above had `! a = a -o b = b` (five operands, parser
-/// territory) and missed the four-operand case entirely.
-#[rstest]
-#[case("test ! x -o x", 1)]
-#[case("test ! \"\" -o x", 1)]
-#[case("test ! x -a \"\"", 0)]
-#[case("test ! \"\" -a \"\"", 0)]
-#[tokio::test]
-async fn four_operands_after_bang_negate_the_whole_expression(
-    #[case] script: &str,
-    #[case] expected: i64,
-) {
-    assert_eq!(code(script).await, expected, "`{script}`");
-}
-
-/// Operands that look like flags stay operands, at every length — the
-/// property the raw-argv binding exists for. `-n = -n` is string equality,
-/// not `-n` applied to `=`, which a greedy unary rule got wrong on the first
-/// draft of the expression parser.
-#[rstest]
-#[case("test -n = -n", 0)]
-#[case("test -f = -f", 0)]
-#[case("test x = -f", 1)]
+#[case("test -n x", 0)]
+#[case("test -z \"\"", 0)]
 #[case("test = = =", 0)]
-#[case("test -f -f", 1)]
-#[case("test ! = x", 1)]
+#[case("test -n = -n", 0)]
 #[tokio::test]
-async fn flag_shaped_operands_stay_operands(#[case] script: &str, #[case] expected: i64) {
-    assert_eq!(code(script).await, expected, "`{script}`");
+async fn supported_forms_are_unchanged(#[case] script: &str, #[case] expected: i64) {
+    let r = kernel().execute(script).await.expect("kernel execute");
+    assert_eq!(r.code, expected, "`{script}`");
 }
 
-/// One operand that is an operator stays a **loud error**, which is kaish's
-/// one deliberate divergence from bash here.
-///
-/// bash reads `test -z` as the non-empty string `"-z"` and returns true, which
-/// silently turns a forgotten operand into a passing condition — the exact
-/// failure mode this whole change exists to remove. kaish keeps the 0.11
-/// behavior and says which operand is missing. Zero operands DOES conform
-/// (false), because an absent expression cannot be a typo'd one.
+/// Two conformance fixes kept from the attempt at implementing the operators,
+/// both independent of them and both verified against `bash -c`.
 #[rstest]
-#[case("test -o")]
-#[case("test -a")]
+// The empty path names no file. It resolved to the working directory, so
+// every file operator answered TRUE for it.
+#[case("test -e \"\"", 1)]
+#[case("test -f \"\"", 1)]
+#[case("test -d \"\"", 1)]
+// No operands is false, as in bash, rather than a usage error — an absent
+// expression cannot be a typo'd one.
+#[case("test", 1)]
+#[tokio::test]
+async fn conformance_fixes_kept(#[case] script: &str, #[case] expected: i64) {
+    let r = kernel().execute(script).await.expect("kernel execute");
+    assert_eq!(r.code, expected, "`{script}`");
+}
+
+/// A lone operator stays loud, which is the divergence from bash that this
+/// whole area exists to defend: bash reads `test -f` as the non-empty string
+/// `"-f"` and returns TRUE, turning a forgotten operand into a passing
+/// condition.
+#[rstest]
+#[case("test -f")]
 #[case("test -z")]
 #[case("test !")]
 #[tokio::test]
 async fn a_lone_operator_is_loud_not_a_string(#[case] script: &str) {
-    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
-    let r = k.execute(script).await.expect("kernel execute");
+    let r = kernel().execute(script).await.expect("kernel execute");
     assert_eq!(r.code, 2, "`{script}` should be a usage error, not bash's true");
-    assert!(
-        r.err.contains("needs an operand"),
-        "`{script}` should name the missing operand, got: {}",
-        r.err
-    );
+    assert!(r.err.contains("operand"), "should name the problem: {}", r.err);
 }
 
-/// bash's *unary* `-a`/`-o` are deliberately absent, and that is what keeps
-/// the spelling unambiguous.
-///
-/// bash reads `test -a FILE` as a deprecated synonym for `-e` and
-/// `test -o NAME` as "shell option NAME is on". Having a second meaning at
-/// two operands is exactly why `EXPR -a EXPR` is ambiguous to parse —
-/// coreutils' own man page warns about it. kaish gives each spelling one
-/// meaning: `-a`/`-o` connect expressions, `-e` tests existence, and anything
-/// else is loud.
-#[rstest]
-#[case("test -a /dev/null")]
-#[case("test -a /nonexistent-xyz")]
-#[case("test -o trash")]
-#[case("test -o nosuchopt")]
-#[case("test ! -a \"\"")]
-#[case("test ! -o x")]
+// --- `set -o` reports option state, which is where that question belongs ----
+
+/// `test -o NAME` is deliberately absent (it is one of bash's overloads of
+/// `-o`, and the reason the binary form is ambiguous). The question it would
+/// have answered — "is this shell option on?" — belongs to `set`, which could
+/// not answer it either: bare `set` prints only what differs from the default,
+/// so an option AT its default was indistinguishable from an unknown one.
 #[tokio::test]
-async fn unary_dash_a_and_dash_o_are_loud(#[case] script: &str) {
-    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
-    let r = k.execute(script).await.expect("kernel execute");
-    assert_eq!(r.code, 2, "`{script}` should be a usage error, not a file/option test");
-    assert!(!r.err.is_empty(), "`{script}` must carry a diagnostic");
+async fn set_dash_o_reports_every_option() {
+    let k = kernel();
+    let out = k.execute("set -o").await.expect("kernel execute").text_out().into_owned();
+    for name in ["glob", "output-limit", "trash"] {
+        assert!(out.contains(name), "`set -o` should list {name}: {out:?}");
+    }
+    assert!(out.contains("on") && out.contains("off"), "states missing: {out:?}");
 }
 
-/// The bug that started this: the expression is evaluated, so the `if` takes
-/// the branch bash takes rather than falling to `else` on a usage error
-/// nobody could see.
 #[tokio::test]
-async fn the_reported_case() {
-    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
-    let r = k
-        .execute("if test a = a -o b = c; then echo yes; else echo no; fi")
+async fn set_dash_o_reflects_a_change() {
+    let k = kernel();
+    let before = k.execute("set -o").await.expect("exec").text_out().into_owned();
+    assert!(before.contains("trash\toff"), "{before:?}");
+
+    let after = k
+        .execute("set -o trash; set -o")
         .await
-        .expect("kernel execute");
-    assert_eq!(r.text_out().trim_end(), "yes");
+        .expect("exec")
+        .text_out()
+        .into_owned();
+    assert!(after.contains("trash\ton"), "{after:?}");
 }
 
-/// A malformed expression inside a condition still reads as false — that is
-/// how a shell condition works — so the value of implementing the operators
-/// is that the common spelling is no longer malformed at all.
+/// It is a table, so `--json` gives an embedder the same answer as structured
+/// data rather than text to parse.
 #[tokio::test]
-async fn a_real_usage_error_is_still_exit_2() {
-    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
-    let r = k.execute("test a = a -o").await.expect("kernel execute");
-    assert_eq!(r.code, 2);
-    assert!(!r.err.is_empty(), "exit 2 must carry a diagnostic");
+async fn set_dash_o_is_structured() {
+    let k = kernel();
+    let out = k.execute("set -o --json").await.expect("exec").text_out().into_owned();
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("parses as JSON");
+    let rows = rows.as_array().expect("array");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0]["OPTION"], "glob");
+}
+
+/// Setting an option still works and still rejects an unknown name — the
+/// report path must not have swallowed the apply path.
+#[tokio::test]
+async fn set_dash_o_with_a_name_still_applies() {
+    let k = kernel();
+    assert_eq!(k.execute("set -o trash").await.expect("exec").code, 0);
+    assert_eq!(k.execute("set -o bogus").await.expect("exec").code, 1);
 }

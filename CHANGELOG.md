@@ -95,20 +95,20 @@ breaking entries are marked **BREAKING**.
   for why each is closed by design.
 
 ### Added
-- **`test` implements `-a`, `-o`, `!`, and `( )`, following bash.** They were
-  rejected with exit 2 through 0.15, on the reasoning that the XSI operators
-  are ambiguous and `&&`/`||` are clearer. The rejection was clear and
-  invisible where `test` is used: `if test a = a -o b = c` reads the exit code,
-  sees 2, and takes the `else` branch with the diagnostic swallowed — a silent
-  false. Precedence is bash's: `!` binds tightest, then `-a`, then `-o`, with
-  `( )` grouping. `[[ ]]` still uses `&&`/`||` and does not accept `-a`/`-o`,
-  as in bash. Verified by a 984-expression differential sweep against
-  `bash -c`.
-- `-a` and `-o` mean AND and OR and nothing else. bash also reads `test -a
-  FILE` as a synonym for `-e` and `test -o NAME` as "shell option NAME is on";
-  that second meaning is what makes `EXPR -a EXPR` ambiguous to parse, and
-  coreutils warns about it in its own man page. One meaning per spelling —
-  `test -a x` is a loud error, `-e` tests existence.
+- **`test` rejects `-a`/`-o`/`(`/`)` before the statement runs (E020).** They
+  were already refused at runtime, but `test` lives in an `if`, and an `if`
+  reads only the exit code — so exit 2 chose the `else` branch and the message
+  reached nobody. Reported as "`test -o` silently returns false rather than
+  OR-ing". A validator error stops the statement instead. Implementing the
+  operators was tried and rejected: bash overloads both spellings (`-a FILE`
+  is a synonym for `-e`, `-o NAME` an option query), which is what makes the
+  binary form ambiguous, and three of its operand-count rules outrank `!`
+  (`test ! = x` compares two strings, `test ! x -o x` negates the whole
+  expression). Compose with `&&`/`||`, or use `[[ ]]`.
+- **`set -o` reports every option and its state** (`glob`, `output-limit`,
+  `trash`), as bash does, and as a table so `--json` answers too. Option state
+  could not be queried at all before: bare `set` prints only what differs from
+  the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
 - **`test -e ""` is false.** The empty path resolved to the working directory,

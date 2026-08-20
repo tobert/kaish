@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Set tool: configure shell options.
@@ -175,6 +175,25 @@ impl Tool for Set {
             })
             .collect();
 
+        // `set -o` with no name reports every option and its state, as bash
+        // does. Without this there was no way to ASK whether an option was on
+        // — bare `set` prints only what differs from the default, so an
+        // option at its default was indistinguishable from an unknown one.
+        // Both parse shapes reach here: `flags = {"o"}` with nothing after,
+        // and a literal `"-o"` positional that is last.
+        let bare_dash_o = (args.flags.contains("o") && positionals.is_empty())
+            || positionals.last().is_some_and(|p| *p == "-o");
+        if bare_dash_o {
+            return ExecResult::with_output(OutputData::table(
+                vec!["OPTION".to_string(), "STATE".to_string()],
+                vec![
+                    option_row("glob", ctx.scope.glob_enabled()),
+                    option_row("output-limit", ctx.output_limit.max_bytes().is_some()),
+                    option_row("trash", ctx.scope.trash_enabled()),
+                ],
+            ));
+        }
+
         let mut i = 0;
         while i < positionals.len() {
             let opt = positionals[i];
@@ -228,6 +247,11 @@ impl Tool for Set {
 
         ExecResult::success("")
     }
+}
+
+/// One `set -o` report row. `on`/`off` matches what bash prints.
+fn option_row(name: &str, enabled: bool) -> OutputNode {
+    OutputNode::new(name).with_cells(vec![if enabled { "on" } else { "off" }.to_string()])
 }
 
 fn format_size_for_set(bytes: usize) -> String {
