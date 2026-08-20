@@ -75,7 +75,9 @@ breaking entries are marked **BREAKING**.
   their own way; they now share one rule — off for `0`, `false`, and an empty
   value, on for anything else — exported as `global_flag_value_is_truthy` for
   embedders binding argv themselves. The bare `--json` and `--json=true` /
-  `--json=false` forms are unchanged.
+  `--json=false` forms are unchanged. scatter/gather's own option-parse errors
+  read the same rule, so `scatter --limit x --json=1` reports as JSON instead
+  of silently falling back to text.
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
   `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
   no assignment reached the validator and `env` had no check of its own. An

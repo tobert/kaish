@@ -1161,7 +1161,10 @@ mod tests {
         assert!(args.flags.contains("json"));
     }
 
-    /// Past `--` the same token is an operand, on both binders.
+    /// Past `--` the same token is not the kernel's flag. (Where it DOES
+    /// land differs between the binders, and the parser cannot produce this
+    /// shape at all — `echo -- --json=true` is a parse error today — so this
+    /// asserts only the part that matters: it is not lifted into `flags`.)
     #[test]
     fn validation_keeps_json_after_double_dash_out_of_flags() {
         let schema = ToolSchema::new("probe", "probe");

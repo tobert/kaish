@@ -7,9 +7,12 @@
 //! |----------------|----------------|----------|----------|
 //! | `--json=true`  | on             | on       | on       |
 //! | `--json=false` | off            | off      | off      |
-//! | `--json=1`     | **exit 2**     | on       | on       |
+//! | `--json=1`     | **exit 2, on** | on       | on       |
 //! | `--json=0`     | **exit 2, on** | off      | off      |
-//! | `--json=yes`   | **exit 2**     | on       | on       |
+//! | `--json=yes`   | **exit 2, on** | on       | on       |
+//!
+//! Every typed row exited 2 with the error itself rendered as JSON, because
+//! the format was switched on before clap ever saw the argv.
 //!
 //! The typed path let `--json=VALUE` fall through to `named`, so the builtin's
 //! clap parser met a bool flag carrying a value and rejected it — after
@@ -179,4 +182,48 @@ async fn json_no_is_on_everywhere() {
 #[tokio::test]
 async fn json_empty_string_is_off_everywhere() {
     assert_all_paths("--json=\"\"", false).await;
+}
+
+/// scatter/gather parse their own options in the pipeline runner, bypassing
+/// `Tool::execute()` and therefore `GlobalFlags::apply_from_args` — so they
+/// read `--json` off the raw AST instead (GH #222). That reader matched only
+/// a bare `Arg::LongFlag`, so `--json=1` on a scatter/gather option error
+/// printed plain text while every other builtin printed a JSON envelope.
+/// Found by review, not by the suite: no probe tool reaches this path.
+#[tokio::test]
+async fn scatter_option_errors_honor_the_json_value_form() {
+    let kernel = kernel_with_probes();
+
+    /// `(stdout, stderr)` from a scatter option-parse failure.
+    async fn scatter_error(kernel: &Kernel, flag: &str) -> (String, String) {
+        // `--limit x` fails inside the pipeline runner's own option parse,
+        // before any ToolArgs exists to read a flag from.
+        let script = format!("seq 2 | scatter --limit x {flag} | gather");
+        let result = kernel.execute(&script).await.expect("kernel execute");
+        let err = result.err.trim().to_string();
+        assert!(
+            err.contains("expected a positive integer"),
+            "`{script}` did not reach the option-parse error: {err:?}"
+        );
+        (result.text_out().trim().to_string(), err)
+    }
+
+    // On: the error is also rendered to stdout as the JSON envelope every
+    // other builtin produces under --json.
+    for flag in ["--json", "--json=1", "--json=yes"] {
+        let (out, _) = scatter_error(&kernel, flag).await;
+        let parsed = serde_json::from_str::<serde_json::Value>(&out);
+        assert!(parsed.is_ok(), "`{flag}` must render the error as JSON, got {out:?}");
+        assert_eq!(
+            parsed.unwrap().get("code").and_then(serde_json::Value::as_i64),
+            Some(2),
+            "`{flag}` envelope should carry the exit code"
+        );
+    }
+
+    // Off: stderr only, nothing rendered to stdout.
+    for flag in ["--json=0", "--json=false"] {
+        let (out, _) = scatter_error(&kernel, flag).await;
+        assert!(out.is_empty(), "`{flag}` must leave stdout empty, got {out:?}");
+    }
 }

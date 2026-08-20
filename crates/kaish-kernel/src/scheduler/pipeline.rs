@@ -13,7 +13,7 @@ use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, PipelineStage, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, ExecResult, OutputFormat, PathError};
-use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
+use crate::tools::{global_flag_value_is_truthy, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
 use super::pipe_stream::pipe_stream_default;
@@ -21,17 +21,41 @@ use super::scatter::{
     parse_gather_options, parse_scatter_options, ScatterGatherRunner,
 };
 
-/// Whether `--json` appears literally among a command's raw AST args.
+/// Whether `--json` is on, read from a command's raw AST args.
 ///
 /// Used only for `run_scatter_gather`'s own option-parsing error path (GH
 /// #222): scatter/gather's arguments are pulled out and parsed directly by
 /// the pipeline runner rather than via `Tool::execute()`, so a parse failure
 /// can happen before there's ever a `ToolArgs` to read a `--json` flag off of
 /// through the usual `GlobalFlags::apply_from_args` route every other
-/// builtin's dispatch takes. `--json` is always a bare boolean flag (never
-/// `--json=value`), so it always lexes to `Arg::LongFlag`.
+/// builtin's dispatch takes.
+///
+/// The `--json=VALUE` form is judged by the same
+/// [`global_flag_value_is_truthy`] rule as every binder. Nothing is evaluated
+/// this early, so only a literal can be judged; a value that needs the
+/// interpreter (`--json=$MODE`) counts as on, matching the validator's choice
+/// — an error rendered as JSON the caller did not ask for costs less than an
+/// error hidden from a caller who did.
 fn has_json_flag(args: &[Arg]) -> bool {
-    args.iter().any(|a| matches!(a, Arg::LongFlag(name) if name == "json"))
+    let mut past_double_dash = false;
+    for arg in args {
+        match arg {
+            Arg::DoubleDash => past_double_dash = true,
+            _ if past_double_dash => {}
+            Arg::LongFlag(name) if name == "json" => return true,
+            Arg::Named { key, value } if key == "json" => {
+                let on = match value {
+                    Expr::Literal(v) => global_flag_value_is_truthy(v),
+                    _ => true,
+                };
+                if on {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Apply `--json` to a `run_scatter_gather` early-return error.
