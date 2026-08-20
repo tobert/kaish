@@ -37,6 +37,22 @@ pub trait KernelBackend: Send + Sync {
     async fn append(&self, path: &Path, content: &[u8]) -> BackendResult<()>;
 
     /// Apply a sequence of patch operations to a file.
+    ///
+    /// Operations apply in order to one snapshot of the file, and the result
+    /// is written once. If an operation fails — a CAS `expected` mismatch, an
+    /// offset or line number past the end — the batch stops before the write
+    /// and the file keeps every byte it had. A caller holding an error never
+    /// has to work out how much of the batch survived.
+    ///
+    /// The snapshot accumulates, so each operation sees the edits before it:
+    /// offsets and line numbers are relative to the content as patched so far,
+    /// not to the file as it was on entry. An insert at line 1 shifts the line
+    /// numbers every later operation in the same batch uses.
+    ///
+    /// The promise covers the operations, not the write that follows them.
+    /// Persisting the result is `write`'s business, with whatever crash,
+    /// concurrency, and I/O-error behavior the implementation gives it — a
+    /// write that fails partway through can still leave a partial file.
     async fn patch(&self, path: &Path, ops: &[PatchOp]) -> BackendResult<()>;
 
     /// List a directory's entries.

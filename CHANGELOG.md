@@ -10,6 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`KernelBackend::patch` states its batch contract.** The trait doc now says
+  what all three implementations already do: operations apply in order to one
+  snapshot and the result is written once, so an operation that fails — a CAS
+  `expected` mismatch, an out-of-range line — stops the batch before the write
+  and leaves the file untouched, and each operation sees the edits before it.
+  Persisting the result stays `write`'s business, including its I/O-error
+  behavior. Pinned by tests that run against every in-tree backend.
+
 ### Fixed
 - **`for` reports a mixed-script loop variable (W007).** `for PАTH in a`, with
   CYRILLIC CAPITAL LETTER A where Latin `A` belongs, bound a different variable
