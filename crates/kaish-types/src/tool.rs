@@ -193,16 +193,11 @@ impl Example {
 
 /// How the kernel's argv binder hands a tool its arguments.
 ///
-/// The binder normally decomposes the words after a command name into
-/// [`ToolArgs::positional`], [`ToolArgs::named`] and [`ToolArgs::flags`].
-/// That split is order-independent and set-shaped, which is what most tools
-/// want and what [`ToolArgs::to_argv`] reconstructs a clap argv from.
-///
-/// It cannot serve a **subcommand tree**. `kj block list --limit 5` decomposes
-/// to `positional: [block, list]`, `named: {limit: 5}`, which renders back as
-/// `--limit=5 -- block list` — and clap rejects that, because `--limit`
-/// belongs to the `list` subcommand, not the root. Order and multiplicity are
-/// gone by then, so no inversion can recover them.
+/// The default split into [`ToolArgs::positional`], [`ToolArgs::named`] and
+/// [`ToolArgs::flags`] is set-shaped, which suits most tools but cannot serve a
+/// subcommand tree: `kj block list --limit 5` renders back as
+/// `--limit=5 -- block list`, which clap rejects because `--limit` belongs to
+/// `list`, not the root. Order and multiplicity are gone by then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArgBinding {
@@ -279,10 +274,6 @@ pub struct ToolSchema {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub raw_argv: bool,
     /// How the binder hands this tool its arguments. See [`ArgBinding`].
-    ///
-    /// Default [`ArgBinding::Typed`]. Set [`ArgBinding::Verbatim`] for a tool
-    /// that owns a clap grammar of its own — see
-    /// [`ToolSchema::with_verbatim_argv`].
     #[serde(default, skip_serializing_if = "ArgBinding::is_typed")]
     pub arg_binding: ArgBinding,
     /// The tool consumes glob patterns **as data** — the argv binder must pass
@@ -335,13 +326,10 @@ impl ToolSchema {
         self
     }
 
-    /// Declare that this tool parses its own argv: the binder skips the
-    /// `positional`/`named`/`flags` split and fills [`ToolArgs::words`] with
-    /// every word after the tool name, in source order, post-expansion.
-    ///
-    /// Use it for a tool whose grammar is a clap **subcommand tree**
-    /// (`kj block list --limit 5`). The typed decomposition drops the order and
-    /// multiplicity such a grammar needs, and [`ToolArgs::to_argv`] cannot put
+    /// Declare that this tool parses its own argv: the binder fills
+    /// [`ToolArgs::words`] with every word after the tool name, in source
+    /// order, post-expansion, and leaves the split empty. See [`ArgBinding`]
+    /// for when to use it. [`ToolArgs::to_argv`] cannot put
     /// them back — a verbatim tool builds its argv from `words` with no
     /// inversion at all ([`ToolArgs::words_argv`] does the rendering).
     ///
@@ -351,10 +339,8 @@ impl ToolSchema {
     /// unchanged either way — it still supplies help, completion and the
     /// parameter list.
     ///
-    /// Distinct from [`ToolSchema::with_raw_argv`], which keeps source order
-    /// too but binds into `positional` and does *not* lift the global flags.
-    /// `raw_argv` serves a position-sensitive POSIX command (`test`, `kill`);
-    /// verbatim serves a tool with its own parser.
+    /// Distinct from [`ToolSchema::with_raw_argv`], which also keeps source
+    /// order but binds into `positional` and does not lift the global flags.
     pub fn with_verbatim_argv(mut self) -> Self {
         self.arg_binding = ArgBinding::Verbatim;
         self
@@ -454,12 +440,9 @@ pub struct ToolArgs {
     /// other tool.
     ///
     /// A text word arrives as [`Value::String`]; a heredoc- or pipe-bound word
-    /// keeps its [`Value::Bytes`], so binary never crosses the argv/text
-    /// boundary. `positional` and `named` are empty when this is `Some`, and
-    /// `flags` holds only the kernel-owned global flags the binder lifted out
-    /// of the stream (today just `json`) — so a verbatim tool can read
-    /// `has_flag("json")` to render its own envelope without ever finding
-    /// `--json` among its words.
+    /// keeps its [`Value::Bytes`]. `positional` and `named` are empty when this
+    /// is `Some`; `flags` holds only the global flags the binder lifted out
+    /// (today just `json`), so `has_flag("json")` still answers.
     ///
     /// Render it to a clap argv with [`ToolArgs::words_argv`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,12 +458,9 @@ impl ToolArgs {
     /// Render [`words`](Self::words) into argv tokens for a verbatim tool's
     /// own parser. Empty when the tool is not verbatim.
     ///
-    /// A [`Value::Bytes`] word renders as an inert placeholder token, the same
-    /// way [`to_argv`](Self::to_argv) renders a binary positional: the token
-    /// only has to satisfy the parser's argv shape, and the real bytes stay
-    /// available at the matching index in `words`. Unlike a binary *named*
-    /// value, nothing here can leak a placeholder into a field a tool reads as
-    /// data, because the tool holds the typed words itself.
+    /// A [`Value::Bytes`] word renders as an inert placeholder token, as
+    /// [`to_argv`](Self::to_argv) does for a binary positional; the real bytes
+    /// stay at the matching index in `words`.
     pub fn words_argv(&self) -> Vec<String> {
         self.words
             .as_deref()

@@ -6193,13 +6193,10 @@ async fn consume_flag_positionals(
 ///   boolean flag.
 ///
 /// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
-/// Is an explicit value on a kernel-owned global flag (`--json=VALUE`) on?
+/// Is `--json=VALUE` on? Off for empty, `false`, `0`; on otherwise.
 ///
-/// Off for an empty string, `false`, `0`, `Bool(false)` and `Int(0)`; on
-/// otherwise. This is the `--json=VALUE` rule `GlobalFlags::apply_from_args`
-/// already applies to a raw-argv tool's string token, spelled for the typed
-/// values the verbatim binder evaluates — `--json=0` means the same thing
-/// whichever path binds it.
+/// The raw-argv rule, spelled for typed values, so `--json=0` means the same
+/// thing whichever path binds it.
 fn global_flag_value_is_truthy(value: &Value) -> bool {
     match value {
         Value::Bool(b) => *b,
@@ -6224,17 +6221,13 @@ pub(crate) async fn bind_tool_args(
     // literal string.
     let glob_passthrough = schema.is_some_and(|s| s.glob_passthrough);
 
-    // Verbatim fast path: a tool that owns its own grammar (a clap subcommand
-    // tree — `kj block list --limit 5`) gets every word after its name in
-    // source order, in `words`, and nothing in `positional`/`named`. The typed
-    // split below is set-shaped, so it drops the order and multiplicity such a
-    // grammar needs and no inversion can recover them; handing the words over
-    // untouched means there is nothing to invert.
+    // Verbatim: the tool owns its grammar, so it gets every word in source
+    // order and nothing in `positional`/`named`. The typed split below is
+    // set-shaped and drops the order and multiplicity a clap subcommand tree
+    // needs, which no inversion can recover.
     //
-    // The kernel still owns its global flags. `--json` is lifted out of the
-    // stream wherever it sits — a subcommand tree puts it last — and recorded
-    // in `flags` so `GlobalFlags::apply_from_args` applies it exactly as it
-    // does for a typed tool. The tool never sees it among its words.
+    // `--json` is still the kernel's. It is lifted into `flags` wherever it
+    // sits, so `apply_from_args` handles it as it does for a typed tool.
     if schema.is_some_and(|s| matches!(s.arg_binding, crate::tools::ArgBinding::Verbatim)) {
         let mut words: Vec<Value> = Vec::new();
         let mut past_double_dash = false;
@@ -6257,8 +6250,7 @@ pub(crate) async fn bind_tool_args(
                             }
                         }
                         None => {
-                            // A word that evaluates to nothing (an unset
-                            // variable) contributes no word, matching the
+                            // Nothing evaluated means no word, matching the
                             // typed path's `if let Some(value)`.
                             if let Some(value) = source.eval(expr).await? {
                                 words.push(apply_tilde_expansion(value, home.as_deref()));
@@ -6280,18 +6272,16 @@ pub(crate) async fn bind_tool_args(
                     })?;
                     let val = apply_tilde_expansion(val, home.as_deref());
                     if !past_double_dash && crate::tools::is_global_output_flag(key) {
-                        // `--json=VALUE`: same truthiness rule `ToolArgs::has_flag`
-                        // applies, so the two spellings agree on what counts as on.
-                        // Removed from the words either way — the tool must not
-                        // meet the kernel's flag in any form.
+                        // Removed from the words whether or not it is on: the
+                        // tool must not meet the kernel's flag in any form.
                         if global_flag_value_is_truthy(&val) {
                             tool_args.flags.insert(key.clone());
                         }
                         continue;
                     }
-                    // Loud on binary (GH #116): reassembling `--k=$BIN` into a
-                    // text token would hand the tool a placeholder that looks
-                    // like data. A binary *word* is fine — it stays typed.
+                    // Loud on binary (GH #116): reassembling `--k=$BIN` as text
+                    // hands the tool a placeholder that looks like data. A bare
+                    // binary word is fine — it stays typed.
                     let val_str = crate::interpreter::value_to_text_sink_named(
                         &val,
                         "a --key=value argument",

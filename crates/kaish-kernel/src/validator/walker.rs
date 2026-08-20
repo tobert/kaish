@@ -795,12 +795,9 @@ fn is_special_command(name: &str) -> bool {
 pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
 
-    // A verbatim tool parses its own argv, so validation binds the way
-    // execution does: placeholders in source order, into `words`. Filling
-    // `positional`/`named`/`flags` here instead would make the schema checks
-    // judge a decomposition the tool will never receive — a missing-required
-    // error on a subcommand path, or an unknown-flag warning for a flag that
-    // belongs to a leaf.
+    // Validation binds the way execution does — placeholders in source order,
+    // into `words` — so the schema checks never judge a decomposition the tool
+    // will not receive.
     if schema.is_some_and(|s| matches!(s.arg_binding, ArgBinding::Verbatim)) {
         let mut words = Vec::new();
         let mut past_double_dash = false;
