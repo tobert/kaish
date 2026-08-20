@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`KernelBackend::patch` states its batch contract.** The trait doc now says
+  what all three implementations already do: operations apply in order to one
+  snapshot and the result is written once, so a failing operation — a CAS
+  `expected` mismatch, an out-of-range line — leaves the file untouched, and
+  each operation sees the edits before it. Pinned by tests that run against
+  every in-tree backend.
+
 ## [0.15.0] - 2026-08-19
 
 ### Added
