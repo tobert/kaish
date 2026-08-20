@@ -32,6 +32,12 @@ breaking entries are marked **BREAKING**.
   `MATCH`/`LINE` one; plain `grep` columnized its matches side by side. All of
   them now print what `kaish -c` prints — `head`'s bare lines, `grep -n`'s
   `3:` prefix, one line per line.
+- **BREAKING: `GlobalFlags::apply_from_args` takes the tool's `raw_argv`
+  flag.** `apply_from_args(&args, ctx)` becomes
+  `apply_from_args(&args, schema.raw_argv, ctx)`. Only a `raw_argv` tool keeps
+  `--json` among its positionals with a `--` marker to bound it; searching any
+  other tool's positionals read an operand after `--` back as the kernel's
+  flag.
 - **BREAKING: plan `index` is now the position in the `statements` list**, with
   no gaps — `statements[i].index == i`, always. It previously counted dropped
   empty statements, so any source opening with a comment or a blank line
@@ -103,6 +109,21 @@ breaking entries are marked **BREAKING**.
   contributes no line but still answered the trailing-newline question for the
   file before it, so `cat -n a.txt empty.txt` ended without the newline
   `cat -n a.txt` has.
+- **`--` ends the options, including for `--flag=value` and `--json`.**
+  `echo -- --flag=value` was a parse error ("adjacent words with no space
+  between them"): the post-`--` grammar had no `--flag=value` production, so
+  the three tokens hit the no-token-pasting guard that exists for pre-`--`
+  argv. It is now one operand, and the value still expands. Separately,
+  `echo -- --json hi` answered in JSON — a positional `--json` was read back as
+  the kernel's flag by a scan that exists for `raw_argv` tools, which keep the
+  bounding `--` among their positionals; that scan is now asked only of them.
+  `-n=1` is still not a word on either side of `--`, as before.
+- **A fragment glued after a `--key=value` word is refused.** `echo --a=1--b=2`
+  and `echo -- --a=$V--b` split into separate arguments instead of reporting
+  the pasting — `Arg::Named`/`Arg::WordAssign` were exempt from the
+  no-token-pasting guard, which covered the boundaries inside the word but not
+  the one after the value. Loud only by accident before (clap rejected the
+  stray `-a`), and silent after `--`.
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
   `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
   no assignment reached the validator and `env` had no check of its own. An

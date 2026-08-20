@@ -864,6 +864,13 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
             }
             Arg::Named { key, value } => {
                 let v = expr_to_placeholder(value);
+                // Past `--` it is an operand, the way execution binds it.
+                if past_double_dash {
+                    tool_args
+                        .positional
+                        .push(Value::String(format!("--{key}={}", crate::interpreter::value_to_string(&v))));
+                    continue;
+                }
                 // The kernel's own flag, bound the way execution binds it:
                 // by truthiness, into `flags`, never into `named`. A value
                 // validation cannot evaluate arrives as the `<dynamic>`

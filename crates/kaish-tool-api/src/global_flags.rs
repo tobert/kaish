@@ -40,8 +40,16 @@ impl GlobalFlags {
     /// before `parsed.global.apply(ctx)` would have run. Idempotent with the
     /// per-builtin apply: both writing `OutputFormat::Json` yields the same
     /// state.
-    pub fn apply_from_args(args: &ToolArgs, ctx: &mut dyn ToolCtx) {
-        if args.has_flag("json") || positional_json_flag(args) {
+    ///
+    /// `raw_argv` is [`ToolSchema::raw_argv`](kaish_types::ToolSchema::raw_argv)
+    /// for the tool being dispatched, and it decides whether `positional` is
+    /// searched at all. Only a `raw_argv` tool keeps `--json` — and the `--`
+    /// marker that bounds it — among its positionals. For every other tool a
+    /// positional `--json` got there by being an operand after `--`, where the
+    /// binder drops the marker, so searching would read the operand back as
+    /// the kernel's flag and `echo -- --json hi` would answer in JSON.
+    pub fn apply_from_args(args: &ToolArgs, raw_argv: bool, ctx: &mut dyn ToolCtx) {
+        if args.has_flag("json") || (raw_argv && positional_json_flag(args)) {
             ctx.set_output_format(OutputFormat::Json);
         }
     }

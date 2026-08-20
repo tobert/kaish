@@ -26,7 +26,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.flags.insert("json".to_string());
 
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, false, &mut ctx);
         assert!(matches!(ctx.output_format, Some(OutputFormat::Json)));
     }
 
@@ -34,7 +34,7 @@ mod tests {
     fn apply_from_args_leaves_format_alone_when_absent() {
         let mut ctx = make_ctx();
         let args = ToolArgs::new();
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, false, &mut ctx);
         assert!(ctx.output_format.is_none());
     }
 
@@ -45,7 +45,7 @@ mod tests {
         args.flags.insert("json".to_string());
 
         // Simulate kernel pre-apply followed by builtin's parsed.global.apply.
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, false, &mut ctx);
         let gf = GlobalFlags { json: true };
         gf.apply(&mut ctx);
         assert!(matches!(ctx.output_format, Some(OutputFormat::Json)));
@@ -63,7 +63,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("--json".to_string()));
 
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, true, &mut ctx);
         assert!(matches!(ctx.output_format, Some(OutputFormat::Json)));
     }
 
@@ -80,7 +80,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("--json=yes".to_string()));
 
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, true, &mut ctx);
         assert!(matches!(ctx.output_format, Some(OutputFormat::Json)));
     }
 
@@ -94,7 +94,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("--json=false".to_string()));
 
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, true, &mut ctx);
         assert!(ctx.output_format.is_none());
     }
 
@@ -115,7 +115,23 @@ mod tests {
         args.positional.push(Value::String("--".to_string()));
         args.positional.push(Value::String("--json".to_string()));
 
-        GlobalFlags::apply_from_args(&args, &mut ctx);
+        GlobalFlags::apply_from_args(&args, true, &mut ctx);
+        assert!(ctx.output_format.is_none());
+    }
+
+    /// The positional scan is for `raw_argv` tools only. A typed tool's
+    /// positional `--json` is an operand after `--` — the binder consumes the
+    /// marker, so nothing bounds the scan — and reading it back as the flag
+    /// made `echo -- --json hi` answer in JSON.
+    #[test]
+    fn apply_from_args_ignores_a_typed_tools_positional_json() {
+        use crate::ast::Value;
+
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("--json".to_string()));
+
+        GlobalFlags::apply_from_args(&args, false, &mut ctx);
         assert!(ctx.output_format.is_none());
     }
 }

@@ -504,6 +504,19 @@ export FOO=bar
 alias greet='echo hello'
 ```
 
+### `--` ends the options
+
+```sh
+echo -- --flag=value            # prints --flag=value
+echo -- --json hi               # prints --json hi, not JSON
+grep -- -pattern file.txt       # search for a pattern starting with `-`
+```
+
+Everything after `--` is an operand, including a word shaped like a flag and
+including `--json`. The value still expands: `echo -- --greeting=$USER`
+prints `--greeting=` followed by the variable. A short flag with a value
+(`-n=1`) is not a word on either side of `--`; quote it (`echo "-n=1"`).
+
 ## Pipes & Redirects
 
 ```sh

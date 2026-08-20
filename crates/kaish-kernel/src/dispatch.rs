@@ -616,7 +616,8 @@ impl CommandDispatcher for BackendDispatcher {
         // Honor --json before the tool runs so a parse failure inside the
         // builtin doesn't drop the format on the floor. See kernel.rs for the
         // matching call in the production path.
-        GlobalFlags::apply_from_args(&tool_args, ctx);
+        let raw_argv = schema.as_ref().is_some_and(|s| s.raw_argv);
+        GlobalFlags::apply_from_args(&tool_args, raw_argv, ctx);
 
         // Execute via backend
         let backend = ctx.backend.clone();
