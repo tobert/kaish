@@ -82,6 +82,8 @@ async fn single_script_names_are_quiet_at_every_door() {
         "export café=ok",
         "for café in a; do echo hi; done",
         "for 名前 in a; do echo hi; done",
+        "env café=ok",
+        "env -u café",
         "unset café",
         "xs=[a]; push xs b",
         "read v",
@@ -123,6 +125,10 @@ async fn the_runtime_name_doors_warn_too() {
         format!("read {name}"),
         format!("xs=[a]; push {name} b"),
         format!("seq 1 2 | scatter --as {name} | echo hi | gather"),
+        // `env` names variables in argv words, so the walker never sees an
+        // assignment to judge — the check has to live in env's own validate.
+        format!("env {name}=x"),
+        format!("env -u {name}"),
     ] {
         let (_, _, err) = run(&source).await;
         assert!(err.contains("W007"), "{source} should warn: {err:?}");
@@ -151,4 +157,36 @@ async fn a_for_loop_with_a_mixed_script_name_still_runs_and_binds() {
         run(&format!("for {name} in x y; do echo ${{{name}}}; done")).await;
     assert_eq!(code, 0, "execution must not be blocked");
     assert_eq!(out, "x\ny");
+}
+
+/// A known over-reach, pinned rather than hidden.
+///
+/// `env` sets variables from the words before the command, and the words after
+/// it belong to that command. The binder does not preserve that split: an
+/// unquoted `key=value` anywhere in the line lands in `named`, so
+/// `env FOO=1 mycmd PАTH=2` judges the command's own argument as if it were a
+/// variable env sets. The order that would tell them apart is gone by the time
+/// any validate runs.
+///
+/// Warning on it is the better half of the trade — a mixed-script `PАTH=2` is
+/// worth reporting wherever it appears, and W007 never blocks execution. But
+/// the message says "names a different variable", which is not what that word
+/// does. Quoting the argument (`'PАTH=2'`) keeps it positional and quiet.
+///
+/// This test exists so the day the binder stops discarding order, someone has
+/// to look at this line and decide, rather than silently changing it.
+#[tokio::test]
+async fn env_also_judges_a_command_argument_that_looks_like_an_assignment() {
+    let name = cyrillic_path();
+    let (_, _, err) = run(&format!("env FOO=1 mycmd {name}=2")).await;
+    assert!(
+        err.contains("W007"),
+        "current behavior: the command's own key=value is judged too: {err:?}"
+    );
+
+    let (_, _, quiet) = run(&format!("env FOO=1 mycmd '{name}=2'")).await;
+    assert!(
+        !quiet.contains("W007"),
+        "a quoted argument stays positional and is not judged: {quiet:?}"
+    );
 }

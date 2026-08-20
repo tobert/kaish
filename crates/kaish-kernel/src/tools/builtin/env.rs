@@ -16,7 +16,8 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::validator::ValidationIssue;
 
 /// Env tool: print environment or run command with modified environment.
 pub struct Env;
@@ -70,6 +71,34 @@ impl Tool for Env {
                 ("Run with modified env", "env MY_VAR=hello command"),
             ],
         )
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let schema = self.schema();
+        let mut issues = validate_against_schema(args, &schema);
+
+        // `env` names variables in argv words, so no assignment reaches the
+        // walker and the check has to live here.
+        //
+        // A `VAR=value` word binds into `named`, alongside env's own flags —
+        // so skip the names the schema declares and judge the rest.
+        let own: std::collections::HashSet<&str> =
+            schema.params.iter().map(|p| p.name.as_str()).collect();
+        issues.extend(
+            args.named
+                .keys()
+                .filter(|key| !own.contains(key.as_str()))
+                .filter_map(|key| super::mixed_script_issue(key)),
+        );
+
+        // `-u VAR`, repeatable: the names are the flag's value, not its key.
+        // Read them the way `execute` reads them, so a spelling the run would
+        // act on is a spelling this judges.
+        if let Ok(unset) = collect_unset_vars(args) {
+            issues.extend(unset.iter().filter_map(|name| super::mixed_script_issue(name)));
+        }
+
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

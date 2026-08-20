@@ -11,6 +11,12 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
+  `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
+  no assignment reached the validator and `env` had no check of its own. An
+  unquoted `key=value` argument to the command being run is judged too, because
+  the binder does not keep the order that separates them; quote it to keep it
+  positional.
 - **`for` reports a mixed-script loop variable (W007).** `for PАTH in a`, with
   CYRILLIC CAPITAL LETTER A where Latin `A` belongs, bound a different variable
   than the source reads as and said nothing, while `PАTH=/bin` had warned since
