@@ -77,11 +77,14 @@ impl Tool for Test {
     /// statement — and a runtime refusal inside an `if` condition is worth
     /// very little, since the branch is chosen from the exit code.
     ///
-    /// **Both operand shapes are checked on purpose.** `test` is `raw_argv`,
-    /// so execution hands it every word in `positional`; the validation
-    /// binder has no raw_argv twin and routes a leading-dash word into
-    /// `flags` instead. Checking only one of them would miss the spelling the
-    /// other produces — the drift class behind GH #376 and #378.
+    /// **Both operand shapes are checked, and each one is load-bearing.**
+    /// `test` is `raw_argv`, so execution hands it every word in
+    /// `positional`; the validation binder has no raw_argv twin, and it
+    /// splits by token shape — `-a`/`-o` look like flags and land in `flags`,
+    /// while `(`/`)` are barewords and land in `positional`. Measured, not
+    /// assumed: deleting either half leaves real programs unreported
+    /// (`test '(' a = a ')'` needs the positional half, the rest need the
+    /// flags half).
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
         let from_positional = args
             .positional

@@ -75,12 +75,16 @@ async fn a_compound_in_a_condition_stops_the_statement() {
     );
 }
 
-/// The check reads BOTH shapes on purpose. `test` is `raw_argv`, so execution
-/// gets every word in `positional`; the validation binder has no raw_argv twin
-/// and routes a leading-dash word into `flags` instead. A rule written from
-/// one shape misses the spelling the other produces — the drift behind GH #376
-/// and #378. If this ever regresses, it will regress silently, which is why it
-/// is asserted rather than assumed.
+/// The check reads BOTH shapes, and each half is load-bearing.
+///
+/// `test` is `raw_argv`, so execution gets every word in `positional`; the
+/// validation binder has no raw_argv twin and splits by token shape instead —
+/// `-a`/`-o` look like flags and land in `flags`, `(`/`)` are barewords and
+/// land in `positional`. I first wrote this off as the raw_argv/typed drift
+/// behind GH #376 and #378, which sounded right and was not the reason.
+/// Deleting either half was measured: without the positional half
+/// `test '(' a = a ')'` goes unreported; without the flags half the other
+/// four cases do.
 #[tokio::test]
 async fn the_rule_sees_the_shape_validation_actually_binds() {
     use kaish_kernel::tools::{register_builtins, ToolRegistry};
