@@ -90,6 +90,8 @@ impl Tool for KaishTrash {
 }
 
 /// Get the trash backend from context, or return an error result.
+// Same call as `ExecContext::snapshot_overwrites`: the `Err` IS the result the
+// caller returns, so boxing it would buy an allocation and cost a deref.
 #[allow(clippy::result_large_err)]
 fn get_backend<'a>(ctx: &'a ExecContext, subcmd: &str) -> Result<&'a dyn TrashBackend, ExecResult> {
     ctx.trash_backend
