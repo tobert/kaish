@@ -48,6 +48,14 @@ pub trait Tool: Send + Sync {
 /// - Unknown flags (warning).
 /// - Type compatibility for both positional and named args.
 pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<ValidationIssue> {
+    // A verbatim tool owns its grammar, and every check below reads a
+    // decomposition it never receives — a required positional would look
+    // missing on a subcommand path. One that wants checks overrides
+    // `Tool::validate`.
+    if args.words.is_some() {
+        return Vec::new();
+    }
+
     let mut issues = Vec::new();
 
     let positional_params: Vec<&ParamSchema> = schema.params.iter().filter(|p| p.positional).collect();

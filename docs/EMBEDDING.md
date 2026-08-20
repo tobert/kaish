@@ -637,6 +637,67 @@ Notes:
   automatic (clap emits help on `--help`); a hand-rolled parser must handle it
   explicitly, or `--help` will fall into your default action.
 
+### Verbatim argv: a tool that parses its own grammar
+
+```rust
+fn schema(&self) -> ToolSchema {
+    ToolSchema::new("kj", "kaijutsu control")
+        .subcommand(ToolSchema::new("block", "block commands"))
+        .with_verbatim_argv()
+}
+
+async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+    // `kj block list --limit 5 --include a --include b`
+    let argv = args.words_argv();  // ["block","list","--limit","5","--include","a","--include","b"]
+    let parsed = Cli::try_parse_from(std::iter::once("kj".to_string()).chain(argv));
+    // …
+}
+```
+
+By default the binder decomposes a command's words into
+`ToolArgs::{positional, named, flags}`, and `ToolArgs::to_argv()` rebuilds a
+clap argv from them. That split is order-independent and set-shaped, which is
+what a flat tool wants.
+
+It cannot serve a **subcommand tree**. `kj block list --limit 5` decomposes to
+`positional: [block, list]`, `named: {limit: 5}` and renders back as
+`--limit=5 -- block list`, which clap rejects — `--limit` belongs to the `list`
+subcommand, not the root. A repeated `--include` collapses to one entry on the
+way in. Order and multiplicity are gone by then, so no inversion can recover
+them.
+
+`.with_verbatim_argv()` sets `ArgBinding::Verbatim`: the binder fills
+`ToolArgs::words` with every word after the tool name, in source order,
+post-expansion, and leaves `positional`/`named` empty. Variables, globs, `~`,
+`$(…)` and heredocs are already expanded; a heredoc- or pipe-bound word keeps
+its `Value::Bytes`, so binary never crosses the argv/text boundary.
+`words_argv()` renders the stream into argv tokens, with a `Value::Bytes` word
+as an inert placeholder whose real bytes stay at the same index in `words`.
+
+- **`--json` stays the kernel's.** It is removed from `words` wherever it
+  appears — including last, where a subcommand tree puts it — and recorded in
+  `flags`, so `args.has_flag("json")` answers it and the kernel applies the
+  output format exactly as for a typed tool. Past a literal `--` it is your
+  operand, not the kernel's flag.
+
+  **Unless you also call `.with_owned_output()`**, in which case `--json`
+  stays in your words and the kernel renders nothing. That is the point of
+  owning output: you emit the final bytes, so you parse the flag that asks for
+  them. Lifting it would strip it from your argv *and* skip rendering, leaving
+  the request handled by nobody.
+- **`--help`/`-h` reach your parser.** `flags` is empty of them, so the
+  kernel's generic help router stands aside — the same responsibility
+  `.with_owned_output()` carries, and the two combine.
+- **The schema is unchanged.** It still supplies help, completion and the
+  parameter list. Schema-shaped argument validation is skipped, because it
+  would judge a decomposition your tool never receives; override
+  `Tool::validate` for pre-execution checks of your own.
+
+Distinct from `.with_raw_argv()`, which also keeps source order but binds into
+`positional` and does not lift the global flags. `raw_argv` serves a
+position-sensitive POSIX command (`test`, `kill`); verbatim serves a tool with
+its own parser.
+
 ### Patient tools: suspending the script timeout
 
 The script timeout (`ExecuteOptions::timeout` / `KernelConfig::request_timeout`)

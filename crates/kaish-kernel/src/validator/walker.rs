@@ -11,7 +11,7 @@ use crate::ast::{
 use crate::kernel::{bind_glued_short_value, push_repeatable_value};
 use crate::scheduler::{is_bool_type, schema_param_lookup};
 use crate::validator::issue::Span;
-use crate::tools::{ToolArgs, ToolRegistry, ToolSchema};
+use crate::tools::{is_global_output_flag, ArgBinding, ToolArgs, ToolRegistry, ToolSchema};
 use kaish_types::CommandKind;
 
 use super::issue::{IssueCode, ValidationIssue};
@@ -794,6 +794,52 @@ fn is_special_command(name: &str) -> bool {
 /// it uses placeholder values since we only care about argument structure.
 pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
+
+    // Validation binds the way execution does — placeholders in source order,
+    // into `words` — so the schema checks never judge a decomposition the tool
+    // will not receive.
+    if schema.is_some_and(|s| matches!(s.arg_binding, ArgBinding::Verbatim)) {
+        // Same rule as the runtime binder, including who keeps `--json`: a tool
+        // that renders its own output gets the flag in its words, and one that
+        // does not has it lifted into `flags`. A `Tool::validate` that reads
+        // `has_flag("json")` must see what execution will.
+        let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
+        let mut words = Vec::new();
+        let mut past_double_dash = false;
+        for arg in args {
+            match arg {
+                Arg::Positional(expr) => words.push(expr_to_placeholder(expr)),
+                Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
+                Arg::LongFlag(name) => {
+                    if lift_global_flags && !past_double_dash && is_global_output_flag(name) {
+                        tool_args.flags.insert(name.clone());
+                    } else {
+                        words.push(Value::String(format!("--{name}")));
+                    }
+                }
+                Arg::Named { key, .. } => {
+                    if lift_global_flags && !past_double_dash && is_global_output_flag(key) {
+                        // The value is a placeholder here, so truthiness cannot
+                        // be judged; execution decides whether it is on. Record
+                        // the flag so a custom `validate` sees the same shape.
+                        tool_args.flags.insert(key.clone());
+                    } else {
+                        words.push(Value::String(format!("--{key}=<value>")));
+                    }
+                }
+                Arg::WordAssign { key, .. } => {
+                    words.push(Value::String(format!("{key}=<value>")));
+                }
+                Arg::DoubleDash => {
+                    past_double_dash = true;
+                    words.push(Value::String("--".to_string()));
+                }
+            }
+        }
+        tool_args.words = Some(words);
+        return tool_args;
+    }
+
     // Schema-aware param table: flag name → (canonical, type, consumes, repeatable).
     // Empty when there's no schema, in which case every flag stays a bare flag
     // (the old schema-blind behavior).
