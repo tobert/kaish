@@ -108,7 +108,10 @@ breaking entries are marked **BREAKING**.
   redirect too. `&&`/`||` chains and `elif` conditions print the same way, a
   short-circuited side still runs nothing, and a `$(…)` inside a condition is
   not printed twice — its stdout is its value. The condition's exit code is
-  still the `if`'s answer, not the statement's status.
+  still the `if`'s answer, not the statement's status. A condition's output
+  obeys the output limit like any other output, and a condition whose output
+  was capped still counts as true. stderr reads in the order it was produced:
+  the condition ran before the branch, so it reports first.
 - **`--json=VALUE` means the same thing on every builtin.** `--json=1`,
   `--json=yes`, and `--json=""` exited 2 with a clap parse error on an ordinary
   builtin while `test` and a verbatim tool accepted them, and `--json=0` *enabled*

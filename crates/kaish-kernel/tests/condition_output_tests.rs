@@ -161,3 +161,66 @@ async fn a_quiet_condition_prints_nothing() {
     let r = run("if true; then echo BODY; fi").await;
     assert_eq!(r.text_out().trim_end(), "BODY");
 }
+
+/// A condition's output obeys the output limit, like every other output.
+///
+/// `apply_spill_contract` is documented as "the ONE seam every execution
+/// surface that produces a raw `ExecResult` must funnel through". Carrying a
+/// condition's stdout made this arm one of those surfaces, and it reached
+/// `execute_command` directly — under the pipeline layer that applies the
+/// contract. With a 2K limit, `if seq 1 100000; then …; fi` handed back 588KB
+/// at exit 0 while the same command on its own was capped at 1.7KB and exit 3.
+/// An agent shell whose cap has a hole in it is worse than one with no cap,
+/// because the cap is what the caller sized their context against.
+#[tokio::test]
+async fn a_conditions_output_obeys_the_output_limit() {
+    let capped = run("kaish-output-limit set 2K; if seq 1 100000; then echo T; fi").await;
+    let plain = run("kaish-output-limit set 2K; seq 1 100000").await;
+
+    let capped_len = capped.text_out().len();
+    assert!(
+        capped_len < 20_000,
+        "a condition's output must be capped like any other; got {capped_len} bytes"
+    );
+    // The cap is the same cap, not merely some smaller number.
+    assert!(
+        capped_len <= plain.text_out().len() * 4,
+        "condition {capped_len} vs plain {} — same limit, same order of magnitude",
+        plain.text_out().len()
+    );
+    assert!(
+        capped.text_out().contains('T'),
+        "the branch still ran and its output still arrives"
+    );
+}
+
+/// A condition succeeds even when its own output was capped. The spill
+/// contract remaps a spilled result's code to 3, and reading that as the
+/// condition's answer would send `if seq 1 100000` down the `else` branch —
+/// the command worked, only its output was too big to keep.
+#[tokio::test]
+async fn a_capped_condition_is_still_true() {
+    let r = run("kaish-output-limit set 2K; if seq 1 100000; then echo THEN; else echo ELSE; fi")
+        .await;
+    assert!(
+        r.text_out().contains("THEN"),
+        "a capped condition still succeeded, got: {}",
+        r.text_out().chars().rev().take(60).collect::<String>()
+    );
+}
+
+/// stderr arrives in the order it was produced: the condition ran before the
+/// branch, so it reports first. The `if` arm appended the branch's own `err`
+/// and only then drained the stream the condition had written to, which put
+/// them backwards; `while` already drained first.
+#[tokio::test]
+async fn condition_stderr_precedes_the_branchs() {
+    let r = run("if cat /nope-cond; then echo y; else cat /nope-body; fi").await;
+    let cond = r.err.find("nope-cond").expect("condition stderr");
+    let body = r.err.find("nope-body").expect("body stderr");
+    assert!(
+        cond < body,
+        "the condition ran first and must report first, got: {}",
+        r.err
+    );
+}

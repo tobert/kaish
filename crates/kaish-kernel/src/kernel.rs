@@ -2441,8 +2441,13 @@ impl Kernel {
                     let flow = self.execute_stmt_flow(stmt).await?;
                     match flow {
                         ControlFlow::Normal(r) => {
-                            accumulate_result(&mut result, &r);
+                            // Drain BEFORE accumulating, as the `while` arm
+                            // does: the stream holds the condition's stderr,
+                            // which was written first and must read first.
+                            // Appending `r.err` ahead of the drain put the
+                            // branch's diagnostic before the condition's.
                             self.drain_stderr_into(&mut result).await;
+                            accumulate_result(&mut result, &r);
                         }
                         mut other => {
                             self.drain_stderr_into(&mut result).await;
@@ -3787,10 +3792,24 @@ impl Kernel {
         Box::pin(async move {
             match expr {
                 Expr::Command(cmd) => {
-                    let result = self.execute_command(&cmd.name, &cmd.args).await?;
+                    let mut result = self.execute_command(&cmd.name, &cmd.args).await?;
                     self.emit_cmdsubst_stderr(&result.err).await;
+                    // Truthiness comes from the command's OWN code, read before
+                    // the spill contract can remap it. A capped `if seq 1
+                    // 100000` succeeded; only its output was too big to keep,
+                    // and reading the remapped 3 would send it to `else`.
+                    let truthy = result.code == 0;
+                    // Carrying the stdout made this arm one of the surfaces
+                    // that produce a raw `ExecResult`, and it reaches
+                    // `execute_command` below the pipeline layer that applies
+                    // the contract — so it applies it here, as
+                    // `apply_spill_contract`'s "ONE seam" note requires.
+                    // Without this a condition handed back its full output with
+                    // no limit at all.
+                    let limit = self.exec_ctx.read().await.output_limit.clone();
+                    crate::output_limit::apply_spill_contract(&mut result, &limit).await;
                     push_stdout_of(out, &result);
-                    Ok(Value::Bool(result.code == 0))
+                    Ok(Value::Bool(truthy))
                 }
                 // Short-circuits exactly as the `eval_expr_async` arm does, and
                 // yields the operand's own value rather than a coerced bool. A
