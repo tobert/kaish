@@ -507,7 +507,13 @@ kaish variables directly into the filter."#,
         r#"```sh
 cmd1 && cmd2              # cmd2 if cmd1 succeeds
 cmd1 || cmd2              # cmd2 if cmd1 fails
-```"#,
+
+if ! cmd; then …; fi      # `!` negates a condition
+while ! cmd; do …; done   # and is how kaish spells `until`
+```
+
+`!` binds to the command that follows, not to the whole chain: `! a && b` is
+`(! a) && b`, so `if ! true && true` takes the `else` branch."#,
     ),
     syntax_section(
         "test-expressions",

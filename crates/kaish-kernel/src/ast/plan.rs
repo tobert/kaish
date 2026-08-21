@@ -464,6 +464,8 @@ fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
     match expr {
         Expr::Command(cmd) => collect_command(cmd, background, out),
         Expr::CommandSubst(stmts) => collect_block(stmts, background, out),
+        // The negation runs its inner command; the plan must show it.
+        Expr::Not(inner) => collect_expr(inner, background, out),
         Expr::BinaryOp { left, right, .. } => {
             collect_expr(left, background, out);
             collect_expr(right, background, out);
@@ -832,6 +834,7 @@ fn render_tooldef(def: &ToolDef) -> String {
 /// reference stays `${NAME}` and a substitution stays `$(…)`.
 pub(crate) fn render_expr(expr: &Expr) -> String {
     match expr {
+        Expr::Not(inner) => format!("! {}", render_expr(inner)),
         Expr::Literal(v) => render_literal(v),
         Expr::VarRef(path) => format!("${{{}}}", render_varpath(path)),
         Expr::Interpolated(parts) => format!("\"{}\"", render_parts(parts)),

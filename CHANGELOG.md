@@ -11,6 +11,16 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …`
+  were parse errors ("found '!' expected condition"), so the idiomatic "run
+  this unless" had to be written backwards through an empty `then` branch. It
+  binds to the command that follows, not to the whole chain, which is bash's
+  reading: `! true && true` is `(! true) && true` and takes the `else` branch.
+  Repeatable (`! ! cmd`), works with `[[ … ]]` and a plain command alike, and a
+  negated condition's output still reaches the statement. `while ! cmd` is also
+  how kaish spells `until`, which it deliberately does not have.
+
+
 - **`set -o pipefail` and `PIPESTATUS`** — a failed pipeline stage is
   detectable. `cat missing | wc -l` exited **0** and there was no second way to
   ask: the status is the last stage's and kaish had neither the mode nor the

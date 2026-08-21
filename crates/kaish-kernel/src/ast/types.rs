@@ -344,6 +344,12 @@ pub enum Expr {
         parts: Vec<SpannedPart>,
         strip_tabs: bool,
     },
+    /// Negated condition: `! cmd`, `! [[ … ]]`.
+    ///
+    /// Binds to the command that follows, not to the whole `&&`/`||` chain —
+    /// `! true && true` is `(! true) && true`, which is bash's reading and
+    /// takes the else branch.
+    Not(Box<Expr>),
     /// Binary operation: `a && b`, `a || b`
     BinaryOp {
         left: Box<Expr>,

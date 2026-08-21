@@ -270,6 +270,7 @@ fn format_param(param: &ParamDef) -> String {
 /// Format an expression as an S-expression.
 pub fn format_expr(expr: &Expr) -> String {
     match expr {
+        Expr::Not(inner) => format!("(not {})", format_expr(inner)),
         Expr::Literal(value) => format_value(value),
         Expr::VarRef(path) => format!("(varref {})", format_varpath(path)),
         Expr::Interpolated(parts) => {

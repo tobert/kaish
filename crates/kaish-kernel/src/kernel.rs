@@ -3941,6 +3941,13 @@ impl Kernel {
                     }
                     self.eval_condition_async(right, out).await
                 }
+                // The negated command still RUNS, so its output belongs to the
+                // statement exactly as an un-negated one's does. Routing this
+                // through `eval_expr_async` would drop it.
+                Expr::Not(inner) => {
+                    let value = self.eval_condition_async(inner, out).await?;
+                    Ok(Value::Bool(!is_truthy(&value)))
+                }
                 other => self.eval_expr_async(other).await,
             }
         })
@@ -3949,6 +3956,10 @@ impl Kernel {
     fn eval_expr_async<'a>(&'a self, expr: &'a Expr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
         match expr {
+            Expr::Not(inner) => {
+                let value = self.eval_expr_async(inner).await?;
+                Ok(Value::Bool(!is_truthy(&value)))
+            }
             Expr::Literal(value) => Ok(value.clone()),
             Expr::VarRef(path) => {
                 let scope = self.scope.read().await;

@@ -734,6 +734,11 @@ while CONDITION; do
     ...
 done
 
+# `!` negates a condition. It binds to the command that follows, so
+# `! a && b` is `(! a) && b` — bash's reading.
+if ! grep -q TODO notes.md; then echo "clean"; fi
+while ! ping -c1 host; do sleep 1; done     # kaish has no `until`
+
 # Case statement (patterns are glob-matched, not expanded)
 case $VAR in
     hello) echo "matched hello" ;;

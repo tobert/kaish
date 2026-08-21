@@ -26,6 +26,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 
 | Limitation | Details | Use instead |
 |-----------|---------|------------|
+| No `until` loop | `until cmd; do …; done` is a parse error. Deliberate — `while !` says the same thing and kaish keeps one spelling per idea. Reconsidered if a use case turns up that `while !` reads badly for. | `while ! cmd; do …; done` |
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's native list literals |
 | Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
 | No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. A bare `,` is NOT one of these — it's significant only inside a `[...]`/`{...}` literal or pattern, so `sed -n 1,3p file` and `sort -k 2,2n` need no quoting. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
