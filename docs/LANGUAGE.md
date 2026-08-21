@@ -328,6 +328,10 @@ echo "literal \$X"              # escaped = no interpolation
 
 # Single quotes - literal strings, no interpolation
 echo 'hello $NAME'              # prints: hello $NAME
+
+# A quote inside $( ) belongs to the substitution, at any depth
+echo "$(basename "$path")"      # one word, quoted on both levels
+echo "$(echo "$(date +%F)")"
 ```
 
 ### Word characters

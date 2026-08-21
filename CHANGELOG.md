@@ -95,6 +95,25 @@ breaking entries are marked **BREAKING**.
   for why each is closed by design.
 
 ### Fixed
+- **A double-quoted string may hold a `$(…)` whose body has its own quoted
+  words.** `echo "$(basename "$p")"` was a parse error — "unterminated command
+  substitution: missing `)`" — and so was every form where BOTH levels were
+  double-quoted: `"$(echo "hi")"`, `x="$(echo "hi")"`, `"pre $(echo "hi") post"`.
+  A quote inside a `$(…)` is the substitution's, not the string's, at any depth.
+  Unquoted (`$(echo "hi")`) and single-quoted (`"$(echo 'hi')"`) forms always
+  worked, which is why the first report — "any literal double quote between
+  `$(` and `)`" — sent people to unquote variables inside `$()` for nothing.
+  `"$(echo 'a"b')"` works too.
+- **An unterminated string says which thing is unterminated.** `echo "oops`
+  reported "unexpected character"; it now reports "unterminated string", and
+  `echo "pre $(echo hi"` reports the missing `)` — the paren is the mistake and
+  the unclosed string is only its consequence. Spans are unchanged.
+- **A file of unterminated openers no longer costs O(N²).** A token that scans
+  for its own terminator reads to end of input when there is none, and the
+  lexer collected an error for every retry though only the first is ever
+  rendered. Lexer errors are capped at 64: 20000 unterminated `"$(echo "`
+  openers went from 4.6s to 0.02s, and 20000 unterminated `${` — which had the
+  same shape before this change — from 1.1s to 0.01s.
 - **An `if`/`while` condition's stderr reaches the author.** The condition
   command's `ExecResult` was dropped after its exit code was read, so every
   diagnostic a condition produced disappeared: `if cat /nonexistent; then …`

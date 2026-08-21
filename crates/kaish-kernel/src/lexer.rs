@@ -91,6 +91,11 @@ pub enum LexerError {
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
     NestingTooDeep,
+    /// A `$(` opened inside a double-quoted string and the input ended before
+    /// its `)`. Reported instead of `UnterminatedString` because the missing
+    /// `)` is the error and the unterminated string is only its consequence:
+    /// `echo "pre $(echo hi"` is a forgotten paren, not a forgotten quote.
+    UnterminatedCommandSubst,
     /// Arithmetic expansion `$((` reached end of input without a closing `))`.
     /// Silently evaluating the partial expression would mask a typo (`$(( 1 + 2`
     /// would compute `3`), so we surface it loudly instead.
@@ -130,6 +135,12 @@ impl fmt::Display for LexerError {
             LexerError::UnexpectedCharacter => write!(f, "unexpected character"),
             LexerError::UnterminatedString => write!(f, "unterminated string"),
             LexerError::UnterminatedVarRef => write!(f, "unterminated variable reference"),
+            // Same wording as the parser's sibling scanner, which reports this
+            // when the `$(` is found inside an already-closed string. One
+            // error, one message, whichever scanner reaches it first.
+            LexerError::UnterminatedCommandSubst => {
+                write!(f, "unterminated command substitution: missing `)`")
+            }
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
@@ -560,8 +571,13 @@ pub enum Token {
     // Literals (with values)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Double-quoted string: `"..."` - value is the parsed content (quotes removed, escapes processed)
-    #[regex(r#""([^"\\]|\\.)*""#, lex_string)]
+    /// Double-quoted string: `"..."` — value is the parsed content (quotes
+    /// removed, escapes processed). The regex matches only the opening quote;
+    /// the callback extends the token to the quote that actually closes it,
+    /// tracking `$(` depth so a quoted word INSIDE a substitution belongs to
+    /// the substitution: `"$(basename "$p")"` is one string, not two. Same
+    /// technique as `VarRef` below, for the same reason (GH #173).
+    #[regex(r#"""#, lex_string)]
     String(String),
 
     /// Single-quoted string: `'...'` - literal content, no escape processing
@@ -887,8 +903,94 @@ impl Token {
 }
 
 /// Lex a double-quoted string literal, processing escape sequences.
+/// Extend a `"` match to the quote that closes the string, then parse the
+/// literal.
+///
+/// A double-quoted string used to be a flat regex, `r#""([^"\\]|\\.)*""#`,
+/// which ends at the first unescaped `"` anywhere. That made
+/// `echo "$(basename "$p")"` a parse error: the string ended at the inner
+/// quote and the remainder was nonsense. A quote inside a `$(…)` is the
+/// substitution's, not the string's, so the scan has to know where it is.
+///
+/// The scan carries a stack of the regions it is inside, because they nest
+/// both ways — a substitution can hold a quoted word, and that word can hold
+/// another substitution. Popping the last region is what ends the string.
+/// Single quotes are literal inside a substitution, so a `"` in them closes
+/// nothing. Parens are counted quote-blind, matching the sibling scanner in
+/// `parse_interpolated_string_spanned` that reads the body afterwards; a
+/// literal `)` inside a quoted word in a substitution body is a residual both
+/// share.
+///
+/// A string that never closes is still `UnterminatedString` — scanning
+/// further must not turn a typo into a program that runs.
 fn lex_string(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
-    parse_string_literal(lex.slice())
+    /// Regions the scan can be inside, innermost last.
+    enum Region {
+        /// A double-quoted span. A `"` ends it.
+        Quoted,
+        /// A `$(…)` body. A balanced `)` ends it.
+        Substitution,
+    }
+
+    let mut stack = vec![Region::Quoted];
+    let mut extra = 0usize;
+    let mut chars = lex.remainder().chars().peekable();
+
+    while let Some(c) = chars.next() {
+        extra += c.len_utf8();
+        match c {
+            // An escape covers the next character wherever we are, so `\"`
+            // never closes a span and `\\` is not a half-escape.
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    extra += next.len_utf8();
+                }
+            }
+            // `$(` opens a substitution from inside either region.
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                extra += 1;
+                stack.push(Region::Substitution);
+            }
+            '"' => match stack.last() {
+                Some(Region::Quoted) => {
+                    stack.pop();
+                    if stack.is_empty() {
+                        lex.bump(extra);
+                        return parse_string_literal(lex.slice());
+                    }
+                }
+                // A quoted word starting inside a substitution.
+                Some(Region::Substitution) => stack.push(Region::Quoted),
+                None => break,
+            },
+            // Only inside a substitution: a single-quoted run is literal, so
+            // skip it whole rather than letting its `"` or `)` decide anything.
+            '\'' if matches!(stack.last(), Some(Region::Substitution)) => {
+                for c in chars.by_ref() {
+                    extra += c.len_utf8();
+                    if c == '\'' {
+                        break;
+                    }
+                }
+            }
+            '(' if matches!(stack.last(), Some(Region::Substitution)) => {
+                stack.push(Region::Substitution);
+            }
+            ')' if matches!(stack.last(), Some(Region::Substitution)) => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    // The stack says which region the input ran out inside. An unclosed `$(`
+    // outranks the string around it: the author forgot the `)`, and saying
+    // "unterminated string" would name the consequence and hide the cause.
+    if stack.iter().any(|r| matches!(r, Region::Substitution)) {
+        return Err(LexerError::UnterminatedCommandSubst);
+    }
+    Err(LexerError::UnterminatedString)
 }
 
 /// Lex a single-quoted string literal (no escape processing).
@@ -3233,6 +3335,17 @@ fn tokenize_impl(
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
     for (result, span) in Token::lexer(&scan_output.text).spanned() {
+        // Every error already stops the parse, and only the first is rendered,
+        // so collecting more is pure cost — and it is not linear cost. A token
+        // that scans for its own terminator (`"`, `${`) reads to end-of-input
+        // when the terminator is missing, and logos then retries from the next
+        // character, so a file of N unterminated openers costs O(N²): 20000
+        // `"$(echo "` openers took 4.6s uncapped, 0.02s at this cap. The cap is
+        // generous enough that a future multi-error report has material.
+        const MAX_LEXER_ERRORS: usize = 64;
+        if errors.len() >= MAX_LEXER_ERRORS {
+            break;
+        }
         match result {
             Ok(token) => {
                 if !keep_comments
