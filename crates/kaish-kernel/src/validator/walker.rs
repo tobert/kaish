@@ -807,7 +807,9 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
     // no `Tool::validate` could tell them apart. The verbatim arm below
     // exists for exactly this reason; raw_argv simply never got one.
     if schema.is_some_and(|s| s.raw_argv) {
-        let mut past_double_dash = false;
+        // No `past_double_dash` tracking: raw_argv keeps `--` as a literal
+        // word and lets the tool decide what it means, which is what the
+        // runtime arm does too.
         for arg in args {
             match arg {
                 Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
@@ -828,12 +830,10 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     ),
                 )),
                 Arg::DoubleDash => {
-                    past_double_dash = true;
                     tool_args.positional.push(Value::String("--".to_string()));
                 }
             }
         }
-        let _ = past_double_dash;
         return tool_args;
     }
 
