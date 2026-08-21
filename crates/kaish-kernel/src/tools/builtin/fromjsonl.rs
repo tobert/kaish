@@ -72,6 +72,7 @@ impl Tool for FromJsonl {
                 ("Parse a literal string", "fromjsonl $'{\"a\":1}\\n{\"a\":2}'"),
             ],
         )
+        .with_typed_substitution()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

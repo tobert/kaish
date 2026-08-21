@@ -93,6 +93,13 @@ impl std::error::Error for BinaryNotText {}
 pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,
+    /// Whether [`Self::data`] is this result's VALUE rather than a structured
+    /// view of the text it printed. Stamped by the dispatcher from the tool's
+    /// [`crate::tool::ToolSchema::typed_substitution`]; a command substitution binds `data`
+    /// only when this is set, while `--json` and the pipeline's structured
+    /// sideband read `data` regardless.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub data_is_value: bool,
     /// Standard output payload — text (canonical for pipes) or raw bytes.
     out: OutputPayload,
     /// Raw standard error as a string.
@@ -164,6 +171,7 @@ impl ExecResult {
     pub fn success(out: impl Into<String>) -> Self {
         Self {
             code: 0,
+            data_is_value: false,
             out: OutputPayload::Text(out.into()),
             err: String::new(),
             data: None,
@@ -186,6 +194,7 @@ impl ExecResult {
             Ok(text) => Self::success(text),
             Err(output) => Self {
                 code: 0,
+                data_is_value: false,
                 out: OutputPayload::Text(String::new()),
                 err: String::new(),
                 data: None,
@@ -222,6 +231,7 @@ impl ExecResult {
         let out = value_to_json(&data).to_string();
         Self {
             code: 0,
+            data_is_value: false,
             out: OutputPayload::Text(out),
             err: String::new(),
             data: Some(data),
@@ -244,6 +254,7 @@ impl ExecResult {
     pub fn success_with_data(out: impl Into<String>, data: Value) -> Self {
         Self {
             code: 0,
+            data_is_value: false,
             out: OutputPayload::Text(out.into()),
             err: String::new(),
             data: Some(data),
@@ -262,6 +273,7 @@ impl ExecResult {
     pub fn failure(code: i64, err: impl Into<String>) -> Self {
         Self {
             code,
+            data_is_value: false,
             out: OutputPayload::Text(String::new()),
             err: Self::terminate_diagnostic(err),
             data: None,
@@ -280,6 +292,7 @@ impl ExecResult {
     /// `for i in $(curl ... | jq .); do ...`.
     pub fn from_output(code: i64, stdout: impl Into<String>, stderr: impl Into<String>) -> Self {
         Self {
+            data_is_value: false,
             code,
             out: OutputPayload::Text(stdout.into()),
             err: stderr.into(),
@@ -299,6 +312,7 @@ impl ExecResult {
     pub fn with_output_and_text(output: OutputData, text: impl Into<String>) -> Self {
         Self {
             code: 0,
+            data_is_value: false,
             out: OutputPayload::Text(text.into()),
             err: String::new(),
             data: None,
@@ -318,6 +332,7 @@ impl ExecResult {
         data: Option<Value>,
     ) -> Self {
         Self {
+            data_is_value: false,
             code,
             out: OutputPayload::Text(out),
             err: Self::terminate_diagnostic(err),

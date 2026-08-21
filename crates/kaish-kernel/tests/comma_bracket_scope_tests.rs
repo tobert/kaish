@@ -139,11 +139,13 @@ async fn quoted_comma_field_list_next_to_arithmetic_still_works() {
         .execute(r#"echo $((1+2)) $(echo 'a:b:c' | cut -d: -f 1,3)"#)
         .await
         .expect("ok");
-    // `$(cmd)` carries structured data (one array element per output line),
-    // so the single-line `cut` result renders as a one-element JSON array
-    // when interpolated bare — unrelated to this fix; `a:c` is the
-    // comma-fixed field-range result underneath the `["..."]` wrapping.
-    assert_eq!(r.text_out(), "3 [\"a:c\"]\n");
+    // This used to read `3 ["a:c"]` — `cut` attached a per-line array to
+    // `.data` and `$(cmd)` bound it, so the comma-fixed field-range result
+    // arrived wrapped. The comment here already called that wrapping
+    // "unrelated to this fix", which is exactly what it was: this test was
+    // tolerating a bug in a neighbouring feature. `cut` is a line filter and
+    // binds the text it printed now, so the wrapping is gone.
+    assert_eq!(r.text_out(), "3 a:c\n");
 }
 
 // ── Glob brace expansion against a real filesystem ──────────────────────────

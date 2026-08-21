@@ -635,7 +635,13 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult
         rows.iter().map(|row| row.to_string()).collect::<Vec<_>>().join("\n")
     };
     let array = serde_json::Value::Array(rows);
-    ExecResult::from_parts(code, text, err, Some(Value::Json(array)))
+    // gather's rows ARE its value, not a structured view of the JSONL it
+    // printed: `for r in $(… | gather)` binds a RECORD per worker and reads
+    // `${r[ok]}`. It is built here rather than through the dispatcher, so it
+    // marks itself — see `ExecResult::data_is_value`.
+    let mut result = ExecResult::from_parts(code, text, err, Some(Value::Json(array)));
+    result.data_is_value = true;
+    result
 }
 
 /// Human-readable repr of a `Value` for a "wrong type" error message —
