@@ -83,6 +83,9 @@ pub enum IssueCode {
     /// warning, never an error: the name binds either way, and the author is
     /// the only one who knows which name they meant.
     MixedScriptName,
+    /// `test` was given an XSI compound/grouping operator (`-a`, `-o`,
+    /// `(`, `)`), which kaish does not implement.
+    TestCompoundOperator,
 }
 
 impl IssueCode {
@@ -91,7 +94,10 @@ impl IssueCode {
     /// Code numbers are stable identifiers, not contiguous. E010 and
     /// W003/W004/W005 remain retired, as does W006 (PosixTestCommand, retired
     /// when `test` became a first-class builtin) — W007 is the next free
-    /// warning number, not a reuse of one of them. E006 (InvalidSedExpr), E007
+    /// warning number, not a reuse of one of them. E020 covers the same
+    /// builtin as retired W006 but is a different judgement: W006 warned that
+    /// `[` was not kaish's, E020 rejects an operator `test` will refuse at
+    /// runtime anyway. E006 (InvalidSedExpr), E007
     /// (InvalidJqFilter), and E011 (DiffNeedsTwoFiles) were wired up with
     /// real emitters in 2026-06-14.
     pub fn code(&self) -> &'static str {
@@ -117,6 +123,7 @@ impl IssueCode {
             IssueCode::UnreadableAssignmentTarget => "E018",
             IssueCode::InvisibleAssignmentTarget => "E019",
             IssueCode::MixedScriptName => "W007",
+            IssueCode::TestCompoundOperator => "E020",
         }
     }
 
@@ -149,6 +156,7 @@ impl IssueCode {
             | IssueCode::ReturnOutsideFunction
             | IssueCode::ForLoopScalarVar
             | IssueCode::ScatterWithoutGather
+            | IssueCode::TestCompoundOperator
             | IssueCode::LastResultFieldAccess
             | IssueCode::LvalueUndefinedRoot
             | IssueCode::DottedAssignmentTarget

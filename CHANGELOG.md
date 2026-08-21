@@ -94,6 +94,27 @@ breaking entries are marked **BREAKING**.
   `TokenCategory` are deliberately left exhaustive — see their doc comments
   for why each is closed by design.
 
+### Added
+- **`test` rejects `-a`/`-o`/`(`/`)` before the statement runs (E020).** They
+  were already refused at runtime, but `test` lives in an `if`, and an `if`
+  reads only the exit code — so exit 2 chose the `else` branch and the message
+  reached nobody. Reported as "`test -o` silently returns false rather than
+  OR-ing". A validator error stops the statement instead. Implementing the
+  operators was tried and rejected: bash overloads both spellings (`-a FILE`
+  is a synonym for `-e`, `-o NAME` an option query), which is what makes the
+  binary form ambiguous, and three of its operand-count rules outrank `!`
+  (`test ! = x` compares two strings, `test ! x -o x` negates the whole
+  expression). Compose with `&&`/`||`, or use `[[ ]]`. Only the operator slot
+  is judged: `test "-a" = "-a"` compares two strings, `test -f "-a"` stats a
+  file named `-a`, and `test "-a" = 1` compares a string to a number — all
+  still run, as before. A single operand has no operator slot, so `test -a`
+  stays the lone-operator error (`'-a' needs an operand`, exit 2) rather than
+  E020, which would name a compound the author did not write.
+- **`set -o` reports every option and its state** (`glob`, `output-limit`,
+  `trash`), as bash does, and as a table so `--json` answers too. Option state
+  could not be queried at all before: bare `set` prints only what differs from
+  the default, so an option at its default looked the same as an unknown one.
+
 ### Fixed
 - **A double-quoted string may hold a `$(…)` whose body has its own quoted
   words.** `echo "$(basename "$p")"` was a parse error — "unterminated command
@@ -115,16 +136,37 @@ breaking entries are marked **BREAKING**.
   from 4.6s to 0.02s, and 20000 unterminated `${` — which had the same shape
   before this change — from 1.1s to 0.01s. A parse error now reports at most
   64 lexer diagnostics rather than one per opener.
-- **An `if`/`while` condition's stderr reaches the author.** The condition
-  command's `ExecResult` was dropped after its exit code was read, so every
-  diagnostic a condition produced disappeared: `if cat /nonexistent; then …`
-  printed nothing at all, where bash prints the error. A command that failed
-  loudly became a silent false purely by sitting in a condition. The rule
-  already existed one arm over — `$(…)` routes its stderr to the enclosing
-  statement because it "belongs to the statement, never to its value" — and a
-  condition is the same case. A condition's *stdout* is still dropped; that
-  needs a channel a statement does not have (see GH #369) and is pinned by a
-  test rather than left unstated.
+- **An `if`/`while` condition's output reaches the author.** The condition
+  command's `ExecResult` was dropped after its exit code was read, so
+  everything a condition produced disappeared: `if cat /nonexistent; then …`
+  printed nothing at all and `if echo COND; then echo BODY; fi` printed only
+  `BODY`, where bash prints both. A command that failed loudly became a silent
+  false purely by sitting in a condition. The rule already existed one arm
+  over — `$(…)` routes its stderr to the enclosing statement because it
+  "belongs to the statement, never to its value" — and a condition is the same
+  case. stderr rides the statement's stderr stream; stdout is folded into the
+  statement's own result, so it reaches a pipe, a `$(…)` capture, and a
+  redirect too. `&&`/`||` chains and `elif` conditions print the same way, a
+  short-circuited side still runs nothing, and a `$(…)` inside a condition is
+  not printed twice — its stdout is its value. The condition's exit code is
+  still the `if`'s answer, not the statement's status. A condition's output
+  obeys the output limit like any other output, and a condition whose output
+  was capped still counts as true. stderr reads in the order it was produced:
+  the condition ran before the branch, so it reports first.
+- **Validation binds a `raw_argv` tool's words in source order**, the way
+  execution does. It split them by token shape instead, so a leading-dash word
+  went to `flags` and a bareword to `positional` and the operand ORDER was
+  gone — leaving `test "-a" = "-a"` and `test a = a -a b = b` with identical
+  `ToolArgs`. A `Tool::validate` on a raw_argv tool could not tell an operator
+  from a literal. The verbatim binder already had this arm; raw_argv never
+  did.
+- **`test -e ""` and `[[ -e "" ]]` are both false.** The empty path resolved to
+  the working directory, so every file operator answered true for it, in both
+  spellings.
+- **`test` with no operands is false**, as in bash, rather than exit 2. An
+  operator missing its operand stays a loud error — that one is a deliberate
+  divergence, since bash reads `test -f` as a non-empty string and returns
+  true.
 - **`--json=VALUE` means the same thing on every builtin.** `--json=1`,
   `--json=yes`, and `--json=""` exited 2 with a clap parse error on an ordinary
   builtin while `test` and a verbatim tool accepted them, and `--json=0` *enabled*

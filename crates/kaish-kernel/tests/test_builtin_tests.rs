@@ -146,7 +146,9 @@ async fn negation() {
 
 #[tokio::test]
 async fn arity_errors_are_loud() {
-    assert_eq!(code_of("test").await, 2, "0-arg test is a usage error");
+    // No operands is false, as in bash — an absent expression cannot be a
+    // typo'd one, so there is nothing for a loud error to protect.
+    assert_eq!(code_of("test").await, 1, "0-arg test is false, like bash");
     assert_eq!(code_of("test -f").await, 2, "operator with missing operand is loud");
     assert_eq!(code_of("test -z").await, 2, "operator with missing operand is loud");
     assert_eq!(code_of("test !").await, 2, "bare ! has no expression");
@@ -171,16 +173,31 @@ async fn arity_edge_cases() {
     assert_eq!(code_of("test -f -f").await, 1, r#"stats a file literally named "-f""#);
 }
 
-// --- compound (-a/-o) is rejected loudly, shell chaining is the path --------
+// --- compound (-a/-o) is refused before running; shell chaining is the path --
 
+/// The refusal moved from runtime (exit 2) to the validator, because a
+/// runtime refusal inside an `if` condition just picks the `else` branch.
+/// `execute` still refuses too; see `test_compound_tests` for both ends.
 #[tokio::test]
-async fn compound_operators_rejected() {
-    assert_eq!(code_of("test -f file.txt -a -f sub").await, 2, "-a is not supported");
-    assert_eq!(code_of("test a = a -o b = b").await, 2, "-o is not supported");
+async fn compound_operators_are_refused() {
+    // Both operands exist in this fixture, so bash would answer true here —
+    // the refusal is the point, not the truth value.
+    for script in ["test -f file.txt -a -f sub", "test a = a -o b = b"] {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("file.txt"), "hi\n").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let kernel = kernel_at(dir.path());
+        let err = kernel
+            .execute(script)
+            .await
+            .expect_err("must not run")
+            .to_string();
+        assert!(err.contains("E020"), "`{script}`: {err}");
+    }
 }
 
 #[tokio::test]
-async fn shell_chaining_is_the_compound_path() {
+async fn shell_chaining_is_still_a_compound_path() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "hi\n").unwrap();
     fs::create_dir(dir.path().join("sub")).unwrap();
