@@ -2422,8 +2422,14 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::If(if_stmt) => {
-                // Use async evaluator to support command substitution in conditions
-                let cond_value = self.eval_expr_async(&if_stmt.condition).await?;
+                // The statement's result is built BEFORE the condition runs,
+                // because a condition's own stdout is the first thing in it —
+                // see `eval_condition_async`. (An `elif` is a nested `Stmt::If`
+                // in `else_branch`, so it takes this same path.)
+                let mut result = ExecResult::success("");
+                let cond_value = self
+                    .eval_condition_async(&if_stmt.condition, &mut result)
+                    .await?;
 
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
@@ -2431,7 +2437,6 @@ impl Kernel {
                     if_stmt.else_branch.as_deref().unwrap_or(&[])
                 };
 
-                let mut result = ExecResult::success("");
                 for stmt in branch {
                     let flow = self.execute_stmt_flow(stmt).await?;
                     match flow {
@@ -2649,7 +2654,11 @@ impl Kernel {
                         return Ok(ControlFlow::ok(result));
                     }
 
-                    let cond_value = self.eval_expr_async(&while_loop.condition).await?;
+                    // Per iteration, so the condition's stdout interleaves with
+                    // the body's rather than arriving in one block up front.
+                    let cond_value = self
+                        .eval_condition_async(&while_loop.condition, &mut result)
+                        .await?;
 
                     if !is_truthy(&cond_value) {
                         break;
@@ -3753,6 +3762,55 @@ impl Kernel {
     ///
     /// This is used for contexts where expressions may contain `$(...)` command
     /// substitution. Unlike the sync `eval_expr`, this can execute pipelines.
+    /// Evaluate an `if`/`while` condition, folding whatever its commands print
+    /// into `out`.
+    ///
+    /// A condition's stdout belongs to the enclosing statement, the same rule
+    /// `Expr::Command` already applies to its stderr. [`Self::eval_expr_async`]
+    /// returns only a `Value`, so those bytes had nowhere to go and
+    /// `if echo COND; then echo BODY; fi` printed only `BODY`. Handing them
+    /// back to the caller keeps the decision there: the `if`/`while` arm folds
+    /// them into the statement's own result, and every consumer of that result
+    /// — a pipe, a `$(…)` capture, a redirect — carries them without learning
+    /// what a condition is. A shared slot on `ExecContext` would have done it
+    /// the other way; that is the pattern GH #369 exists to remove.
+    ///
+    /// Only the forms that can hold a command in STATEMENT position are handled
+    /// here. Everything else is [`Self::eval_expr_async`]'s, `$(…)` above all:
+    /// a substitution's stdout IS its value, so folding it in as well would
+    /// print it twice.
+    fn eval_condition_async<'a>(
+        &'a self,
+        expr: &'a Expr,
+        out: &'a mut ExecResult,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            match expr {
+                Expr::Command(cmd) => {
+                    let result = self.execute_command(&cmd.name, &cmd.args).await?;
+                    self.emit_cmdsubst_stderr(&result.err).await;
+                    push_stdout_of(out, &result);
+                    Ok(Value::Bool(result.code == 0))
+                }
+                // Short-circuits exactly as the `eval_expr_async` arm does, and
+                // yields the operand's own value rather than a coerced bool. A
+                // side that short-circuits never runs, so it prints nothing.
+                Expr::BinaryOp { left, op, right } => {
+                    let left_val = self.eval_condition_async(left, &mut *out).await?;
+                    let short_circuits = match op {
+                        BinaryOp::And => !is_truthy(&left_val),
+                        BinaryOp::Or => is_truthy(&left_val),
+                    };
+                    if short_circuits {
+                        return Ok(left_val);
+                    }
+                    self.eval_condition_async(right, out).await
+                }
+                other => self.eval_expr_async(other).await,
+            }
+        })
+    }
+
     fn eval_expr_async<'a>(&'a self, expr: &'a Expr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
         match expr {
@@ -6942,7 +7000,13 @@ fn finalize_output(
 /// each command's output concatenates raw, matching bash (`printf a; printf b`
 /// and `printf a && printf b` both yield `ab`; a trailing newline only appears
 /// when a command emits its own, as `echo` does).
-fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
+/// Append `new`'s stdout to `accumulated`'s, and nothing else.
+///
+/// Split out of [`accumulate_result`] because a condition carries only its
+/// stdout up to the enclosing statement — its exit code is the `if`/`while`'s
+/// answer, not the statement's status. Sharing the append keeps the two
+/// callers from drifting on the byte handling below.
+fn push_stdout_of(accumulated: &mut ExecResult, new: &ExecResult) {
     // Materialize lazy OutputData into .out before accumulating.
     // Without this, the first command's output stays in .output while
     // the second's text gets appended to .out, losing the first.
@@ -6961,6 +7025,10 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
         }
         None => accumulated.push_out(&new.text_out()),
     }
+}
+
+fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
+    push_stdout_of(accumulated, new);
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
     accumulated.data = new.data.clone();
