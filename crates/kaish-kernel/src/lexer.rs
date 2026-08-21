@@ -1791,56 +1791,91 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
 /// for byte, advancing `*i` past it.
 ///
 /// Used by `scan`'s double-quoted-string arm so the pre-pass does not rewrite
-/// anything inside a command body. Parens are counted, and a `'…'` or `"…"`
-/// run inside the body is copied opaquely so a paren in a quoted word cannot
-/// close the substitution early — the same reason `lex_string` tracks regions.
+/// anything inside a command body. It carries the same region stack
+/// `lex_string` uses, for the same reason: a quoted word inside the body can
+/// open another substitution, and a flat quote-skip would read that inner
+/// opener as the outer closer.
+///
+/// This pass COPIES rather than parses, so a mis-counted paren cannot corrupt
+/// the byte stream — the outer loop copies whatever this did not, and the
+/// bytes are identical. What it decides is where arithmetic extraction
+/// resumes, which is why every case that shows a miscount needs arithmetic
+/// after the paren in question.
+///
+/// It still has no command grammar, so a `)` that is not structure — an
+/// unquoted `case` pattern's, one in a `#` comment, one in a heredoc body —
+/// is counted. Those are pre-existing and loud, and the parser's
+/// `CmdSubstFrames` is the token-based scanner that gets them right.
+///
 /// An unterminated body is copied to end of input and left for the lexer to
 /// report; this pass never decides that a program is malformed.
 fn copy_substitution_verbatim(chars: &[(usize, char)], i: &mut usize, out: &mut String) {
+    // Same regions, same rules as `lex_string` one pass later. A flat
+    // "skip to the next quote of the same kind" loop is not enough: a quoted
+    // word inside the body can open ANOTHER substitution, and the inner
+    // opener then reads as the outer closer, so a `)` after it closes the
+    // body early.
+    enum Region {
+        Quoted,
+        Substitution,
+    }
+
     let n = chars.len();
     // `$` and `(` — the caller has already checked both are present.
     out.push('$');
     out.push('(');
     *i += 2;
-    let mut depth = 1usize;
+    let mut stack = vec![Region::Substitution];
+
     while *i < n {
         let c = chars[*i].1;
-        match c {
-            '\\' => {
-                out.push(c);
+        // An escape covers the next character wherever we are.
+        if c == '\\' {
+            out.push(c);
+            *i += 1;
+            if *i < n {
+                out.push(chars[*i].1);
                 *i += 1;
-                if *i < n {
-                    out.push(chars[*i].1);
-                    *i += 1;
-                }
-                continue;
             }
-            '\'' | '"' => {
-                let quote = c;
+            continue;
+        }
+        // `$(` opens a substitution from inside either region.
+        if c == '$' && *i + 1 < n && chars[*i + 1].1 == '(' {
+            out.push('$');
+            out.push('(');
+            *i += 2;
+            stack.push(Region::Substitution);
+            continue;
+        }
+        match c {
+            '"' => match stack.last() {
+                Some(Region::Quoted) => {
+                    stack.pop();
+                }
+                Some(Region::Substitution) => stack.push(Region::Quoted),
+                None => {}
+            },
+            // Literal only in command position; inside a double-quoted word a
+            // single quote is an ordinary character.
+            '\'' if matches!(stack.last(), Some(Region::Substitution)) => {
                 out.push(c);
                 *i += 1;
                 while *i < n {
                     let q = chars[*i].1;
-                    // A double-quoted run honors `\"`; a single-quoted one has
-                    // no escapes at all, which is why the check is on `quote`.
-                    if q == '\\' && quote == '"' && *i + 1 < n {
-                        out.push(q);
-                        out.push(chars[*i + 1].1);
-                        *i += 2;
-                        continue;
-                    }
                     out.push(q);
                     *i += 1;
-                    if q == quote {
+                    if q == '\'' {
                         break;
                     }
                 }
                 continue;
             }
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
+            '(' if matches!(stack.last(), Some(Region::Substitution)) => {
+                stack.push(Region::Substitution);
+            }
+            ')' if matches!(stack.last(), Some(Region::Substitution)) => {
+                stack.pop();
+                if stack.is_empty() {
                     out.push(c);
                     *i += 1;
                     return;

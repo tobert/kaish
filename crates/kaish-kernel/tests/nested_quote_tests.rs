@@ -162,3 +162,27 @@ async fn no_internal_marker_ever_reaches_the_output() {
         );
     }
 }
+
+/// A quoted word inside a substitution can itself open another substitution,
+/// so finding the substitution's closing `)` needs the same region stack
+/// `lex_string` uses one pass later — not a flat "skip to the next quote of
+/// the same kind" loop, which mistakes the inner opener for the outer closer.
+///
+/// The visible symptom is only ever a mis-placed resumption of arithmetic
+/// extraction, because this pass copies rather than parses: bytes are
+/// identical either way, and the outer loop copies whatever the helper did
+/// not. So the case that shows it needs arithmetic AFTER the paren the flat
+/// loop miscounts.
+#[rstest]
+#[case(r#"echo "$(echo "$(echo ")")" $((1+1)))""#, ") 2")]
+#[case(r#"echo "$(echo "$(echo "(")" $((2+2)))""#, "( 4")]
+#[case(r#"echo "$(echo ")" $((3+3)))""#, ") 6")]
+#[case(r#"echo "$(echo ')' $((4+4)))""#, ") 8")]
+#[case(r#"echo "$(echo hi; echo $((2+2)))""#, "hi\n4")]
+#[tokio::test]
+async fn a_paren_in_a_nested_quoted_word_does_not_close_the_substitution(
+    #[case] script: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(out_of(script).await, expected, "`{script}`");
+}
