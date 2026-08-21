@@ -575,8 +575,14 @@ for x in $(echo "a b c"); do echo $x; done     # one iteration (no \n)
 # Whitespace splitting needs explicit split:
 for x in $(split "a b c"); do echo $x; done
 
-# Builtins that emit .data (seq, jq, cut, find, glob) iterate per element:
+# A line filter returns text, so the newline split iterates it:
 for i in $(seq 1 5); do echo $i; done
+
+# A builtin whose output IS a value (fromjson, jq, keys, values, split,
+# gather) binds that value — ask a POSIX-familiar builtin with --json:
+cfg=$(fromjson '{"port": 80}');  echo ${cfg[port]}
+y=$(cut -f2 f)                    # the text cut printed
+y=$(cut -f2 f --json)             # ["b"]
 
 # Outside for-loops, $(cmd) is one value:
 R=$(printf 'a\nb')                # R is "a\nb"

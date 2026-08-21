@@ -54,6 +54,7 @@ impl Tool for KaishLast {
                 ("Capture for later use", "seq 1 5\nDATA=$(kaish-last)"),
             ],
         )
+        .with_typed_substitution()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

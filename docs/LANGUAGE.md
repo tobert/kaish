@@ -832,11 +832,13 @@ pipe its output in.
 
 Unlike traditional shells, kaish does **not** perform implicit *word* splitting on command substitution results — `$VAR` and `$(cmd)` carry whole strings, spaces and all. In `for`-loop iteration position, two narrower rules take over:
 
-1. **Structured data wins.** Builtins that emit list-shaped output (`seq`, `find`, `glob`, `jq`, `cut`, …) carry an internal JSON array on the previous result; for-loops iterate over the array elements directly. (Pipe the data out with `kaish-last` if you need it on stdout.)
-2. **Otherwise, split on newlines.** When `$(cmd)` returns a plain string with `\n` in it, the for-loop iterates per line. Whitespace within a line is never split.
+1. **A typed value wins.** A builtin whose output IS a value — `fromjson`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, `kaish-last`, `typeof` — carries that value through the substitution, so `$(…)` binds a record or a list and for-loops iterate its elements.
+2. **Otherwise, split on newlines.** When `$(cmd)` returns text with `\n` in it, the for-loop iterates per line. Whitespace within a line is never split.
+
+A builtin with a POSIX counterpart returns **text**, so it reads the way its POSIX self does: `y=$(cut -f2 f)` is the text `cut` printed, exactly like `y=$(awk '{print $2}' f)`. Ask for the structure with `--json` — `cut -f2 f --json` is `["b"]`. `seq`, `cut`, `find`, `glob`, and `ls` all work this way; iteration is unaffected, because the newline split does the same job.
 
 ```sh
-# seq returns a JSON array — iterates over numbers
+# seq returns text — the newline split iterates over the numbers
 for i in $(seq 1 5); do
     echo "Number: $i"
 done

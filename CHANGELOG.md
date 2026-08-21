@@ -25,6 +25,26 @@ breaking entries are marked **BREAKING**.
   `set -euo pipefail` prelude works, where before it died on line 1.
 
 ### Changed
+- **BREAKING: `$(cmd)` binds a typed value only when the tool's data IS its
+  value.** `y=$(cut -f2 f)` bound `["benign"]` while `y=$(awk '{print $2}' f)`,
+  doing the identical job, bound text — because `.data` was answering three
+  questions at once (it feeds `--json`, it is the pipeline's structured
+  sideband, and it is what a substitution binds) and any builtin that wanted
+  the first two got the third. A builtin with a POSIX counterpart now returns
+  **text**, so it reads as its POSIX self: `cut`, `seq`, `find`, and `glob`
+  join `grep`, `head`, `sort`, `sed`, `awk`, and `ls`. Ask for the structure
+  with `--json`, which is unchanged. A builtin whose output IS a value —
+  `fromjson`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, `kaish-last`,
+  `typeof` — is unchanged, so collections and `${r[key]}` behave exactly as
+  before. Iteration is unchanged everywhere: a `for` head newline-splits text,
+  which is how `grep` and `ls` have always iterated. The pipeline's structured
+  sideband is untouched, so `seq 1 3 | jq .` still sees `[1,2,3]`.
+  **Embedders with their own tools:** a tool that returns data and prints
+  nothing needs no change — a text-less result's data is its value. A tool that
+  prints text AND attaches data must call `ToolSchema::with_typed_substitution()`
+  to keep binding typed.
+
+
 - **BREAKING: `--json` carries one line anchor, named `line`, typed as an
   integer.** "Which line of the file is this" had three spellings: `grep`
   emitted an integer `line_number` in its rich payload, `head`/`tail` emitted a

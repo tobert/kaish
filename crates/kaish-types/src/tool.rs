@@ -228,6 +228,10 @@ pub struct ToolSchema {
     pub description: String,
     /// Parameter definitions.
     pub params: Vec<ParamSchema>,
+    /// Whether `$(tool)` binds this tool's `.data` as a typed value rather
+    /// than binding its text. See [`ToolSchema::with_typed_substitution`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub typed_substitution: bool,
     /// Usage examples.
     pub examples: Vec<Example>,
     /// Map remaining positional args to named params by schema order.
@@ -315,6 +319,7 @@ impl ToolSchema {
             raw_argv: false,
             arg_binding: ArgBinding::Typed,
             glob_passthrough: false,
+            typed_substitution: false,
             operations: Vec::new(),
         }
     }
@@ -351,6 +356,28 @@ impl ToolSchema {
     /// flag would leave it handled by no one.
     pub fn with_verbatim_argv(mut self) -> Self {
         self.arg_binding = ArgBinding::Verbatim;
+        self
+    }
+
+    /// Declare that this tool's `.data` IS its value, so `$(tool)` binds it
+    /// typed instead of binding the text it printed.
+    ///
+    /// `.data` does three jobs: it feeds `--json`, it is the pipeline's
+    /// structured sideband, and it is what a command substitution binds. Only
+    /// the third is a question of taste, and answering it from "does this tool
+    /// set `.data`" got it wrong: `cut -f2 f` bound `["b"]` while
+    /// `awk '{print $2}' f`, doing the identical job, bound text.
+    ///
+    /// Declare it when the structured thing IS the answer — `fromjson`, `jq`,
+    /// `keys`, `values`. Leave it off when `.data` is a structured VIEW of
+    /// text the tool already printed, which is every tool with a POSIX
+    /// counterpart: those read as their POSIX selves, and a caller who wants
+    /// types asks with `--json`.
+    ///
+    /// Not inferable from the constructor: `jq` and `cut` both build with
+    /// `success_with_data` and belong on opposite sides.
+    pub fn with_typed_substitution(mut self) -> Self {
+        self.typed_substitution = true;
         self
     }
 
