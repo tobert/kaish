@@ -24,7 +24,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 pub struct Set;
 
 /// The `-o`/`+o` names kaish implements.
-const VALID_SET_O_NAMES: &[&str] = &["glob", "output-limit[=SIZE]", "trash"];
+const VALID_SET_O_NAMES: &[&str] = &["glob", "output-limit[=SIZE]", "pipefail", "trash"];
 
 /// Applies one `-o NAME` (`enable = true`) or `+o NAME` (`enable = false`).
 ///
@@ -40,6 +40,7 @@ fn apply_set_o(ctx: &mut ExecContext, name: &str, enable: bool) -> Result<(), St
     match name {
         "trash" => ctx.scope.set_trash_enabled(enable),
         "glob" => ctx.scope.set_glob_enabled(enable),
+        "pipefail" => ctx.scope.set_pipefail_enabled(enable),
         "output-limit" => {
             if enable {
                 if ctx.output_limit.max_bytes().is_none() {
@@ -56,12 +57,6 @@ fn apply_set_o(ctx: &mut ExecContext, name: &str, enable: bool) -> Result<(), St
             let bytes = crate::output_limit::parse_size(size_str)
                 .map_err(|e| format!("set: {sigil}o output-limit={size_str}: {e}"))?;
             ctx.output_limit.set_limit(Some(bytes));
-        }
-        "pipefail" => {
-            return Err(format!(
-                "set: {sigil}o pipefail: not implemented — kaish has no pipefail; \
-                 see `help limits` for the deliberate omission and its workaround"
-            ));
         }
         _ => {
             return Err(format!(
@@ -189,6 +184,7 @@ impl Tool for Set {
                 vec![
                     option_row("errexit", ctx.scope.error_exit_enabled()),
                     option_row("glob", ctx.scope.glob_enabled()),
+                    option_row("pipefail", ctx.scope.pipefail_enabled()),
                     option_row("output-limit", ctx.output_limit.max_bytes().is_some()),
                     option_row("trash", ctx.scope.trash_enabled()),
                 ],
@@ -308,9 +304,7 @@ mod tests {
     async fn test_set_ignores_unknown_bare_flags() {
         // Bare short flags kaish doesn't implement (-u, -x) are still
         // silently ignored for bash compatibility — see the comment on the
-        // flags-loop `_ => {}` arm. `-o pipefail` is different: it now
-        // fails loudly (test_set_o_pipefail_fails below), so it's dropped
-        // from this case.
+        // flags-loop `_ => {}` arm.
         let mut ctx = make_ctx();
 
         let mut args = ToolArgs::new();
@@ -321,8 +315,12 @@ mod tests {
         assert!(result.ok());
     }
 
+    /// `set -o pipefail` used to be refused as unimplemented. It is
+    /// implemented now, so it succeeds and turns the option on. An option
+    /// kaish genuinely does not have must still be refused, or this would
+    /// prove only that `set -o` stopped checking anything.
     #[tokio::test]
-    async fn test_set_o_pipefail_fails() {
+    async fn test_set_o_pipefail_enables_it() {
         let mut ctx = make_ctx();
 
         let mut args = ToolArgs::new();
@@ -330,8 +328,20 @@ mod tests {
         args.positional.push(Value::String("pipefail".into()));
 
         let result = Set.execute(args, &mut ctx).await;
-        assert!(!result.ok());
-        assert!(result.err.contains("pipefail"));
+        assert!(result.ok(), "err={}", result.err);
+        assert!(ctx.scope.pipefail_enabled());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("+o".into()));
+        args.positional.push(Value::String("pipefail".into()));
+        assert!(Set.execute(args, &mut ctx).await.ok());
+        assert!(!ctx.scope.pipefail_enabled());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("nosuchoption".into()));
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "an unknown -o name must still be refused");
     }
 
     #[tokio::test]
@@ -346,11 +356,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_euo_pipefail_fails_on_pipefail() {
-        // Common bash idiom: set -euo pipefail. kaish has no pipefail (see
-        // limits.md), so this now fails loudly instead of silently
-        // no-opping — but -e, processed earlier in the same positional
-        // loop, has already taken effect by the time -o pipefail errors.
+    async fn test_set_euo_pipefail_sets_all_of_them() {
+        // The muscle-memory prelude. It used to die on `-o pipefail`, which
+        // in an embedder whose exit status is a policy decision turned a
+        // habitual first line into a deny-everything guard.
         let mut ctx = make_ctx();
 
         let mut args = ToolArgs::new();
@@ -360,9 +369,9 @@ mod tests {
         args.positional.push(Value::String("pipefail".into()));
 
         let result = Set.execute(args, &mut ctx).await;
-        assert!(!result.ok());
-        assert!(result.err.contains("pipefail"));
+        assert!(result.ok(), "err={}", result.err);
         assert!(ctx.scope.error_exit_enabled());
+        assert!(ctx.scope.pipefail_enabled());
     }
 
     #[tokio::test]

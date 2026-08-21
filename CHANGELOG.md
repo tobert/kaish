@@ -10,6 +10,20 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`set -o pipefail` and `PIPESTATUS`** — a failed pipeline stage is
+  detectable. `cat missing | wc -l` exited **0** and there was no second way to
+  ask: the status is the last stage's and kaish had neither the mode nor the
+  variable. `PIPESTATUS` now records every stage's code, in order, for every
+  pipeline including a one-command one, and `set -o pipefail` makes a pipeline
+  report its **rightmost** non-zero stage (bash's rule — `(exit 3) | (exit 4) |
+  true` is 4, not 3). `PIPESTATUS` is a list rather than bash's word-array, so
+  `${PIPESTATUS[0]}` indexes it, `${#PIPESTATUS}` counts the stages, and
+  `$(values $PIPESTATUS)` iterates them; reading it runs a command, and that
+  command replaces it, as in bash. `set -o` reports `pipefail`, and
+  `set -o pipefail` no longer exits 1 as an unimplemented name — so the
+  `set -euo pipefail` prelude works, where before it died on line 1.
+
 ### Changed
 - **BREAKING: `--json` carries one line anchor, named `line`, typed as an
   integer.** "Which line of the file is this" had three spellings: `grep`
@@ -137,6 +151,18 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **Arithmetic inside a `$(…)` inside a double-quoted string works, and stops
+  leaking an internal name.** `echo "$(seq 1 $((1+1)))"` and
+  `echo "$(echo $((1+1)))"` were parse errors, and
+  `echo "$(echo '$((1+1))')"` printed `${__ARITH:1+1__}` — an internal marker
+  in place of the author's own text, with no error at all. The pre-pass that
+  lifts `$((…))` out of a string reached into command bodies: it rewrote
+  arithmetic a command's single quotes had made literal, and for the unquoted
+  form it put the marker in the outer string's token while the body is parsed
+  as its own program, which never resolved it. A `$(…)` in a string is now
+  copied verbatim and scanned when the body itself is parsed. Arithmetic that
+  is genuinely in the string, single quotes and all, still expands:
+  `echo "'$((1+1))'"` is `'2'`, as in bash.
 - **A double-quoted string may hold a `$(…)` whose body has its own quoted
   words.** `echo "$(basename "$p")"` was a parse error — "unterminated command
   substitution: missing `)`" — and so was every form where BOTH levels were

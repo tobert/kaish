@@ -450,7 +450,13 @@ impl PipelineRunner {
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            return self.run_single(&stages[0], ctx, None, dispatcher).await;
+            let result = self.run_single(&stages[0], ctx, None, dispatcher).await;
+            // A lone command is a pipeline of one, and bash reports it:
+            // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
+            // multi-stage case would leave the previous pipeline's codes
+            // visible here — stale answers to a question the author just asked.
+            ctx.scope.set_pipestatus(&[result.code]);
+            return result;
         }
 
         // Multi-stage pipeline
@@ -805,10 +811,16 @@ impl PipelineRunner {
         // (e.g., `echo "Alice" | read NAME`).
         let mut last_result = ExecResult::success("");
         let mut panics: Vec<String> = Vec::new();
+        // Every stage's code, by stage index. A stage that panicked never
+        // produced one; it reads as 1, the same status the panic gives the
+        // pipeline below, so the list never has a hole and never claims a
+        // stage succeeded because its task died.
+        let mut codes: Vec<i64> = vec![1; handles.len()];
 
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
                 Ok((result, mut stage_ctx)) => {
+                    codes[i] = result.code;
                     // Stage 0 was handed the session's stdin. Whatever it did
                     // not consume comes back, or it dies here — `seq 1 2 | cat`
                     // never reads stdin at all, yet the stream it was handed
@@ -840,6 +852,10 @@ impl PipelineRunner {
             }
         }
 
+
+        // AFTER the loop: `ctx.scope` is REPLACED by the last stage's scope at
+        // `i == last_idx` above, so anything written before that is thrown away.
+        ctx.scope.set_pipestatus(&codes);
 
         // ANY stage panicking overrides `last_result`, regardless of which
         // stage.

@@ -247,8 +247,17 @@ async fn set_dash_o_is_structured() {
     let out = k.execute("set -o --json").await.expect("exec").text_out().into_owned();
     let rows: serde_json::Value = serde_json::from_str(&out).expect("parses as JSON");
     let rows = rows.as_array().expect("array");
-    assert_eq!(rows.len(), 4, "{rows:?}");
-    assert_eq!(rows[0]["OPTION"], "errexit");
+    // Grew to 5: errexit and pipefail both became reportable options.
+    // Asserted by NAME, not by index — two sibling branches both added a row
+    // here and both had pinned `rows[0]`, which is what made them conflict for
+    // no behavioral reason.
+    assert_eq!(rows.len(), 5, "{rows:?}");
+    for name in ["errexit", "glob", "pipefail", "output-limit", "trash"] {
+        assert!(
+            rows.iter().any(|r| r["OPTION"] == name),
+            "`{name}` must be reportable: {rows:?}"
+        );
+    }
 }
 
 /// Setting an option still works and still rejects an unknown name — the
