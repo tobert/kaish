@@ -105,8 +105,9 @@ breaking entries are marked **BREAKING**.
   binary form ambiguous, and three of its operand-count rules outrank `!`
   (`test ! = x` compares two strings, `test ! x -o x` negates the whole
   expression). Compose with `&&`/`||`, or use `[[ ]]`. Only the operator slot
-  is judged: `test "-a" = "-a"` compares two strings and `test -f "-a"` stats
-  a file named `-a`, as before.
+  is judged: `test "-a" = "-a"` compares two strings, `test -f "-a"` stats a
+  file named `-a`, and `test "-a" = 1` compares a string to a number — all
+  still run, as before.
 - **`set -o` reports every option and its state** (`glob`, `output-limit`,
   `trash`), as bash does, and as a table so `--json` answers too. Option state
   could not be queried at all before: bare `set` prints only what differs from

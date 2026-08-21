@@ -804,8 +804,8 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
     // shape and destroyed the ORDER, which for `test` is the only thing that
     // separates an operator from a literal: `test "-a" = "-a"` and
     // `test a = a -a b = b` decomposed to the same flags/positional sets, so
-    // no `Tool::validate` could tell them apart. The verbatim arm below
-    // exists for exactly this reason; raw_argv simply never got one.
+    // no `Tool::validate` could tell them apart. The verbatim arm below was
+    // added for exactly this reason; raw_argv had gone without one until now.
     if schema.is_some_and(|s| s.raw_argv) {
         // No `past_double_dash` tracking: raw_argv keeps `--` as a literal
         // word and lets the tool decide what it means, which is what the

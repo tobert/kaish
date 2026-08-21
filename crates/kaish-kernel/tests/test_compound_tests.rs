@@ -246,3 +246,44 @@ async fn an_operator_word_in_operand_position_is_data(
         .unwrap_or_else(|e| panic!("`{script}` must not be refused: {e}"));
     assert_eq!(r.code, expected, "`{script}`");
 }
+
+// --- a non-string operand must not shift the operator slots ---------------
+
+/// `validate` rebuilt its word list from `positional` and dropped every
+/// non-`String` value. Runtime keeps operands typed, so an `Int` operand
+/// shifted the slots by one and the two disagreed again — the same class the
+/// source-order fix closed, in a narrower form.
+///
+/// `test "-a" = 1` is a string compared against a number: bash exits 1 and
+/// kaish refused it outright.
+#[rstest]
+#[case("test \"-a\" = 1", 1)]
+#[case("test \"-o\" = 1", 1)]
+#[case("test 1 = \"-a\"", 1)]
+#[case("test \"(\" = 1", 1)]
+#[tokio::test]
+async fn a_numeric_operand_does_not_shift_the_slots(#[case] script: &str, #[case] expected: i64) {
+    let r = kernel()
+        .execute(script)
+        .await
+        .unwrap_or_else(|e| panic!("`{script}` must not be refused: {e}"));
+    assert_eq!(r.code, expected, "`{script}`");
+}
+
+/// The same shift in the other direction: a compound operator IS in the
+/// operator slot, but a dropped numeric operand hid it from the validator, so
+/// the statement ran and failed at runtime instead of being stopped.
+#[rstest]
+#[case("test -a 1")]
+#[case("test -o 1")]
+#[case("test 1 -a 2")]
+#[case("test -a")]
+#[tokio::test]
+async fn a_compound_operator_is_caught_even_beside_a_number(#[case] script: &str) {
+    let err = kernel()
+        .execute(script)
+        .await
+        .expect_err("must be refused before running")
+        .to_string();
+    assert!(err.contains("E020"), "`{script}`: {err}");
+}

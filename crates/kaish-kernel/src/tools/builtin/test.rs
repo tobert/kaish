@@ -86,14 +86,19 @@ impl Tool for Test {
     /// which scanned every word because a decomposed `ToolArgs` had no order
     /// left to read.
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
-        let words: Vec<&str> = args
+        // EVERY operand, rendered the way `eval_test` renders one when it asks
+        // whether a word is an operator. Dropping the non-strings — the first
+        // version filtered for `Value::String` — shifted the slots by one for
+        // each, so `test "-a" = 1` looked like the two-operand `-a =` and was
+        // refused, while `test -a 1` looked like a lone word and was not.
+        // Runtime keeps operands typed and compares `value_to_string`, so this
+        // is what it sees.
+        let words: Vec<String> = args
             .positional
             .iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.as_str()),
-                _ => None,
-            })
+            .map(crate::interpreter::value_to_string)
             .collect();
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
 
         // A placeholder means an unevaluated expansion; its runtime value is
         // unknown, so judging it would report a program that may be fine.
@@ -110,6 +115,9 @@ impl Tool for Test {
             rest = &rest[1..];
         }
         let found = match rest.len() {
+            // A compound operator alone is still one: runtime says
+            // "'-a' needs an operand", and an `if` would swallow that.
+            1 => Some(rest[0]).filter(|w| is_compound_op(w)),
             2 => Some(rest[0]).filter(|w| is_compound_op(w)),
             3 => Some(rest[1]).filter(|w| is_compound_op(w)),
             n if n > 3 => rest.iter().copied().find(|w| is_compound_op(w)),
