@@ -443,6 +443,9 @@ pub struct Scope {
     trash_max_size: u64,
     /// Glob expansion mode (set -o glob): expand bare glob patterns in arguments.
     glob_enabled: bool,
+    /// Pipefail mode (set -o pipefail): a pipeline reports the rightmost
+    /// non-zero stage instead of only its last stage.
+    pipefail_enabled: bool,
     /// Kaish session identifier ($$). A monotonic counter assigned at Kernel
     /// construction (see `KERNEL_COUNTER` in kernel.rs) — *not* the OS PID.
     /// Subshells / forks inherit the parent's value (Scope clone copies it).
@@ -470,6 +473,7 @@ impl Scope {
             trash_enabled: false,
             trash_max_size: 10 * 1024 * 1024, // 10 MB
             glob_enabled: true,
+            pipefail_enabled: false,
             pid: 0,
         }
     }
@@ -678,6 +682,47 @@ impl Scope {
     /// Set AST display mode (kaish-ast -on / kaish-ast -off).
     pub fn set_show_ast(&mut self, enabled: bool) {
         self.show_ast = enabled;
+    }
+
+    /// Check if pipefail is enabled (set -o pipefail).
+    pub fn pipefail_enabled(&self) -> bool {
+        self.pipefail_enabled
+    }
+
+    /// Set pipefail mode (set -o pipefail / set +o pipefail).
+    pub fn set_pipefail_enabled(&mut self, enabled: bool) {
+        self.pipefail_enabled = enabled;
+    }
+
+    /// Record every stage's exit code as `PIPESTATUS`, a list.
+    ///
+    /// A list rather than bash's `${PIPESTATUS[@]}` word-array, because kaish
+    /// has collections and no word splitting: `${PIPESTATUS[0]}` indexes it,
+    /// `${#PIPESTATUS}` counts it, and `$(values $PIPESTATUS)` iterates it.
+    /// Written for EVERY pipeline including a one-stage one, as bash does —
+    /// `false; echo ${PIPESTATUS[0]}` is `1`.
+    pub fn set_pipestatus(&mut self, codes: &[i64]) {
+        let list = serde_json::Value::Array(
+            codes.iter().map(|c| serde_json::Value::from(*c)).collect(),
+        );
+        self.set_global("PIPESTATUS", Value::Json(list));
+    }
+
+    /// The rightmost non-zero code in `PIPESTATUS`, or `None` when every
+    /// stage succeeded.
+    ///
+    /// bash's pipefail rule is the LAST failing stage, not the first:
+    /// `set -o pipefail; (exit 3) | (exit 4) | true` is 4. Reading
+    /// left-to-right is the easy mistake, and it is wrong on exactly the input
+    /// that proves a pipeline can fail more than once.
+    pub fn pipestatus_rightmost_failure(&self) -> Option<i64> {
+        let Some(Value::Json(serde_json::Value::Array(codes))) = self.get("PIPESTATUS") else {
+            return None;
+        };
+        codes
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .rfind(|c| *c != 0)
     }
 
     /// Check if trash mode is enabled (set -o trash).

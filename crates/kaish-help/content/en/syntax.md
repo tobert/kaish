@@ -355,17 +355,26 @@ sed 's/(a)\1/x/'                    # ERROR — no backreference IN a pattern
 
 ```sh
 set -e                    # exit on first error
+set -o pipefail           # a pipeline reports its rightmost failing stage
 set -o trash              # move rm'd / overwritten files to Trash
 set -o glob               # enable bare glob expansion (on by default)
 set +o trash              # disable trash
 set +o glob               # disable bare glob expansion
+set -o                    # report every option and its state
 ```
+
+`cat missing | wc -l` exits **0** without pipefail — the status is the LAST
+stage's. With `set -o pipefail` it exits **1**. `${PIPESTATUS[0]}` reports
+each stage either way: after `false | true`, `${PIPESTATUS[0]}` is `1` and
+`${PIPESTATUS[1]}` is `0`. `PIPESTATUS` is a list, so `${#PIPESTATUS}` counts
+the stages and `$(values $PIPESTATUS)` iterates them. Reading it runs a
+command, and that command replaces it — capture it before asking twice.
 
 Env var: `KAISH_TRASH=1` enables trash at startup.
 
 `set -o NAME` / `set +o NAME` on a name kaish doesn't implement exits **1**
-and names the valid set (`glob`, `output-limit[=SIZE]`, `trash`) — it never
-silently no-ops. `set -o pipefail` fails this way: kaish has no pipefail.
+and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`, `trash`) — it never
+silently no-ops.
 `set -o approvals` and `set -o latch` — retired spellings from the removed
 approval subsystem and the confirmation latch — fail the same way; they
 turn nothing on. A bare unrecognized short flag (`-u`, `-x`) is still

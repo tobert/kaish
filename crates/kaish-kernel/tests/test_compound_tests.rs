@@ -247,8 +247,13 @@ async fn set_dash_o_is_structured() {
     let out = k.execute("set -o --json").await.expect("exec").text_out().into_owned();
     let rows: serde_json::Value = serde_json::from_str(&out).expect("parses as JSON");
     let rows = rows.as_array().expect("array");
-    assert_eq!(rows.len(), 3, "{rows:?}");
+    // Grew to 4 when pipefail became a real option.
+    assert_eq!(rows.len(), 4, "{rows:?}");
     assert_eq!(rows[0]["OPTION"], "glob");
+    assert!(
+        rows.iter().any(|r| r["OPTION"] == "pipefail"),
+        "pipefail must be reportable: {rows:?}"
+    );
 }
 
 /// Setting an option still works and still rejects an unknown name — the
