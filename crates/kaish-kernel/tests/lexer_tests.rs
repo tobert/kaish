@@ -352,13 +352,25 @@ fn lexer_double_quoted_strings(#[case] input: &str, #[case] expected: &[&str]) {
 #[rstest]
 #[case::string_unterminated(r#""unterminated"#)]
 fn lexer_string_errors(#[case] input: &str) {
-    // KNOWN GAP: an unterminated double-quoted string never
-    // matches the logos `String` token regex, so it surfaces the generic
-    // `UnexpectedCharacter` rather than the curated `UnterminatedString` (which
-    // only the interpolated/complete-string helper emits). Pinning the *actual*
-    // variant keeps the test honest and flags any change for review — improving
-    // the diagnostic to `UnterminatedString` should update this assertion.
-    run_lexer_error_variant(input, LexerError::UnexpectedCharacter);
+    // The gap this used to pin is closed. It read: an unterminated string
+    // never matched the flat `String` regex, so logos surfaced the generic
+    // `UnexpectedCharacter` rather than the curated `UnterminatedString`, and
+    // "improving the diagnostic to `UnterminatedString` should update this
+    // assertion." `lex_string` scans for the closing quote itself now, so it
+    // is the one that reports the failure and it names it. The span is
+    // unchanged; only the wording improved.
+    run_lexer_error_variant(input, LexerError::UnterminatedString);
+}
+
+/// A `$(` left open inside the string names the missing `)`, not the string.
+/// Both are unterminated; only the paren is the mistake, and the parser's
+/// sibling scanner has always said so for the forms that reached it.
+#[rstest]
+#[case::in_substitution(r#""$(echo hi"#)]
+#[case::after_inner_quote(r#""$(echo "hi""#)]
+#[case::nested_substitution(r#""$(echo "$(echo hi)""#)]
+fn lexer_unterminated_cmdsubst_in_string(#[case] input: &str) {
+    run_lexer_error_variant(input, LexerError::UnterminatedCommandSubst);
 }
 
 // =============================================================================
@@ -1107,4 +1119,30 @@ fn lexer_non_ascii_quoting_still_escapes(#[case] input: &str, #[case] expected: 
 #[case::minusbare_leading_non_ascii_unaffected("-é", &["MINUSBARE(-é)"])]
 fn lexer_widen_does_not_disturb_ascii_priority(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
+}
+
+/// A file full of unterminated openers must not cost O(N²).
+///
+/// A token that scans for its own terminator (`"`, `${`) reads to end-of-input
+/// when the terminator is missing, and logos then retries from the next
+/// character — so N openers cost N scans of the remainder: 20000 `"$(echo "`
+/// openers took 4.6s uncapped and 0.02s capped. Both renderers join every
+/// collected error, so the cap bounds the printed diagnostic too. Pinning the
+/// count catches a regression here as a slow test rather than as a wrong
+/// answer.
+#[test]
+fn lexer_errors_are_capped() {
+    // One opening quote, then openers that never pair off. `"$(echo "` repeated
+    // on its own does NOT reproduce: its quotes pair into empty strings and
+    // only two ever reach end-of-input. The shape matters more than the size.
+    let source = format!("echo \"{}", r#"$(echo ""#.repeat(5000));
+    let errors = tokenize(&source).expect_err("unterminated openers must be an error");
+    // Exactly the cap, not merely "bounded": 5000 openers produce ~5001 errors
+    // uncapped, so `<= 64` alone would also pass with a cap of 1, which would
+    // swallow diagnostics a caller needs.
+    assert_eq!(
+        errors.len(),
+        64,
+        "expected exactly the cap when the input overruns it"
+    );
 }
