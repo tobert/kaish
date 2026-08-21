@@ -686,11 +686,19 @@ if test -f "$path"; then …; fi  # the usual home, an `if`/`while` condition
 
 - **Numbers are kaish (JSON) numbers**, so `test 1.5 -gt 1` compares (it does not
   error the way POSIX `test` would); a non-numeric operand is a loud error.
-- **No `-a` / `-o` / `\( \)`** — those ambiguous XSI operators are rejected
-  loudly. Compose with shell `&&` / `||`, or use `[[ ]]`.
+- **No `-a` / `-o` / `\( \)`** — rejected by the validator (E020), so the
+  statement does not run at all. bash overloads both spellings (`-a FILE` is a
+  synonym for `-e`, `-o NAME` asks whether a shell option is on), which is
+  what makes the binary form ambiguous; coreutils' own man page points at
+  `&&`/`||` instead. Three of bash's operand-count rules also outrank `!`:
+  `test ! = x` compares two strings, `test ! -a ""` is an AND, and
+  `test ! x -o x` negates the whole expression. Compose with `&&` / `||`, or
+  use `[[ ]]`. Ask about a shell option with `set -o`.
 - **An operator missing its operand is a loud error** (`test -f` on its own),
-  never a surprise-true — kaish does no word splitting, so the classic
-  `test -n $empty` footgun can't arise.
+  never a surprise-true — this is the one place `test` deliberately differs
+  from bash, which reads `-f` as a non-empty string and returns true. kaish
+  does no word splitting either, so the classic `test -n $empty` footgun can't
+  arise. `test` with no operands at all is false, as in bash.
 - **Richer tests stay `[[ ]]`-only**: membership (`in` / `not in`), regex
   (`=~` / `!~`), and the shape guards (`-list` / `-record`).
 
