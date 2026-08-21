@@ -7150,8 +7150,19 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
     accumulated.data = new.data.clone();
-    accumulated.did_spill = new.did_spill;
-    accumulated.original_code = new.original_code;
+    // OR, not assign. `did_spill` is a fact about the OUTPUT — this block's
+    // text was truncated — and an ordinary statement running afterwards does
+    // not untruncate it. Assigning let `seq …; echo after` report
+    // `did_spill: false` with output still missing, telling an embedder asking
+    // "did I get everything" the wrong thing. The exit CODE is a separate
+    // question and still belongs to the last statement, as in any shell.
+    accumulated.did_spill |= new.did_spill;
+    // `original_code` is only meaningful alongside a spill, so it follows the
+    // same rule: keep the first one rather than letting a later clean
+    // statement's `None` erase the code the spill replaced.
+    if accumulated.original_code.is_none() {
+        accumulated.original_code = new.original_code;
+    }
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
 }
