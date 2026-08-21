@@ -34,7 +34,7 @@ breaking entries are marked **BREAKING**.
   **text**, so it reads as its POSIX self: `cut`, `seq`, `find`, and `glob`
   join `grep`, `head`, `sort`, `sed`, `awk`, and `ls`. Ask for the structure
   with `--json`, which is unchanged. A builtin whose output IS a value —
-  `fromjson`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, `kaish-last`,
+  `fromjson`, `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`,
   `typeof` — is unchanged, so collections and `${r[key]}` behave exactly as
   before. Iteration is unchanged everywhere: a `for` head newline-splits text,
   which is how `grep` and `ls` have always iterated. The pipeline's structured

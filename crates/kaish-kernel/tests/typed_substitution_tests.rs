@@ -110,3 +110,70 @@ async fn json_output_is_unchanged(#[case] script: &str, #[case] expected: &str) 
 async fn iteration_is_unchanged(#[case] script: &str, #[case] expected: &str) {
     assert_eq!(out(script).await, expected, "`{script}`");
 }
+
+/// A typed value survives a COMPOUND statement. `accumulate_result` copied
+/// `.data` without its marker, so every `if`/`for`/`while`/`case` and every
+/// `&&`/`||` chain dropped the value on the way out. The marker travels with
+/// the data now.
+#[rstest]
+#[case("x=$(if true; then fromjson '[1,2]'; fi); echo ${x[0]}", "1")]
+#[case("x=$(for i in 1; do fromjson '[9,8]'; done); echo ${x[0]}", "9")]
+#[case("x=$(while true; do fromjson '[5]'; break; done); echo ${x[0]}", "5")]
+#[case("x=$(case a in a) fromjson '[3]';; esac); echo ${x[0]}", "3")]
+#[case("x=$(true && fromjson '[1,2]'); echo ${x[0]}", "1")]
+#[case("x=$(false || fromjson '[1,2]'); echo ${x[0]}", "1")]
+#[tokio::test]
+async fn a_typed_value_survives_a_compound_statement(
+    #[case] script: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(out(script).await, expected, "`{script}`");
+}
+
+/// And the INVERSE, which is the same bug wearing the other hat: the chain
+/// kept the LEFT side's marker while taking the RIGHT side's data, so
+/// `$(fromjson … && cut …)` bound `cut`'s structured view typed — the original
+/// bug re-entering through a side door.
+#[tokio::test]
+async fn a_chain_does_not_type_the_right_side_from_the_left() {
+    let script = "printf 'a\tb\n' > /tmp/ktinv.tsv;                   x=$(fromjson '[1,2]' && cut -f2 /tmp/ktinv.tsv); echo $x";
+    assert_eq!(out(script).await, "[1,2]b", "both texts, neither typed");
+}
+
+/// `break`/`continue` carry no value, and must not erase the body's.
+#[tokio::test]
+async fn a_valueless_signal_does_not_erase_the_bodys_value() {
+    assert_eq!(
+        out("x=$(for i in 1 2; do fromjson '[7]'; continue; done); echo ${x[0]}").await,
+        "7"
+    );
+    // The must-not-break direction: a body that produced only text stays text.
+    assert_eq!(out("x=$(while true; do echo hi; break; done); echo $x").await, "hi");
+}
+
+/// A wrapper that re-dispatches returns the INNER result, so stamping it from
+/// the wrapper's own schema erased what the inner tool declared.
+///
+/// `into_arc()` is required: `timeout` re-dispatches through `ctx.dispatcher`,
+/// which is `None` on a kernel that was never wrapped, and the inner command
+/// then runs not at all rather than running untyped.
+#[tokio::test]
+async fn a_redispatching_wrapper_keeps_the_inner_declaration() {
+    let k = Kernel::new(KernelConfig::repl()).expect("kernel").into_arc();
+    let r = k
+        .execute("x=$(timeout 5 fromjson '[1,2]'); echo ${x[0]}")
+        .await
+        .expect("execute");
+    assert_eq!(r.text_out().trim_end(), "1", "err={:?}", r.err);
+}
+
+/// The rest of the typed set, so a missing declaration shows up here rather
+/// than in someone's script. `fromjsonl` was missing one.
+#[rstest]
+#[case("x=$(fromjsonl '{\"a\":1}'); echo ${x[0]}", "{\"a\":1}")]
+#[case("x=$(split 'a b c'); echo ${x[1]}", "b")]
+#[case("x=$(typeof 5); echo $x", "number")]
+#[tokio::test]
+async fn the_rest_of_the_typed_set(#[case] script: &str, #[case] expected: &str) {
+    assert_eq!(out(script).await, expected, "`{script}`");
+}

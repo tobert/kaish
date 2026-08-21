@@ -3561,7 +3561,20 @@ impl Kernel {
                         // `x=$(embedder_tool)` and structured iteration over
                         // its result depend on `.data` surviving the crossing
                         // back into the kernel.
-                        return Ok(ExecResult::from(tool_result));
+                        let mut result = ExecResult::from(tool_result);
+                        // The same rule the builtin dispatch applies, applied
+                        // here too — this seam returns before it. Without this
+                        // an embedder tool that hands back a value got its
+                        // `$(…)` capture stringified, which is precisely what
+                        // the comment above promises does not happen.
+                        let data_is_only_output = result.data.is_some()
+                            && !result.has_output()
+                            && result.text_out().is_empty();
+                        result.data_is_value |= data_is_only_output
+                            || tool_schema
+                                .as_ref()
+                                .is_some_and(|s| s.typed_substitution);
+                        return Ok(result);
                     }
                     Err(BackendError::ToolNotFound(_)) => {
                         // The backend confirms no such tool exists — fall
@@ -3687,7 +3700,13 @@ impl Kernel {
         let data_is_only_output = result.data.is_some()
             && !result.has_output()
             && result.text_out().is_empty();
-        result.data_is_value = typed_substitution || data_is_only_output;
+        // OR, never assign: a wrapper that re-dispatches an inner command
+        // returns the INNER result, and stamping it from the wrapper's own
+        // schema erased what the inner tool declared —
+        // `$(timeout 5 fromjson '[1,2]')` bound text while `$(fromjson …)`
+        // bound a list. A result arrives here fresh from `tool.execute`, so a
+        // marker already set is one the tool or its inner dispatch meant.
+        result.data_is_value |= typed_substitution || data_is_only_output;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
@@ -7182,7 +7201,14 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     push_stdout_of(accumulated, new);
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
+    // The marker travels WITH the data, always. Copying one without the other
+    // is wrong in both directions: a compound statement ending in `fromjson`
+    // lost its value (`$(if true; then fromjson '[1,2]'; fi)` bound text), and
+    // a chain whose LEFT side was typed kept that marker over the right side's
+    // data (`$(fromjson '[1,2]' && cut -f2 f)` bound `["b"]` typed — the very
+    // bug this mechanism exists to fix, re-entering through a side door).
     accumulated.data = new.data.clone();
+    accumulated.data_is_value = new.data_is_value;
     accumulated.did_spill = new.did_spill;
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
@@ -7216,7 +7242,17 @@ fn fold_block_output_into_flow(block_output: ExecResult, flow: &mut ControlFlow)
 /// into that loop's result.
 fn accumulate_flow_output(accumulated: &mut ExecResult, flow: &ControlFlow) {
     if let ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } = flow {
+        // `break`/`continue` carry no value of their own, and a signal that
+        // produced nothing must not erase what the body already produced —
+        // leaving a loop early stops it, it does not unmake its output. Same
+        // reasoning as `fold_block_output_into_flow`'s, one step further:
+        // `$(while true; do fromjson '[5]'; break; done)` bound text because
+        // the empty `break` result overwrote the body's value.
+        let carried = (accumulated.data.take(), accumulated.data_is_value);
         accumulate_result(accumulated, result);
+        if result.data.is_none() {
+            (accumulated.data, accumulated.data_is_value) = carried;
+        }
     }
 }
 
