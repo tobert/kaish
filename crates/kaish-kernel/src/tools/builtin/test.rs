@@ -97,7 +97,7 @@ impl Tool for Test {
 
         // A placeholder means an unevaluated expansion; its runtime value is
         // unknown, so judging it would report a program that may be fine.
-        if words.iter().any(|w| *w == "<dynamic>") {
+        if words.contains(&"<dynamic>") {
             return Vec::new();
         }
 
