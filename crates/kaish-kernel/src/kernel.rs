@@ -2135,7 +2135,10 @@ impl Kernel {
         }
         let _errexit_guard: Option<ErrexitGuard<'_>> = if let Some(enabled) = opts.errexit {
             let mut scope = self.scope.write().await;
-            let saved = scope.error_exit_enabled();
+            // The RAW flag, not `error_exit_enabled()`: that one is false
+            // while errexit is suppressed inside a `&&`/`||` left side, and
+            // restoring from it would turn `set -e` off for good.
+            let saved = scope.error_exit_flag();
             scope.set_error_exit(enabled);
             drop(scope);
             Some(ErrexitGuard { kernel: self, saved })

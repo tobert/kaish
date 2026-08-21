@@ -655,6 +655,17 @@ impl Scope {
         self.error_exit && self.errexit_suppressed == 0
     }
 
+    /// The raw `set -e` flag, ignoring any active suppression.
+    ///
+    /// [`Self::error_exit_enabled`] answers "should errexit fire right now",
+    /// which is false while suppressed inside a `&&`/`||` left side. Anything
+    /// that SAVES the setting to restore later must read this instead, or a
+    /// save taken during suppression restores `set -e` as off and quietly
+    /// disables it for everything after.
+    pub fn error_exit_flag(&self) -> bool {
+        self.error_exit
+    }
+
     /// Set error-exit mode (set -e / set +e).
     pub fn set_error_exit(&mut self, enabled: bool) {
         self.error_exit = enabled;
