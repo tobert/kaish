@@ -70,6 +70,32 @@ change that changed no behavior.
 Embedders typically run a fresh kernel per request — variables, functions,
 aliases, `set -o` options, and `cwd` reset each time.
 
+### When exit status is a decision: errexit
+
+kaish's default is standard shell behavior: a failing statement does not
+abort the script, and `ExecResult.code` is the **last** statement's status —
+not the first failure. An embedder that only branches on the final code (a
+policy hook where 0 continues a tool call and non-zero denies it) will not
+see an early failure at all if a later statement happens to succeed.
+
+If a script's exit status is a security or gating decision, turn errexit on
+so the first failure is the one you see:
+
+```sh
+set -e                 # preferred where you control the script text
+```
+
+Writing `set -e` at the top of the script you hand to kaish is **preferred**
+whenever you control that text — a reader of the script sees it, the same
+way they'd see it in `sh`. Reach for `KernelConfig::errexit_enabled` /
+`ExecuteOptions::errexit` (below, under
+[Per-Call Execution](#per-call-execution-executeoptions) and
+[Kernel Construction](#modes-kernelconfig)) only when you cannot rely on the
+script's author to write `set -e` — a script you did not author, or one
+instructions could omit it from. The trade-off is real: an errexit turned on
+from config is invisible from *inside* the script except through `set -o` —
+there is no line in the script text a reader can point to.
+
 ## Stack size — size your execution threads
 
 The interpreter recurses on the **native stack**: command substitution
@@ -210,7 +236,10 @@ let config = KernelConfig::agent();
 ```
 
 Other builders: `.with_trash(bool)` (destructive-op
-rails — see below), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
+rails — see below), `.with_errexit(bool)` (abort on a statement's first
+failure instead of continuing — off by default, see
+["When exit status is a decision"](#when-exit-status-is-a-decision-errexit)
+above), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
 in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
 (below).
 
@@ -426,6 +455,13 @@ Fields:
   one call and cleared on every exit path — prefer `cancel_token` when your
   embedder's threading model allows it.
 - **`cwd`** — per-call working directory override.
+- **`errexit`** — `with_errexit(bool)`, a per-call override for errexit that
+  wins over `KernelConfig::errexit_enabled` for this call only, restoring the
+  kernel's prior state (the config default, or whatever a previous call's
+  `set -e`/`set +e` left behind) when the call returns. `None` (the default)
+  leaves errexit exactly as the kernel already has it. See
+  ["When exit status is a decision"](#when-exit-status-is-a-decision-errexit)
+  above.
 - **`stdin`** — standard input for this call as a ready, bytes-typed buffer
   (`impl Into<Vec<u8>>` — a `&str`/`String` or a raw `Vec<u8>` both work),
   consumed by the first top-level command that reads stdin (shell draining

@@ -218,7 +218,7 @@ async fn a_lone_operator_is_loud_not_a_string(#[case] script: &str) {
 async fn set_dash_o_reports_every_option() {
     let k = kernel();
     let out = k.execute("set -o").await.expect("kernel execute").text_out().into_owned();
-    for name in ["glob", "output-limit", "trash"] {
+    for name in ["errexit", "glob", "output-limit", "trash"] {
         assert!(out.contains(name), "`set -o` should list {name}: {out:?}");
     }
     assert!(out.contains("on") && out.contains("off"), "states missing: {out:?}");
@@ -247,8 +247,8 @@ async fn set_dash_o_is_structured() {
     let out = k.execute("set -o --json").await.expect("exec").text_out().into_owned();
     let rows: serde_json::Value = serde_json::from_str(&out).expect("parses as JSON");
     let rows = rows.as_array().expect("array");
-    assert_eq!(rows.len(), 3, "{rows:?}");
-    assert_eq!(rows[0]["OPTION"], "glob");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert_eq!(rows[0]["OPTION"], "errexit");
 }
 
 /// Setting an option still works and still rejects an unknown name — the

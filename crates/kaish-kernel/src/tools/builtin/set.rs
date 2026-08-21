@@ -187,6 +187,7 @@ impl Tool for Set {
             return ExecResult::with_output(OutputData::table(
                 vec!["OPTION".to_string(), "STATE".to_string()],
                 vec![
+                    option_row("errexit", ctx.scope.error_exit_enabled()),
                     option_row("glob", ctx.scope.glob_enabled()),
                     option_row("output-limit", ctx.output_limit.max_bytes().is_some()),
                     option_row("trash", ctx.scope.trash_enabled()),
