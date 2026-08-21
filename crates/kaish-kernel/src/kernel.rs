@@ -3942,8 +3942,15 @@ impl Kernel {
                     .map_err(|e| anyhow::anyhow!("arithmetic error: {}", e))
             }
             Expr::Command(cmd) => {
-                // Execute command and return boolean based on exit code
+                // A command in expression position — an `if`/`while`
+                // condition, or a side of `&&`/`||` inside one. Its VALUE is
+                // the exit code's truthiness, but its OUTPUT belongs to the
+                // enclosing statement, exactly as `Expr::CommandSubst` says of
+                // a substitution's stderr. Dropping the `ExecResult` here made
+                // `if cat /nonexistent; then …` print nothing at all, so every
+                // condition that failed for a reason failed silently.
                 let result = self.execute_command(&cmd.name, &cmd.args).await?;
+                self.emit_cmdsubst_stderr(&result.err).await;
                 Ok(Value::Bool(result.code == 0))
             }
             Expr::LastExitCode => {
@@ -4473,6 +4480,11 @@ impl Kernel {
     /// boundary, so an inner substitution's stderr is already inside the outer
     /// block's result by the time this runs for the outer one — which is why it
     /// is written exactly once, here, rather than also accumulated by callers.
+    /// Hand a nested command's stderr to the enclosing statement.
+    ///
+    /// Two callers, one rule: a command substitution's stderr is not part of
+    /// its value, and a condition command's stderr is not part of its
+    /// truthiness. Both belong to the statement the author wrote.
     async fn emit_cmdsubst_stderr(&self, err: &str) {
         if err.is_empty() {
             return;
