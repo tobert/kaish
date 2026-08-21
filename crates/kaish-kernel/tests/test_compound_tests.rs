@@ -149,14 +149,57 @@ async fn conformance_fixes_kept(#[case] script: &str, #[case] expected: i64) {
     assert_eq!(r.code, expected, "`{script}`");
 }
 
+/// `[[ ]]` answers the empty path the same way, because `file_test` says it
+/// "mirrors `[[`'s `FileTest` arm so the two stay consistent" and a fix that
+/// lands in one arm makes that comment false. The two spellings of a file
+/// test must never disagree about the same path.
+#[rstest]
+#[case("[[ -e \"\" ]]", 1)]
+#[case("[[ -f \"\" ]]", 1)]
+#[case("[[ -d \"\" ]]", 1)]
+#[case("[[ -r \"\" ]]", 1)]
+#[case("[[ -w \"\" ]]", 1)]
+#[case("[[ -x \"\" ]]", 1)]
+#[tokio::test]
+async fn double_bracket_answers_the_empty_path_like_test(
+    #[case] script: &str,
+    #[case] expected: i64,
+) {
+    let r = kernel().execute(script).await.expect("kernel execute");
+    assert_eq!(r.code, expected, "`{script}`");
+}
+
+/// The same path through both spellings, to catch a future fix landing in one
+/// arm again. A non-empty path that exists must still be true on both sides.
+#[tokio::test]
+async fn both_spellings_agree_on_a_real_path() {
+    let k = kernel();
+    let r = k.execute("[[ -d \"/\" ]]").await.expect("kernel execute");
+    assert_eq!(r.code, 0, "`[[ -d / ]]`");
+    let r = k.execute("test -d \"/\"").await.expect("kernel execute");
+    assert_eq!(r.code, 0, "`test -d /`");
+}
+
 /// A lone operator stays loud, which is the divergence from bash that this
 /// whole area exists to defend: bash reads `test -f` as the non-empty string
 /// `"-f"` and returns TRUE, turning a forgotten operand into a passing
 /// condition.
+///
+/// A compound operator is no exception, and E020 must not claim it. One
+/// operand has no operator slot for `-a` to sit in, so the accurate report is
+/// the runtime's "needs an operand" — not "chain with `&&`/`||`", which names
+/// a compound the author did not write. E020's first version answered these
+/// because its own comment argued the runtime message would be swallowed by an
+/// `if`; #385 made that false.
 #[rstest]
 #[case("test -f")]
 #[case("test -z")]
 #[case("test !")]
+#[case("test \"-a\"")]
+#[case("test -a")]
+#[case("test \"-o\"")]
+#[case("test \"(\"")]
+#[case("test \")\"")]
 #[tokio::test]
 async fn a_lone_operator_is_loud_not_a_string(#[case] script: &str) {
     let r = kernel().execute(script).await.expect("kernel execute");
@@ -277,7 +320,8 @@ async fn a_numeric_operand_does_not_shift_the_slots(#[case] script: &str, #[case
 #[case("test -a 1")]
 #[case("test -o 1")]
 #[case("test 1 -a 2")]
-#[case("test -a")]
+// `test -a` alone is NOT here: one operand has no operator slot, so it is a
+// lone operator, not a compound — see `a_lone_operator_is_loud_not_a_string`.
 #[tokio::test]
 async fn a_compound_operator_is_caught_even_beside_a_number(#[case] script: &str) {
     let err = kernel()

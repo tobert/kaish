@@ -115,9 +115,11 @@ impl Tool for Test {
             rest = &rest[1..];
         }
         let found = match rest.len() {
-            // A compound operator alone is still one: runtime says
-            // "'-a' needs an operand", and an `if` would swallow that.
-            1 => Some(rest[0]).filter(|w| is_compound_op(w)),
+            // A single operand has no operator slot for a compound to sit in:
+            // `test "-a"` is one string. Runtime answers it accurately with
+            // "'-a' needs an operand", and since a condition's output reaches
+            // the author that report is worth more than E020's, which would
+            // name a compound the author never wrote.
             2 => Some(rest[0]).filter(|w| is_compound_op(w)),
             3 => Some(rest[1]).filter(|w| is_compound_op(w)),
             n if n > 3 => rest.iter().copied().find(|w| is_compound_op(w)),
@@ -329,7 +331,9 @@ fn apply_binary(left: &Value, op: &str, right: &Value) -> Result<bool, String> {
 async fn file_test(ctx: &ExecContext, op: &str, path: &str) -> bool {
     // The empty path names no file. Resolving it lands on the working
     // directory, so `test -e ""` answered true — bash says false, and so does
-    // every reading of "does this file exist".
+    // every reading of "does this file exist". `eval_test_async`'s `FileTest`
+    // arm carries the same guard; a fix that lands in only one of them makes
+    // the mirror above a lie, which is what happened the first time.
     if path.is_empty() {
         return false;
     }

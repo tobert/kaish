@@ -107,7 +107,9 @@ breaking entries are marked **BREAKING**.
   expression). Compose with `&&`/`||`, or use `[[ ]]`. Only the operator slot
   is judged: `test "-a" = "-a"` compares two strings, `test -f "-a"` stats a
   file named `-a`, and `test "-a" = 1` compares a string to a number — all
-  still run, as before.
+  still run, as before. A single operand has no operator slot, so `test -a`
+  stays the lone-operator error (`'-a' needs an operand`, exit 2) rather than
+  E020, which would name a compound the author did not write.
 - **`set -o` reports every option and its state** (`glob`, `output-limit`,
   `trash`), as bash does, and as a table so `--json` answers too. Option state
   could not be queried at all before: bare `set` prints only what differs from
@@ -131,8 +133,9 @@ breaking entries are marked **BREAKING**.
   `ToolArgs`. A `Tool::validate` on a raw_argv tool could not tell an operator
   from a literal. The verbatim binder already had this arm; raw_argv never
   did.
-- **`test -e ""` is false.** The empty path resolved to the working directory,
-  so every file operator answered true for it.
+- **`test -e ""` and `[[ -e "" ]]` are both false.** The empty path resolved to
+  the working directory, so every file operator answered true for it, in both
+  spellings.
 - **`test` with no operands is false**, as in bash, rather than exit 2. An
   operator missing its operand stays a loud error — that one is a deliberate
   divergence, since bash reads `test -f` as a non-empty string and returns
