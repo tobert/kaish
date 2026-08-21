@@ -116,16 +116,23 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
-- **An `if`/`while` condition's stderr reaches the author.** The condition
-  command's `ExecResult` was dropped after its exit code was read, so every
-  diagnostic a condition produced disappeared: `if cat /nonexistent; then …`
-  printed nothing at all, where bash prints the error. A command that failed
-  loudly became a silent false purely by sitting in a condition. The rule
-  already existed one arm over — `$(…)` routes its stderr to the enclosing
-  statement because it "belongs to the statement, never to its value" — and a
-  condition is the same case. A condition's *stdout* is still dropped; that
-  needs a channel a statement does not have (see GH #369) and is pinned by a
-  test rather than left unstated.
+- **An `if`/`while` condition's output reaches the author.** The condition
+  command's `ExecResult` was dropped after its exit code was read, so
+  everything a condition produced disappeared: `if cat /nonexistent; then …`
+  printed nothing at all and `if echo COND; then echo BODY; fi` printed only
+  `BODY`, where bash prints both. A command that failed loudly became a silent
+  false purely by sitting in a condition. The rule already existed one arm
+  over — `$(…)` routes its stderr to the enclosing statement because it
+  "belongs to the statement, never to its value" — and a condition is the same
+  case. stderr rides the statement's stderr stream; stdout is folded into the
+  statement's own result, so it reaches a pipe, a `$(…)` capture, and a
+  redirect too. `&&`/`||` chains and `elif` conditions print the same way, a
+  short-circuited side still runs nothing, and a `$(…)` inside a condition is
+  not printed twice — its stdout is its value. The condition's exit code is
+  still the `if`'s answer, not the statement's status. A condition's output
+  obeys the output limit like any other output, and a condition whose output
+  was capped still counts as true. stderr reads in the order it was produced:
+  the condition ran before the branch, so it reports first.
 - **Validation binds a `raw_argv` tool's words in source order**, the way
   execution does. It split them by token shape instead, so a leading-dash word
   went to `flags` and a bareword to `positional` and the operand ORDER was
