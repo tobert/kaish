@@ -62,6 +62,27 @@ breaking entries are marked **BREAKING**.
   that compensated for the offset must stop.
 
 ### Added
+- **BREAKING: `KernelConfig::errexit_enabled` and `ExecuteOptions::errexit` —
+  a config-level errexit default and per-call override.** An embedder whose
+  exit status is a security or gating decision (a policy hook: 0 continues a
+  tool call, non-zero denies it) needs an early failure to abort the script,
+  not vanish behind a later statement's success — kaish's default is standard
+  shell behavior, where the script's status is the *last* statement's, not
+  the first failure's. `set -e` written into the script already does this,
+  and stays the preferred fix wherever the embedder controls the script
+  text — a reader sees it. The new knobs cover the case where an embedder
+  cannot rely on the script's author to write it:
+  `KernelConfig::errexit_enabled` sets a kernel-wide default (`.with_errexit`,
+  same shape as `trash_enabled`/`.with_trash`), and `ExecuteOptions::errexit`
+  overrides it for one call (e.g. a strict guard alongside advisory calls
+  left at the default). Both feed the same runtime state `set -e`/`set +e`
+  mutate, so there is one notion of "errexit is on" — `set -o` reports it
+  regardless of which one set it, which is what makes a config-set default
+  (invisible in the script text) acceptable at all. **Off by default; no
+  behavior change for an existing embedder.** Marked breaking because it adds
+  a field to two public, non-`#[non_exhaustive]` structs — any construction
+  by full literal (not the documented `::new()`/preset + builder pattern)
+  needs the new field.
 - **`plan` builtin — the statement projection, reachable from a kaish body.**
   `plan '<statement>' --json` emits the same object `kaish --plan` does, byte
   for byte, and `plan` with no argument reads the statement from stdin. Nothing

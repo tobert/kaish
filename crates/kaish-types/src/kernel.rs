@@ -93,6 +93,22 @@ pub struct ExecuteOptions {
     /// `Kernel::cancel()`. Keep the closure cheap: it runs on the hot path.
     /// `None` (the default) polls nothing.
     pub interrupt: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Per-call override for errexit (`set -e`): abort on a statement's
+    /// first nonzero exit instead of continuing to the next one.
+    ///
+    /// **Precedence:** `Some(enabled)` wins over `KernelConfig::errexit_enabled`
+    /// for this call only, and is restored to whatever the kernel already had
+    /// (the config default, or a prior call's `set -e`/`set +e`) when the call
+    /// returns. `None` (the default) leaves errexit exactly as the kernel
+    /// already has it — no override, no restore. Either way, a `set -e` /
+    /// `set +e` the script itself runs still applies for the rest of that
+    /// call: this and the config default only pick the *starting* value of
+    /// the one piece of state (`Scope::error_exit`) that `set -e` also
+    /// mutates, so `set -o` always reports the true, single answer.
+    ///
+    /// Use this to run one call (e.g. a security/gating hook) with errexit
+    /// on while the kernel's other calls keep the shell-standard default off.
+    pub errexit: Option<bool>,
 }
 
 impl ExecuteOptions {
@@ -171,6 +187,14 @@ impl ExecuteOptions {
     /// case) or a raw `Vec<u8>` (binary, GH #176) both work.
     pub fn with_stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(stdin.into());
+        self
+    }
+
+    /// Force errexit on or off for this call only, overriding
+    /// `KernelConfig::errexit_enabled`. See the `errexit` field doc for
+    /// exact precedence and restore behavior.
+    pub fn with_errexit(mut self, enabled: bool) -> Self {
+        self.errexit = Some(enabled);
         self
     }
 }

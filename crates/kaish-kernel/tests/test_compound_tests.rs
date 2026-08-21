@@ -218,7 +218,7 @@ async fn a_lone_operator_is_loud_not_a_string(#[case] script: &str) {
 async fn set_dash_o_reports_every_option() {
     let k = kernel();
     let out = k.execute("set -o").await.expect("kernel execute").text_out().into_owned();
-    for name in ["glob", "output-limit", "trash"] {
+    for name in ["errexit", "glob", "output-limit", "trash"] {
         assert!(out.contains(name), "`set -o` should list {name}: {out:?}");
     }
     assert!(out.contains("on") && out.contains("off"), "states missing: {out:?}");
@@ -247,13 +247,17 @@ async fn set_dash_o_is_structured() {
     let out = k.execute("set -o --json").await.expect("exec").text_out().into_owned();
     let rows: serde_json::Value = serde_json::from_str(&out).expect("parses as JSON");
     let rows = rows.as_array().expect("array");
-    // Grew to 4 when pipefail became a real option.
-    assert_eq!(rows.len(), 4, "{rows:?}");
-    assert_eq!(rows[0]["OPTION"], "glob");
-    assert!(
-        rows.iter().any(|r| r["OPTION"] == "pipefail"),
-        "pipefail must be reportable: {rows:?}"
-    );
+    // Grew to 5: errexit and pipefail both became reportable options.
+    // Asserted by NAME, not by index — two sibling branches both added a row
+    // here and both had pinned `rows[0]`, which is what made them conflict for
+    // no behavioral reason.
+    assert_eq!(rows.len(), 5, "{rows:?}");
+    for name in ["errexit", "glob", "pipefail", "output-limit", "trash"] {
+        assert!(
+            rows.iter().any(|r| r["OPTION"] == name),
+            "`{name}` must be reportable: {rows:?}"
+        );
+    }
 }
 
 /// Setting an option still works and still rejects an unknown name — the

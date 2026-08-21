@@ -239,6 +239,20 @@ pub struct KernelConfig {
     /// or via `KAISH_TRASH=1`.
     pub trash_enabled: bool,
 
+    /// Enable errexit (`set -e`) at kernel construction (set -o errexit default).
+    ///
+    /// When enabled, a script aborts at the first statement that exits
+    /// nonzero instead of continuing to the next one. **Off by default** —
+    /// standard shell behavior, so an embedder upgrading kaish sees no
+    /// change. There is one piece of state behind this
+    /// (`Scope::error_exit_enabled`), seeded from this field and mutated at
+    /// runtime by `set -e`/`set +e`: this only picks the *starting* value,
+    /// a script's own `set -e`/`set +e` still applies afterward regardless
+    /// of what this was, and `set -o` always reports the true, single
+    /// answer no matter which one set it. `ExecuteOptions::errexit`
+    /// overrides this for one call.
+    pub errexit_enabled: bool,
+
     /// Variables to populate the root scope with at construction, all marked
     /// for export to child processes.
     ///
@@ -379,6 +393,7 @@ impl Default for KernelConfig {
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_external_commands: cfg!(feature = "subprocess"),
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+                errexit_enabled: false,
                 initial_vars: HashMap::new(),
                 request_timeout: None,
                 kill_grace: Duration::from_secs(2),
@@ -400,6 +415,7 @@ impl Default for KernelConfig {
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_external_commands: false,
                 trash_enabled: false,
+                errexit_enabled: false,
                 initial_vars: HashMap::new(),
                 request_timeout: None,
                 kill_grace: Duration::from_secs(2),
@@ -427,6 +443,7 @@ impl KernelConfig {
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
             trash_enabled: false,
+            errexit_enabled: false,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
@@ -457,6 +474,7 @@ impl KernelConfig {
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
             trash_enabled: false,
+            errexit_enabled: false,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
@@ -495,6 +513,7 @@ impl KernelConfig {
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            errexit_enabled: false,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
@@ -530,6 +549,7 @@ impl KernelConfig {
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            errexit_enabled: false,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
@@ -561,6 +581,7 @@ impl KernelConfig {
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
+            errexit_enabled: false,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
@@ -587,6 +608,7 @@ impl KernelConfig {
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: false,
             trash_enabled: false,
+            errexit_enabled: false,
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
@@ -646,6 +668,13 @@ impl KernelConfig {
     /// Enable or disable trash-on-delete at startup.
     pub fn with_trash(mut self, enabled: bool) -> Self {
         self.trash_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable errexit (`set -e`) at startup. See `errexit_enabled`
+    /// for precedence against `ExecuteOptions::errexit` and runtime `set -e`.
+    pub fn with_errexit(mut self, enabled: bool) -> Self {
+        self.errexit_enabled = enabled;
         self
     }
 
@@ -1210,7 +1239,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, trash_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, trash_enabled, errexit_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, .. } = config;
 
         if no_host_side_channel {
             output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
@@ -1262,6 +1291,7 @@ impl Kernel {
                     scope.set_exported(name, value);
                 }
                 scope.set_trash_enabled(trash_enabled);
+                scope.set_error_exit(errexit_enabled);
                 scope
             }),
             initial_vars,
@@ -2078,6 +2108,40 @@ impl Kernel {
             }
             drop(scope);
             Some(VarsFrameGuard { kernel: self, newly_exported: newly })
+        } else {
+            None
+        };
+
+        // Per-call errexit override (`ExecuteOptions::errexit`): save the
+        // kernel's current errexit state, apply the override, restore the
+        // saved value on Drop so it doesn't leak into the next call. `None`
+        // leaves errexit exactly as the kernel already has it — no save, no
+        // restore. Same RAII pattern as CwdGuard/StdinGuard.
+        struct ErrexitGuard<'a> {
+            kernel: &'a Kernel,
+            saved: bool,
+        }
+        impl Drop for ErrexitGuard<'_> {
+            fn drop(&mut self) {
+                let Ok(mut scope) = self.kernel.scope.try_write() else {
+                    tracing::error!(
+                        "errexit guard: scope lock unexpectedly busy; \
+                         skipping errexit restore — override may leak to next call"
+                    );
+                    return;
+                };
+                scope.set_error_exit(self.saved);
+            }
+        }
+        let _errexit_guard: Option<ErrexitGuard<'_>> = if let Some(enabled) = opts.errexit {
+            let mut scope = self.scope.write().await;
+            // The RAW flag, not `error_exit_enabled()`: that one is false
+            // while errexit is suppressed inside a `&&`/`||` left side, and
+            // restoring from it would turn `set -e` off for good.
+            let saved = scope.error_exit_flag();
+            scope.set_error_exit(enabled);
+            drop(scope);
+            Some(ErrexitGuard { kernel: self, saved })
         } else {
             None
         };
@@ -4897,16 +4961,19 @@ impl Kernel {
             // Build tool_args from args (async for command substitution support)
             let tool_args = self.build_args_async(args, None).await?;
 
-            // Create isolated scope (like user tools). The trash rail is NOT
-            // session state a script may shed: a `.kai` script starting from
-            // a blank scope would otherwise overwrite and delete without the
-            // recovery net `set -o trash` promised. Carry it.
+            // Create isolated scope (like user tools). The trash rail and
+            // errexit are NOT session state a script may shed: a `.kai`
+            // script starting from a blank scope would otherwise overwrite
+            // and delete without the recovery net `set -o trash` promised,
+            // or run past a gating failure the caller turned errexit on for.
+            // Carry both.
             let mut isolated_scope = Scope::new();
             {
                 let scope = self.scope.read().await;
                 isolated_scope.set_pid(scope.pid());
                 isolated_scope.set_trash_enabled(scope.trash_enabled());
                 isolated_scope.set_trash_max_size(scope.trash_max_size());
+                isolated_scope.set_error_exit(scope.error_exit_enabled());
             }
 
             // Set up positional parameters ($0 = script name, $1, $2, ... = args)
@@ -5780,11 +5847,11 @@ impl Kernel {
     ///
     /// Clears in-memory variables and resets cwd to root. History is not
     /// cleared (it persists across resets). The kernel's `$$` identity, the
-    /// trash-on-delete configuration, and any frontend-seeded `initial_vars`
-    /// (HOME/PATH/etc, from `KernelConfig`) are re-applied to the fresh
-    /// scope rather than silently reverting to defaults — an embedder that
-    /// opted into trash must not find it quietly disabled after a `reset()`
-    /// between requests.
+    /// trash-on-delete configuration, the current errexit state, and any
+    /// frontend-seeded `initial_vars` (HOME/PATH/etc, from `KernelConfig`)
+    /// are re-applied to the fresh scope rather than silently reverting to
+    /// defaults — an embedder that opted into trash or errexit must not find
+    /// either quietly disabled after a `reset()` between requests.
     ///
     /// **Background jobs are untouched** (GH #245) — `reset()` is a scope/cwd
     /// reset, not a session boundary for `&`. A job started before `reset()`
@@ -5798,6 +5865,7 @@ impl Kernel {
             let mut scope = self.scope.write().await;
             let pid = scope.pid();
             let trash_enabled = scope.trash_enabled();
+            let errexit_enabled = scope.error_exit_enabled();
             let mut fresh = Scope::new();
             fresh.set_pid(pid);
             for (name, value) in self.initial_vars.clone() {
@@ -5807,6 +5875,10 @@ impl Kernel {
             // requests that dropped it would hand the next request an
             // unpinned session (spec §F.3 item 3).
             fresh.set_trash_enabled(trash_enabled);
+            // Same reasoning as trash: an embedder relying on errexit for a
+            // gating decision must not find it quietly disabled after a
+            // `reset()` between requests.
+            fresh.set_error_exit(errexit_enabled);
             *scope = fresh;
         }
         {
