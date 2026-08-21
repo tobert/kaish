@@ -2793,6 +2793,13 @@ where
     // Base: test expr OR command
     let base = choice((test_expr_condition, command_condition));
 
+    // `!` negates the command that follows it, BEFORE `&&`/`||` fold below —
+    // bash reads `! true && true` as `(! true) && true`. Repeated so `! ! x`
+    // parses, which bash also accepts.
+    let base = just(Token::Bang)
+        .repeated()
+        .foldr(base, |_, inner| Expr::Not(Box::new(inner)));
+
     // && has higher precedence than ||
     // First chain with && (higher precedence)
     let and_expr = base.clone().foldl(

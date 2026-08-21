@@ -536,6 +536,7 @@ impl<'a> Validator<'a> {
     /// Validate an expression.
     fn validate_expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::Not(inner) => self.validate_expr(inner),
             Expr::Literal(_) => {}
             Expr::VarRef(path) => self.validate_var_ref(path),
             Expr::Interpolated(parts) => {

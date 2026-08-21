@@ -177,6 +177,9 @@ impl<'a> Evaluator<'a> {
     /// Evaluate an expression to a value.
     pub fn eval(&mut self, expr: &Expr) -> EvalResult<Value> {
         match expr {
+            // A `!` in a condition; the sync evaluator sees it when the
+            // condition holds no command substitution.
+            Expr::Not(inner) => Ok(Value::Bool(!is_truthy(&self.eval(inner)?))),
             Expr::Literal(value) => self.eval_literal(value),
             Expr::VarRef(path) => self.eval_var_ref(path),
             Expr::Interpolated(parts) => self.eval_interpolated(parts),
