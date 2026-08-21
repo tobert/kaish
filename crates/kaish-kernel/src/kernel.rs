@@ -4038,6 +4038,15 @@ impl Kernel {
                     // builtins like `stat`/`cp` use).
                     let path_str = crate::interpreter::value_to_text_sink_named(&path_value, "a path")
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // The empty path names no file. Resolving it lands on the
+                    // working directory, so `[[ -e "" ]]` answered true — bash
+                    // says false, and so does every reading of "does this file
+                    // exist". Same guard as `test`'s `file_test`; the two
+                    // spellings of a file test must not disagree about a path,
+                    // and `test_compound_tests` pins that they agree.
+                    if path_str.is_empty() {
+                        return Ok(false);
+                    }
                     // Resolve against the *session* cwd, not the process cwd, so a
                     // relative `[[ -f rel ]]` honors `cd` and agrees with the
                     // VFS-aware `test` builtin (GH #101). Backend stats a raw

@@ -28,6 +28,7 @@ use crate::interpreter::{
     is_collection, numeric_compare, scalar_test_operand_error, value_to_string,
     value_to_text_sink_named, values_equal, ExecResult,
 };
+use kaish_tool_api::{IssueCode, ValidationIssue};
 use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 pub struct Test;
@@ -70,6 +71,73 @@ impl Tool for Test {
         .with_raw_argv()
     }
 
+    /// Reject `-a`/`-o`/`(`/`)` before anything runs.
+    ///
+    /// `execute` refuses them too, but only a validator error stops the
+    /// statement — and a runtime refusal inside an `if` condition is worth
+    /// very little, since the branch is chosen from the exit code.
+    ///
+    /// Reads `positional` in source order, because `test` is `raw_argv` and
+    /// the validation binder now mirrors that (see
+    /// `build_tool_args_for_validation`). Order is the whole point: an
+    /// operator word is only an operator in an operator SLOT. `test "-a" =
+    /// "-a"` compares two strings and `test -f "-a"` stats a file named
+    /// `-a` — both legal, both refused by the first version of this rule,
+    /// which scanned every word because a decomposed `ToolArgs` had no order
+    /// left to read.
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        // EVERY operand, rendered the way `eval_test` renders one when it asks
+        // whether a word is an operator. Dropping the non-strings — the first
+        // version filtered for `Value::String` — shifted the slots by one for
+        // each, so `test "-a" = 1` looked like the two-operand `-a =` and was
+        // refused, while `test -a 1` looked like a lone word and was not.
+        // Runtime keeps operands typed and compares `value_to_string`, so this
+        // is what it sees.
+        let words: Vec<String> = args
+            .positional
+            .iter()
+            .map(crate::interpreter::value_to_string)
+            .collect();
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+
+        // A placeholder means an unevaluated expansion; its runtime value is
+        // unknown, so judging it would report a program that may be fine.
+        if words.contains(&"<dynamic>") {
+            return Vec::new();
+        }
+
+        // Same slots `eval_test`/`eval_primary` read: skip the leading `!`
+        // run, then the operator is the first word of a two-operand primary
+        // and the middle word of a three-operand one. Anything longer is
+        // already an error, and `-a`/`-o` is why it usually happens.
+        let mut rest = words.as_slice();
+        while rest.len() >= 2 && rest[0] == "!" {
+            rest = &rest[1..];
+        }
+        let found = match rest.len() {
+            // A single operand has no operator slot for a compound to sit in:
+            // `test "-a"` is one string. Runtime answers it accurately with
+            // "'-a' needs an operand", and since a condition's output reaches
+            // the author that report is worth more than E020's, which would
+            // name a compound the author never wrote.
+            2 => Some(rest[0]).filter(|w| is_compound_op(w)),
+            3 => Some(rest[1]).filter(|w| is_compound_op(w)),
+            n if n > 3 => rest.iter().copied().find(|w| is_compound_op(w)),
+            _ => None,
+        };
+
+        match found {
+            Some(op) => vec![
+                ValidationIssue::error(
+                    IssueCode::TestCompoundOperator,
+                    format!("test: '{op}' is not supported — {COMPOUND_HINT}"),
+                )
+                .with_suggestion("test EXPR1 && test EXPR2, or [[ EXPR1 && EXPR2 ]]"),
+            ],
+            None => Vec::new(),
+        }
+    }
+
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
@@ -103,17 +171,28 @@ fn is_binary_op(s: &str) -> bool {
     matches!(s, "=" | "==" | "!=" | "-eq" | "-ne" | "-gt" | "-lt" | "-ge" | "-le")
 }
 
+/// The XSI compound / grouping operators.
+///
 /// The XSI compound / grouping operators kaish deliberately does not implement.
-fn is_rejected_op(s: &str) -> bool {
+///
+/// bash gives `-a`/`-o` two meanings apiece — the binary AND/OR, and a unary
+/// `-a FILE` (a synonym for `-e`) / `-o NAME` (a shell option query) — and
+/// that overload is what makes the binary form ambiguous to parse. coreutils'
+/// own man page warns about it and points at `&&`/`||` instead. On top of the
+/// ambiguity, three of bash's operand-count rules outrank `!` in ways that
+/// surprise a careful reader: `test ! = x` compares two strings, `test ! -a ""`
+/// is an AND, and `test ! x -o x` negates the whole expression rather than
+/// `x`. kaish declines all of it and says so, at every arity.
+fn is_compound_op(s: &str) -> bool {
     matches!(s, "-a" | "-o" | "(" | ")")
-}
-
-fn is_any_op(s: &str) -> bool {
-    is_unary_op(s) || is_binary_op(s) || is_rejected_op(s) || s == "!"
 }
 
 const COMPOUND_HINT: &str =
     "kaish `test` has no -a/-o/() compound — chain with shell `&&`/`||` or use `[[ ... ]]`";
+
+fn is_any_op(s: &str) -> bool {
+    is_unary_op(s) || is_binary_op(s) || is_compound_op(s) || s == "!"
+}
 
 /// Evaluate a `test` expression. A single (or parity-collapsed) leading `!`
 /// negates; the rest is a primary. Returns Err (→ exit 2) on any usage/type
@@ -134,7 +213,9 @@ async fn eval_test(ctx: &ExecContext, operands: &[Value]) -> Result<bool, String
 
 async fn eval_primary(ctx: &ExecContext, operands: &[Value]) -> Result<bool, String> {
     match operands.len() {
-        0 => Err("test: missing expression".to_string()),
+        // No operands is false, as in bash. Nothing can be hidden by it:
+        // there is no expression to have gotten wrong.
+        0 => Ok(false),
         1 => {
             let operand = &operands[0];
             // A bare collection has no truth value here — loud Shape error.
@@ -162,7 +243,7 @@ async fn eval_primary(ctx: &ExecContext, operands: &[Value]) -> Result<bool, Str
         }
         2 => {
             let op = value_to_string(&operands[0]);
-            if is_rejected_op(&op) {
+            if is_compound_op(&op) {
                 return Err(format!("test: '{op}' is not supported — {COMPOUND_HINT}"));
             }
             if is_unary_op(&op) {
@@ -174,7 +255,7 @@ async fn eval_primary(ctx: &ExecContext, operands: &[Value]) -> Result<bool, Str
         }
         3 => {
             let op = value_to_string(&operands[1]);
-            if is_rejected_op(&op) {
+            if is_compound_op(&op) {
                 return Err(format!("test: '{op}' is not supported — {COMPOUND_HINT}"));
             }
             if is_binary_op(&op) {
@@ -248,6 +329,14 @@ fn apply_binary(left: &Value, op: &str, right: &Value) -> Result<bool, String> {
 /// Stat `path` through the VFS backend and answer the file predicate — mirrors
 /// `[[`'s `FileTest` arm so the two stay consistent.
 async fn file_test(ctx: &ExecContext, op: &str, path: &str) -> bool {
+    // The empty path names no file. Resolving it lands on the working
+    // directory, so `test -e ""` answered true — bash says false, and so does
+    // every reading of "does this file exist". `eval_test_async`'s `FileTest`
+    // arm carries the same guard; a fix that lands in only one of them makes
+    // the mirror above a lie, which is what happened the first time.
+    if path.is_empty() {
+        return false;
+    }
     let resolved = ctx.resolve_path(path);
     let entry = ctx.backend.stat(&resolved).await.ok();
     match op {
