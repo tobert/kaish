@@ -464,6 +464,7 @@ impl Tool for JqNative {
             ParamSchema::required("filter", "string", "jq filter expression").positional(),
         );
         schema
+        .with_typed_substitution()
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

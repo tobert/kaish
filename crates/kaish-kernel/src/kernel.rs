@@ -3561,7 +3561,20 @@ impl Kernel {
                         // `x=$(embedder_tool)` and structured iteration over
                         // its result depend on `.data` surviving the crossing
                         // back into the kernel.
-                        return Ok(ExecResult::from(tool_result));
+                        let mut result = ExecResult::from(tool_result);
+                        // The same rule the builtin dispatch applies, applied
+                        // here too — this seam returns before it. Without this
+                        // an embedder tool that hands back a value got its
+                        // `$(…)` capture stringified, which is precisely what
+                        // the comment above promises does not happen.
+                        let data_is_only_output = result.data.is_some()
+                            && !result.has_output()
+                            && result.text_out().is_empty();
+                        result.data_is_value |= data_is_only_output
+                            || tool_schema
+                                .as_ref()
+                                .is_some_and(|s| s.typed_substitution);
+                        return Ok(result);
                     }
                     Err(BackendError::ToolNotFound(_)) => {
                         // The backend confirms no such tool exists — fall
@@ -3585,7 +3598,7 @@ impl Kernel {
         // read the tool's schema and nothing after this block does, so the whole
         // schema borrow is scoped here and cannot ride the `tool.execute` await
         // below (GH #48, item 7).
-        let (tool_args, wants_help, owns_output, raw_argv) = {
+        let (tool_args, wants_help, owns_output, raw_argv, typed_substitution) = {
             // Prefer the kernel's schema catalog over `tool.schema()`: for a
             // clap-derived builtin, `schema()` rebuilds the entire clap
             // `Command` and reflects it into a fresh `ToolSchema` — ~34
@@ -3625,7 +3638,7 @@ impl Kernel {
                 && ((tool_args.flags.contains("help") && !schema_claims("help"))
                     || (tool_args.flags.contains("h") && !schema_claims("-h")));
 
-            (tool_args, wants_help, schema.owns_output, schema.raw_argv)
+            (tool_args, wants_help, schema.owns_output, schema.raw_argv, schema.typed_substitution)
         };
 
         if wants_help {
@@ -3672,7 +3685,28 @@ impl Kernel {
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
         GlobalFlags::apply_from_args(&tool_args, raw_argv, &mut *ctx);
 
-        let result = tool.execute(tool_args, &mut *ctx).await;
+        let mut result = tool.execute(tool_args, &mut *ctx).await;
+        // A command substitution binds `.data` only when it is the result's
+        // VALUE. `--json` and the pipeline sideband read `.data` either way,
+        // so this marks the ONE consumer whose answer is a matter of taste.
+        //
+        // Two ways to qualify. A tool that printed NOTHING has only its data,
+        // so that data is trivially its value — this is `fromjson`'s shape and
+        // an out-of-tree tool's, and it needs no declaration, which is what
+        // keeps this from breaking embedder tools. A tool that printed text
+        // AND attached data has to say which one it means, because the two
+        // readings are equally defensible: `jq` means the data, `cut` means
+        // the text it printed.
+        let data_is_only_output = result.data.is_some()
+            && !result.has_output()
+            && result.text_out().is_empty();
+        // OR, never assign: a wrapper that re-dispatches an inner command
+        // returns the INNER result, and stamping it from the wrapper's own
+        // schema erased what the inner tool declared —
+        // `$(timeout 5 fromjson '[1,2]')` bound text while `$(fromjson …)`
+        // bound a list. A result arrives here fresh from `tool.execute`, so a
+        // marker already set is one the tool or its inner dispatch meant.
+        result.data_is_value |= typed_substitution || data_is_only_output;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
@@ -4571,13 +4605,16 @@ impl Kernel {
                             push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
-                            last_data = r.data;
+                            // A structured VIEW of printed text does not escape as the
+                    // substitution's value — `$(cut -f2 f)` is the text `cut`
+                    // printed, the same as `$(awk '{print $2}' f)`.
+                    last_data = if r.data_is_value { r.data } else { None };
                         }
                         ControlFlow::Return { value } => {
                             push_out(&mut accumulated_out, &value);
                             accumulated_err.push_str(&value.err);
                             last_code = value.code;
-                            last_data = value.data;
+                            last_data = if value.data_is_value { value.data } else { None };
                             break;
                         }
                         ControlFlow::Exit { code, result: r } => {
@@ -4590,7 +4627,7 @@ impl Kernel {
                             push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
-                            last_data = r.data;
+                            last_data = if r.data_is_value { r.data } else { None };
                         }
                     }
                 }
@@ -4615,6 +4652,9 @@ impl Kernel {
         let code = exit_code.unwrap_or(last_code);
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
         result.err = accumulated_err;
+        // Whatever survived the gate above IS a value, so the result says so
+        // and a further `$( )` around this one keeps it typed.
+        result.data_is_value = last_data.is_some();
         result.data = last_data;
         Ok(result)
     }
@@ -4721,13 +4761,13 @@ impl Kernel {
                     push_out(&mut accumulated_out, &r);
                     accumulated_err.push_str(&r.err);
                     last_code = r.code;
-                    last_data = r.data;
+                    last_data = if r.data_is_value { r.data } else { None };
                 }
                 ControlFlow::Return { value } => {
                     push_out(&mut accumulated_out, &value);
                     accumulated_err.push_str(&value.err);
                     last_code = value.code;
-                    last_data = value.data;
+                    last_data = if value.data_is_value { value.data } else { None };
                     break;
                 }
                 ControlFlow::Exit { code, result: r } => {
@@ -4741,6 +4781,9 @@ impl Kernel {
 
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
+        // Whatever survived the gate above IS a value, so the result says so
+        // and a further `$( )` around this one keeps it typed.
+        result.data_is_value = last_data.is_some();
         result.data = last_data;
         Ok(result)
     }
@@ -4843,7 +4886,7 @@ impl Kernel {
                             push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
-                            last_data = r.data.clone();
+                            last_data = if r.data_is_value { r.data.clone() } else { None };
                             self.update_last_result(&r).await;
                         }
                         ControlFlow::Break { .. } | ControlFlow::Continue { .. } => {
@@ -4867,7 +4910,10 @@ impl Kernel {
                             let mut result =
                                 ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
                             result.err = accumulated_err;
-                            result.data = last_data;
+                            // Whatever survived the gate above IS a value, so the result says so
+        // and a further `$( )` around this one keeps it typed.
+        result.data_is_value = last_data.is_some();
+        result.data = last_data;
                             return Ok(result);
                         }
                     }
@@ -4880,6 +4926,9 @@ impl Kernel {
 
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
+        // Whatever survived the gate above IS a value, so the result says so
+        // and a further `$( )` around this one keeps it typed.
+        result.data_is_value = last_data.is_some();
         result.data = last_data;
         Ok(result)
     }
@@ -5025,13 +5074,13 @@ impl Kernel {
                                 push_out(&mut accumulated_out, &r);
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
-                                last_data = r.data;
+                                last_data = if r.data_is_value { r.data } else { None };
                             }
                             ControlFlow::Return { value } => {
                                 push_out(&mut accumulated_out, &value);
                                 accumulated_err.push_str(&value.err);
                                 last_code = value.code;
-                                last_data = value.data;
+                                last_data = if value.data_is_value { value.data } else { None };
                                 break;
                             }
                             ControlFlow::Exit { code, result: r } => {
@@ -5044,7 +5093,7 @@ impl Kernel {
                                 push_out(&mut accumulated_out, &r);
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
-                                last_data = r.data;
+                                last_data = if r.data_is_value { r.data } else { None };
                             }
                         }
                     }
@@ -5068,7 +5117,10 @@ impl Kernel {
             let code = exit_code.unwrap_or(last_code);
             let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
             result.err = accumulated_err;
-            result.data = last_data;
+            // Whatever survived the gate above IS a value, so the result says so
+        // and a further `$( )` around this one keeps it typed.
+        result.data_is_value = last_data.is_some();
+        result.data = last_data;
             return Ok(Some(result));
         }
 
@@ -7149,7 +7201,14 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     push_stdout_of(accumulated, new);
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
+    // The marker travels WITH the data, always. Copying one without the other
+    // is wrong in both directions: a compound statement ending in `fromjson`
+    // lost its value (`$(if true; then fromjson '[1,2]'; fi)` bound text), and
+    // a chain whose LEFT side was typed kept that marker over the right side's
+    // data (`$(fromjson '[1,2]' && cut -f2 f)` bound `["b"]` typed — the very
+    // bug this mechanism exists to fix, re-entering through a side door).
     accumulated.data = new.data.clone();
+    accumulated.data_is_value = new.data_is_value;
     accumulated.did_spill = new.did_spill;
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
@@ -7183,7 +7242,17 @@ fn fold_block_output_into_flow(block_output: ExecResult, flow: &mut ControlFlow)
 /// into that loop's result.
 fn accumulate_flow_output(accumulated: &mut ExecResult, flow: &ControlFlow) {
     if let ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } = flow {
+        // `break`/`continue` carry no value of their own, and a signal that
+        // produced nothing must not erase what the body already produced —
+        // leaving a loop early stops it, it does not unmake its output. Same
+        // reasoning as `fold_block_output_into_flow`'s, one step further:
+        // `$(while true; do fromjson '[5]'; break; done)` bound text because
+        // the empty `break` result overwrote the body's value.
+        let carried = (accumulated.data.take(), accumulated.data_is_value);
         accumulate_result(accumulated, result);
+        if result.data.is_none() {
+            (accumulated.data, accumulated.data_is_value) = carried;
+        }
     }
 }
 

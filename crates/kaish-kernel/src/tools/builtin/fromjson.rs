@@ -64,6 +64,7 @@ impl Tool for FromJson {
                 ("Capture for access", "cfg=$(fromjson \"$text\")"),
             ],
         )
+        .with_typed_substitution()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

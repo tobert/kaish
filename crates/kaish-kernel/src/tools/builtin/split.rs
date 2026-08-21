@@ -78,6 +78,7 @@ impl Tool for Split {
                 ("Split stdin on whitespace", "echo \"a b c\" | split"),
             ],
         )
+        .with_typed_substitution()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

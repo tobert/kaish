@@ -93,6 +93,7 @@ impl Tool for Keys {
                 ),
             ],
         )
+        .with_typed_substitution()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

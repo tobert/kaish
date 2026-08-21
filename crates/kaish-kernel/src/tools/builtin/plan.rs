@@ -49,6 +49,7 @@ impl Tool for PlanTool {
                 ("Plan what is on stdin", "echo \"$stmt\" | plan --json"),
             ],
         )
+        .with_typed_substitution()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
