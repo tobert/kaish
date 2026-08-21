@@ -171,6 +171,15 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **A spill stays reported when a later statement succeeds.** `did_spill` was
+  assigned rather than OR-ed as a block accumulated its statements, so
+  `seq 1 100000; echo after` under an output limit reported `did_spill: false`
+  with output still truncated — an embedder asking "did I get everything" was
+  told yes. It is a fact about the output, not a status, so a later statement
+  does not clear it; `original_code` follows the same rule and keeps the first
+  one. The exit CODE is unchanged and still belongs to the last statement, as
+  in any shell.
+
 - **Arithmetic inside a `$(…)` inside a double-quoted string works, and stops
   leaking an internal name.** `echo "$(seq 1 $((1+1)))"` and
   `echo "$(echo $((1+1)))"` were parse errors, and
