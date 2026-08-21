@@ -3335,13 +3335,14 @@ fn tokenize_impl(
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
     for (result, span) in Token::lexer(&scan_output.text).spanned() {
-        // Every error already stops the parse, and only the first is rendered,
-        // so collecting more is pure cost — and it is not linear cost. A token
-        // that scans for its own terminator (`"`, `${`) reads to end-of-input
-        // when the terminator is missing, and logos then retries from the next
-        // character, so a file of N unterminated openers costs O(N²): 20000
-        // `"$(echo "` openers took 4.6s uncapped, 0.02s at this cap. The cap is
-        // generous enough that a future multi-error report has material.
+        // A token that scans for its own terminator (`"`, `${`) reads to
+        // end-of-input when the terminator is missing, and logos then retries
+        // from the next character — so a file of N unterminated openers costs
+        // O(N²) to lex: 20000 `"$(echo "` openers took 4.6s uncapped and 0.02s
+        // at this cap. Both renderers join every collected error
+        // (`Kernel::execute`, the REPL), so the cap also bounds what a single
+        // typo can print; 64 diagnostics is already past what anyone reads,
+        // and one runaway opener should not bury the first real error.
         const MAX_LEXER_ERRORS: usize = 64;
         if errors.len() >= MAX_LEXER_ERRORS {
             break;

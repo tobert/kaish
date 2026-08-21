@@ -104,8 +104,11 @@ async fn an_unterminated_string_is_still_an_error(#[case] script: &str) {
         .err()
         .unwrap_or_else(|| panic!("`{script}` must be refused"))
         .to_string();
+    // NOT `contains("parse")` — every kernel parse error carries that word, so
+    // the assertion would hold even if the curated diagnostic regressed to a
+    // generic "unexpected character".
     assert!(
-        err.contains("parse") || err.contains("nterminated"),
-        "`{script}` should name the parse problem, got: {err}"
+        err.contains("unterminated"),
+        "`{script}` should name what is unterminated, got: {err}"
     );
 }

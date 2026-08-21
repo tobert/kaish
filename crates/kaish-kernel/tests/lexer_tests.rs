@@ -1125,11 +1125,11 @@ fn lexer_widen_does_not_disturb_ascii_priority(#[case] input: &str, #[case] expe
 ///
 /// A token that scans for its own terminator (`"`, `${`) reads to end-of-input
 /// when the terminator is missing, and logos then retries from the next
-/// character — so N openers cost N scans of the remainder. Every error already
-/// stops the parse and only the first is rendered, so collecting all of them
-/// bought nothing and cost seconds: 20000 `"$(echo "` openers took 4.6s
-/// uncapped and 0.02s capped. Pinning the count catches a regression here as a
-/// slow test rather than as a wrong answer.
+/// character — so N openers cost N scans of the remainder: 20000 `"$(echo "`
+/// openers took 4.6s uncapped and 0.02s capped. Both renderers join every
+/// collected error, so the cap bounds the printed diagnostic too. Pinning the
+/// count catches a regression here as a slow test rather than as a wrong
+/// answer.
 #[test]
 fn lexer_errors_are_capped() {
     // One opening quote, then openers that never pair off. `"$(echo "` repeated
@@ -1137,11 +1137,12 @@ fn lexer_errors_are_capped() {
     // only two ever reach end-of-input. The shape matters more than the size.
     let source = format!("echo \"{}", r#"$(echo ""#.repeat(5000));
     let errors = tokenize(&source).expect_err("unterminated openers must be an error");
-    assert!(
-        errors.len() <= 64,
-        "lexer errors must be capped; got {}",
-        errors.len()
+    // Exactly the cap, not merely "bounded": 5000 openers produce ~5001 errors
+    // uncapped, so `<= 64` alone would also pass with a cap of 1, which would
+    // swallow diagnostics a caller needs.
+    assert_eq!(
+        errors.len(),
+        64,
+        "expected exactly the cap when the input overruns it"
     );
-    // The cap must not swallow the report itself.
-    assert!(!errors.is_empty(), "the error must still be reported");
 }

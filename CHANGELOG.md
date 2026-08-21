@@ -110,10 +110,11 @@ breaking entries are marked **BREAKING**.
   the unclosed string is only its consequence. Spans are unchanged.
 - **A file of unterminated openers no longer costs O(N²).** A token that scans
   for its own terminator reads to end of input when there is none, and the
-  lexer collected an error for every retry though only the first is ever
-  rendered. Lexer errors are capped at 64: 20000 unterminated `"$(echo "`
-  openers went from 4.6s to 0.02s, and 20000 unterminated `${` — which had the
-  same shape before this change — from 1.1s to 0.01s.
+  lexer then retries from the next character, collecting an error each time.
+  Lexer errors are capped at 64: 20000 unterminated `"$(echo "` openers went
+  from 4.6s to 0.02s, and 20000 unterminated `${` — which had the same shape
+  before this change — from 1.1s to 0.01s. A parse error now reports at most
+  64 lexer diagnostics rather than one per opener.
 - **An `if`/`while` condition's stderr reaches the author.** The condition
   command's `ExecResult` was dropped after its exit code was read, so every
   diagnostic a condition produced disappeared: `if cat /nonexistent; then …`
