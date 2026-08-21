@@ -3127,6 +3127,24 @@ impl Kernel {
 
         let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
 
+        // `set -o pipefail`: the pipeline answers with the RIGHTMOST non-zero
+        // stage, not the first. bash's `set -o pipefail; (exit 3) | (exit 4) |
+        // true` is 4, and reading the first non-zero would have said 3.
+        //
+        // Applied BEFORE the spill contract so a spilled pipeline still reports
+        // 3 and keeps the pipefail status as `original_code`, rather than the
+        // last stage's — the spill remap is about output size and should
+        // override whatever the pipeline decided its status was, not race it.
+        //
+        // Read back from the scope the runner just wrote rather than threaded
+        // separately: PIPESTATUS is the one record of what each stage did, so
+        // the mode and the variable cannot disagree about the same pipeline.
+        if ctx.scope.pipefail_enabled() {
+            if let Some(code) = ctx.scope.pipestatus_rightmost_failure() {
+                result.code = code;
+            }
+        }
+
         // Post-hoc spill check + exit-3 remap (catches builtins and fast
         // external commands; also catches a ring overflow that already
         // flipped `did_spill` even when the limit itself is disabled, GH
@@ -8294,32 +8312,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_ignores_unknown_bare_flags_but_rejects_o_pipefail() {
+    async fn test_set_euo_pipefail_is_a_working_prelude() {
         let kernel = Kernel::transient().expect("failed to create kernel");
 
-        // Bash idiom: set -euo pipefail. kaish implements -e, silently
-        // ignores the bare -u (no fixed set to check it against), and now
-        // fails loudly on -o pipefail — kaish has no pipefail (limits.md
-        // documents it as a deliberate omission), so this must not
-        // silently no-op.
-        //
-        // Not asserted here: `result.err`. When the same statement both
-        // enables -e and fails, `Stmt::Command`'s `-e` check replaces the
-        // result with `ControlFlow::exit_code(result.code)`
-        // (`control_flow.rs`), which carries only the numeric code and
-        // discards the failing result's error text — a pre-existing,
-        // general bug (confirmed with `cat` on a missing file too, nothing
-        // specific to `set`) outside this fix's scope. `set_option_tests.rs`
-        // covers the message text without `-e` in the mix.
+        // `set -euo pipefail` is muscle memory for a lot of script authors.
+        // kaish implements -e and pipefail, and silently ignores the bare -u
+        // (no fixed set to check it against). It used to FAIL on -o pipefail,
+        // which mattered well beyond tidiness: an embedder whose exit status
+        // is a policy decision — kaijutsu gates a tool call on it — read a
+        // habitual first line as a deny.
         let result = kernel
-            .execute("set -e -u -o pipefail")
+            .execute("set -euo pipefail")
             .await
-            .expect("set with unknown options failed");
+            .expect("set -euo pipefail failed");
+        assert!(result.ok(), "the prelude must succeed, err={}", result.err);
 
-        assert!(!result.ok(), "set -o pipefail must fail, not silently no-op");
+        // Both options really took effect, not just parsed.
+        let result = kernel.execute("set -o").await.expect("set -o failed");
+        let text = result.text_out();
+        for row in text.lines() {
+            if row.contains("pipefail") {
+                assert!(row.contains("on"), "pipefail should read on: {row}");
+            }
+        }
 
-        // -e should still be enabled: it's a separate flag applied before
-        // the positional loop reaches the failing -o pipefail.
+        // -e is live: the statement after a failure never runs.
         kernel
             .execute(r#"
                 BEFORE="yes"
@@ -8330,7 +8347,7 @@ mod tests {
             .ok();
 
         let after = kernel.get_var("AFTER").await;
-        assert!(after.is_none(), "-e should be enabled despite the -o pipefail failure");
+        assert!(after.is_none(), "-e should be enabled by the prelude");
     }
 
     #[tokio::test]

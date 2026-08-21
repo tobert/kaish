@@ -148,19 +148,18 @@ async fn set_plus_o_unknown_name_fails_loudly() {
 }
 
 #[tokio::test]
-async fn set_o_pipefail_fails_loudly() {
-    // limits.md documents pipefail as a deliberate omission, not an
-    // oversight — an agent reaching for the bash safety must be told kaish
-    // has none, not left believing it took effect.
+async fn set_o_pipefail_is_accepted_and_takes_effect() {
+    // pipefail used to be refused as a deliberate omission. It is implemented,
+    // so the refusal must be gone — and it must actually DO something, or this
+    // would pass on a silent no-op, which is the outcome the old test existed
+    // to prevent.
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("set -o pipefail").await.unwrap();
-    assert!(!result.ok(), "set -o pipefail must fail, not silently no-op");
-    assert_ne!(result.code, 0);
-    assert!(
-        result.err.contains("pipefail"),
-        "error should name pipefail: {:?}",
-        result.err
-    );
+    assert!(result.ok(), "err={:?}", result.err);
+    assert_eq!(result.code, 0);
+
+    let result = kernel.execute("false | true").await.unwrap();
+    assert_eq!(result.code, 1, "pipefail must report the failing stage");
 }
 
 #[tokio::test]
