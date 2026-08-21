@@ -1607,6 +1607,25 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                         )?;
                         continue;
                     }
+                    // A `$(…)` inside the string is a COMMAND, and this pass
+                    // is not the one that reads commands. Copy the body
+                    // verbatim: it is parsed on its own later, and `scan` runs
+                    // over it again there, so arithmetic inside it is handled
+                    // at the level where it belongs.
+                    //
+                    // Reaching in from here was wrong in both directions.
+                    // `echo "$(echo '$((1+1))')"` printed `${__ARITH:1+1__}` —
+                    // an internal name where the author's text should be, with
+                    // no error, because a command's single quotes make that
+                    // arithmetic literal and this pass could not see it was
+                    // inside a command at all. And `echo "$(echo $((1+1)))"`
+                    // was a parse error, because the marker was substituted
+                    // into the OUTER string's token while the body is parsed
+                    // as its own program, which never resolves it.
+                    if dch == '$' && i + 1 < n && chars[i + 1].1 == '(' {
+                        copy_substitution_verbatim(&chars, &mut i, &mut out);
+                        continue;
+                    }
                     out.push(dch);
                     i += 1;
                 }
@@ -1768,6 +1787,72 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
 /// marker into `out` and records the replacement. Single `)` characters
 /// inside the expression are kept (only a `))` pair at depth zero closes),
 /// matching the pre-#95 collector.
+/// Copy a `$(…)` from `chars[*i]` through its balanced `)` into `out`, byte
+/// for byte, advancing `*i` past it.
+///
+/// Used by `scan`'s double-quoted-string arm so the pre-pass does not rewrite
+/// anything inside a command body. Parens are counted, and a `'…'` or `"…"`
+/// run inside the body is copied opaquely so a paren in a quoted word cannot
+/// close the substitution early — the same reason `lex_string` tracks regions.
+/// An unterminated body is copied to end of input and left for the lexer to
+/// report; this pass never decides that a program is malformed.
+fn copy_substitution_verbatim(chars: &[(usize, char)], i: &mut usize, out: &mut String) {
+    let n = chars.len();
+    // `$` and `(` — the caller has already checked both are present.
+    out.push('$');
+    out.push('(');
+    *i += 2;
+    let mut depth = 1usize;
+    while *i < n {
+        let c = chars[*i].1;
+        match c {
+            '\\' => {
+                out.push(c);
+                *i += 1;
+                if *i < n {
+                    out.push(chars[*i].1);
+                    *i += 1;
+                }
+                continue;
+            }
+            '\'' | '"' => {
+                let quote = c;
+                out.push(c);
+                *i += 1;
+                while *i < n {
+                    let q = chars[*i].1;
+                    // A double-quoted run honors `\"`; a single-quoted one has
+                    // no escapes at all, which is why the check is on `quote`.
+                    if q == '\\' && quote == '"' && *i + 1 < n {
+                        out.push(q);
+                        out.push(chars[*i + 1].1);
+                        *i += 2;
+                        continue;
+                    }
+                    out.push(q);
+                    *i += 1;
+                    if q == quote {
+                        break;
+                    }
+                }
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(c);
+                    *i += 1;
+                    return;
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+        *i += 1;
+    }
+}
+
 fn extract_arithmetic(
     chars: &[(usize, char)],
     i: &mut usize,

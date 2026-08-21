@@ -116,6 +116,18 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **Arithmetic inside a `$(…)` inside a double-quoted string works, and stops
+  leaking an internal name.** `echo "$(seq 1 $((1+1)))"` and
+  `echo "$(echo $((1+1)))"` were parse errors, and
+  `echo "$(echo '$((1+1))')"` printed `${__ARITH:1+1__}` — an internal marker
+  in place of the author's own text, with no error at all. The pre-pass that
+  lifts `$((…))` out of a string reached into command bodies: it rewrote
+  arithmetic a command's single quotes had made literal, and for the unquoted
+  form it put the marker in the outer string's token while the body is parsed
+  as its own program, which never resolved it. A `$(…)` in a string is now
+  copied verbatim and scanned when the body itself is parsed. Arithmetic that
+  is genuinely in the string, single quotes and all, still expands:
+  `echo "'$((1+1))'"` is `'2'`, as in bash.
 - **A double-quoted string may hold a `$(…)` whose body has its own quoted
   words.** `echo "$(basename "$p")"` was a parse error — "unterminated command
   substitution: missing `)`" — and so was every form where BOTH levels were

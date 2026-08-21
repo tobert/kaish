@@ -112,3 +112,53 @@ async fn an_unterminated_string_is_still_an_error(#[case] script: &str) {
         "`{script}` should name what is unterminated, got: {err}"
     );
 }
+
+/// Single quotes inside a `$(…)` are a COMMAND's quotes, so nothing in them
+/// expands — including arithmetic.
+///
+/// `scan()` pre-extracts `$((…))` out of a double-quoted string before logos
+/// runs, replacing it with a marker that `resolve_markers` swaps back. Its
+/// string arm had no notion of a `$(…)` body, so it reached into one and
+/// rewrote arithmetic that was sitting inside single quotes — where a command
+/// would have left it alone. `echo "$(echo '$((1+1))')"` printed
+/// `${__ARITH:1+1__}`: an internal name, in place of the author's text, with
+/// no error. Wrong output that nothing reports is the worst kind, so this is
+/// pinned by value and not by "it doesn't crash".
+///
+/// Single quotes inside a double-quoted string but NOT inside a substitution
+/// are ordinary characters, and arithmetic there still expands —
+/// `echo "'$((1+1))'"` is `'2'` in bash too. That case is the control.
+#[rstest]
+#[case(r#"echo "$(echo '$((1+1))')""#, "$((1+1))")]
+#[case(r#"echo "$(echo 'a$((2))b')""#, "a$((2))b")]
+#[case(r#"echo "$(printf '%s' '$((9))')""#, "$((9))")]
+#[case(r#"echo "$(echo '$((1+1))' '$((2+2))')""#, "$((1+1)) $((2+2))")]
+// Control: not inside a substitution, so it expands, exactly as bash does.
+#[case(r#"echo "'$((1+1))'""#, "'2'")]
+// Control: inside a substitution but NOT single-quoted, so it still expands.
+#[case(r#"echo "$(echo $((1+1)))""#, "2")]
+#[case(r#"echo "$(echo "$((1+1))")""#, "2")]
+#[tokio::test]
+async fn arithmetic_in_single_quotes_inside_a_substitution_is_literal(
+    #[case] script: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(out_of(script).await, expected, "`{script}`");
+}
+
+/// The marker must never reach a user by any route. If one does, the scanner
+/// rewrote something it had no business rewriting.
+#[tokio::test]
+async fn no_internal_marker_ever_reaches_the_output() {
+    for script in [
+        r#"echo "$(echo '$((1+1))')""#,
+        r#"echo "$(echo '$(( ))')""#,
+        r#"echo "$(echo 'x$((1))y$((2))z')""#,
+    ] {
+        let out = out_of(script).await;
+        assert!(
+            !out.contains("__ARITH") && !out.contains("__KAISH"),
+            "`{script}` leaked an internal name: {out}"
+        );
+    }
+}
