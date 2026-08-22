@@ -46,10 +46,7 @@ async fn out(script: &str) -> String {
 // Path producers too: `ls` was already text, and `find`/`glob` only escaped
 // that by separately setting `.data` — luck, not design.
 #[case("mkdir -p /tmp/kts && touch /tmp/kts/a.txt; y=$(find /tmp/kts -name '*.txt'); echo $y", "/tmp/kts/a.txt")]
-// NB: `glob` drops the leading `/` from an absolute match — pre-existing,
-// identical on main, and unrelated to typing. Pinned as it is so this test
-// does not quietly encode a bug as intent.
-#[case("mkdir -p /tmp/ktg && touch /tmp/ktg/b.txt; y=$(glob '/tmp/ktg/*.txt'); echo $y", "tmp/ktg/b.txt")]
+#[case("mkdir -p /tmp/ktg && touch /tmp/ktg/b.txt; y=$(glob '/tmp/ktg/*.txt'); echo $y", "/tmp/ktg/b.txt")]
 #[tokio::test]
 async fn a_posix_familiar_builtin_binds_text(#[case] script: &str, #[case] expected: &str) {
     assert_eq!(out(script).await, expected, "`{script}`");
