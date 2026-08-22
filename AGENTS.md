@@ -87,8 +87,8 @@ cargo insta review                       # Interactive review of pending snapsho
   do (see below).
 - **Do not wrap PR body prose — write one long line per paragraph.** GitHub
   re-wraps the merge commit body at exactly 72 characters.
-- **Put every example in a fenced code block in a PR body.** A \`\`\` fence is
-  exempt from re-wrap; a four-space-indented block is not. `##` headings do not
+- **Put every example in a fenced code block in a PR body.** A `` ``` `` fence
+  is exempt from re-wrap; a four-space-indented block is not. `##` headings do not
   survive as plain text at all — use a short capitalized line or a paragraph
   break instead.
 - **Add files by name**: `git add <file>`. Never use `git add -A` or `git add .`
