@@ -217,8 +217,10 @@ impl Tool for Glob {
 
             // Names are reported relative to the conventional root — `/` for an
             // anchored pattern, the cwd otherwise — regardless of where the walk
-            // actually starts.
-            let report_root = if glob.is_anchored() {
+            // actually starts. Captured before `split_static_dir` shadows `glob`
+            // below with an always-unanchored remainder pattern.
+            let is_anchored = glob.is_anchored();
+            let report_root = if is_anchored {
                 ctx.resolve_path("/")
             } else {
                 ctx.resolve_path(".")
@@ -273,11 +275,20 @@ impl Tool for Glob {
                 return ExecResult::failure(1, format!("glob: no matches for pattern '{pattern}'"));
             }
 
-            // Build OutputNodes for each matched path (relative to root),
-            // deduped across patterns by reported name.
+            // Build OutputNodes for each matched path, deduped across patterns
+            // by reported name. An anchored pattern reports the full absolute
+            // path: `report_root` is `/` for that case, and stripping it as a
+            // path prefix would also strip the leading `/` itself (`/a/b`
+            // .strip_prefix("/") == "a/b`), silently turning an absolute
+            // result relative. Only a relative pattern's cwd-rooted walk gets
+            // stripped down to a bare relative name.
             for p in &paths {
-                let rel = p.strip_prefix(&report_root).unwrap_or(p);
-                let name = rel.to_string_lossy().to_string();
+                let name = if is_anchored {
+                    p.to_string_lossy().to_string()
+                } else {
+                    let rel = p.strip_prefix(&report_root).unwrap_or(p);
+                    rel.to_string_lossy().to_string()
+                };
                 if !seen.insert(name.clone()) {
                     continue;
                 }

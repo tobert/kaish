@@ -409,11 +409,18 @@ impl Tool for Grep {
 
             let mut dir_roots: Vec<PathBuf> = Vec::new();
             let mut file_operands: Vec<PathBuf> = Vec::new();
+            // Kept alongside `dir_roots`: the display rule below depends on how
+            // the caller SPELLED the operand, which the resolved path no longer
+            // shows.
+            let mut dir_written_absolute: Vec<bool> = Vec::new();
             for operand in &operands {
                 let resolved = ctx.resolve_path(operand);
                 match ctx.backend.stat(&resolved).await {
                     Ok(entry) if entry.is_file() => file_operands.push(resolved),
-                    _ => dir_roots.push(resolved),
+                    _ => {
+                        dir_roots.push(resolved);
+                        dir_written_absolute.push(operand.starts_with('/'));
+                    }
                 }
             }
 
@@ -485,10 +492,27 @@ impl Tool for Grep {
                 // whenever there's exactly one directory and no file operand
                 // mixed in. Otherwise strip cwd so each source shows under its
                 // own subpath (`top.txt`, `sub/inner.txt`).
-                let display_root = if dir_roots.len() == 1 && !has_file_operands {
+                //
+                // An operand written absolute keeps absolute results, as GNU
+                // does: `grep -r p /srv/log` reports `/srv/log/a.txt`, not
+                // `a.txt`, so a path that came back can be used as a path.
+                // An empty root strips nothing (`strip_prefix("")` returns the
+                // path unchanged), which is the same guard the `/` cwd needs —
+                // stripping `/` as a prefix removes the leading separator
+                // instead of relativizing, and `/` is the default cwd for an
+                // isolated kernel.
+                let sole_dir = dir_roots.len() == 1 && !has_file_operands;
+                let display_root = if sole_dir && dir_written_absolute[0] {
+                    PathBuf::new()
+                } else if sole_dir {
                     dir_roots[0].clone()
                 } else {
-                    ctx.resolve_path(".")
+                    let cwd = ctx.resolve_path(".");
+                    if cwd == Path::new("/") {
+                        PathBuf::new()
+                    } else {
+                        cwd
+                    }
                 };
 
                 return self

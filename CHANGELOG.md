@@ -207,6 +207,13 @@ breaking entries are marked **BREAKING**.
   strip ran first, so `x:-y` became the whole path and its unset name measured
   0. bash rejects the form outright, and kaish's unquoted door already did.
 
+- **An absolute path stays absolute through `glob`, `grep -r`, and every
+  path-taking builtin.** `glob '/tmp/x/*.txt'` reported `tmp/x/z.txt`, and
+  `grep -rl p /srv/log` reported bare names, so a result could not be used as
+  a path. `cat`, `ls`, `wc`, `head`, `tail`, `file`, `checksum`, `base64`,
+  `tac`, and `xxd` shared it whenever the cwd was an ancestor. Relative
+  operands are unchanged; `find` never had it.
+
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
   inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
   directory the shell started in while `pwd` reported `/tmp` — a wrong value
@@ -341,6 +348,13 @@ breaking entries are marked **BREAKING**.
   existence.** Both answered "does it exist" — a mode-000 file was `-r` true,
   contradicting `cat`'s own EACCES one line later. `-r` now checks `0o444`,
   the same style `-w`/`-x` already use for `0o222`/`0o111`.
+
+- **`glob` keeps the leading `/` of an absolute pattern.** `glob '/tmp/x/*.txt'`
+  reported `tmp/x/z.txt` — silently wrong, with no error — while a bare glob in
+  argv (`echo /tmp/x/*.txt`) reported the correct absolute path. The wrong
+  value fed straight into `$(…)` and `for`, so `cat $(glob '/tmp/x/*.txt')`
+  reported "not found" for a file that exists. `--json` carried the same wrong
+  value. `find` does not share this defect.
 
 ## [0.15.0] - 2026-08-19
 
