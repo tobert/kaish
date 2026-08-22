@@ -103,8 +103,6 @@ use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
-#[cfg(feature = "subprocess")]
-use crate::scheduler::{drain_to_stream_teed, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{
     global_flag_value_is_truthy, register_builtins, ExecContext, GlobalFlags, ToolArgs,
     ToolRegistry,
@@ -833,8 +831,6 @@ pub struct Kernel {
     overlay_handle: Option<Arc<OverlayHandle>>,
     /// Default per-request timeout (None = no default).
     request_timeout: Option<Duration>,
-    /// SIGTERM-to-SIGKILL grace period for child kills.
-    kill_grace: Duration,
     /// Receiver for the kernel stderr stream.
     ///
     /// Pipeline stages write to the corresponding `StderrStream` (set on ExecContext).
@@ -860,12 +856,6 @@ pub struct Kernel {
     /// Set by `into_arc()`. Allows builtins to re-dispatch inner commands
     /// through the full Kernel resolution chain.
     self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
-    /// Background job this kernel (a fork) is executing on behalf of, if any.
-    /// Set on the fork created by `execute_background` and inherited by all its
-    /// sub-forks (pipeline stages, scatter workers), so an external command
-    /// spawned anywhere under a background job can record its process group on
-    /// that job for `kill -<sig> %N`. `None` for foreground execution.
-    bg_job_id: Option<crate::scheduler::JobId>,
     /// Serializes concurrent `execute()` / `execute_streaming()` callers on
     /// this Kernel instance. Tokio's Mutex is fair (FIFO) and acts as the
     /// queue. Background jobs, scatter workers, and concurrent pipeline
@@ -1264,6 +1254,7 @@ impl Kernel {
         let initial_cwd = cwd.clone();
         exec_ctx.set_cwd(cwd);
         exec_ctx.kill_children_on_parent_death = kill_children_on_parent_death;
+        exec_ctx.kill_grace = kill_grace;
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
@@ -1321,7 +1312,6 @@ impl Kernel {
             allow_external_commands,
             vfs_budget,
             request_timeout,
-            kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             interrupt: std::sync::Mutex::new(None),
@@ -1330,7 +1320,6 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             recursion_depth: AtomicUsize::new(0),
-            bg_job_id: None,
             // Overlay handle is set by Kernel::new after assemble returns;
             // assemble itself doesn't know the handle (it's constructed in setup_vfs).
             // with_backend always has None (overlay=true is rejected above).
@@ -1423,7 +1412,8 @@ impl Kernel {
     /// stages, `$(...)` cmdsubs) where parent timeout/cancel must cascade
     /// into the fork's external children, use [`Self::fork_attached`].
     pub async fn fork(&self) -> Arc<Self> {
-        self.fork_inner(tokio_util::sync::CancellationToken::new(), self.bg_job_id)
+        let background_job = self.exec_ctx.read().await.background_job;
+        self.fork_inner(tokio_util::sync::CancellationToken::new(), background_job)
             .await
     }
 
@@ -1440,7 +1430,8 @@ impl Kernel {
             let parent = self.cancel_token.lock().expect("cancel_token poisoned");
             parent.child_token()
         };
-        self.fork_inner(child_token, self.bg_job_id).await
+        let background_job = self.exec_ctx.read().await.background_job;
+        self.fork_inner(child_token, background_job).await
     }
 
     /// Fork for a background job, stamping the job id so external commands
@@ -1460,7 +1451,7 @@ impl Kernel {
     async fn fork_inner(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-        bg_job_id: Option<crate::scheduler::JobId>,
+        background_job: Option<crate::scheduler::JobId>,
     ) -> Arc<Self> {
         let scope_snapshot = self.scope.read().await.clone();
         let user_tools_snapshot = self.user_tools.read().await.clone();
@@ -1479,6 +1470,7 @@ impl Kernel {
         fork_ctx.dispatcher = None;
         fork_ctx.interactive = false;
         fork_ctx.cancel = cancel.clone();
+        fork_ctx.background_job = background_job;
         #[cfg(all(unix, feature = "subprocess"))]
         {
             fork_ctx.terminal_state = None;
@@ -1503,7 +1495,6 @@ impl Kernel {
             // cap as foreground writes.
             vfs_budget: self.vfs_budget.clone(),
             request_timeout: self.request_timeout,
-            kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(cancel),
             interrupt: std::sync::Mutex::new(None),
@@ -1514,8 +1505,6 @@ impl Kernel {
             // A fork runs on a fresh stack (spawned task) — its recursion
             // budget is independent of the parent's current depth (GH #46).
             recursion_depth: AtomicUsize::new(0),
-            // A fork surfaces its own holds; the parent's slot stays put.
-            bg_job_id,
             // Arc-clone the overlay handle so forks (background jobs, scatter
             // workers, pipeline stages) can reach the same overlay transaction
             // via `kaish-vfs status/diff/commit/reset`.
@@ -3111,6 +3100,8 @@ impl Kernel {
             interactive: self.interactive,
             // The kernel-wide setting; a snapshot inherits it like `interactive`.
             kill_children_on_parent_death: ec.kill_children_on_parent_death,
+            kill_grace: ec.kill_grace,
+            background_job: ec.background_job,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -5176,16 +5167,6 @@ impl Kernel {
     #[cfg(feature = "subprocess")]
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
-        // Read the cancel token from `self.exec_ctx`, which `dispatch_command`
-        // populates from the inbound ctx.cancel on every dispatch. This is
-        // what makes the `timeout` builtin's swapped child token reach the
-        // wait_or_kill discipline below — reading `self.cancel_token` would
-        // give the kernel-wide token and miss the timeout's child cascade.
-        let cancel = {
-            let ec = self.exec_ctx.read().await;
-            ec.cancel.clone()
-        };
-        let kill_grace = self.kill_grace;
         if !self.allow_external_commands {
             return Ok(None);
         }
@@ -5286,469 +5267,69 @@ impl Kernel {
         };
         let has_stdin = pipe_stdin.is_some() || stdin_bytes.is_some();
 
-        // Build and spawn the command
-        use tokio::process::Command;
-
-        let mut cmd = Command::new(&executable);
-        cmd.args(&argv);
-        cmd.current_dir(&real_cwd);
-
-        // Hermetic env: child sees only kaish's exported vars, not the kaish
-        // process's OS env. Frontends that want OS-env passthrough (REPL, MCP)
-        // populate it via KernelConfig::initial_vars at construction.
-        cmd.env_clear();
-        {
-            let scope = self.scope.read().await;
-            let exported = scope.exported_vars();
-            // A structured value can't cross the process boundary; refuse rather
-            // than silently JSON-serialize it into the child's environment.
-            if let Some(msg) = crate::interpreter::structured_export_error(&exported) {
-                return Err(anyhow::anyhow!(msg));
-            }
-            for (var_name, value) in exported {
-                // Binary can't cross the process boundary as an env var value
-                // either — loud, not the `[binary: N bytes]` placeholder
-                // silently exported in its place (kept in sync with
-                // dispatch.rs::try_external and env.rs::execute_with_env).
-                let value_str = crate::interpreter::value_to_text_sink_named(
-                    &value,
-                    "an exported environment variable value",
-                )
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-                cmd.env(var_name, value_str);
-            }
-        }
-
-        // Handle stdin
-        cmd.stdin(if has_stdin {
-            std::process::Stdio::piped()
-        } else if self.interactive {
-            std::process::Stdio::inherit()
-        } else {
-            std::process::Stdio::null()
-        });
-
+        // The cancel token, the kill grace, and the background job all come
+        // from `self.exec_ctx`, which `dispatch_command` populates from the
+        // inbound ctx on every dispatch. That is what makes the `timeout`
+        // builtin's swapped child token reach the wait_or_kill discipline —
+        // reading `self.cancel_token` would give the kernel-wide token and
+        // miss the timeout's child cascade.
+        //
         // In interactive mode, standalone or last-in-pipeline commands inherit
         // the terminal's stdout/stderr so output streams in real-time.
         // First/middle commands must capture stdout for the pipe — same as bash.
-        let pipeline_position = {
+        let (pipeline_position, spawn_ctx) = {
             let ctx = self.exec_ctx.read().await;
-            ctx.pipeline_position
+            (
+                ctx.pipeline_position,
+                crate::spawn::SpawnContext::from_exec_context(&ctx),
+            )
         };
         let inherit_output = self.interactive
             && matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
-        if inherit_output {
-            cmd.stdout(std::process::Stdio::inherit());
-            cmd.stderr(std::process::Stdio::inherit());
-        } else {
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-        }
-
-        // On Unix, always put the child in its own process group so cancellation
-        // can `killpg` the whole tree (the child plus any grandchildren).
-        // Restoring default tty-related signal handlers stays gated on
-        // job-control mode — those only matter when the child has a controlling
-        // terminal.
-        #[cfg(unix)]
-        {
-            let restore_jc_signals = self.terminal_state.is_some() && inherit_output;
-            // Read before the fork: the child compares `getppid()` against it to
-            // catch a parent that died inside the fork/prctl window.
-            let kill_on_parent_death = {
-                let ec = self.exec_ctx.read().await;
-                ec.kill_children_on_parent_death
-            };
-            let parent_pid = std::process::id();
-            // SAFETY: setpgid, prctl, getppid, and sigaction(SIG_DFL) are all
-            // async-signal-safe per POSIX; safe to call between fork and exec.
-            #[allow(unsafe_code)]
-            unsafe {
-                cmd.pre_exec(move || {
-                    // Own process group — for kill scope.
-                    nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
-                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-                    if kill_on_parent_death {
-                        crate::dispatch::arm_parent_death_signal(parent_pid)?;
-                    }
-                    if restore_jc_signals {
-                        use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
-                        let mut sa: nix::libc::sigaction = std::mem::zeroed();
-                        sa.sa_sigaction = SIG_DFL;
-                        if sigaction(SIGTSTP, &sa, std::ptr::null_mut()) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if sigaction(SIGTTOU, &sa, std::ptr::null_mut()) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if sigaction(SIGTTIN, &sa, std::ptr::null_mut()) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if sigaction(SIGINT, &sa, std::ptr::null_mut()) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
-                    Ok(())
-                });
-            }
-        }
-
-        // Backstop for kill on drop in case our explicit kill path is bypassed
-        // (panic, early return, etc) on the **capture** wait path. We do NOT
-        // set this on the JC inherit path: that uses sync `waitpid` outside
-        // tokio's view of the child, so on drop tokio would try to kill an
-        // already-reaped (possibly-reused) PID. The JC path has its own
-        // cancel handling via the side-task watcher.
-        let in_jc_inherit_path = inherit_output && self.terminal_state.is_some();
-        if !in_jc_inherit_path {
-            cmd.kill_on_drop(true);
-        }
-
-        // Spawn the process. Capture a `KillTarget` immediately so cancel/
-        // timeout paths can deliver signals via pidfd (Linux ≥ 5.3) — bound
-        // to this process's generation, immune to PID reuse if the OS reaps
-        // the child before our kill syscalls fire.
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                return Ok(Some(ExecResult::failure(
-                    127,
-                    format!("{}: {}", name, e),
-                )));
-            }
-        };
-        let kill_target = crate::pidfd::KillTarget::from_child(&child);
-
-        // If this external runs on behalf of a background job, record its
-        // process group on the job so `kill -<sig> %N` can signal the real
-        // process directly (STOP/CONT/USR1/…, not just terminate). The child
-        // did `setpgid(0, 0)` in pre_exec, so its PGID equals its PID.
-        if let Some(job_id) = self.bg_job_id
-            && let Some(pid) = child.id()
-        {
-            self.jobs.add_pgid(job_id, pid).await;
-        }
-
-        // Same seam, for output: a background job's streams outlive this one
-        // command, so the drain tasks below tee into them and the job closes
-        // them itself. This is what makes `/v/jobs/{id}/stdout` grow while a
-        // `cargo build &` is still building (GH #240 removed the node rather
-        // than wire this tee; the tee is the half that was missing).
-        let job_streams = match self.bg_job_id {
-            Some(job_id) => self.jobs.streams(job_id).await,
-            None => None,
+        // Hermetic env: the child sees only kaish's exported vars, not the
+        // kaish process's OS env. Frontends that want OS-env passthrough
+        // (REPL, MCP) populate it via KernelConfig::initial_vars.
+        let env = {
+            let scope = self.scope.read().await;
+            crate::spawn::hermetic_env(&scope)?
         };
 
-        // Feed stdin. A streaming `pipe_stdin` is copied to the child by a
-        // detached task (bounded memory, no pre-drain) so an upstream stage and
-        // this child run concurrently — and a child that never reads stdin (or
-        // is killed) just breaks the copy, which stops. A buffered byte vector
-        // is written verbatim (no text detour), so binary stdin survives.
-        let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = pipe_stdin {
-            child.stdin.take().map(|mut child_stdin| {
-                // A buffered prefix and a live pipe are one stream, not two
-                // candidates. After `read x`, the bytes `read` over-read sit in
-                // the buffer and the rest is still in the pipe; picking the pipe
-                // and dropping the buffer would silently skip the front of the
-                // child's input.
-                let prefix = stdin_bytes;
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    if let Some(data) = prefix
-                        && child_stdin.write_all(&data).await.is_err()
-                    {
-                        return; // child closed stdin; dropping it signals EOF
-                    }
-                    let mut buf = [0u8; 8192];
-                    loop {
-                        match pipe_in.read(&mut buf).await {
-                            Ok(0) => break, // EOF
-                            Ok(n) => {
-                                if child_stdin.write_all(&buf[..n]).await.is_err() {
-                                    break; // child closed stdin
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    // Dropping child_stdin signals EOF to the child.
-                })
-            })
-        } else if let Some(data) = stdin_bytes {
-            // Write the buffered bytes from a detached task too — NOT inline.
-            // An inline write blocks once the stdin pipe fills, and the output
-            // drain hasn't spawned yet, so a child that emits a lot before
-            // consuming all its input (every pipe buffer full) deadlocks. A
-            // write error here is normal, not a failure: a child that closes
-            // stdin early (e.g. `head`) breaks the pipe. Dropping child_stdin
-            // signals EOF.
-            child.stdin.take().map(|mut child_stdin| {
-                tokio::spawn(async move {
-                    use tokio::io::AsyncWriteExt;
-                    let _ = child_stdin.write_all(&data).await;
-                })
-            })
+        let stdin = if has_stdin {
+            crate::spawn::StdinPolicy::Piped {
+                prefix: stdin_bytes,
+                pipe: pipe_stdin,
+            }
+        } else if self.interactive {
+            crate::spawn::StdinPolicy::Inherit
         } else {
-            None
+            crate::spawn::StdinPolicy::Null
         };
 
-        // Abort the stdin-copy task on EVERY exit path (the capture path, both
-        // interactive `inherit_output` returns, and any early error return).
-        // Once the child is reaped the copy has nothing left to deliver; if it
-        // were left parked on `pipe_in.read()` it would leak and hold the
-        // upstream pipe reader open. A drop guard is the single place that
-        // covers all returns — explicit per-return aborts were error-prone (an
-        // earlier version missed the two inherit_output returns).
-        struct AbortStdinCopyOnDrop(Option<tokio::task::JoinHandle<()>>);
-        impl Drop for AbortStdinCopyOnDrop {
-            fn drop(&mut self) {
-                if let Some(t) = self.0.take() {
-                    t.abort();
-                }
+        // `self.interactive` and `self.terminal_state`, not the context's:
+        // the persistent `exec_ctx` never carries the kernel's interactive
+        // flag (only per-dispatch snapshots do), so the inherit decision is
+        // made here and handed to the spawn as a policy.
+        let output = if inherit_output {
+            crate::spawn::OutputPolicy::Inherit {
+                #[cfg(unix)]
+                terminal_state: self.terminal_state.clone(),
             }
-        }
-        let _stdin_copy_guard = AbortStdinCopyOnDrop(stdin_task);
-
-        if inherit_output {
-            // Job control path: use waitpid with WUNTRACED for Ctrl-Z support
-            #[cfg(unix)]
-            if let Some(ref term) = self.terminal_state {
-                let child_id = child.id().unwrap_or(0);
-                let pid = nix::unistd::Pid::from_raw(child_id as i32);
-                let pgid = pid; // child is its own pgid leader
-
-                // Give the terminal to the child's process group
-                if let Err(e) = term.give_terminal_to(pgid) {
-                    tracing::warn!("failed to give terminal to child: {}", e);
-                }
-
-                let term_clone = term.clone();
-                let cmd_name = name.to_string();
-                let cmd_display = format!("{} {}", name, argv.join(" "));
-                let jobs = self.jobs.clone();
-
-                // Side task that watches for cancellation while the blocking
-                // waitpid runs. On cancel, it SIGTERMs the process group, waits
-                // the grace period, then SIGKILLs. The blocking waitpid returns
-                // when the child dies. AbortOnDrop guard cancels the watcher
-                // on the success path so it doesn't keep running after wait
-                // returns naturally.
-                //
-                // `wait_complete` shrinks the PID-reuse race: the watcher
-                // checks it before each kill syscall and bails out if
-                // wait_for_foreground has already reaped the child. This
-                // doesn't fully eliminate the race (atomic load + kill is
-                // not atomic with the OS reap+reuse), but narrows the window
-                // to nanoseconds — enough to be ignorable in practice.
-                let wait_complete = std::sync::Arc::new(
-                    std::sync::atomic::AtomicBool::new(false)
-                );
-                let cancel_watcher = {
-                    let cancel = cancel.clone();
-                    let wc = wait_complete.clone();
-                    // Ownership transfer: the JC path's sync wait inside
-                    // block_in_place owns the child's reaping, so the
-                    // cancel_watcher drives the kill side via KillTarget
-                    // (pidfd-bound on Linux). When kill_target is None
-                    // (older kernel + open failure, or non-Linux), falls
-                    // through to the older PID-based path the closure
-                    // captures from `pid`.
-                    let target = kill_target.as_ref().map(|t| {
-                        // Re-borrow the components we need into Owned-ish form
-                        // so the spawned task is 'static. We can't move
-                        // KillTarget directly because try_execute_external
-                        // still uses it after the spawn — but on the JC path
-                        // there is no further use after the watcher spawn,
-                        // so a clone-of-pid + owned None pidfd is safe.
-                        // Simpler: signal via the existing target by cloning
-                        // a fresh pidfd; the original keeps its handle.
-                        // Pidfd is just an OwnedFd — not Clone — so do it
-                        // by re-opening from the pid. Fall back if reopen
-                        // fails (race already reaped → best-effort kill).
-                        crate::pidfd::KillTarget::from_pid(t.pid())
-                    });
-                    tokio::spawn(async move {
-                        cancel.cancelled().await;
-                        if wc.load(std::sync::atomic::Ordering::SeqCst) { return; }
-                        use nix::sys::signal::Signal;
-                        if let Some(t) = &target {
-                            t.signal(Signal::SIGTERM);
-                            t.signal_pg(Signal::SIGTERM);
-                        } else {
-                            let _ = nix::sys::signal::kill(pid, Signal::SIGTERM);
-                            let _ = nix::sys::signal::killpg(pid, Signal::SIGTERM);
-                        }
-                        if kill_grace > Duration::ZERO {
-                            tokio::time::sleep(kill_grace).await;
-                            if wc.load(std::sync::atomic::Ordering::SeqCst) { return; }
-                        }
-                        if let Some(t) = &target {
-                            t.signal(Signal::SIGKILL);
-                            t.signal_pg(Signal::SIGKILL);
-                        } else {
-                            let _ = nix::sys::signal::kill(pid, Signal::SIGKILL);
-                            let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
-                        }
-                    })
-                };
-                struct AbortOnDrop(tokio::task::JoinHandle<()>);
-                impl Drop for AbortOnDrop {
-                    fn drop(&mut self) {
-                        self.0.abort();
-                    }
-                }
-                let _watcher_guard = AbortOnDrop(cancel_watcher);
-
-                let wait_complete_setter = wait_complete.clone();
-                let code = tokio::task::block_in_place(move || {
-                    let result = term_clone.wait_for_foreground(pid);
-                    // Mark wait done before the watcher might fire.
-                    wait_complete_setter.store(true, std::sync::atomic::Ordering::SeqCst);
-
-                    // Always reclaim the terminal
-                    if let Err(e) = term_clone.reclaim_terminal() {
-                        tracing::warn!("failed to reclaim terminal: {}", e);
-                    }
-
-                    match result {
-                        crate::terminal::WaitResult::Exited(code) => code as i64,
-                        crate::terminal::WaitResult::Signaled(sig) => 128 + sig as i64,
-                        crate::terminal::WaitResult::Stopped(_sig) => {
-                            // Register as a stopped job
-                            let rt = tokio::runtime::Handle::current();
-                            let job_id = rt.block_on(jobs.register_stopped(
-                                cmd_display,
-                                child_id,
-                                child_id, // pgid = pid for group leader
-                            ));
-                            eprintln!("\n[{}]+ Stopped\t{}", job_id, cmd_name);
-                            148 // 128 + SIGTSTP(20) on most systems, but we use a fixed value
-                        }
-                    }
-                });
-
-                return Ok(Some(ExecResult::from_output(code, String::new(), String::new())));
-            }
-
-            // Non-job-control path with inherited stdio.
-            let status = match wait_or_kill(&mut child, kill_target.as_ref(), &cancel, kill_grace).await {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(Some(ExecResult::failure(
-                        1,
-                        format!("{}: failed to wait: {}", name, e),
-                    )));
-                }
-            };
-
-            let code = exit_code_from_status(&status);
-
-            // stdout/stderr already went to the terminal
-            Ok(Some(ExecResult::from_output(code, String::new(), String::new())))
         } else {
-            // Capture output via bounded streams
-            let stdout_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
-            let stderr_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
+            crate::spawn::OutputPolicy::Captured
+        };
 
-            let stdout_pipe = child.stdout.take();
-            let stderr_pipe = child.stderr.take();
+        let request = crate::spawn::SpawnRequest {
+            executable: PathBuf::from(executable),
+            argv,
+            cwd: real_cwd,
+            env,
+            stdin,
+            output,
+            label: name.to_string(),
+        };
 
-            let stdout_clone = stdout_stream.clone();
-            let stderr_clone = stderr_stream.clone();
-
-            // Only the stage whose stdout *is* the job's stdout tees: in
-            // `a | b`, `a`'s bytes are `b`'s stdin, and teeing them would put
-            // the pipeline's intermediate data into the node alongside its
-            // real output. stderr has no such routing — every stage's stderr
-            // is the job's stderr — so it tees from any position.
-            let stdout_tee = job_streams.as_ref().and_then(|s| {
-                matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last)
-                    .then(|| s.stdout.clone())
-            });
-            let stderr_tee = job_streams.as_ref().map(|s| s.stderr.clone());
-
-            let stdout_task = stdout_pipe.map(|pipe| {
-                tokio::spawn(async move {
-                    drain_to_stream_teed(pipe, stdout_clone, stdout_tee).await;
-                })
-            });
-
-            let stderr_task = stderr_pipe.map(|pipe| {
-                tokio::spawn(async move {
-                    drain_to_stream_teed(pipe, stderr_clone, stderr_tee).await;
-                })
-            });
-
-            let cancelled_before_wait = cancel.is_cancelled();
-            let status = match wait_or_kill(&mut child, kill_target.as_ref(), &cancel, kill_grace).await {
-                Ok(s) => s,
-                Err(e) => {
-                    // stdin-copy task is aborted by `_stdin_copy_guard` on return.
-                    if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
-                    if let Some(task) = stderr_task { task.abort(); let _ = task.await; }
-                    return Ok(Some(ExecResult::failure(
-                        1,
-                        format!("{}: failed to wait: {}", name, e),
-                    )));
-                }
-            };
-
-            // On cancel, abort the drain tasks (the child's pipes are gone;
-            // late output is lost but predictable death beats partial capture).
-            // On normal exit, await drains so we don't lose buffered output.
-            if cancelled_before_wait || cancel.is_cancelled() {
-                if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
-                if let Some(task) = stderr_task { task.abort(); let _ = task.await; }
-            } else {
-                if let Some(task) = stdout_task {
-                    // Ignore join error — the drain task logs its own errors
-                    let _ = task.await;
-                }
-                if let Some(task) = stderr_task {
-                    let _ = task.await;
-                }
-            }
-
-            let code = exit_code_from_status(&status);
-
-            // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
-            // result, so `curl url`, `curl url > file.bin`, etc. keep binary
-            // intact. stderr stays text. See docs/binary-data.md.
-            let stdout = stdout_stream.read().await;
-            let mut stderr = stderr_stream.read_string().await;
-            let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
-
-            // Both streams are fixed-size rings regardless of `ctx.output_limit`
-            // (that machinery only runs post-hoc, in `execute_pipeline`, and only
-            // when enabled). With the limit disabled — the repl/embedded/test
-            // default — an overflow here used to be silent: `write` evicted the
-            // oldest bytes and bumped `bytes_evicted`, but nothing ever read that
-            // counter, so a >10MB stdout reported clean success with its head
-            // quietly gone (GH #191). Surface it loudly instead.
-            if stderr_stream.has_overflowed().await {
-                let stats = stderr_stream.stats().await;
-                stderr = format!("{}{stderr}", stats.overflow_marker("stderr"));
-            }
-            if stdout_stream.has_overflowed().await {
-                // The marker goes in stderr, never prepended into `result`'s
-                // stdout payload: stdout may be binary
-                // (`success_text_or_bytes` yields a `Bytes` result for
-                // non-UTF-8 data — e.g. `curl` fetching a >10MB binary), and
-                // string-formatting a marker into it would lossily reinterpret
-                // bytes as text, introducing a SECOND, different kind of
-                // corruption on top of the eviction itself.
-                //
-                // Only stdout overflow flips `did_spill` — exit-code integrity
-                // tracks stdout, matching the enabled-limit path's contract
-                // (stderr overflow alone doesn't remap the exit code).
-                let stats = stdout_stream.stats().await;
-                stderr = format!("{}{stderr}", stats.overflow_marker("stdout"));
-                result.did_spill = true;
-            }
-            result.err = stderr;
-            Ok(Some(result))
-        }
+        Ok(Some(crate::spawn::spawn_process(request, &spawn_ctx).await))
     }
 
     // --- Variable Access ---
@@ -10690,6 +10271,60 @@ AFTER="yes"'"#)
         assert!(
             !r.ok(),
             "alias to a missing external should fail, not resolve internally",
+        );
+    }
+
+    /// `kill_grace` is the number the SIGTERM-to-SIGKILL cascade waits on, and
+    /// the spawn path reads it off the execution context. Seeding it only on
+    /// the `Kernel` would silently give every child the 2s default instead of
+    /// the embedder's setting.
+    #[tokio::test]
+    async fn kill_grace_reaches_the_execution_context_and_its_forks() {
+        let grace = Duration::from_millis(250);
+        let kernel = Kernel::new(KernelConfig::transient().with_kill_grace(grace))
+            .expect("build kernel");
+        assert_eq!(
+            kernel.exec_ctx.read().await.kill_grace,
+            grace,
+            "the configured kill grace never reached the execution context",
+        );
+
+        let fork = kernel.fork().await;
+        assert_eq!(
+            fork.exec_ctx.read().await.kill_grace,
+            grace,
+            "a fork's children would be killed on a different clock than the parent's",
+        );
+    }
+
+    /// A child spawned under a background job records its process group on
+    /// that job (for `kill -<sig> %N`) and tees its output into the job's
+    /// streams. Both reads go through the execution context, so the job id has
+    /// to survive `fork_for_background` and every sub-fork beneath it.
+    #[tokio::test]
+    async fn a_background_fork_stamps_its_job_on_the_execution_context() {
+        let kernel = Kernel::transient().expect("build kernel").into_arc();
+        assert_eq!(
+            kernel.exec_ctx.read().await.background_job,
+            None,
+            "foreground execution must not claim a job",
+        );
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let job_id = kernel.jobs.register("sleep 60".to_string(), rx).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let background = kernel.fork_for_background(cancel, job_id).await;
+        assert_eq!(
+            background.exec_ctx.read().await.background_job,
+            Some(job_id),
+            "a background fork's children would never be registered on the job",
+        );
+
+        let stage = background.fork().await;
+        assert_eq!(
+            stage.exec_ctx.read().await.background_job,
+            Some(job_id),
+            "a pipeline stage under a background job lost the job id",
         );
     }
 }

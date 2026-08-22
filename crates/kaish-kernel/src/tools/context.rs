@@ -24,6 +24,11 @@ use crate::interpreter::OutputFormat;
 
 use super::traits::ToolSchema;
 
+/// Grace between SIGTERM and SIGKILL for a cancelled child, when nothing sets
+/// one: 2 seconds. `KernelConfig::kill_grace` overrides it for a kernel-built
+/// context.
+pub const DEFAULT_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Output context determines how command output should be formatted.
 ///
 /// Different contexts prefer different output formats:
@@ -116,6 +121,24 @@ pub struct ExecContext {
     /// `false` for a stand-alone `ExecContext` built outside a kernel, which
     /// is the pre-existing behavior.
     pub kill_children_on_parent_death: bool,
+    /// SIGTERM-to-SIGKILL grace period for a child killed by cancellation.
+    ///
+    /// Seeded from `KernelConfig::kill_grace`. It lives here, not only on the
+    /// `Kernel`, for the same reason as `kill_children_on_parent_death`: a
+    /// tool that spawns a child holds an `ExecContext` and never a `Kernel`,
+    /// and one home keeps the grace from drifting between spawn sites.
+    ///
+    /// [`DEFAULT_KILL_GRACE`] for a stand-alone `ExecContext` built outside a
+    /// kernel.
+    pub kill_grace: std::time::Duration,
+    /// The background job this context executes on behalf of, if any.
+    ///
+    /// Stamped by `Kernel::fork_for_background` and inherited by every
+    /// sub-fork (pipeline stages, scatter workers), so a child spawned
+    /// anywhere beneath a background job records its process group on that
+    /// job for `kill -<sig> %N` and tees its output into the job's streams.
+    /// `None` for foreground execution.
+    pub background_job: Option<crate::scheduler::JobId>,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
@@ -338,6 +361,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             kill_children_on_parent_death: false,
+            kill_grace: DEFAULT_KILL_GRACE,
+            background_job: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -377,6 +402,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             kill_children_on_parent_death: false,
+            kill_grace: DEFAULT_KILL_GRACE,
+            background_job: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -413,6 +440,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             kill_children_on_parent_death: false,
+            kill_grace: DEFAULT_KILL_GRACE,
+            background_job: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -449,6 +478,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             kill_children_on_parent_death: false,
+            kill_grace: DEFAULT_KILL_GRACE,
+            background_job: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -488,6 +519,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             kill_children_on_parent_death: false,
+            kill_grace: DEFAULT_KILL_GRACE,
+            background_job: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -524,6 +557,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: false,
             kill_children_on_parent_death: false,
+            kill_grace: DEFAULT_KILL_GRACE,
+            background_job: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -818,6 +853,8 @@ impl ExecContext {
             pipeline_position: PipelinePosition::Only,
             interactive: self.interactive,
             kill_children_on_parent_death: self.kill_children_on_parent_death,
+            kill_grace: self.kill_grace,
+            background_job: self.background_job,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
