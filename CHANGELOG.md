@@ -199,6 +199,24 @@ breaking entries are marked **BREAKING**.
 - `help <tool>` renders a tool's subcommands and their flags, and names each
   parameter's aliases. `help kj` and every wrapped command showed "No
   parameters." before.
+
+- **`ls -R` and `tree` no longer swallow a directory they can't read.** Both
+  hit `Err(_) => continue` with no comment on a failed listing, so an
+  unreadable subdirectory just vanished: `ls -R` exited 0 with nothing to say
+  so, and `tree` rendered it as a childless node — indistinguishable from a
+  genuinely empty directory, not merely omitted. `ls -R` now names every
+  unreadable directory on stderr, keeps listing the rest of the tree, and
+  exits 1, matching GNU `ls -R`, which continues past each failure instead of
+  stopping at the first. `tree` marks the node inline as
+  `name [error opening dir]` (GNU `tree`'s own convention) plus the same
+  stderr diagnostic and exit 1; the marker is part of the node's name, so it
+  also survives into `tree --json`. `ls -R --json` does not yet carry an
+  equivalent marker for an unreadable directory — a known gap, not fixed here.
+
+- **`tee -a` and `>>` now append through a real VFS `Filesystem::append`
+  (`O_APPEND`):** no read permission needed, and the read-then-write race
+  is closed. New trait method, default impl — no embedder break.
+
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
   miscounting it.** Text output uses one newline per path, so a name that
   already contains one split into two paths naming no file — measured, a
@@ -207,6 +225,17 @@ breaking entries are marked **BREAKING**.
   `--json`, which serializes each name as its own JSON string and reads it
   losslessly. Escaping was considered and rejected: it needs a decoder on the
   other side, and kaish has no word splitting to be that decoder.
+
+- **`${#x:-y}` is refused in a quoted string instead of reporting 0.** The `#`
+  strip ran first, so `x:-y` became the whole path and its unset name measured
+  0. bash rejects the form outright, and kaish's unquoted door already did.
+
+- **An absolute path stays absolute through `glob`, `grep -r`, and every
+  path-taking builtin.** `glob '/tmp/x/*.txt'` reported `tmp/x/z.txt`, and
+  `grep -rl p /srv/log` reported bare names, so a result could not be used as
+  a path. `cat`, `ls`, `wc`, `head`, `tail`, `file`, `checksum`, `base64`,
+  `tac`, and `xxd` shared it whenever the cwd was an ancestor. Relative
+  operands are unchanged; `find` never had it.
 
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
   inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
@@ -330,6 +359,25 @@ breaking entries are marked **BREAKING**.
   than the source reads as and said nothing, while `PАTH=/bin` had warned since
   0.11. The loop head was the last static door without the check;
   `docs/LANGUAGE.md` claimed every door reported it, and now that is true.
+- **`${#v}` counts characters, matching slicing.** `v=日本語; echo ${#v}`
+  reported `9` — the UTF-8 byte length — while `${v[0:1]}` sliced by
+  character and returned `日`, a silent disagreement inside one shell.
+  `${#v}` now counts Unicode scalar values, matching `${v[…]}` and bash.
+  `${#list}`/`${#record}`/`${#PIPESTATUS}` are unchanged (element/key/stage
+  counts), and `${#bytes}` stays the byte count — `Value::Bytes` is not
+  sliceable, so there is no character unit for it to agree with.
+
+- **`test -r FILE` and `[[ -r FILE ]]` check the mode bits, not just
+  existence.** Both answered "does it exist" — a mode-000 file was `-r` true,
+  contradicting `cat`'s own EACCES one line later. `-r` now checks `0o444`,
+  the same style `-w`/`-x` already use for `0o222`/`0o111`.
+
+- **`glob` keeps the leading `/` of an absolute pattern.** `glob '/tmp/x/*.txt'`
+  reported `tmp/x/z.txt` — silently wrong, with no error — while a bare glob in
+  argv (`echo /tmp/x/*.txt`) reported the correct absolute path. The wrong
+  value fed straight into `$(…)` and `for`, so `cat $(glob '/tmp/x/*.txt')`
+  reported "not found" for a file that exists. `--json` carried the same wrong
+  value. `find` does not share this defect.
 
 ## [0.15.0] - 2026-08-19
 
