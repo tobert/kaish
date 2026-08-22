@@ -624,16 +624,24 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
 }
 
 /// Length of a value for `${#…}`: element count for a list, key count for a
-/// record, and the byte length of the string form for any scalar (unchanged
-/// for non-collections). The single source of truth for the three `${#…}`
-/// evaluation sites (sync + the two async ones).
+/// record, and the CHARACTER count (Unicode scalar values) of the string form
+/// for any scalar (unchanged for non-collections). The single source of truth
+/// for the three `${#…}` evaluation sites (sync + the two async ones).
+///
+/// Characters, not bytes, so `${#v}` agrees with slicing (`classify_slice` in
+/// `interpreter/scope.rs` already slices by character) and with bash —
+/// `v=日本語` is length 3, not the 9-byte UTF-8 encoding. Non-string scalars
+/// stringify to ASCII (`42`, `true`, `null`), where chars and bytes coincide,
+/// so this is a no-op for them.
 pub fn value_length(value: &Value) -> i64 {
     match value {
         Value::Json(serde_json::Value::Array(a)) => a.len() as i64,
         Value::Json(serde_json::Value::Object(o)) => o.len() as i64,
         // Binary length is the byte count, not the length of the text placeholder.
+        // Bytes are not sliceable (`resolve_path` rejects a Bytes root as "not
+        // a collection"), so there is no slice unit to agree with here.
         Value::Bytes(b) => b.len() as i64,
-        other => value_to_string(other).len() as i64,
+        other => value_to_string(other).chars().count() as i64,
     }
 }
 

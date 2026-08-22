@@ -312,6 +312,13 @@ breaking entries are marked **BREAKING**.
   than the source reads as and said nothing, while `PАTH=/bin` had warned since
   0.11. The loop head was the last static door without the check;
   `docs/LANGUAGE.md` claimed every door reported it, and now that is true.
+- **`${#v}` counts characters, matching slicing.** `v=日本語; echo ${#v}`
+  reported `9` — the UTF-8 byte length — while `${v[0:1]}` sliced by
+  character and returned `日`, a silent disagreement inside one shell.
+  `${#v}` now counts Unicode scalar values, matching `${v[…]}` and bash.
+  `${#list}`/`${#record}`/`${#PIPESTATUS}` are unchanged (element/key/stage
+  counts), and `${#bytes}` stays the byte count — `Value::Bytes` is not
+  sliceable, so there is no character unit for it to agree with.
 
 ## [0.15.0] - 2026-08-19
 
