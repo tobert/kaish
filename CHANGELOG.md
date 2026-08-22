@@ -13,7 +13,7 @@ breaking entries are marked **BREAKING**.
 ### Changed
 - **BREAKING: `grep -r` prefixes matches with the operand as written,
   matching GNU.** `grep -r p dir` now reports `dir/a.txt`, not the bare
-  `a.txt` kaish stripped it to. The `.` operand keeps no prefix, like GNU;
+  `a.txt` kaish stripped it to. An explicit `.` is joined as GNU joins it (`./d/a.txt`); only a defaulted operand stays bare.;
   several directories or a mixed file+dir operand list were already correct.
 
 ### Fixed

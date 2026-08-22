@@ -252,9 +252,13 @@ async fn grep_recursive_dot_slash_operand_keeps_its_spelling() {
 }
 
 /// The `.` operand is the one exception both GNU and kaish carve out: no
-/// prefix at all, since joining would just add a redundant `./`.
+/// GNU does NOT special-case `.`: it joins the operand like any other, so
+/// `grep -r p .` reports `./d/a.txt`. Verified against `/usr/bin/grep` 3.12,
+/// not against the `grep` on PATH — this machine's shell shadows `grep` with
+/// `ugrep`, which DOES strip the `./` and would have confirmed the wrong
+/// answer. The first version of this test pinned that wrong answer.
 #[tokio::test]
-async fn grep_recursive_dot_operand_has_no_prefix() {
+async fn grep_recursive_dot_operand_keeps_gnu_dot_slash() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("d")).unwrap();
     fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
@@ -262,7 +266,21 @@ async fn grep_recursive_dot_operand_has_no_prefix() {
 
     let (out, code) = run(&kernel, "grep -rl HIT .").await;
     assert_eq!(code, 0, "grep should match: {out:?}");
-    assert_eq!(out, "d/a.txt", "the . operand still reports the bare cwd-relative path: {out:?}");
+    assert_eq!(out, "./d/a.txt", "an explicit `.` is joined, as GNU does: {out:?}");
+}
+
+/// The complement, and the reason `.` cannot simply be prefixed always: a
+/// DEFAULTED operand — no path written at all — reports bare names in GNU.
+#[tokio::test]
+async fn grep_recursive_defaulted_operand_has_no_prefix() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d")).unwrap();
+    fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -rl HIT").await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    assert_eq!(out, "d/a.txt", "a defaulted operand stays bare: {out:?}");
 }
 
 /// Several directory operands already showed each match under its own

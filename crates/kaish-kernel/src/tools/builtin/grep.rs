@@ -401,7 +401,11 @@ impl Tool for Grep {
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
                 };
-            let operands = if operands.is_empty() {
+            // GNU distinguishes a WRITTEN `.` from a defaulted one:
+            // `grep -r p .` reports `./d/a.txt` while a bare `grep -r p`
+            // reports `d/a.txt`. Remember which happened.
+            let operand_defaulted = operands.is_empty();
+            let operands = if operand_defaulted {
                 vec![".".to_string()]
             } else {
                 operands
@@ -488,10 +492,12 @@ impl Tool for Grep {
                 files.extend(file_operands);
 
                 // Display prefix: GNU prefixes every result with the operand
-                // exactly as written (`grep -r p dir` → `dir/a.txt`,
-                // `grep -r p ./dir` → `./dir/a.txt`), except the bare `.`
-                // operand, which GNU (and kaish) print with no prefix at all —
-                // joining would only add a redundant `./`. `display_root` still
+                // exactly as written — `grep -r p dir` → `dir/a.txt`,
+                // `grep -r p ./dir` → `./dir/a.txt`, and `grep -r p .` →
+                // `./d/a.txt`. The `.` is NOT a special case: GNU joins it
+                // like any other operand. Only a DEFAULTED operand (no path
+                // written at all) reports bare names, which is why the two
+                // are tracked apart above. `display_root` still
                 // strips the resolved walk root from each match; `display_prefix`
                 // is then joined back on for a sole relative directory operand.
                 // Several directories or a mixed file+dir operand list instead
@@ -510,7 +516,7 @@ impl Tool for Grep {
                 let sole_dir_absolute = sole_dir && dir_operand_text[0].starts_with('/');
                 let (display_root, display_prefix) = if sole_dir_absolute {
                     (PathBuf::new(), None)
-                } else if sole_dir && dir_operand_text[0] != "." {
+                } else if sole_dir && !operand_defaulted {
                     (dir_roots[0].clone(), Some(dir_operand_text[0].clone()))
                 } else if sole_dir {
                     (dir_roots[0].clone(), None)
