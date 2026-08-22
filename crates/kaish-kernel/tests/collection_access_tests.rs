@@ -186,6 +186,42 @@ async fn length_of_string_stays_char_count() {
     assert_eq!(out, "5");
 }
 
+/// `${#v}` must count Unicode scalar values, not UTF-8 bytes — matching what
+/// slicing already does (`classify_slice` in `interpreter/scope.rs`) and
+/// matching bash. `日本語` is 3 characters but 9 UTF-8 bytes; `😁` is 1
+/// character but 4 UTF-8 bytes. Before the fix, `${#…}` reported the byte
+/// count (9 and 4) while `${v[0:1]}` sliced by character — a silent
+/// disagreement inside one shell.
+#[tokio::test]
+async fn length_of_multibyte_string_is_char_count_not_byte_count() {
+    let k = setup().await;
+
+    let (out, code, err) = run(&k, "v=日本語; echo ${#v}").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "3", "日本語 is 3 characters (9 UTF-8 bytes)");
+
+    let (out, code, err) = run(&k, "v=😁; echo ${#v}").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "1", "😁 is 1 character (4 UTF-8 bytes)");
+}
+
+/// The bug this file was opened for: `${#v}` and `${v[0:1]}` must agree on
+/// what a "character" is. Slicing already counts characters (see
+/// `classify_slice`'s doc comment); this pins length to the same unit so a
+/// caller can trust `${#v}` as a valid slice bound.
+#[tokio::test]
+async fn length_and_slice_agree_on_character_count() {
+    let k = setup().await;
+
+    let (out, code, err) = run(&k, "v=日本語; echo ${#v} ${v[0:1]}").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "3 日", "${{#v}} must count the same unit ${{v[0:1]}} slices");
+
+    let (out, code, err) = run(&k, "v=😁; echo ${#v} ${v[0:1]}").await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "1 😁", "${{#v}} must count the same unit ${{v[0:1]}} slices");
+}
+
 // ── Scalar unwrap enables typed ops ────────────────────────────────────────
 
 #[tokio::test]
@@ -1134,4 +1170,59 @@ async fn redirect_target_bare_collection_is_a_loud_error() {
         Err(e) => format!("{e:#}"),
     };
     assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+}
+
+/// `${#x:-y}` is not a length with a default, and bash rejects it outright as
+/// a bad substitution. kaish's two doors disagreed: the unquoted spelling
+/// refused it (loudly, if imprecisely), while the quoted spelling stripped the
+/// `#`, made `x:-y` the whole path, resolved that unset name, and reported
+/// **0** — a wrong length with nothing to say so.
+///
+/// A parse error surfaces as `Err` from `execute`, so these do not use the
+/// `run` helper, which unwraps.
+#[tokio::test]
+async fn length_with_a_default_is_refused_in_a_quoted_string() {
+    let k = setup().await;
+
+    let result = k.execute(r#"echo "${#x:-yy}""#).await;
+    let err = result.expect_err("a length with a default must not parse");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("length cannot carry a default"),
+        "the error must name the real condition, not the `#`: {text}"
+    );
+}
+
+/// The same refusal with the name set, so the failure is about the FORM and
+/// not about `x` being unset.
+#[tokio::test]
+async fn length_with_a_default_is_refused_even_when_the_name_is_set() {
+    let k = setup().await;
+
+    let result = k.execute(r#"v=abc; echo "${#v:-yy}""#).await;
+    let err = result.expect_err("a length with a default must not parse");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("length cannot carry a default"),
+        "expected the length-with-default refusal, got: {text}"
+    );
+}
+
+/// The forms either side of it must keep working — refusing the combination
+/// must not refuse its halves.
+#[tokio::test]
+async fn a_plain_length_and_a_plain_default_still_work_quoted() {
+    let k = setup().await;
+
+    let (out, code, err) = run(&k, r#"v=日本語; echo "${#v}""#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "3", "a plain length in a quoted string");
+
+    let (out, code, err) = run(&k, r#"echo "${nope:-fallback}""#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "fallback", "a plain default in a quoted string");
+
+    let (out, code, err) = run(&k, r#"p="a:-b"; echo "${#p}""#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "4", "`:-` inside a VALUE is not a default separator");
 }
