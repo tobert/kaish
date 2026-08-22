@@ -312,6 +312,10 @@ breaking entries are marked **BREAKING**.
   than the source reads as and said nothing, while `PАTH=/bin` had warned since
   0.11. The loop head was the last static door without the check;
   `docs/LANGUAGE.md` claimed every door reported it, and now that is true.
+- **`test -r FILE` and `[[ -r FILE ]]` check the mode bits, not just
+  existence.** Both answered "does it exist" — a mode-000 file was `-r` true,
+  contradicting `cat`'s own EACCES one line later. `-r` now checks `0o444`,
+  the same style `-w`/`-x` already use for `0o222`/`0o111`.
 
 ## [0.15.0] - 2026-08-19
 
