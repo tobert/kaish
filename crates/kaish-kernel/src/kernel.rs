@@ -1261,6 +1261,7 @@ impl Kernel {
         let (stderr_writer, stderr_receiver) = stderr_stream();
 
         let mut exec_ctx = make_ctx(&vfs, &tools);
+        let initial_cwd = cwd.clone();
         exec_ctx.set_cwd(cwd);
         exec_ctx.kill_children_on_parent_death = kill_children_on_parent_death;
         exec_ctx.set_job_manager(jobs.clone());
@@ -1292,6 +1293,20 @@ impl Kernel {
                 }
                 scope.set_trash_enabled(trash_enabled);
                 scope.set_error_exit(errexit_enabled);
+                // `$PWD` before any `cd`. Seeded HERE, not just on `exec_ctx`:
+                // this is the scope execution reads, and `exec_ctx.scope` is
+                // overwritten from it at every dispatch, so a value written
+                // only there never survives to be read.
+                scope.set_global(
+                    "PWD",
+                    Value::String(initial_cwd.to_string_lossy().into_owned()),
+                );
+                // `$OLDPWD` is DROPPED rather than seeded. There is no previous
+                // directory yet, and an inherited one describes the invoking
+                // shell's history, not this session's — `cd -` already refuses
+                // with "OLDPWD not set", and the variable must not contradict
+                // it by naming a directory `cd -` will not go to.
+                scope.remove("OLDPWD");
                 scope
             }),
             initial_vars,
@@ -5942,11 +5957,20 @@ impl Kernel {
             // gating decision must not find it quietly disabled after a
             // `reset()` between requests.
             fresh.set_error_exit(errexit_enabled);
+            // `reset()` puts the session back at `/`, so `$PWD` says so.
+            // `initial_vars` can carry an inherited `PWD` from the invoking
+            // environment, which would otherwise survive the reset and name a
+            // directory this session is no longer in. `$OLDPWD` goes for the
+            // same reason a fresh kernel has none: there is no previous
+            // directory, and `cd -` refuses.
+            fresh.set_global("PWD", Value::String("/".to_string()));
+            fresh.remove("OLDPWD");
             *scope = fresh;
         }
         {
             let mut ctx = self.exec_ctx.write().await;
             ctx.cwd = PathBuf::from("/");
+            ctx.prev_cwd = None;
         }
         Ok(())
     }

@@ -190,6 +190,16 @@ breaking entries are marked **BREAKING**.
   losslessly. Escaping was considered and rejected: it needs a decoder on the
   other side, and kaish has no word splitting to be that decoder.
 
+- **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
+  inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
+  directory the shell started in while `pwd` reported `/tmp` — a wrong value
+  with nothing to say so, and the validator vouched for the name because
+  `PWD`/`OLDPWD` are in its known-variable list. `$OLDPWD` was worse than
+  stale: it held a directory from the INVOKING shell's history. They are now
+  maintained at the one place a working directory changes, seeded at startup,
+  and put back by `reset()`. `$OLDPWD` is absent until the first `cd`, matching
+  `cd -`'s existing "OLDPWD not set" refusal instead of contradicting it.
+
 - **A spill stays reported when a later statement succeeds.** `did_spill` was
   assigned rather than OR-ed as a block accumulated its statements, so
   `seq 1 100000; echo after` under an output limit reported `did_spill: false`
