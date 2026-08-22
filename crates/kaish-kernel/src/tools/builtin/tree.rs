@@ -52,6 +52,11 @@ struct TreeArgs {
 struct TreeNode {
     children: BTreeMap<String, TreeNode>,
     is_dir: bool,
+    /// Set when the walk could not open this directory. GNU `tree`'s
+    /// convention is to mark the node inline rather than leave it
+    /// childless — childless is indistinguishable from a genuinely empty
+    /// directory, so silence here would misrepresent, not just omit.
+    has_error: bool,
 }
 
 impl TreeNode {
@@ -73,6 +78,24 @@ impl TreeNode {
         }
     }
 
+    /// Mark the node at `path` as a directory the walk failed to open. The
+    /// node always already exists (it was inserted when discovered as a
+    /// directory entry of its parent); if it somehow doesn't, this is a
+    /// silent no-op rather than a panic on a walk-order quirk.
+    fn mark_error(&mut self, path: &[&str]) {
+        if path.is_empty() {
+            self.has_error = true;
+            return;
+        }
+        if let Some(entry) = self.children.get_mut(path[0]) {
+            if path.len() == 1 {
+                entry.has_error = true;
+            } else {
+                entry.mark_error(&path[1..]);
+            }
+        }
+    }
+
     fn format_traditional(&self, prefix: &str, _is_last: bool, output: &mut String) {
         let mut children: Vec<_> = self.children.iter().collect();
         children.sort_by_key(|(name, _)| *name);
@@ -90,6 +113,9 @@ impl TreeNode {
             output.push_str(connector);
             output.push_str(name);
             output.push_str(name_suffix);
+            if node.has_error {
+                output.push_str(" [error opening dir]");
+            }
             output.push('\n');
 
             if !node.children.is_empty() {
@@ -114,6 +140,9 @@ impl TreeNode {
             output.push_str(&spaces);
             output.push_str(name);
             output.push_str(name_suffix);
+            if node.has_error {
+                output.push_str(" [error opening dir]");
+            }
             output.push('\n');
 
             if !node.children.is_empty() {
@@ -123,6 +152,12 @@ impl TreeNode {
     }
 
     /// Convert TreeNode to OutputNode for the structured output model.
+    ///
+    /// An unreadable directory's marker is embedded directly in the node
+    /// `name` (rather than a side channel) so it survives unchanged through
+    /// both the default compact-notation text render
+    /// (`OutputData::to_canonical_string`, which reads `node.name`) and
+    /// `--json` (`node_to_json`, which uses `node.name` as the object key).
     fn to_output_node(&self, name: &str) -> OutputNode {
         let entry_type = if self.is_dir {
             EntryType::Directory
@@ -135,7 +170,13 @@ impl TreeNode {
             .map(|(child_name, child_node)| child_node.to_output_node(child_name))
             .collect();
 
-        OutputNode::new(name)
+        let display_name = if self.has_error {
+            format!("{name} [error opening dir]")
+        } else {
+            name.to_string()
+        };
+
+        OutputNode::new(display_name)
             .with_entry_type(entry_type)
             .with_children(children)
     }
@@ -226,6 +267,18 @@ impl Tool for Tree {
 
         // Walk directory using stack-based iteration
         let mut stack: Vec<(String, usize)> = vec![(resolved.clone(), 0usize)];
+        // Every directory the walk could not open: reported on stderr and
+        // folded into a nonzero exit once the walk finishes, matching
+        // ls -R's accumulate-and-continue handling of the same failure. A
+        // directory the ignore filter already skipped (below) never reaches
+        // this call, so a gitignored-and-unreadable directory is not an
+        // error.
+        let mut errors: Vec<String> = Vec::new();
+        // Set when the root itself can't be opened — it has no TreeNode of
+        // its own to mark_error on (the root is implicit; `tree.children`
+        // holds only what was discovered underneath it), so its marker is
+        // applied directly to the top-level output below instead.
+        let mut root_has_error = false;
 
         while let Some((dir, depth)) = stack.pop() {
             // Check max depth
@@ -237,7 +290,27 @@ impl Tool for Tree {
             // List directory contents
             let entries = match ctx.backend.list(Path::new(&dir)).await {
                 Ok(entries) => entries,
-                Err(_) => continue,
+                Err(e) => {
+                    let dir_trimmed = dir.trim_end_matches('/');
+                    let relative = dir_trimmed
+                        .strip_prefix(&resolved)
+                        .unwrap_or(dir_trimmed)
+                        .trim_start_matches('/');
+                    if relative.is_empty() {
+                        root_has_error = true;
+                        errors.push(format!("tree: {}: {}", path, e));
+                    } else {
+                        let parts: Vec<&str> = relative.split('/').collect();
+                        tree.mark_error(&parts);
+                        errors.push(format!(
+                            "tree: {}/{}: {}",
+                            path.trim_end_matches('/'),
+                            relative,
+                            e
+                        ));
+                    }
+                    continue;
+                }
             };
 
             for entry in entries {
@@ -281,22 +354,29 @@ impl Tool for Tree {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
+        let root_marker = if root_has_error { " [error opening dir]" } else { "" };
 
         // Handle explicit text format requests
         if flat {
-            let mut output = format!("{}/\n", root_name);
+            let mut output = format!("{}/{}\n", root_name, root_marker);
             tree.format_flat(1, &mut output);
-            return ExecResult::with_output(OutputData::text(output.trim_end()));
+            return apply_walk_errors(
+                ExecResult::with_output(OutputData::text(output.trim_end())),
+                &errors,
+            );
         }
 
         if traditional {
-            let mut output = format!("{}/\n", root_name);
+            let mut output = format!("{}/{}\n", root_name, root_marker);
             tree.format_traditional("", false, &mut output);
-            return ExecResult::with_output(OutputData::text(output.trim_end()));
+            return apply_walk_errors(
+                ExecResult::with_output(OutputData::text(output.trim_end())),
+                &errors,
+            );
         }
 
         // Build structured OutputData with tree structure
-        let root_node = OutputNode::new(&root_name)
+        let root_node = OutputNode::new(format!("{}{}", root_name, root_marker))
             .with_entry_type(EntryType::Directory)
             .with_children(
                 tree.children
@@ -305,8 +385,23 @@ impl Tool for Tree {
                     .collect()
             );
 
-        ExecResult::with_output(OutputData::nodes(vec![root_node]))
+        apply_walk_errors(
+            ExecResult::with_output(OutputData::nodes(vec![root_node])),
+            &errors,
+        )
     }
+}
+
+/// Fold accumulated per-directory listing failures into a result: stderr
+/// gets every failure (the walk continues past each one rather than
+/// stopping at the first), and the exit code moves to 1 so an agent reading
+/// only the exit code doesn't mistake a partial walk for a complete one.
+fn apply_walk_errors(mut result: ExecResult, errors: &[String]) -> ExecResult {
+    if !errors.is_empty() {
+        result.err = ExecResult::terminate_diagnostic(errors.join("\n"));
+        result = result.with_code(1);
+    }
+    result
 }
 
 #[cfg(test)]
