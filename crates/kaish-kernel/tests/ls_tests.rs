@@ -199,3 +199,71 @@ async fn ls_reverse_sort_orders_descending() {
     let z = out.find("zzz.txt").expect("zzz present");
     assert!(z < a, "reverse sort should put zzz before aaa: {out:?}");
 }
+
+// ---------------------------------------------------------------------------
+// `ls -R` headers match GNU's operand-as-written convention (#398 follow-up).
+// ---------------------------------------------------------------------------
+
+/// A relative directory operand headers every level with itself joined onto
+/// the subpath, GNU style: `ls -R sub` headers `sub:` then `sub/inner:`, not
+/// the bare `.:` / `inner:` kaish used to print regardless of the operand.
+#[tokio::test]
+async fn ls_recursive_relative_operand_headers_match_gnu() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "sub/top.txt", "");
+    touch(dir.path(), "sub/inner/deep.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "ls -R sub").await;
+    assert_eq!(code, 0);
+    assert!(out.contains("sub:\n"), "top header should be the operand: {out:?}");
+    assert!(out.contains("sub/inner:\n"), "nested header should join onto the operand: {out:?}");
+}
+
+/// The `.` operand (explicit or the `ls -R` default) headers the root `.:`
+/// but joins every subdirectory with a `./` prefix, matching GNU exactly —
+/// kaish used to print the bare subdirectory name with no prefix at all.
+#[tokio::test]
+async fn ls_recursive_dot_operand_prefixes_children_with_dot_slash() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "sub/inner.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "ls -R").await;
+    assert_eq!(code, 0);
+    assert!(out.starts_with(".:\n"), "root header stays bare .: {out:?}");
+    assert!(out.contains("./sub:\n"), "child header gets GNU's ./ prefix: {out:?}");
+}
+
+/// An absolute directory operand headers every level with its full absolute
+/// path, the same class of fix as #398 for `glob`/`grep -r`: a header kaish
+/// prints should be usable as a path.
+#[tokio::test]
+async fn ls_recursive_absolute_operand_headers_stay_absolute() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "sub/inner.txt", "");
+    let kernel = kernel_at(dir.path());
+    let abs = dir.path().join("sub");
+    let (out, code) = run(&kernel, &format!("ls -R {}", dir.path().display())).await;
+    assert_eq!(code, 0);
+    assert!(
+        out.contains(&format!("{}:\n", abs.display())),
+        "nested header should be the absolute path, not a bare name: {out:?}"
+    );
+}
+
+/// The `--json` shape is a separate contract from the text header fix above:
+/// node names still start from `.` for the walk root and join bare names for
+/// children, regardless of how the operand was spelled. Needs a real nested
+/// subdirectory — a flat one-level walk collapses to a single un-keyed node,
+/// which would pass trivially either way.
+#[tokio::test]
+async fn ls_recursive_json_shape_is_unaffected_by_operand_spelling() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "sub/inner/deep.txt", "");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "ls -R sub --json").await;
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\".\":"),
+        "the json walk-root key must stay '.', unaffected by the operand: {out:?}"
+    );
+}

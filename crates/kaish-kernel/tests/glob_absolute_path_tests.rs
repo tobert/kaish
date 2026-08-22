@@ -222,11 +222,11 @@ async fn grep_recursive_absolute_operand_is_unaffected_by_cwd() {
     assert_eq!(out, expected, "cwd must not change an absolute answer: {out:?}");
 }
 
-/// The control. A relative operand keeps kaish's documented display: the sole
-/// walk root is stripped, so `grep -r p dir` reports `file`. Fixing the
-/// absolute case must not disturb this.
+/// A relative operand now prefixes results with the operand as written, GNU
+/// style: `grep -r p d` reports `d/a.txt`, not the bare `a.txt` kaish used
+/// to strip down to.
 #[tokio::test]
-async fn grep_recursive_relative_operand_display_is_unchanged() {
+async fn grep_recursive_relative_operand_matches_gnu_prefix() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("d")).unwrap();
     fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
@@ -234,5 +234,53 @@ async fn grep_recursive_relative_operand_display_is_unchanged() {
 
     let (out, code) = run(&kernel, "grep -rl HIT d").await;
     assert_eq!(code, 0, "grep should match: {out:?}");
-    assert_eq!(out, "a.txt", "a relative operand keeps the historical display: {out:?}");
+    assert_eq!(out, "d/a.txt", "a relative operand is prefixed like GNU: {out:?}");
+}
+
+/// A relative operand spelled with a leading `./` keeps that spelling in the
+/// prefix, matching GNU byte-for-byte.
+#[tokio::test]
+async fn grep_recursive_dot_slash_operand_keeps_its_spelling() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d")).unwrap();
+    fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -rl HIT ./d").await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    assert_eq!(out, "./d/a.txt", "a ./-spelled operand keeps its ./ prefix: {out:?}");
+}
+
+/// The `.` operand is the one exception both GNU and kaish carve out: no
+/// prefix at all, since joining would just add a redundant `./`.
+#[tokio::test]
+async fn grep_recursive_dot_operand_has_no_prefix() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d")).unwrap();
+    fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -rl HIT .").await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    assert_eq!(out, "d/a.txt", "the . operand still reports the bare cwd-relative path: {out:?}");
+}
+
+/// Several directory operands already showed each match under its own
+/// cwd-relative subpath (`d/a.txt`, `d2/b.txt`) before this change, and must
+/// keep doing so — the new prefix rule applies only to a sole directory
+/// operand.
+#[tokio::test]
+async fn grep_recursive_multiple_dir_operands_display_is_unchanged() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d")).unwrap();
+    fs::create_dir_all(dir.path().join("d2")).unwrap();
+    fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
+    fs::write(dir.path().join("d2/b.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -rl HIT d d2").await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec!["d/a.txt", "d2/b.txt"]);
 }
