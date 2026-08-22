@@ -212,6 +212,16 @@ impl Tool for Env {
 
         #[cfg(feature = "subprocess")]
         {
+            // `env CMD` spawns CMD, so it is an external command and answers
+            // to the same gate every other one does. Without this check `env`
+            // went straight to `tokio::process::Command`, so a kernel built
+            // with external commands turned off still ran the host binary.
+            if !ctx.allow_external_commands {
+                return ExecResult::failure(
+                    127,
+                    format!("env: {command}: external commands are disabled on this shell"),
+                );
+            }
             return execute_with_env(
                 ctx,
                 &command,
@@ -225,8 +235,14 @@ impl Tool for Env {
 
         #[cfg(not(feature = "subprocess"))]
         {
-            let _ = (ctx, &command, &cmd_args, &env_overrides, &unset_vars, clear_env);
-            return ExecResult::failure(1, "env: external commands not available in sandbox mode");
+            let _ = (&cmd_args, &env_overrides, &unset_vars, clear_env);
+            let _ = ctx;
+            return ExecResult::failure(
+                127,
+                format!(
+                    "env: {command}: external commands are not available in this build of the shell"
+                ),
+            );
         }
     }
 }
