@@ -17,30 +17,13 @@ breaking entries are marked **BREAKING**.
   Constructors are unchanged; only a struct literal must add the two fields.
 
 ### Added
-- **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature) —
-  an embedder can register an external program as a kaish tool with a grammar
-  instead of turning `allow_external_commands` on for everything on `$PATH`. A
-  wrapped command runs with that switch off, so a kernel can name every program
-  it is able to run. `WrappedCommand::build()` pins the executable at
-  registration (a missing, non-executable, or relative path is an `Err` there,
-  not a `127` on first call), names the verbs and flags each one accepts, and
-  the kernel renders the child's argv itself — in source order, under each
-  flag's declared name — so a value is never parsed as a flag unless the
-  declaration put it in flag position. Verbs and flags are deny-by-default: an
-  undeclared one fails with the allowed set named, exit 2, before anything
-  spawns, and the validator reports it from `kaish --plan` and `plan_program`.
-  Constraints are `required`, `int`, `choices`, and `path_under` (component-wise
-  containment after canonicalization, so `/opt/scripts-evil` is not under
-  `/opt/scripts`; the resolved path is what the child receives). The child gets
-  the kernel's hermetic environment plus the declaration's `env` pins, captured
-  stdout and stderr, the same cancel and output-limit discipline as an external
-  command, and its own exit code unchanged. `Stdin::Closed` (the default) gives
-  it `/dev/null` and refuses a call that pipes or redirects input rather than
-  dropping it; `Stdin::Pipe` streams. `Tail::{Deny, AfterDashDash, Forward}`
-  says what happens to argv the declaration does not describe, `Forward` being
-  the documented override that passes undeclared flags through in place.
-  `Verb::json_output()` parses that verb's stdout as JSON so `$(…)` binds it
-  typed. Declarations derive serde, so a policy file deserializes into one. See
+- **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
+  register an external program as a tool with a declared grammar — pinned
+  executable, allowlisted verbs and flags (deny-by-default, exit 2 before any
+  spawn, reported by the validator), kernel-rendered argv, hermetic env plus
+  pins, `Stdin::{Closed,Pipe}`, `Tail::{Deny,AfterDashDash,Forward}`,
+  constraints `required`/`int`/`choices`/`path_under`, `json_output` verbs
+  binding typed. Runs with `allow_external_commands` off. See
   `docs/wrapped_command.md`.
 
 - **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …`
@@ -213,6 +196,9 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- `help <tool>` renders a tool's subcommands and their flags, and names each
+  parameter's aliases. `help kj` and every wrapped command showed "No
+  parameters." before.
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
   miscounting it.** Text output uses one newline per path, so a name that
   already contains one split into two paths naming no file — measured, a
