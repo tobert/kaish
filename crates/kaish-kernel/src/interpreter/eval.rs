@@ -626,7 +626,9 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
 /// Length of a value for `${#…}`: element count for a list, key count for a
 /// record, and the CHARACTER count (Unicode scalar values) of the string form
 /// for any scalar (unchanged for non-collections). The single source of truth
-/// for the three `${#…}` evaluation sites (sync + the two async ones).
+/// for every `${#…}` evaluation site — the two sync ones, the two async ones
+/// in `kernel.rs`, and the two reduced-sync ones in `scheduler/pipeline.rs` —
+/// all of which reach it through `resolve_length`.
 ///
 /// Characters, not bytes, so `${#v}` agrees with slicing (`classify_slice` in
 /// `interpreter/scope.rs` already slices by character) and with bash —
@@ -641,6 +643,9 @@ pub fn value_length(value: &Value) -> i64 {
         // Bytes are not sliceable (`resolve_path` rejects a Bytes root as "not
         // a collection"), so there is no slice unit to agree with here.
         Value::Bytes(b) => b.len() as i64,
+        // Counted in place: `value_to_string` would clone the string first,
+        // and this arm is the hot one.
+        Value::String(s) => s.chars().count() as i64,
         other => value_to_string(other).chars().count() as i64,
     }
 }

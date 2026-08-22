@@ -1171,3 +1171,58 @@ async fn redirect_target_bare_collection_is_a_loud_error() {
     };
     assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
 }
+
+/// `${#x:-y}` is not a length with a default, and bash rejects it outright as
+/// a bad substitution. kaish's two doors disagreed: the unquoted spelling
+/// refused it (loudly, if imprecisely), while the quoted spelling stripped the
+/// `#`, made `x:-y` the whole path, resolved that unset name, and reported
+/// **0** — a wrong length with nothing to say so.
+///
+/// A parse error surfaces as `Err` from `execute`, so these do not use the
+/// `run` helper, which unwraps.
+#[tokio::test]
+async fn length_with_a_default_is_refused_in_a_quoted_string() {
+    let k = setup().await;
+
+    let result = k.execute(r#"echo "${#x:-yy}""#).await;
+    let err = result.expect_err("a length with a default must not parse");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("length cannot carry a default"),
+        "the error must name the real condition, not the `#`: {text}"
+    );
+}
+
+/// The same refusal with the name set, so the failure is about the FORM and
+/// not about `x` being unset.
+#[tokio::test]
+async fn length_with_a_default_is_refused_even_when_the_name_is_set() {
+    let k = setup().await;
+
+    let result = k.execute(r#"v=abc; echo "${#v:-yy}""#).await;
+    let err = result.expect_err("a length with a default must not parse");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("length cannot carry a default"),
+        "expected the length-with-default refusal, got: {text}"
+    );
+}
+
+/// The forms either side of it must keep working — refusing the combination
+/// must not refuse its halves.
+#[tokio::test]
+async fn a_plain_length_and_a_plain_default_still_work_quoted() {
+    let k = setup().await;
+
+    let (out, code, err) = run(&k, r#"v=日本語; echo "${#v}""#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "3", "a plain length in a quoted string");
+
+    let (out, code, err) = run(&k, r#"echo "${nope:-fallback}""#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "fallback", "a plain default in a quoted string");
+
+    let (out, code, err) = run(&k, r#"p="a:-b"; echo "${#p}""#).await;
+    assert_eq!(code, 0, "err: {err}");
+    assert_eq!(out, "4", "`:-` inside a VALUE is not a default separator");
+}

@@ -190,6 +190,10 @@ breaking entries are marked **BREAKING**.
   losslessly. Escaping was considered and rejected: it needs a decoder on the
   other side, and kaish has no word splitting to be that decoder.
 
+- **`${#x:-y}` is refused in a quoted string instead of reporting 0.** The `#`
+  strip ran first, so `x:-y` became the whole path and its unset name measured
+  0. bash rejects the form outright, and kaish's unquoted door already did.
+
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
   inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
   directory the shell started in while `pwd` reported `/tmp` — a wrong value
