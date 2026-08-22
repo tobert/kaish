@@ -457,6 +457,32 @@ fn mixed_tool() -> WrappedTool {
 }
 
 #[tokio::test]
+async fn a_json_verb_whose_stdout_overflows_the_capture_ring_passes_through_unparsed() {
+    // The capture ring is a fixed 10 MB; past it the JSON is known to be
+    // incomplete, so the wrapper must hand the spilled result through
+    // untouched rather than fail it as "does not parse". 11 MB of `x` is
+    // not JSON at any length, so a missing guard would show as exit 1.
+    let dir = tempfile::tempdir().unwrap();
+    let big = "x".repeat(11_000_000);
+    std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+    let tool = WrappedCommand::new("wjsoncat")
+        .executable("/bin/cat")
+        .root(Verb::root().positional(Positional::one("file")).json_output())
+        .build()
+        .expect("the JSON cat declaration builds");
+    let kernel = kernel_with(dir.path(), vec![tool]);
+
+    let result = run(&kernel, "wjsoncat big.txt").await;
+    assert!(result.did_spill, "11 MB must overflow the 10 MB ring: code={} err={}", result.code, result.err);
+    assert!(
+        !result.err.contains("declared JSON output"),
+        "a spilled result must not be parsed as JSON: {}",
+        result.err
+    );
+    assert_ne!(result.code, 1, "the child's outcome passes through, not the wrapper's parse failure");
+}
+
+#[tokio::test]
 async fn a_json_verb_prints_its_json_and_binds_typed_on_an_all_json_tool() {
     let dir = tempfile::tempdir().unwrap();
     let kernel = kernel_with(dir.path(), vec![all_json_tool()]);
