@@ -98,7 +98,7 @@ impl EmbeddedClient {
         self.kernel
             .execute_with_options_streaming(input, ExecuteOptions::default(), on_output)
             .await
-            .map_err(|e| ClientError::Execution(e.to_string()))
+            .map_err(ClientError::Kernel)
     }
 
     /// Execute with full per-call options (timeout, cancel token, vars overlay,
@@ -112,7 +112,7 @@ impl EmbeddedClient {
         self.kernel
             .execute_with_options(input, opts)
             .await
-            .map_err(|e| ClientError::Execution(e.to_string()))
+            .map_err(ClientError::Kernel)
     }
 
     /// Execute with options + per-statement output callback.
@@ -125,7 +125,7 @@ impl EmbeddedClient {
         self.kernel
             .execute_with_options_streaming(input, opts, on_output)
             .await
-            .map_err(|e| ClientError::Execution(e.to_string()))
+            .map_err(ClientError::Kernel)
     }
 
     /// Execute with options + per-statement callback, feeding a **lazy** process
@@ -145,7 +145,7 @@ impl EmbeddedClient {
         self.kernel
             .execute_with_pipe_stdin_streaming(input, opts, pipe_stdin, on_output)
             .await
-            .map_err(|e| ClientError::Execution(e.to_string()))
+            .map_err(ClientError::Kernel)
     }
 }
 
@@ -155,7 +155,7 @@ impl KernelClient for EmbeddedClient {
         self.kernel
             .execute(input)
             .await
-            .map_err(|e| ClientError::Execution(e.to_string()))
+            .map_err(ClientError::Kernel)
     }
 
     async fn execute_with_vars(
@@ -166,7 +166,7 @@ impl KernelClient for EmbeddedClient {
         self.kernel
             .execute_with_options(input, ExecuteOptions::new().with_vars(vars))
             .await
-            .map_err(|e| ClientError::Execution(e.to_string()))
+            .map_err(ClientError::Kernel)
     }
 
     async fn get_var(&self, name: &str) -> ClientResult<Option<Value>> {

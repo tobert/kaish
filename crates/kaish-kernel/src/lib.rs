@@ -17,6 +17,7 @@ pub mod backend;
 pub(crate) mod backend_walker_fs;
 pub mod dispatch;
 pub mod duration;
+pub mod error;
 pub mod fragment;
 pub mod help;
 pub mod ignore_config;
@@ -65,6 +66,7 @@ pub use backend::{
     ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
 pub use dispatch::{CommandDispatcher, PipelinePosition};
+pub use error::KernelError;
 pub use ignore_config::{IgnoreConfig, IgnoreScope};
 pub use kernel::{
     CommandKind, ExecuteOptions, Kernel, KernelConfig, VfsMountMode, MAX_RECURSION_DEPTH,

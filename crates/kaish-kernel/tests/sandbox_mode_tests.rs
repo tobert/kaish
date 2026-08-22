@@ -191,18 +191,33 @@ async fn sandbox_external_commands_blocked() {
     let k = sandbox_kernel().await;
     // Use a command name that is definitely not a builtin.
     let r = k.execute("/usr/bin/curl https://example.com").await.expect("execute failed");
-    // Pin the policy block exactly: exit 127 + "command not found". A looser
-    // !ok() would also pass if curl actually RAN and failed (network error,
-    // exit 6) — i.e., a sandbox escape would go unnoticed.
+    // Pin the policy block exactly: exit 127, and a message that names the
+    // refusal rather than claiming curl doesn't exist. A looser !ok() would
+    // also pass if curl actually RAN and failed (network error, exit 6) —
+    // i.e., a sandbox escape would go unnoticed.
     assert_eq!(
         r.code, 127,
         "external command should be policy-blocked (127), not merely fail: out={:?} err={:?}",
         r.text_out(),
         r.err
     );
+    // This test's isolated() kernel is refused for one of two reasons
+    // depending on how this binary was built — `subprocess` compiled in but
+    // configured off (the default `cargo test --all`, which unifies
+    // `subprocess` in via kaish-repl's `full` feature), or `subprocess` not
+    // compiled in at all (`cargo test -p kaish-kernel --no-default-features`,
+    // CLAUDE.md's dedicated sandbox-mode CI leg). Both share this prefix and
+    // neither is "command not found" — see `external_command_tests.rs` and
+    // `external_commands_not_compiled_tests.rs` for the two exact messages
+    // pinned individually.
     assert!(
-        r.err.contains("command not found"),
-        "policy block should surface as command-not-found: err={:?}",
+        r.err.contains("external commands are"),
+        "policy block should name the refusal, not claim the command is missing: err={:?}",
+        r.err
+    );
+    assert!(
+        !r.err.contains("command not found"),
+        "must not be misreported as a missing command: err={:?}",
         r.err
     );
 }

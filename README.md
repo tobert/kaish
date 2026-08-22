@@ -57,23 +57,25 @@ the implementation: strict parsing with pre-execution validation, builtins that
 behave identically everywhere, and a filesystem boundary the embedder controls.
 
 Underneath, kaish's data model is JSON. A variable holds an array or a record as
-naturally as a string, `$(cmd)` substitution carries structured values, so you
-can choose between old-school text parsing and using JSON-typed data. Using the
-`--json` flag on any command will get it to emit the same typed data the
-language works with internally. Structured results flow through pipes,
-subscripts, and iteration without extra serialization / deserialization steps.
+naturally as a string, and `$(cmd)` binds a typed value when the command's
+output *is* a value — `x=$(fromjson <<< '[1,2]')` binds a list, as `jq`, `keys`,
+and `values` do. A builtin with a POSIX counterpart binds text instead, so it
+reads as its POSIX self: `$(grep …)`, `$(ls …)`, and `$(find …)` are text, one
+line per result. Ask any command for its structure with `--json`, which emits
+the same typed data the language works with internally. Structured results flow
+through pipes, subscripts, and iteration without extra serialization /
+deserialization steps.
 
 ## What's Different About kaish?
 
 Kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
-language that's comes naturally, while providing better pre-execution
+language that comes naturally, while providing better pre-execution
 syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 
 - **JSON data model** — kaish's native values are JSON types: strings, numbers, booleans, arrays, and records.
 - **Single brackets are JSON** - `[` is for json arrays and records, `[[` is for branching
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
-- **Line iteration in for-loops** — `for line in $(cat file)` splits on `\n` only; whitespace within a line is never split
-- **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
+- **Line iteration in for-loops** — a `for` head splits text on `\n` only, never on whitespace within a line: `for line in $(cat file)`, `for i in $(seq 1 5)`, and `for f in $(ls)` all iterate the same way
 - **Explicit splitting** — use `split "$VAR"` for whitespace/delimiter/regex splitting
 - **No backticks** — only `$(cmd)` substitution
 - **Strict booleans** — only lowercase `true`/`false` are booleans; `TRUE` and `yes` are ordinary strings
@@ -92,9 +94,10 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# regular *.log works but glob adds recursive ** patterns, and its
-# data passes to the for loop as a JSON array
-for file in $(glob **/*.log); do
+# bare *.log recurses too with **; reach for the glob builtin for options
+# like --exclude. glob has a POSIX counterpart (find), so $(glob ...) binds
+# text, one path per line, same as $(find ...) or $(ls ...).
+for file in $(glob **/*.log --exclude="*.tmp.log"); do
     echo "logfile: $file"
 done
 
@@ -128,7 +131,8 @@ ask kaish itself — help is in-band: `help builtins`, `help syntax`, `help <too
 
 ## Getting Started
 
-You'll need a Rust toolchain ([rustup](https://rustup.rs)). For
+You'll need a Rust toolchain ([rustup](https://rustup.rs)) for either path
+below — the REPL or an embedded kernel.
 
 ### The REPL
 
@@ -196,22 +200,20 @@ async fn main() -> anyhow::Result<()> {
 The kernel is hermetic by default — it never reads the OS environment (the
 frontend supplies vars), and the OS-touching capability features (`subprocess`,
 `host`, `os-integration`, `tokens`) are opt-in cargo features, so the dangerous
-surface is named, not inherited. Every `execute()` returns an `ExecResult` with
+surface is explicit. Every `execute()` returns an `ExecResult` with
 clean text output, an optional typed `data` payload (`--json` on any command),
-and an exit code agents can branch on: `2` means a destructive op wants
-confirmation, `3` means output was truncated, `124` is a timeout.
+and an exit code agents can branch on: `2` is a usage error or a refusal that
+names what to do instead (e.g. `kaish-trash empty` without `--confirm`), `3`
+means output was truncated, `124` is a timeout.
 
 [docs/EMBEDDING.md](docs/EMBEDDING.md) is the full guide: kernel construction,
 capability features, `ExecuteOptions`, custom tools, the exit-code contract, and
 thread stack sizing.
 
 **Using kaish over MCP?** kaish core doesn't ship an MCP server — that surface
-lives in the embedders. [**kaibo**](https://github.com/tobert/kaibo) (解剖) is the
-showcase: a read-only codebase-analysis MCP that drives kaish to read and reason
-about a project and answers with cited `file:line` spans.
-[**kaijutsu**](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP
-interface too. Both show the pattern: embed the kernel, then expose it however
-your agent needs.
+lives in the embedders. [**kaibo**](https://github.com/tobert/kaibo) is the
+showcase: agents with kaish powers in an MCP (or CLI). Kaibo agents have a kaish
+shell tool for exploring filesystems and text.
 
 **Not embedding, just curious?** [**kaish-extras**](https://github.com/tobert/kaish-extras)
 compiles the kernel to `wasm32-unknown-unknown` and runs it in a browser tab —
@@ -242,7 +244,7 @@ an `awk` that never surprises.
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
-| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | `:`, assert, false, test, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-last, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version, kaish-vfs |
@@ -252,10 +254,10 @@ an `awk` that never surprises.
 - Builtins go through the VFS and see only its mounts — the agent preset
   sandboxes to `$HOME` + `/tmp`, with `/v/` as in-memory scratch under a
   64 MiB budget.
-- **External commands resolved via `PATH` run against the real filesystem** —
-  the VFS sandbox does not apply to them. Block them at runtime with
-  `allow_external_commands=false`, or build without the `subprocess` capability
-  feature and they don't exist at all.
+- **External commands — resolved via `PATH` or a direct path — run against the
+  real filesystem** — the VFS sandbox does not apply to them. Block them at
+  runtime with `allow_external_commands=false`, or build without the
+  `subprocess` capability feature and they don't exist at all.
 - `--overlay` makes a call copy-on-write: writes stay in memory unless the
   script runs `kaish-vfs commit`.
 - `set -o trash` (or `KAISH_TRASH=1`) diverts deletes and truncating
@@ -269,29 +271,6 @@ an `awk` that never surprises.
 
 Trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md); the
 embedder-facing `plan_program` contract in [docs/EMBEDDING.md](docs/EMBEDDING.md).
-
-## Terms
-
-kaish uses these words with one meaning each, in the docs, the help system, and the
-error messages.
-
-| Term | Meaning |
-|---|---|
-| loud, fail loud | An error is explicit and immediate. kaish never continues on a wrong assumption. |
-| silently | Used only in the negative, to name behavior kaish refuses. |
-| builtin | A tool that runs inside the kernel process. |
-| external command | A program the kernel runs through `PATH`. |
-| kernel | The execution core. Not the OS kernel. |
-| mount | A path prefix bound to a filesystem, or the act of binding one. |
-| typed | A value keeps its JSON type through substitution. It is not stringified. |
-| overlay | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
-| trash | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
-| spill | To write oversize output to a file, or the file that results. |
-| hazard | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
-| override | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. Never a workaround: an override is part of the design, and every restriction that has one names it. |
-
-Contributors: the writing style behind this vocabulary is in
-[AGENTS.md](AGENTS.md), "Writing style".
 
 ## Why build 会sh?
 
@@ -319,20 +298,14 @@ are cut manually, so that one workflow is the whole CI story.
 ## Contributing
 
 Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
-love seeing what other agents come up with. **All changes go through a PR** —
-branch, push, and open a PR rather than committing to `main` (releases are the
-exception). That said, please have your agent (or another model) review the PR
-before submitting — a few tokens on review goes a long way. Same goes for issues:
-agent-filed is fine, just make sure it makes sense. CI must be green before a PR
-merges; note that the runners track current stable Rust, so clippy there may know
-lints your local toolchain doesn't yet.
+love seeing what other agents come up with. **All changes go through a PR.**
 
-If you're working with AI coding agents, you might also be interested in
-[kaibo](https://github.com/tobert/kaibo), an assistant for you assistant with a
-read-only kaish shell.
+Be sure to have your agent read [AGENTS.md](AGENTS.md). Most of what we do for
+kaish is standard open source process.
 
-- [**gpal**](https://github.com/tobert/gpal) — Gemini as an MCP server (pairs well with Claude Code)
-- [**cpal**](https://github.com/tobert/cpal) — Claude as an MCP server (pairs well with Gemini CLI)
+Please review your code before submitting PRs. [kaibo](https://github.com/tobert/kaibo)
+subagents use kaish as their read-only shell and it does a great job of finding defects
+before committing or pushing that PR.
 
 ## License
 

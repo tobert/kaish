@@ -303,6 +303,38 @@ impl Filesystem for LocalFs {
         fs::write(&full_path, data).await
     }
 
+    async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.check_writable()?;
+        let full_path = self.resolve(path)?;
+
+        // Ensure parent directory exists, matching `write`'s behavior for a
+        // path in a missing directory.
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        // O_APPEND, no read: this needs no read permission (unlike the
+        // trait default's read-then-write) and each write(2) call is
+        // atomic, so a concurrent writer's bytes land before or after ours,
+        // never lost between a read and a write.
+        //
+        // `flush` is not optional: `tokio::fs::File::write_all` completing
+        // does not guarantee the bytes reached the OS file — under
+        // concurrent load, `write_all().await` returning `Ok` and then
+        // dropping the file without an explicit flush measurably lost the
+        // appended bytes (confirmed by direct repro against bare
+        // tokio::fs::File, independent of this function). `flush` drives
+        // that write through before the handle is dropped.
+        use tokio::io::AsyncWriteExt;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&full_path)
+            .await?;
+        file.write_all(data).await?;
+        file.flush().await
+    }
+
     async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
         self.check_writable()?;
         let full_path = self.resolve(path)?;
@@ -537,6 +569,58 @@ mod tests {
         fs.write(Path::new("test.txt"), b"hello").await.unwrap();
         let data = fs.read(Path::new("test.txt")).await.unwrap();
         assert_eq!(data, b"hello");
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_append_creates_a_missing_file() {
+        let (fs, dir) = setup().await;
+
+        fs.append(Path::new("new.txt"), b"hello").await.unwrap();
+        let data = fs.read(Path::new("new.txt")).await.unwrap();
+        assert_eq!(data, b"hello");
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_append_extends_an_existing_file() {
+        let (fs, dir) = setup().await;
+
+        fs.write(Path::new("existing.txt"), b"original\n").await.unwrap();
+        fs.append(Path::new("existing.txt"), b"appended\n").await.unwrap();
+        let data = fs.read(Path::new("existing.txt")).await.unwrap();
+        assert_eq!(data, b"original\nappended\n");
+
+        cleanup(&dir).await;
+    }
+
+    // The point of a real O_APPEND: no read permission needed. A read-then-write
+    // composition would fail on a write-only file; this must succeed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_append_succeeds_on_a_write_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (fs, dir) = setup().await;
+        let path = dir.join("write_only.txt");
+        std::fs::write(&path, b"original\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+
+        let read_still_works = std::fs::read(&path).is_ok();
+        let result = fs.append(Path::new("write_only.txt"), b"appended\n").await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        if read_still_works {
+            eprintln!("skipping: running as root, 0200 did not deny read");
+            cleanup(&dir).await;
+            return;
+        }
+
+        result.unwrap();
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(data, b"original\nappended\n");
 
         cleanup(&dir).await;
     }
