@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
 use crate::operation::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
@@ -77,9 +76,15 @@ impl Tool for Tee {
         };
 
         // Under trash, a truncating overwrite snapshots the prior content
-        // before we write below (no-op with trash off). Append never
-        // snapshots (it doesn't destroy prior content); a new file just
-        // writes.
+        // before we write below (no-op with trash off). Append is excluded
+        // from that snapshot because it carries the prior bytes forward
+        // itself: the backend folds them into the new write, or reports the
+        // error and writes nothing. That exclusion is only safe while a
+        // failed read cannot stand in for empty content — which is why
+        // append goes through the backend rather than reading here.
+        // A writer racing between the backend's read and its write is a
+        // separate, known residual (see the CAS note at the write site),
+        // not something a snapshot would catch either.
         let targets: Vec<(String, bool)> = paths.iter().map(|p| (p.clone(), append)).collect();
         let snapshots = match ctx
             .snapshot_overwrites("tee",
@@ -105,16 +110,22 @@ impl Tool for Tee {
             let resolved = ctx.resolve_path(path_str);
             let path = Path::new(&resolved);
 
-            // Overwrite writes the borrowed input directly (no clone); append
-            // needs a read-modify-write since the VFS lacks an append mode. A
+            // Overwrite writes the borrowed input directly (no clone). A
             // truncating overwrite of a gated target goes through a CAS against
             // the gate's snapshot, so a concurrent change between the gate and
             // this write is a loud conflict, not a silent clobber.
+            //
+            // Append delegates to the backend rather than reading and writing
+            // here. `KernelBackend::append` is the same primitive the `>>`
+            // redirect uses, and it already treats a failed read correctly:
+            // `NotFound` starts from an empty base (appending to a new file
+            // creates it), while a permission error or an I/O error
+            // propagates. Reading here instead let a failed read stand in for
+            // empty content, so `tee -a` overwrote the file with just the new
+            // input and exited 0.
             let write_result = if append {
-                let mut combined = ctx.backend.read(path, None).await.unwrap_or_default();
-                combined.extend_from_slice(&input);
                 ctx.backend
-                    .write(path, &combined, WriteMode::Overwrite)
+                    .append(path, &input)
                     .await
                     .map_err(|e| e.to_string())
             } else {
@@ -141,6 +152,7 @@ impl Tool for Tee {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::WriteMode;
     use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
@@ -212,6 +224,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(written, b"original content\nappended\n");
+    }
+
+    /// Wraps a real backend and forces the append path to fail for one
+    /// path, so tee's handling of a failed append is testable
+    /// deterministically. Both `read` and `append` fail, so the test states
+    /// tee's contract — report the failure, leave the bytes alone — without
+    /// pinning which backend primitive tee reaches for. (A real mode-0200
+    /// file is the end-to-end fixture; see
+    /// `tests/tee_append_read_failure_tests.rs`.)
+    struct FailingReadBackend {
+        inner: Arc<dyn crate::backend::KernelBackend>,
+        fail_path: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::KernelBackend for FailingReadBackend {
+        async fn read(
+            &self,
+            path: &Path,
+            range: Option<crate::backend::ReadRange>,
+        ) -> crate::backend::BackendResult<Vec<u8>> {
+            if path == self.fail_path {
+                return Err(crate::backend::BackendError::PermissionDenied(
+                    path.display().to_string(),
+                ));
+            }
+            self.inner.read(path, range).await
+        }
+        async fn write(
+            &self,
+            path: &Path,
+            content: &[u8],
+            mode: WriteMode,
+        ) -> crate::backend::BackendResult<()> {
+            self.inner.write(path, content, mode).await
+        }
+        async fn append(&self, path: &Path, content: &[u8]) -> crate::backend::BackendResult<()> {
+            if path == self.fail_path {
+                return Err(crate::backend::BackendError::PermissionDenied(
+                    path.display().to_string(),
+                ));
+            }
+            self.inner.append(path, content).await
+        }
+        async fn patch(
+            &self,
+            path: &Path,
+            ops: &[crate::backend::PatchOp],
+        ) -> crate::backend::BackendResult<()> {
+            self.inner.patch(path, ops).await
+        }
+        async fn list(&self, path: &Path) -> crate::backend::BackendResult<Vec<crate::vfs::DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> crate::backend::BackendResult<crate::vfs::DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> crate::backend::BackendResult<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn set_mtime(
+            &self,
+            path: &Path,
+            mtime: std::time::SystemTime,
+        ) -> crate::backend::BackendResult<()> {
+            self.inner.set_mtime(path, mtime).await
+        }
+        async fn remove(&self, path: &Path, recursive: bool) -> crate::backend::BackendResult<()> {
+            self.inner.remove(path, recursive).await
+        }
+        async fn rename(&self, from: &Path, to: &Path) -> crate::backend::BackendResult<()> {
+            self.inner.rename(from, to).await
+        }
+        async fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path).await
+        }
+        async fn lstat(&self, path: &Path) -> crate::backend::BackendResult<crate::vfs::DirEntry> {
+            self.inner.lstat(path).await
+        }
+        async fn read_link(&self, path: &Path) -> crate::backend::BackendResult<std::path::PathBuf> {
+            self.inner.read_link(path).await
+        }
+        async fn symlink(&self, target: &Path, link: &Path) -> crate::backend::BackendResult<()> {
+            self.inner.symlink(target, link).await
+        }
+        async fn call_tool(
+            &self,
+            name: &str,
+            args: ToolArgs,
+            ctx: &mut dyn ToolCtx,
+        ) -> crate::backend::BackendResult<crate::backend::ToolResult> {
+            self.inner.call_tool(name, args, ctx).await
+        }
+        async fn list_tools(&self) -> crate::backend::BackendResult<Vec<crate::backend::ToolInfo>> {
+            self.inner.list_tools().await
+        }
+        async fn get_tool(
+            &self,
+            name: &str,
+        ) -> crate::backend::BackendResult<Option<crate::backend::ToolInfo>> {
+            self.inner.get_tool(name).await
+        }
+        fn read_only(&self) -> bool {
+            self.inner.read_only()
+        }
+        fn backend_type(&self) -> &str {
+            self.inner.backend_type()
+        }
+        fn mounts(&self) -> Vec<crate::backend::MountInfo> {
+            self.inner.mounts()
+        }
+        fn resolve_real_path(&self, path: &Path) -> Option<std::path::PathBuf> {
+            self.inner.resolve_real_path(path)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tee_append_read_failure_does_not_truncate() {
+        use crate::backend::KernelBackend as _;
+
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("existing.txt"), b"original content\n")
+            .await
+            .unwrap();
+        vfs.mount("/", mem);
+        let vfs = Arc::new(vfs);
+
+        // Two independent backends over the *same* VFS: `backend` is what
+        // tee writes through (and always fails to read `/existing.txt`);
+        // `verify_backend` is a plain, un-wrapped view used only to inspect
+        // what actually landed on disk, so the assertion below isn't
+        // laundered through the same backend that's rigged to fail.
+        let inner: Arc<dyn crate::backend::KernelBackend> =
+            Arc::new(crate::backend::LocalBackend::new(vfs.clone()));
+        let verify_backend = crate::backend::LocalBackend::new(vfs);
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(FailingReadBackend {
+            inner,
+            fail_path: std::path::PathBuf::from("/existing.txt"),
+        });
+        let mut ctx = ExecContext::with_backend(backend);
+        ctx.set_stdin("appended\n".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/existing.txt".into()));
+        args.flags.insert("a".to_string());
+
+        let result = Tee.execute(args, &mut ctx).await;
+
+        assert!(!result.ok(), "tee -a must fail when the pre-append read fails");
+        assert!(
+            !result.err.is_empty(),
+            "the read failure must be reported, not swallowed"
+        );
+
+        // The heart of this test: the file must still hold its ORIGINAL
+        // bytes, not just the new input alone.
+        let written = verify_backend
+            .read(Path::new("/existing.txt"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            written, b"original content\n",
+            "a failed pre-append read must not truncate the file; got {written:?}"
+        );
     }
 
     #[tokio::test]

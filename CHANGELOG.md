@@ -194,6 +194,10 @@ breaking entries are marked **BREAKING**.
   also survives into `tree --json`. `ls -R --json` does not yet carry an
   equivalent marker for an unreadable directory — a known gap, not fixed here.
 
+- **`tee -a` and `>>` now append through a real VFS `Filesystem::append`
+  (`O_APPEND`):** no read permission needed, and the read-then-write race
+  is closed. New trait method, default impl — no embedder break.
+
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
   miscounting it.** Text output uses one newline per path, so a name that
   already contains one split into two paths naming no file — measured, a

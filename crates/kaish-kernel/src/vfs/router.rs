@@ -252,6 +252,17 @@ impl Filesystem for VfsRouter {
         fs.write(&relative, data).await
     }
 
+    #[tracing::instrument(level = "trace", skip(self, data), fields(path = %path.display(), size = data.len()))]
+    async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        // Forward to the mount so a real append (LocalFs's O_APPEND, say)
+        // reaches it. Falling through to the trait default would call our
+        // own `read` and `write`, which route to the mount's read and write
+        // individually — never its `append` override, and losing the
+        // atomicity that override exists to provide.
+        let (fs, relative) = self.find_mount(path)?;
+        fs.append(&relative, data).await
+    }
+
     #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         // Special case: listing root might need to show mount points
