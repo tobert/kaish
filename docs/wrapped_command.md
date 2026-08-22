@@ -169,6 +169,7 @@ let python = WrappedCommand::new("python")
         .stdin(Stdin::Pipe))
     .verb(Verb::new("json-tool")
         .lead(["-m", "json.tool"])
+        .omit_name()
         .positional(Positional::one("file"))
         .stdin(Stdin::Pipe)
         .json_output())
@@ -176,8 +177,12 @@ let python = WrappedCommand::new("python")
 ```
 
 `json-tool` is a verb python does not have. `Verb::lead` supplies the real
-argv, so the declaration can name a stable, narrow entry point for a module
-invocation. `.json_output()` declares that the verb's stdout is JSON;
+argv and `Verb::omit_name` keeps the synthetic name out of it, so the
+declaration can name a stable, narrow entry point for a module invocation:
+`python json-tool f.json` renders `["-I", "-m", "json.tool", "f.json"]`. A
+verb the program does have keeps its name — `cargo metadata` renders
+`["metadata", "--format-version", "1"]` — so the two cases are told apart by
+the declaration, not by whether a `lead` is present. `.json_output()` declares that the verb's stdout is JSON;
 `$(python json-tool f.json)` binds as data because the declaration said so,
 never because the bytes looked like JSON.
 
@@ -437,10 +442,14 @@ are pure and table-driven (`rstest`); they should be dense.
 
 ## Open items
 
-- Per-verb `json_output` and `ToolSchema::typed_substitution`: the kernel reads
-  `typed_substitution` from the root schema. The implementation decides
-  whether a root-level flag plus "data-only result" is enough, or whether the
-  kernel should read the leaf. Record the decision here.
+- Per-verb `json_output` and `ToolSchema::typed_substitution`: **decided.** The
+  root schema sets `typed_substitution` only when *every* verb the tool can run
+  declares `json_output()`. A tool with one JSON verb among text ones would
+  otherwise make `$(cargo build)` bind a value that does not exist. Each verb's
+  own schema still carries the flag, so `help` reports it per verb, and a caller
+  who wants the data from one JSON verb among many asks with `--json`. Reading
+  the leaf is a kernel change; it is not needed until a declaration wants a
+  mixed tool to substitute typed.
 - The declaration types may move to `kaish-types` if an embedder wants to
   deserialize declarations without the kernel. Not before one asks.
 - Presets (`git`, `python`, `cargo`) ship as data outside the kernel. One small
