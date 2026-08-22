@@ -324,6 +324,11 @@ breaking entries are marked **BREAKING**.
   counts), and `${#bytes}` stays the byte count — `Value::Bytes` is not
   sliceable, so there is no character unit for it to agree with.
 
+- **`test -r FILE` and `[[ -r FILE ]]` check the mode bits, not just
+  existence.** Both answered "does it exist" — a mode-000 file was `-r` true,
+  contradicting `cat`'s own EACCES one line later. `-r` now checks `0o444`,
+  the same style `-w`/`-x` already use for `0o222`/`0o111`.
+
 ## [0.15.0] - 2026-08-19
 
 ### Added
