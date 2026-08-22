@@ -969,3 +969,40 @@ async fn an_external_command_after_a_partial_read_sees_the_remainder() {
         "the external command must resume where `read` stopped"
     );
 }
+
+/// `env CMD` spawns CMD, so it must answer to the external-commands gate.
+/// It did not: `env` reached `tokio::process::Command` directly with no check,
+/// so a kernel with external commands off still ran the host binary. A sandbox
+/// bypass, shipped in 0.15.0, and reachable by any embedder running a
+/// read-only shell — `env FOO=bar curl ...` escaped it.
+///
+/// Found by a kaibo review of the refusal-message work, which asked whether
+/// every route to a refused external command was covered. This one was not.
+#[tokio::test]
+async fn env_cannot_bypass_the_external_commands_gate() {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+
+    // The control: a direct external command is refused. This also stands in
+    // for the precondition — `allow_external_commands` is private, so the
+    // refusal itself is how the test proves the gate is closed.
+
+    let direct = kernel.execute("/bin/echo MARKER").await.expect("exec");
+    assert_ne!(direct.code, 0, "direct external must be refused");
+    assert!(!direct.text_out().contains("MARKER"));
+
+    // The bug: the same binary reached through `env`.
+    let via_env = kernel
+        .execute("env FOO=bar /bin/echo MARKER")
+        .await
+        .expect("exec");
+    assert!(
+        !via_env.text_out().contains("MARKER"),
+        "SANDBOX BYPASS: env ran a host binary with external commands disabled: {via_env:?}"
+    );
+    assert_ne!(via_env.code, 0, "env must refuse, not silently succeed");
+    assert!(
+        via_env.err.contains("external commands are"),
+        "the refusal must name the condition: {:?}",
+        via_env.err
+    );
+}

@@ -95,6 +95,10 @@ breaking entries are marked **BREAKING**.
   exhaustive by design.
 
 ### Fixed
+- **`env CMD` no longer bypasses the external-commands gate.** `env` spawned
+  the host binary directly with no capability check, so `env FOO=bar curl …`
+  escaped a kernel built with external commands off. It now refuses with exit
+  **127**, naming the condition. Present since the capability was introduced.
 
 - **`ls -R` and `tree` no longer swallow a directory they cannot read.** Both
   dropped it silently at exit 0 — `tree` rendering it as a childless node,
