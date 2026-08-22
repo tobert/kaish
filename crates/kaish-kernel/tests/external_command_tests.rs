@@ -939,6 +939,65 @@ async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
 }
 
 // ---------------------------------------------------------------------------
+// A kernel with external commands turned off must name that condition, not
+// claim the command doesn't exist. This is the kaijutsu bug the fix exists
+// for: a read-only shell's `git` lookup came back "command not found", and
+// the calling model concluded git wasn't installed and gave up — when
+// `allow_external_commands: false` was the actual, actionable reason.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn disabled_external_commands_report_the_condition_not_command_not_found() {
+    // `/bin/sh` genuinely exists — verify that first, so a passing result
+    // here can't be confused with the genuinely-missing case the control
+    // test below covers.
+    assert!(
+        std::path::Path::new("/bin/sh").exists(),
+        "test fixture requires /bin/sh to exist on this system"
+    );
+
+    let config = KernelConfig::repl().with_allow_external_commands(false);
+    let kernel = Kernel::new(config).expect("kernel with external commands disabled");
+
+    let result = kernel.execute("/bin/sh -c true").await.expect("execute");
+
+    assert_eq!(result.code, 127, "policy refusal keeps the not-found exit code: {result:?}");
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        !msg.contains("command not found"),
+        "a resolvable command refused by policy must not be misreported as missing: {msg}"
+    );
+    assert!(
+        msg.contains("external commands are disabled on this shell"),
+        "the refusal should name the actual condition: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn enabled_external_commands_still_report_not_found_for_a_missing_command() {
+    // Control for the test above: proves the fix didn't just relabel every
+    // external-command failure as "disabled". With external commands
+    // allowed, a name that genuinely isn't on PATH must still say so.
+    let kernel = repl_kernel();
+
+    let result = kernel
+        .execute("definitely-not-a-real-command-disabled-reason-fix")
+        .await
+        .expect("execute");
+
+    assert_eq!(result.code, 127, "not found is still exit 127: {result:?}");
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        msg.contains("command not found"),
+        "a genuinely missing command must keep the generic not-found message: {msg}"
+    );
+    assert!(
+        !msg.contains("external commands are disabled"),
+        "must not claim policy refusal when the command simply isn't on PATH: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // A partial `read` leaves a buffered prefix AND a live pipe. They are one
 // stream: an external command's stdin must receive the prefix first, then the
 // rest of the pipe. Choosing one and dropping the other silently skips the

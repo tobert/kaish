@@ -45,6 +45,75 @@ pub enum OutputContext {
     Script,
 }
 
+/// Why kaish will not run an external command for this dispatch — distinct
+/// from "not found in PATH", which is a different condition entirely (see
+/// `crate::tools::builtin::spawn::virtual_cwd_error` for that one).
+///
+/// The two variants name different audiences, not just different remedies:
+/// [`Self::NotCompiled`] is a build-time fact only whoever built this binary
+/// can change; [`Self::ConfiguredOff`] is a runtime policy an embedder set
+/// and can change. A caller must not collapse them into one message.
+///
+/// Lives here (not behind `#[cfg(feature = "subprocess")]`) because both
+/// `Kernel::try_execute_external` and `dispatch.rs`'s test-only
+/// `BackendDispatcher::try_external` need it from their `not(subprocess)`
+/// arm too, where the `spawn` module — gated on that same feature — is not
+/// compiled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalCommandsUnavailable {
+    /// This binary was built without the `subprocess` capability.
+    NotCompiled,
+    /// This binary has the capability, but this kernel's configuration
+    /// turned it off.
+    ConfiguredOff,
+}
+
+impl ExternalCommandsUnavailable {
+    /// The condition, named precisely and completely — no remedy. A remedy
+    /// depends on the embedder's own tool surface, which kaish cannot see
+    /// (one caller's fix is "use the other tool"; another's is "reconfigure
+    /// the kernel"), so the message stops at the fact.
+    pub fn condition(self) -> &'static str {
+        match self {
+            Self::NotCompiled => "external commands are not available in this build of the shell",
+            Self::ConfiguredOff => "external commands are disabled on this shell",
+        }
+    }
+}
+
+/// Refuse to run `name` as an external command, exit 127 — the same code
+/// POSIX gives "command not found", since from here it's indistinguishable
+/// to a caller checking only the exit code. The message is what carries the
+/// distinction; see [`ExternalCommandsUnavailable::condition`].
+pub fn external_commands_unavailable_error(name: &str, reason: ExternalCommandsUnavailable) -> ExecResult {
+    ExecResult::failure(127, format!("{name}: {}", reason.condition()))
+}
+
+/// Outcome of attempting to run a command as an external process — what
+/// `Kernel::try_execute_external` and `dispatch.rs`'s test-only
+/// `BackendDispatcher::try_external` return instead of `Option<ExecResult>`.
+///
+/// The distinction matters past this call: only [`Self::NotFound`] means
+/// "keep looking" in the ordinary sense. [`Self::Unavailable`] also means
+/// "keep looking" — a backend-registered tool of the same name is a separate
+/// capability kaish still tries — but the reason must survive that lookup so
+/// the final "nothing claimed this name" message can name it, instead of the
+/// fallthrough re-deriving the wrong "command not found".
+// Without `subprocess`, both spawn sites' stubs only ever produce
+// `Unavailable(NotCompiled)` — `Ran`/`NotFound` are real variants, just
+// unreachable in that build, not leftover code.
+#[cfg_attr(not(feature = "subprocess"), allow(dead_code))]
+pub(crate) enum ExternalCommandOutcome {
+    /// A command was resolved and run; this IS the final result.
+    Ran(ExecResult),
+    /// Nothing on PATH matches `name`, and no explicit-path form resolved
+    /// either — a genuine "not found" specific to external resolution.
+    NotFound,
+    /// kaish did not attempt a PATH lookup or spawn at all. See
+    /// [`ExternalCommandsUnavailable`] for which of the two reasons.
+    Unavailable(ExternalCommandsUnavailable),
+}
+
 /// Execution context passed to tools.
 ///
 /// Provides access to the backend (for file operations and tool dispatch),
@@ -126,6 +195,8 @@ pub struct ExecContext {
     ///
     /// When `false`, external commands (PATH lookup, `exec`, `spawn`) are blocked.
     /// Only kaish builtins and backend-registered tools (MCP) are available.
+    /// A blocked attempt reports [`ExternalCommandsUnavailable::ConfiguredOff`],
+    /// not "command not found".
     pub allow_external_commands: bool,
     /// Trash backend for safe file deletion.
     ///

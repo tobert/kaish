@@ -29,6 +29,10 @@ use async_trait::async_trait;
 use crate::ast::{Command, Expr, Stmt, Value};
 use crate::interpreter::ExecResult;
 use crate::tools::ExecContext;
+#[cfg(test)]
+use crate::tools::{
+    external_commands_unavailable_error, ExternalCommandOutcome, ExternalCommandsUnavailable,
+};
 
 // The following imports are only used by the test-only `BackendDispatcher`.
 #[cfg(test)]
@@ -197,17 +201,19 @@ impl BackendDispatcher {
 
     /// Try to execute an external command (PATH lookup + process spawn).
     ///
-    /// Used as fallback when no builtin/backend tool matches. Returns None if
-    /// the command is not found in PATH. Always captures stdout/stderr (never
-    /// inherits terminal — pipeline stages don't need interactive I/O).
+    /// Used as fallback when no builtin/backend tool matches. `Unavailable`
+    /// if kaish will not attempt this at all (kept in sync with
+    /// kernel.rs::try_execute_external — see `ExternalCommandOutcome`).
+    /// Always captures stdout/stderr (never inherits terminal — pipeline
+    /// stages don't need interactive I/O).
     #[cfg(not(feature = "subprocess"))]
     async fn try_external(
         &self,
         _name: &str,
         _args: &[Arg],
         _ctx: &mut ExecContext,
-    ) -> Option<ExecResult> {
-        None
+    ) -> ExternalCommandOutcome {
+        ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::NotCompiled)
     }
 
     /// Try to execute an external command (PATH lookup + process spawn).
@@ -217,11 +223,26 @@ impl BackendDispatcher {
         name: &str,
         args: &[Arg],
         ctx: &mut ExecContext,
-    ) -> Option<ExecResult> {
+    ) -> ExternalCommandOutcome {
         if !ctx.allow_external_commands {
-            return None;
+            return ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff);
         }
+        match self.try_external_on_path(name, args, ctx).await {
+            Some(result) => ExternalCommandOutcome::Ran(result),
+            None => ExternalCommandOutcome::NotFound,
+        }
+    }
 
+    /// The actual PATH lookup + spawn, once the caller has confirmed
+    /// external commands are allowed at all — kept in sync with
+    /// kernel.rs::try_execute_external_on_path.
+    #[cfg(feature = "subprocess")]
+    async fn try_external_on_path(
+        &self,
+        name: &str,
+        args: &[Arg],
+        ctx: &mut ExecContext,
+    ) -> Option<ExecResult> {
         // Real filesystem location of the shell's cwd, if any. A `None` real
         // path means the cwd is virtual (a CoW overlay, an in-memory VFS
         // mount, …) — there's nowhere for a child OS process to run. Don't
@@ -632,10 +653,19 @@ impl CommandDispatcher for BackendDispatcher {
             // not have from the real path (GH #93 item 4).
             Ok(tool_result) => ExecResult::from(tool_result),
             Err(BackendError::ToolNotFound(_)) => {
-                // Fall back to external command execution
+                // Fall back to external command execution. The backend
+                // registry already had its chance above, so — unlike the
+                // production path in kernel.rs, which tries external first —
+                // `Unavailable` is a final answer here, not something that
+                // needs to survive a later backend lookup.
                 match self.try_external(&cmd.name, &cmd.args, ctx).await {
-                    Some(result) => result,
-                    None => ExecResult::failure(127, format!("command not found: {}", cmd.name)),
+                    ExternalCommandOutcome::Ran(result) => result,
+                    ExternalCommandOutcome::NotFound => {
+                        ExecResult::failure(127, format!("command not found: {}", cmd.name))
+                    }
+                    ExternalCommandOutcome::Unavailable(reason) => {
+                        external_commands_unavailable_error(&cmd.name, reason)
+                    }
                 }
             }
             Err(e) => ExecResult::failure(127, e.to_string()),

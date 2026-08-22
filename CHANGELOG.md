@@ -181,6 +181,11 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **A refused external command names the refusal, not "command not found".**
+  A disabled-by-configuration shell and a binary built without `subprocess`
+  each reported the same 127; each now gets its own message.
+  Backend-registered tools still resolve either way.
+
 - **`ls -R` and `tree` no longer swallow a directory they can't read.** Both
   hit `Err(_) => continue` with no comment on a failed listing, so an
   unreadable subdirectory just vanished: `ls -R` exited 0 with nothing to say
