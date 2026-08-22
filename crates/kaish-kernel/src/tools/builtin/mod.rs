@@ -210,6 +210,54 @@ pub(crate) fn get_path_string(
     }
 }
 
+/// Refuse to let `ls`/`find`/`glob` report a name containing a newline as
+/// TEXT. `for f in $(cmd)`, a pipe, and `OutputData::to_canonical_string()`
+/// itself all treat one newline as one path boundary; a name that already
+/// contains a newline splits into two lines that name no file that exists
+/// (measured: a 2-file directory with one `we\nird.txt` name counted as 3
+/// items under `for f in $(ls dir)`). This is [`value_to_text_sink_named`]'s
+/// sibling at the output boundary rather than the interpolation boundary —
+/// same shape (name the sink, go loud rather than corrupt silently), a
+/// different one.
+///
+/// Walks `output`'s tree (root and children, so `ls -R`'s nested listing is
+/// covered too) and returns the first offending name, with its newline
+/// rendered as the two characters `\n` so the message stays on one line.
+///
+/// Call this only after confirming `--json` was not requested
+/// (`ctx.output_format.is_none()`): `--json` serializes each name as its own
+/// JSON string and never joins names by newline, so it stays the documented,
+/// lossless way to read a newline-bearing name — named in the error below.
+///
+/// [`value_to_text_sink_named`]: crate::interpreter::value_to_text_sink_named
+pub(crate) fn guard_no_newline_names(
+    builtin: &str,
+    output: &crate::interpreter::OutputData,
+) -> Result<(), String> {
+    fn first_newline_name(nodes: &[crate::interpreter::OutputNode]) -> Option<&str> {
+        for node in nodes {
+            let name = node.display_name();
+            if name.contains('\n') {
+                return Some(name);
+            }
+            if let Some(found) = first_newline_name(&node.children) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    if let Some(name) = first_newline_name(&output.root) {
+        let escaped = name.replace('\n', "\\n");
+        return Err(format!(
+            "{builtin}: '{escaped}': a newline in a filename cannot be reported as \
+             text — the line split would report two files that do not exist. \
+             Use `{builtin} --json` to read it losslessly, or rename the file."
+        ));
+    }
+    Ok(())
+}
+
 /// Register all built-in tools with the registry.
 pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(alias::Alias);

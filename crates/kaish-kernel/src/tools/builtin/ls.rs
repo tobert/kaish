@@ -148,7 +148,7 @@ impl Tool for Ls {
             paths.push(".".to_string());
         }
 
-        match paths.as_slice() {
+        let result = match paths.as_slice() {
             // Single target keeps the rich behavior: glob expansion,
             // file-shown-as-name, directory contents, and recursion.
             [path] => self.list_one(ctx, path, &opts, recursive).await,
@@ -171,7 +171,19 @@ impl Tool for Ls {
                 // Explicit operands: an inaccessible one is reported, not dropped.
                 self.render_names(ctx, names, &opts, true).await
             }
+        };
+
+        // Text is the default here; `--json` serializes each name as its own
+        // JSON string and never joins them by newline, so it stays the
+        // documented lossless way past a newline-bearing name. See
+        // `guard_no_newline_names`.
+        if ctx.output_format.is_none()
+            && let Some(output) = result.output()
+            && let Err(e) = super::guard_no_newline_names("ls", output)
+        {
+            return ExecResult::failure(2, e);
         }
+        result
     }
 }
 

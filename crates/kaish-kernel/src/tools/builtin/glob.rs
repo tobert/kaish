@@ -307,6 +307,16 @@ impl Tool for Glob {
 
         let mut result = ExecResult::with_output(OutputData::nodes(nodes));
         result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
+        // Text is the default here; `--json` serializes each name as its own
+        // JSON string and never joins them by newline, so it stays the
+        // documented lossless way past a newline-bearing name. See
+        // `guard_no_newline_names`.
+        if ctx.output_format.is_none()
+            && let Some(output) = result.output()
+            && let Err(e) = super::guard_no_newline_names("glob", output)
+        {
+            return ExecResult::failure(2, e);
+        }
         result
     }
 }

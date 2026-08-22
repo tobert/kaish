@@ -181,6 +181,15 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **`ls`/`find`/`glob` refuse a filename containing a newline instead of
+  miscounting it.** Text output uses one newline per path, so a name that
+  already contains one split into two paths naming no file — measured, a
+  two-file directory reported **three** items under `for f in $(ls dir)`, with
+  nothing to say so. All three now exit **2**, naming the offending path and
+  `--json`, which serializes each name as its own JSON string and reads it
+  losslessly. Escaping was considered and rejected: it needs a decoder on the
+  other side, and kaish has no word splitting to be that decoder.
+
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
   inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
   directory the shell started in while `pwd` reported `/tmp` — a wrong value
