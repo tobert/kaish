@@ -618,6 +618,52 @@ mod overlay_tests {
         let (out, code) = run(&kernel, "kaish-vfs diff").await;
         assert_eq!(code, 0, "diff should exit 0 when overlay is clean: {}", out);
     }
+
+    // ------------------------------------------------------------------
+    // Test 11: `tee -a` on a lower-only file must materialize lower content
+    // plus the appended bytes into the upper layer, leaving the lower (real
+    // disk) file untouched. This is the case a real O_APPEND on the upper
+    // layer alone would get wrong: it would append to an *empty* upper file
+    // and lose the lower content entirely. `Filesystem::append`'s default
+    // (read-then-write) is what OverlayFs must keep using — `read` falls
+    // through to the lower layer and `write` records it as the base — so
+    // this exercises that the kernel-level append path still reaches it.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn overlay_tee_append_materializes_lower_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        // Seed a file on the real (lower) disk only.
+        std::fs::write(root.join("hello.txt"), b"original content\n").unwrap();
+
+        let kernel = overlay_kernel(root);
+        let cwd = root.to_string_lossy();
+
+        let (_, code) = run(&kernel, &format!(
+            "echo appended | tee -a \"{}/hello.txt\"", cwd
+        )).await;
+        assert_eq!(code, 0, "overlay tee -a should succeed");
+
+        // The lower (real disk) file must be untouched.
+        let real_bytes = std::fs::read(root.join("hello.txt")).unwrap();
+        assert_eq!(real_bytes, b"original content\n",
+            "real (lower) file must be byte-identical after a virtual append");
+
+        // Reading back through the overlay must see lower + appended.
+        let (cat_out, code) = run(&kernel, &format!("cat \"{}/hello.txt\"", cwd)).await;
+        assert_eq!(code, 0, "cat through overlay failed: {}", cat_out);
+        assert_eq!(cat_out, "original content\nappended",
+            "overlay view must be lower content plus the appended line");
+
+        // kaish-vfs status: should be dirty, and the upper holds the full
+        // merged content (base = lower, not empty) — not just "appended\n".
+        let (status_out, code) = run(&kernel, "kaish-vfs status").await;
+        assert_eq!(code, 0, "kaish-vfs status failed: {}", status_out);
+        assert_eq!(status_field(&status_out, "dirty"), "yes",
+            "overlay must be dirty after tee -a: {}", status_out);
+    }
 }
 
 // ------------------------------------------------------------------

@@ -162,6 +162,15 @@ impl Filesystem for DevFs {
         }
     }
 
+    async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        // The trait default reads before writing, but `read` on every device
+        // except /dev/null errors "unbounded" (see above) — `tee -a >
+        // /dev/zero` would fail loudly for the wrong reason. Append has the
+        // same discard-or-not-found contract as write, so delegate directly
+        // instead of reading first.
+        self.write(path, data).await
+    }
+
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         if Self::is_root(path) {
             return Ok(Self::NAMES.iter().map(|n| Self::entry(n)).collect());
