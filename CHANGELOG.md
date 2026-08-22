@@ -181,6 +181,15 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **`ls`/`find`/`glob` refuse a filename containing a newline instead of
+  miscounting it.** Text output uses one newline per path, so a name that
+  already contains one split into two paths naming no file — measured, a
+  two-file directory reported **three** items under `for f in $(ls dir)`, with
+  nothing to say so. All three now exit **2**, naming the offending path and
+  `--json`, which serializes each name as its own JSON string and reads it
+  losslessly. Escaping was considered and rejected: it needs a decoder on the
+  other side, and kaish has no word splitting to be that decoder.
+
 - **A spill stays reported when a later statement succeeds.** `did_spill` was
   assigned rather than OR-ed as a block accumulated its statements, so
   `seq 1 100000; echo after` under an output limit reported `did_spill: false`

@@ -840,6 +840,8 @@ Unlike traditional shells, kaish does **not** perform implicit *word* splitting 
 1. **A typed value wins.** A builtin whose output IS a value — `fromjson`, `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, `typeof` — carries that value through the substitution, so `$(…)` binds a record or a list and for-loops iterate its elements.
 2. **Otherwise, split on newlines.** When `$(cmd)` returns text with `\n` in it, the for-loop iterates per line. Whitespace within a line is never split.
 
+`ls`, `find`, and `glob` refuse (exit 2) rather than report a filename containing a newline as text: one newline is one path boundary, so the split would produce two paths naming no file — `for f in $(ls dir)` counted three items in a two-file directory. The error names the path and `--json`, which reads the name losslessly.
+
 A builtin with a POSIX counterpart returns **text**, so it reads the way its POSIX self does: `y=$(cut -f2 f)` is the text `cut` printed, exactly like `y=$(awk '{print $2}' f)`. Ask for the structure with `--json` — `cut -f2 f --json` is `["b"]`. `seq`, `cut`, `find`, `glob`, and `ls` all work this way; iteration is unaffected, because the newline split does the same job.
 
 ```sh

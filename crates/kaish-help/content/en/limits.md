@@ -38,6 +38,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `alias` | First word only; not in pipelines or compound commands |
 | `set` | `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (`-u`, `-x` ignored; an unknown `-o` name exits 1) |
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
+| `ls`/`find`/`glob` | A name containing a newline is **refused** in text output (exit 2), naming the path and `--json`. One newline is one path boundary in text, so reporting such a name would split it into two paths that name no file. `--json` reads it losslessly. |
 | `ps` | Linux-only (reads `/proc`) |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
