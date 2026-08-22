@@ -645,8 +645,33 @@ impl ExecContext {
     ///
     /// Saves the old directory for `cd -` support.
     pub fn set_cwd(&mut self, path: PathBuf) {
-        self.prev_cwd = Some(self.cwd.clone());
+        let previous = self.cwd.clone();
+        self.prev_cwd = Some(previous.clone());
         self.cwd = path;
+        // `$PWD`/`$OLDPWD` follow the working directory from HERE, the one
+        // place it changes. They used to be whatever the process inherited and
+        // nothing ever wrote them, so `cd /tmp; echo $PWD` reported the
+        // directory the shell started in while `pwd` reported `/tmp` — a wrong
+        // value with nothing to say so, and the validator vouched for the name
+        // because `scope_tracker` lists both as known. `$OLDPWD` was worse than
+        // stale: it held a directory from the INVOKING shell's history.
+        //
+        // Here rather than in the `cd` builtin so a second writer cannot drift
+        // from the first.
+        self.sync_cwd_vars(&previous);
+    }
+
+    /// Write `$PWD`/`$OLDPWD` from the context's own directories.
+    ///
+    /// Kept next to [`Self::set_cwd`] because the kernel also calls it once at
+    /// startup: a script that reads `$PWD` before its first `cd` must not see
+    /// the inherited environment's value either.
+    pub(crate) fn sync_cwd_vars(&mut self, previous: &Path) {
+        self.scope.set_global("PWD", Value::String(self.cwd.to_string_lossy().into_owned()));
+        self.scope.set_global(
+            "OLDPWD",
+            Value::String(previous.to_string_lossy().into_owned()),
+        );
     }
 
     /// Get the previous working directory (for `cd -`).
