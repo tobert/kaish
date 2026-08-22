@@ -274,7 +274,7 @@ impl Ls {
             return self.list_file(ctx, path, &info, opts);
         }
         if recursive {
-            self.list_recursive(ctx, &resolved, opts).await
+            self.list_recursive(ctx, &resolved, path, opts).await
         } else {
             self.list_single(ctx, path, &resolved, opts).await
         }
@@ -461,13 +461,23 @@ impl Ls {
         &self,
         ctx: &mut ExecContext,
         root: &Path,
+        operand: &str,
         opts: &ListOptions,
     ) -> ExecResult {
         let mut text_output = String::new();
         let mut dir_nodes: Vec<OutputNode> = Vec::new();
-        let mut dirs_to_visit: Vec<(String, String)> = vec![(
+        // Each visited directory carries two independent labels: `display_path`
+        // names the `--json` node (unchanged from before — `.` for the walk
+        // root, then a bare relative path built the historical way) and
+        // `text_display_path` is what the text header prints. GNU `ls -R`
+        // headers every directory with the operand as written, joined onward
+        // for each child (`dir` -> `dir/sub`, `.` -> `./sub`, an absolute
+        // operand stays absolute) — kaish's text output now matches. Splitting
+        // the two keeps `--json` byte-for-byte stable.
+        let mut dirs_to_visit: Vec<(String, String, String)> = vec![(
             root.to_string_lossy().to_string(),
             ".".to_string(),
+            operand.to_string(),
         )];
 
         let ignore_filter = ctx.build_ignore_filter(root).await;
@@ -480,14 +490,14 @@ impl Ls {
         // is not an error.
         let mut errors: Vec<String> = Vec::new();
 
-        while let Some((dir_path, display_path)) = dirs_to_visit.pop() {
+        while let Some((dir_path, display_path, text_display_path)) = dirs_to_visit.pop() {
             // List this directory
             let entries = match ctx.backend.list(Path::new(&dir_path)).await {
                 Ok(e) => e,
                 Err(e) => {
                     errors.push(format!(
                         "ls: cannot open directory '{}': {}",
-                        display_path, e
+                        text_display_path, e
                     ));
                     continue;
                 }
@@ -497,7 +507,7 @@ impl Ls {
             if !text_output.is_empty() {
                 text_output.push('\n');
             }
-            text_output.push_str(&display_path);
+            text_output.push_str(&text_display_path);
             text_output.push_str(":\n");
 
             let mut filtered = filter_and_sort(entries, opts.show_all, &opts.sort);
@@ -524,7 +534,12 @@ impl Ls {
                     } else {
                         format!("{}/{}", display_path, e.name)
                     };
-                    (child_path, child_display)
+                    // GNU's join has no "." special case: `ls -R .` headers
+                    // its first subdirectory `./dir`, unlike the bare `dir`
+                    // the JSON node name above uses.
+                    let child_text_display =
+                        format!("{}/{}", text_display_path.trim_end_matches('/'), e.name);
+                    (child_path, child_display, child_text_display)
                 })
                 .collect();
 
@@ -848,8 +863,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Should have directory headers
-        assert!(result.text_out().contains(".:"));
+        // Should have directory headers, matching GNU's operand-as-written
+        // convention: the "/" operand is passed through verbatim.
+        assert!(result.text_out().contains("/:"));
         // Should show files in root
         assert!(result.text_out().contains("README.md"));
         assert!(result.text_out().contains("src"));

@@ -77,13 +77,13 @@ async fn grep_c_recursive_prints_per_file_counts() {
     std::fs::write(tmp.path().join("d/b.txt"), "alpha\nalpha\nbeta\n").unwrap();
     let kernel = kernel_at(tmp.path());
 
-    // Display follows grep's existing single-walk-root convention: the root
-    // (`d/`) is stripped from names, matching the match-line display.
+    // Display matches GNU: the operand (`d`) prefixes every name, the same
+    // as the match-line display.
     let (out, code) = run(&kernel, "grep -rc alpha d").await;
     assert_eq!(code, 0);
     let mut lines: Vec<&str> = out.lines().collect();
     lines.sort_unstable();
-    assert_eq!(lines, vec!["a.txt:1", "b.txt:2"]);
+    assert_eq!(lines, vec!["d/a.txt:1", "d/b.txt:2"]);
 }
 
 #[tokio::test]
