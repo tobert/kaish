@@ -9,6 +9,7 @@
 //! already makes, so a caller can match on it instead of parsing the
 //! message text.
 
+use std::fmt;
 use crate::parser::ParseError;
 use crate::validator::ValidationIssue;
 
@@ -34,11 +35,10 @@ use crate::validator::ValidationIssue;
 /// external command is one candidate under discussion — without breaking a
 /// caller that already has a wildcard arm. Add a match arm rather than
 /// expect this list to stay closed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum KernelError {
     /// The input did not lex or parse. Nothing ran.
-    #[error("{message}")]
     Parse {
         /// Every lex/parse failure found, in source order. Each carries its
         /// own span; `errors[i].format(source)` reproduces one line of
@@ -51,7 +51,6 @@ pub enum KernelError {
     },
 
     /// The pre-execution validator rejected the program. Nothing ran.
-    #[error("{message}")]
     Validation {
         /// Every error-severity issue the validator raised, carrying its
         /// [`kaish_tool_api::IssueCode`](crate::validator::IssueCode),
@@ -68,8 +67,42 @@ pub enum KernelError {
     /// A statement started running and something failed partway through —
     /// a builtin, the evaluator, dispatch, or an IO fault. Carries the
     /// original error chain unchanged; `source()` and `{:#}` still walk it.
-    #[error("{0}")]
     Execution(anyhow::Error),
+}
+
+// Display is hand-written rather than derived because the derive would drop
+// the alternate flag. `anyhow` uses `{:#}` to mean "walk the whole cause
+// chain", and a derived `#[error("{0}")]` renders the inner error with a
+// plain `{}`, which reports only the outermost context — so
+// `{:#}` on a wrapped execution fault would lose the real cause. A caller
+// that printed `{:#}` before this type existed must keep seeing the chain.
+impl fmt::Display for KernelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KernelError::Parse { message, .. } | KernelError::Validation { message, .. } => {
+                f.write_str(message)
+            }
+            KernelError::Execution(e) => {
+                if f.alternate() {
+                    write!(f, "{e:#}")
+                } else {
+                    write!(f, "{e}")
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for KernelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            // `anyhow::Error` is not itself a `std::error::Error`, so the
+            // chain is reached through its own source rather than by
+            // returning it directly.
+            KernelError::Execution(e) => e.source(),
+            _ => None,
+        }
+    }
 }
 
 impl KernelError {
