@@ -100,6 +100,7 @@ pub use kaish_types::{CommandKind, ExecuteOptions};
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
+use crate::error::{classify_execute_error, KernelError};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
 use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
@@ -1635,8 +1636,19 @@ impl Kernel {
     ///
     /// Equivalent to `execute_with_options(input, ExecuteOptions::default())`.
     /// Returns the result of the last statement executed.
-    pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        self.run_inner(input, ExecuteOptions::default(), None, None).await
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError`] when the program was rejected before running
+    /// (a lex/parse failure or a validator rejection) or faulted while
+    /// running. See [`KernelError::is_rejected`] to route on that
+    /// distinction. A nonzero exit from the *script itself* — a failed
+    /// command, `set -e` — is not an `Err`; it comes back as `Ok` with the
+    /// exit code folded into the returned [`ExecResult`].
+    pub async fn execute(&self, input: &str) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, ExecuteOptions::default(), None, None)
+            .await
+            .map_err(classify_execute_error)
     }
 
     /// Argv-native peer of [`Self::execute`] — run one command whose arguments
@@ -1678,10 +1690,18 @@ impl Kernel {
     /// external is interrupted at the deadline with exit code 124, the same as the
     /// string door). There is no per-call options surface yet — a future
     /// `execute_argv_with_options` would carry per-call timeout/cancel/vars/cwd.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError`], always [`KernelError::Execution`] — argv has
+    /// no shell syntax to reject, so `execute_argv` never returns
+    /// [`KernelError::Parse`] or [`KernelError::Validation`] (a tool's own
+    /// `validate()`/clap parse at dispatch still surfaces here, as an
+    /// execution failure).
     #[tracing::instrument(level = "info", skip(self, argv), fields(cmd = name, argc = argv.len()))]
-    pub async fn execute_argv(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
+    pub async fn execute_argv(&self, name: &str, argv: &[Value]) -> Result<ExecResult, KernelError> {
         let _guard = self.acquire_execute_lock().await;
-        self.execute_argv_locked(name, argv).await
+        self.execute_argv_locked(name, argv).await.map_err(classify_execute_error)
     }
 
     /// [`Self::execute_argv`]'s body, with the execute lock assumed **held**.
@@ -1801,24 +1821,33 @@ impl Kernel {
     /// Concurrent callers on the same Kernel serialize on the kernel-wide
     /// execute lock. For true parallelism, call [`Kernel::fork`] (detached)
     /// or [`Kernel::fork_attached`] (cancellation cascades from this kernel).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError`] when the program was rejected before running
+    /// or faulted while running — see [`KernelError::is_rejected`].
     pub async fn execute_with_options(
         &self,
         input: &str,
         opts: ExecuteOptions,
-    ) -> Result<ExecResult> {
-        self.run_inner(input, opts, None, None).await
+    ) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, opts, None, None).await.map_err(classify_execute_error)
     }
 
     /// Same as [`Self::execute_with_options`] but with a per-statement output
     /// callback. The callback fires after each top-level statement so the
     /// embedder (REPL, MCP streaming) can flush output incrementally.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::execute_with_options`].
     pub async fn execute_with_options_streaming(
         &self,
         input: &str,
         opts: ExecuteOptions,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
-    ) -> Result<ExecResult> {
-        self.run_inner(input, opts, None, Some(on_output)).await
+    ) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, opts, None, Some(on_output)).await.map_err(classify_execute_error)
     }
 
     /// Execute with a **lazy** standard input fed as a [`PipeReader`](crate::PipeReader).
@@ -1832,26 +1861,36 @@ impl Kernel {
     ///
     /// Embedders that already hold a complete buffer (text or binary) should
     /// prefer the simpler [`ExecuteOptions::with_stdin`] path instead.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::execute_with_options`].
     pub async fn execute_with_pipe_stdin(
         &self,
         input: &str,
         opts: ExecuteOptions,
         pipe_stdin: crate::scheduler::PipeReader,
-    ) -> Result<ExecResult> {
-        self.run_inner(input, opts, Some(pipe_stdin), None).await
+    ) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, opts, Some(pipe_stdin), None).await.map_err(classify_execute_error)
     }
 
     /// Streaming counterpart to [`Self::execute_with_pipe_stdin`] — the REPL
     /// `-c`/script frontend uses this to print output incrementally while
     /// feeding a lazy process-stdin pipe.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::execute_with_options`].
     pub async fn execute_with_pipe_stdin_streaming(
         &self,
         input: &str,
         opts: ExecuteOptions,
         pipe_stdin: crate::scheduler::PipeReader,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
-    ) -> Result<ExecResult> {
-        self.run_inner(input, opts, Some(pipe_stdin), Some(on_output)).await
+    ) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, opts, Some(pipe_stdin), Some(on_output))
+            .await
+            .map_err(classify_execute_error)
     }
 
     /// Execute kaish source code with a transient overlay of exported variables.
@@ -1864,8 +1903,10 @@ impl Kernel {
         &self,
         input: &str,
         vars: HashMap<String, Value>,
-    ) -> Result<ExecResult> {
-        self.run_inner(input, ExecuteOptions::new().with_vars(vars), None, None).await
+    ) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, ExecuteOptions::new().with_vars(vars), None, None)
+            .await
+            .map_err(classify_execute_error)
     }
 
     /// Execute kaish source code with a per-statement callback.
@@ -1877,8 +1918,10 @@ impl Kernel {
         &self,
         input: &str,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
-    ) -> Result<ExecResult> {
-        self.run_inner(input, ExecuteOptions::default(), None, Some(on_output)).await
+    ) -> Result<ExecResult, KernelError> {
+        self.run_inner(input, ExecuteOptions::default(), None, Some(on_output))
+            .await
+            .map_err(classify_execute_error)
     }
 
     /// Link embedder trace context, then run [`Self::execute_with_options_inner`].
@@ -2225,7 +2268,11 @@ impl Kernel {
                 .map(|e| e.format(input))
                 .collect::<Vec<_>>()
                 .join("\n");
-            anyhow::anyhow!("parse error:\n{}", msg)
+            let message = format!("parse error:\n{}", msg);
+            // Tagged so `classify_execute_error` can recover the structured
+            // rejection at the public execute-surface boundary; every other
+            // `?` in this function propagates a plain, untagged `anyhow::Error`.
+            anyhow::Error::from(KernelError::Parse { errors, message })
         })?;
 
         // AST display mode: show AST instead of executing
@@ -2262,7 +2309,11 @@ impl Kernel {
                     .map(|e| e.format(input))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Err(anyhow::anyhow!("validation failed:\n{}", error_msg));
+                let message = format!("validation failed:\n{}", error_msg);
+                let issues: Vec<crate::validator::ValidationIssue> =
+                    errors.into_iter().cloned().collect();
+                // Tagged the same way as the parse rejection above.
+                return Err(anyhow::Error::from(KernelError::Validation { issues, message }));
             }
 
             // Log warnings via tracing (trace level to avoid noise); surface the

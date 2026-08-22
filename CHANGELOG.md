@@ -35,6 +35,15 @@ breaking entries are marked **BREAKING**.
   `set -euo pipefail` prelude works, where before it died on line 1.
 
 ### Changed
+- **BREAKING (embedders): `execute`/`execute_with_options`/`execute_argv` (and
+  siblings) return `Result<ExecResult, KernelError>`, not `anyhow::Result`.**
+  Match `KernelError::is_rejected()` to route a validator/parse rejection
+  separately from a runtime fault. `Display` text is byte-identical to
+  before, so an embedder that only prints the error needs no change.
+- **BREAKING (embedders): `kaish_client::ClientError` is now `#[non_exhaustive]`
+  and gained a `Kernel(KernelError)` variant** — `EmbeddedClient` carries the
+  kernel's typed error through it instead of flattening execution failures
+  to `ClientError::Execution(String)`.
 - **BREAKING: `$(cmd)` binds a typed value only when the tool's data IS its
   value.** `y=$(cut -f2 f)` bound `["benign"]` while `y=$(awk '{print $2}' f)`,
   doing the identical job, bound text — because `.data` was answering three

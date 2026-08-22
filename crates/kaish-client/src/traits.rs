@@ -13,15 +13,31 @@ use kaish_kernel::tools::ToolSchema;
 pub type ClientResult<T> = Result<T, ClientError>;
 
 /// Errors that can occur when using a kernel client.
+///
+/// `#[non_exhaustive]`: a variant can be added later without breaking a
+/// caller that already has a wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ClientError {
     /// Connection to the kernel failed.
     #[error("connection error: {0}")]
     Connection(String),
 
-    /// The kernel returned an error during execution.
+    /// The kernel returned an error during execution, flattened to a
+    /// string. Reachable by any client implementation that has no structured
+    /// kernel error to carry (e.g. a network client deserializing a remote
+    /// failure). An [`EmbeddedClient`](crate::EmbeddedClient) never
+    /// constructs this — it has the real [`kaish_kernel::KernelError`] in
+    /// hand, so it uses [`ClientError::Kernel`] instead.
     #[error("execution error: {0}")]
     Execution(String),
+
+    /// The underlying kernel rejected or failed the call. Carries the
+    /// kernel's own typed error, so a caller can match
+    /// [`kaish_kernel::KernelError::is_rejected`] (or the variant directly)
+    /// instead of parsing this type's `Display` text.
+    #[error(transparent)]
+    Kernel(#[from] kaish_kernel::KernelError),
 
     /// I/O error.
     #[error("io error: {0}")]

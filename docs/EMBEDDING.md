@@ -27,7 +27,9 @@ async fn main() -> anyhow::Result<()> {
     let kernel = Kernel::new(KernelConfig::transient())?;
 
     // execute() returns Ok(ExecResult) even when the script fails
-    // (nonzero exit code); Err(_) is reserved for kernel faults.
+    // (nonzero exit code); Err(KernelError) means the program was
+    // rejected before running or faulted while running — see
+    // "Errors: KernelError" below.
     let result = kernel.execute("echo 'Hello from kaish!'").await?;
     if result.code != 0 {
         eprintln!("script failed: {}", result.err);
@@ -95,6 +97,71 @@ script's author to write `set -e` — a script you did not author, or one
 instructions could omit it from. The trade-off is real: an errexit turned on
 from config is invisible from *inside* the script except through `set -o` —
 there is no line in the script text a reader can point to.
+
+## Errors: `KernelError`
+
+`Err(_)` from `execute`/`execute_with_options`/`execute_argv` (and their
+streaming and pipe-stdin siblings) is `KernelError` — never a script's own
+failing exit code, which stays inside `Ok(ExecResult)` per
+[the result contract](#the-result-contract) above. `KernelError` carries the
+one distinction that surface never could: **rejected before running** versus
+**failed while running**.
+
+```rust
+use kaish_kernel::KernelError;
+
+match kernel.execute(script).await {
+    Ok(result) => { /* script ran; branch on result.code as usual */ }
+    Err(err) if err.is_rejected() => {
+        // KernelError::Parse or KernelError::Validation: nothing ran.
+        // Route this back to whoever wrote the script — a validator
+        // rejection names the command and the fix.
+        report_bad_input(&err);
+    }
+    Err(err) => {
+        // KernelError::Execution: a statement started running and
+        // something faulted — treat it like any other operational fault.
+        report_operational_fault(&err);
+    }
+}
+```
+
+Match the variant directly for the structured detail each rejection carries,
+rather than parsing `Display` text:
+
+- **`KernelError::Parse { errors, message }`** — the input did not lex or
+  parse. `errors` is every `ParseError` found, each with its own span. A
+  lexer failure (unterminated string, backticks) and a grammar failure
+  (missing `fi`) are both `Parse` — kaish already unifies them into one pass
+  before this type existed, so this type keeps that unification rather than
+  inventing a distinction the kernel doesn't make internally.
+- **`KernelError::Validation { issues, message }`** — the pre-execution
+  validator rejected the program. `issues` is every error-severity
+  `ValidationIssue`, each carrying its `IssueCode`, message, and source span
+  — route on `code` (an enum), not on substring matches against `message`.
+- **`KernelError::Execution(anyhow::Error)`** — a statement began running and
+  faulted: a builtin, the evaluator, an IO fault, or anything else the
+  interpreter propagated. The original error chain is intact — `{:?}` and
+  `.source()` still walk it — even though `Display` (`{}`) shows only the
+  outermost message, matching `anyhow`'s usual behavior.
+
+`is_rejected()` (and its complement, `is_execution_failure()`) answer the
+coarse question without a match statement. `KernelError` is
+`#[non_exhaustive]`: match it with a wildcard arm, since a new rejection
+reason can be added in a minor version.
+
+`KernelError` implements `std::error::Error`, so it converts into
+`anyhow::Error` for free (`?` in a function returning `anyhow::Result`
+works unchanged) — an embedder that doesn't need the distinction can keep
+using `anyhow` exactly as before. `Display` on every variant reproduces
+byte-for-byte what `Kernel::execute` returned as an untyped `anyhow::Error`
+before this type existed, so an embedder that only prints the error sees no
+change on upgrade — only one that wants to route on the distinction needs to
+change anything.
+
+`kaish_client::ClientError` gained a matching `Kernel(KernelError)` variant;
+`EmbeddedClient`'s `execute*` methods carry the kernel's typed error through
+instead of flattening it to `ClientError::Execution(String)`.
 
 ## Stack size — size your execution threads
 
@@ -605,7 +672,11 @@ Semantics:
 - **Same tail as the string door.** Command resolution (aliases, user tools,
   `.kai` scripts, externals, backend tools) and `--json`.
   The kernel's pre-execution *syntax* validator does not run — argv carries no
-  shell syntax — but a tool's own `validate()`/clap parse still does.
+  shell syntax — but a tool's own `validate()`/clap parse still does. One
+  consequence for the [`KernelError`](#errors-kernelerror) returned on `Err`:
+  `execute_argv` never returns `KernelError::Parse` or
+  `KernelError::Validation`, only `KernelError::Execution` — there is nothing
+  for those two variants to reject.
 - **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`
   internally (the two-layer clap model), the un-stringified-value win fully lands
   only for tools that read `args.positional` directly (the documented pattern),
