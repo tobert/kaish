@@ -10,17 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Added
-- **BREAKING (embedders): `ExecContext` carries `kill_grace` and
-  `background_job`.** The kernel's external-command spawn read both off the
-  `Kernel`, which put them out of reach of a tool that holds only an
-  `ExecContext` — so a second tool wanting the same child-process discipline
-  had to copy it. They live on the context now, next to
-  `kill_children_on_parent_death`, which moved there for the same reason.
-  `tools::DEFAULT_KILL_GRACE` (2s) is the value a stand-alone `ExecContext`
-  gets. Construction through `ExecContext::new`/`with_vfs_and_tools` is
-  unaffected; a struct literal must add the two fields.
+### Changed
+- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding
+  only an `ExecContext` can spawn a child with the kernel's external-command
+  discipline. `tools::DEFAULT_KILL_GRACE` (2s) is the stand-alone default.
+  Constructors are unchanged; only a struct literal must add the two fields.
 
+### Added
 - **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …`
   were parse errors ("found '!' expected condition"), so the idiomatic "run
   this unless" had to be written backwards through an empty `then` branch. It
