@@ -181,6 +181,14 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **`tee -a` no longer truncates a file it can't read.** The pre-append
+  read used `.unwrap_or_default()`, so any read failure — permission
+  denied, an I/O error, not just a missing file — silently became an empty
+  base, and the next write replaced the file with just the new input,
+  exiting 0. Only a genuinely missing file (`NotFound`) now gets the
+  empty-base treatment; every other read error is reported and that target
+  is skipped, leaving its prior content untouched.
+
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
   miscounting it.** Text output uses one newline per path, so a name that
   already contains one split into two paths naming no file — measured, a
