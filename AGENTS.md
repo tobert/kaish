@@ -1,24 +1,20 @@
 # kaish
 
-**kaish** (会sh) is a predictable shell for AI agents: an embeddable Rust library with a
-reference REPL.
+**kaish** is a predictable shell for AI agents as an embeddable Rust library with a reference REPL.
 
 ## Project overview
 
-会sh is stable. Changes before 1.0 are limited to ergonomics and correctness. The focus is
+kaish (会sh) is stable. Changes before 1.0 are limited to ergonomics and correctness. The focus is
 the embeddable kernel/library and a reference REPL that tests the kernel against interactive
-use. kaish does **not** ship its own MCP server — MCP servers live in the embedders:
-[kaibo](https://github.com/tobert/kaibo) (解剖) is the MCP showcase (a read-only
-codebase-analysis MCP that drives kaish), and
-[kaijutsu](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP interface. Both
-have the same maintainer, so API changes are straightforward where they improve the projects
-together.
+use. kaish does **not** ship its own MCP server. [kaibo](https://github.com/tobert/kaibo) is the
+MCP showcase (models and subagents with kaish powers).
 
 **Philosophy**: 80% rule applied to POSIX/Bourne/bash shell. kaish is *inspired by POSIX
-`sh` and bash, informed by ShellCheck's lints* — not a dialect ShellCheck can validate:
-`[[ ]]` and `<<<` are bash, and typed data, structured `$()`, and collections are modeled
-by no ShellCheck dialect at all. **ShellCheck reports nothing about kaish's extensions.
-The kaish validator is the only checker that sees them.**
+`sh` and bash* but makes some tradeoffs to adopt JSON types and offer a safer subset of
+its ancestors.  `[[ ]]` and `<<<` are just like bash. kaish also includes builtins for the
+most common Unix/Linux command line utilities for text processing. It can be built to run
+hermetically, with only builtins available to callers, and no exec to the operating system
+at all.
 
 **Explicitly dropped features**: process substitution `<(cmd)`, backticks, `eval`, word splitting
 
@@ -55,70 +51,34 @@ cargo insta test --check                 # CI mode (fails on pending snapshots)
 cargo insta review                       # Interactive review of pending snapshots
 ```
 
-CI (`.github/workflows/ci.yml`) runs the gates on every PR and push to `main`:
-`cargo test --all --locked`, clippy with `-D warnings`, rustdoc with
-`RUSTDOCFLAGS="-D warnings"` (a broken intra-doc link fails the PR — run the
-doc gate locally too), a committed-`.snap.new` tripwire, `cargo test -p
-kaish-kernel --no-default-features --locked`, and the `kaish-wasi`
-wasm32-wasip1 build. When a gate changes, change ci.yml in the same PR.
-The runners track current stable Rust, which may be newer than local
-toolchains — CI clippy can fire lints local clippy doesn't have yet; fix the
-code rather than pinning the toolchain.
-
-The workspace denies `clippy::unwrap_used` and warns `clippy::expect_used` (see
-`[workspace.lints]` in the root `Cargo.toml`) to keep production code propagating
-errors. `clippy.toml` sets `allow-{unwrap,expect}-in-tests = true` so those
-restriction lints don't fire on code inside `#[test]` bodies — but clippy does
-**not** treat non-`#[test]` test *helper* functions, integration-test crates, or
-`#[cfg(all(test, …))]` modules as test context, so add a file- or module-scoped
-`#![allow(clippy::unwrap_used, clippy::expect_used)]` there (a panic on a known-good
-fixture IS the test failing). `cargo clippy --all` alone skips test targets — use
-`--all-targets` to catch test code too.
-
 ## Development guidelines
 
 ### Error handling
 
-- Use `anyhow::Result` for fallible operations
-- Avoid `unwrap()` — propagate with `?`
-- Add context: `.context("what we were trying to do")`
 - Never discard errors.
    - If an error is impossible in practice, the program must still panic if it occurs.
-   - When an error is deliberately ignored, a comment must say so.
+   - When an error is deliberately ignored, a comment must say why.
 
 ### Code style
 
-- Comments only for non-obvious intent or complex behavior
+- Comments should be short and direct. Comments are not a space for narratives,
+  that goes in the commit messages.
 - **`///` on a builtin argument is published to agents** — `params_from_clap` copies it
   into `ParamSchema.description` and the kernel ships it to the model. Describe the
-  flag's behavior there; implementation notes go in `//` comments.
-- Avoid `mod.rs` in new modules — use `src/module_name.rs` (legacy `mod.rs` files remain; don't add more)
-- Full words for names, avoid abbreviations
-- Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`
+  flag's behavior there succinctly, using simple English. Implementation notes go in `//` comments.
+- Avoid `mod.rs` in new modules — use `src/module_name.rs`.
+- Full words for names, avoid abbreviations.
+- Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`.
 
 ### Version control
 
-- **`main` is protected — every change lands via PR.** Branch first
-  (`git switch -c <type>/<short-desc>`), push, and open a PR with `gh pr create`.
-  Nothing is committed directly to `main`. **This includes releases** — the
-  `/release` skill bumps the version on a `release/vX.Y.Z` branch and merges it
-  via PR like any other change; only the `git tag` and `cargo publish` (neither a
-  branch commit) run from `main`, after the bump PR has merged.
-- **Have the PR reviewed before merging** — prefer kaibo (`consult`) for the
-  review; `/code-review` on the diff or another agent/model also works. Review
-  is cheap; a bug on `main` is not (we ask outside contributors to do the same;
-  see README "Contributing").
-- **Merging to `main` is Amy's word, and an agent asks every time.** Default:
-  open the PR, get it reviewed, address the review, report it ready — then stop.
-  Amy reads the PR herself; that reading is the point of the gate, and a green
-  review is evidence for her decision, not a substitute for it. She may hand out
-  a merge word for a named piece of work ("fix x, y, z and merge when the kaibo
-  review is done and addressed") — that word is **ephemeral**: it covers the PRs
-  she named, and it expires with them. Never carry it to the next PR, and never
-  infer one from a clean review, a green CI, or a clearance given before.
-  Irreversible and outward-facing steps — `git tag` pushes, `cargo publish`,
-  release pages, anything posted to a repo we don't own — each need their own
-  word; a merge word does not cover them.
+- **`main` is protected — every change lands via PR.** Agents may create PRs,
+  but they **must** be reviewed by a human before merging.
+- **Do code review before pushing** — kaibo (`consult`) with a different model
+  family is recommended, or use a different model tier via builtin review tools.
+- **Merging to `main` is a human decision, and an agent asks every time.** Default:
+  open a PR, review it, address the review, report it ready — then stop.
+  A human will read the PR and merge or ask for it to be merged.
 - **PRs land as merge commits that use the PR title and body** — the convention is
   a merge commit (`gh pr merge --merge`), not squash or rebase, with the merge
   commit's subject and body kept as the PR title/body so the decisions captured in
@@ -126,19 +86,12 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   write the PR title/body to carry the same decision-narrative the commit messages
   do (see below).
 - **Do not wrap PR body prose — write one long line per paragraph.** GitHub
-  re-wraps the merge commit body at exactly 72 characters, word by word, so an
-  unwrapped paragraph arrives correctly filled. Wrapping it yourself is what
-  produces the ragged one-word orphan lines: a 76-column line becomes a
-  72-column line plus a four-character remainder, and every line does it.
-  Wrap **commit** messages at 72 by hand, though — git stores those verbatim
-  and GitHub never touches them. The rule tracks a real distinction: hand-wrap
-  what you hand-author into git, leave alone what GitHub is going to reflow.
-- **Put every example in a fenced code block in a PR body.** A ``` fence is
-  exempt from the re-wrap; a four-space-indented block is not, and its
-  continuation lines lose their indent when GitHub folds them. Markdown tables
-  and `##` headings do not survive as plain text at all — use a short
-  capitalized line or a paragraph break instead.
-- **Add files by name**: `git add <file>`, never `git add -A` or `git add .`
+  re-wraps the merge commit body at exactly 72 characters.
+- **Put every example in a fenced code block in a PR body.** A \`\`\` fence is
+  exempt from re-wrap; a four-space-indented block is not. `##` headings do not
+  survive as plain text at all — use a short capitalized line or a paragraph
+  break instead.
+- **Add files by name**: `git add <file>`. Never use `git add -A` or `git add .`
 - Before committing, both must be clean:
   - `cargo test --all`
   - `cargo clippy --all --all-targets` — zero errors **and** zero warnings
@@ -150,20 +103,20 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 ### Commit messages
 
 Commit and pull request bodies should usually summarize the decisions behind the
-change, **drawn from the conversation with the user**. Commit messages briefly explain
-what happened as context for the more important task of explaining the decisions we
-made.
+change, **drawn from the conversation with the user**. The commit message is where
+the narrative of agent and user can be persisted. A useful commit message will
+remind us how we got to the code it contains. The code can speak for itself.
 
 ## Architecture
 
-The kernel is the unit of execution. Multiple frontends connect to the same kernel:
+The kernel is the unit of execution. Multiple frontends can connect to the same kernel:
 
 ```
 Frontends (REPL, Embedded — e.g. kaibo/kaijutsu)
     ↓ KernelClient trait
         └── EmbeddedClient (direct in-process)
     ↓
-Kernel (核)
+Kernel
     ├── Lexer (logos)
     ├── Parser (chumsky)
     ├── Validator (pre-execution checks)
@@ -178,38 +131,8 @@ Kernel (核)
 kaish prefers designs where the **embedder holds the state and the control flow**, and the
 kernel supplies the mechanism that makes holding it correct. This is a design preference,
 not a rule about one subsystem — apply it whenever a new boundary between kernel and
-embedder is being drawn.
-
-The test to apply at a boundary: does the kernel *ask* the embedder for an answer, or does it
-*run* the embedder's work? Asking is a pure function on the request path — the kernel keeps
-control, and the answer is data. Running means the kernel owns a task, a clock, and a
-cancellation policy on the embedder's behalf, and those are three decisions per deployment
-that no default gets right. When the answer cannot be immediate, **return the question as
-data and let the embedder come back**, rather than awaiting a callback the kernel then has
-to bound.
-
-Three things follow:
-
-- **The kernel never waits on the embedder.** A bounded wait is a clock-driven decision; an
-  unbounded one is a liveness hazard the kernel cannot cancel correctly. `plan_program` is
-  the shape to copy: it returns every statement's `Plan` as data, and the embedder decides
-  on its own time whether to execute.
-- **The kernel keeps what must be correct under concurrency**, and only that: the job
-  table, the trash contract, the output limits. Inverting *those* would make every
-  embedder re-implement the hard part.
-- **Helpers compose above the boundary, never inside it.** A reusable waiter, a pending queue,
-  a retry policy — write them as composable pieces in the REPL or a util crate that is
-  itself an embedder. A convenience that reads a clock or parks a decision inside the
-  kernel has moved policy back across the boundary.
-
-The payoff: an embedder that owns the state can do things with it we will not
-think of. kaijutsu parks a decision in its own UI, kaibo can put a plan in front of a
-different model, someone else queues it for a shift change. None of those shapes need a
-kernel change, because the kernel never assumed which one it was serving.
-
-The approval ledger is the evidence: kaish once held approval state and decision flow
-inside the kernel, and it was removed before 0.14.0 because every embedder already had
-its own — see `docs/EMBEDDING.md`, "Why this, and not a gate".
+embedder is being drawn. When the kernel cannot answer immediately, **return some data
+and let the embedder come back**. No callbacks or awaits on embedder code.
 
 ## Testing
 
@@ -237,9 +160,7 @@ fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need m
 ## Writing style
 
 kaish keeps a small, predictable subset of `sh`, so existing shell skills transfer. This
-guide keeps a small, predictable subset of English for the same reason. Read this before
-editing prose, comments, or documentation. This guide is loosely based on Standard
-Technical English and uses similar prescriptions.
+guide keeps a small, predictable subset of English for the same reason.
 
 ### Vocabulary choices
 
@@ -249,7 +170,7 @@ text — familiar words may require a longer sentence.
 Use plain words instead of figures of speech. Make the intended meaning available from the
 words themselves, including in second-language or partial-context use.
 
-Use an established technical term when kaish gives it one meaning.
+Use an established technical term when kaish gives it one meaning. For example:
 
 | Write | Meaning |
 |---|---|
@@ -259,9 +180,6 @@ Use an established technical term when kaish gives it one meaning.
 `hazard` and `override` belong to this vocabulary too; they carry guarantees, so their
 definitions live in the Terms table below, with every other term that carries a
 behavioral guarantee.
-
-Use the public word instead of a tool's private term. For example, `dhat` calls
-an allocation a "block"; write "18% fewer allocations," not "18% fewer blocks."
 
 Use American spelling to match the corpus: `modeled`, not `modelled`.
 
@@ -274,9 +192,6 @@ about prose.
 
 `surface` can hide the thing it names. In published text, name the tool schema, error
 message, help topic, or API.
-
-Write `boundary`, not `seam`. Use a boundary to separate available actions from mechanism
-that does not affect those actions.
 
 Example labels are imperative. Write "Send STOP by name," not "Named shorthand." The
 label sits next to a command, so it should read like one.
@@ -320,24 +235,19 @@ notes in `//` comments.
 A `///` comment on the clap struct is not published; `schema_from_clap` reads
 `cmd.get_about()` instead. Struct docs and `//` comments are safe places for mechanism.
 
-> Before: `/// Unset a variable (-u VAR). Repeatable: -u A -u B. Clap sees a single`
-> `/// occurrence via to_argv() ... This field is a validation sink only.`
->
-> After: `/// Unset a variable (-u VAR). Repeatable: -u A -u B.`
-
-A blank `///` line also splits clap short help from long help. Everything before the blank
+A blank `///` line splits clap short help from long help. Everything before the blank
 line is published; everything after it is not. Use the split when an implementation note
 belongs next to the field.
 
 Do not infer the published text by grepping the source. Read `Kernel::tool_schemas()` or
-run the published-prose test. When you touch a builtin, audit every `///` on its clap
-struct — the visit supplies the context needed to judge each line.
+run the published-prose test. When modifying builtins, audit every `///` on its clap
+struct to ensure code and documentation stay synchronized.
 
 ### Write for model context
 
-Use the same prose in human and model contexts. Assume the context may be truncated. Teach
-syntax with examples. Repeat a rule in its error. These instructions add to the rules
-above; they do not replace them.
+Use the same prose in human and model contexts. Assume the context may be truncated and
+lead with the most important information. Teach syntax with examples. Repeat important
+rules.
 
 ### The example is the rule
 
@@ -356,9 +266,8 @@ clearly marked error next to it:
 
 ### Terms
 
-Terms that carry a guarantee. **This table is the source**; `README.md` mirrors it for
-readers and must be kept in step. The list grows when a collision appears in real prose,
-not in advance.
+These are the terms that carry a stable definition. **This table is the source**
+The list grows when a collision appears in real prose, not in advance.
 
 | Term | Part of speech | Meaning |
 |---|---|---|
@@ -377,24 +286,5 @@ not in advance.
 
 `CHANGELOG.md` follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org). While pre-1.0, minor (`0.X.0`)
-releases may carry breaking changes.
-
-- **Every user/agent/embedder-facing change adds a bullet** under the top
-  `## [Unreleased]` section, in the right group: `Added`, `Changed`,
-  `Deprecated`, `Removed`, `Fixed`, `Security`. Omit empty groups. Skip pure
-  internal churn (refactors with no observable effect, version bumps).
-- **Mark breaking changes** by starting the bullet with `**BREAKING:**`. Anything
-  that changes default features, the embedder API, language grammar, exit-code
-  contracts, or `--json` shapes is breaking — **when the surface it changes shipped
-  in a release**. The marker means "a user or embedder of the last released version
-  must act on upgrade." Surface that never shipped carries no marker and gets no
-  removal bullet: edit its bullets in place to describe the final state; the
-  mid-cycle path lives in `git log`.
-- Bullets are concise and scannable — one line each, written for someone reading
-  the shell/embedding surface, not the diff.
-- **At release** (the `/release` skill owns this): rename `## [Unreleased]` to
-  `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it, and add
-  the `[X.Y.Z]` compare link at the bottom of the file.
-- **Every version bump gets a git tag** `vX.Y.Z` at the bump commit. One tag per
-  released version, no gaps — the changelog and `git tag -l` must agree.
+releases may carry breaking changes. Try to keep them short.
 

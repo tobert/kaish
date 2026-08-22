@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
 The kernel is hermetic by default — it never reads the OS environment (the
 frontend supplies vars), and the OS-touching capability features (`subprocess`,
 `host`, `os-integration`, `tokens`) are opt-in cargo features, so the dangerous
-surface is named, not inherited. Every `execute()` returns an `ExecResult` with
+surface explicit. Every `execute()` returns an `ExecResult` with
 clean text output, an optional typed `data` payload (`--json` on any command),
 and an exit code agents can branch on: `2` is a usage error or a refusal that
 names what to do instead (e.g. `kaish-trash empty` without `--confirm`), `3`
@@ -211,12 +211,9 @@ capability features, `ExecuteOptions`, custom tools, the exit-code contract, and
 thread stack sizing.
 
 **Using kaish over MCP?** kaish core doesn't ship an MCP server — that surface
-lives in the embedders. [**kaibo**](https://github.com/tobert/kaibo) (解剖) is the
-showcase: a read-only codebase-analysis MCP that drives kaish to read and reason
-about a project and answers with cited `file:line` spans.
-[**kaijutsu**](https://github.com/tobert/kaijutsu) embeds kaish behind its own MCP
-interface too. Both show the pattern: embed the kernel, then expose it however
-your agent needs.
+lives in the embedders. [**kaibo**](https://github.com/tobert/kaibo) is the
+showcase: agents with kaish powers in an MCP (or CLI). Kaibo agents have a kaish
+shell tool for exploring filesystems and text.
 
 **Not embedding, just curious?** [**kaish-extras**](https://github.com/tobert/kaish-extras)
 compiles the kernel to `wasm32-unknown-unknown` and runs it in a browser tab —
@@ -275,27 +272,6 @@ an `awk` that never surprises.
 Trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md); the
 embedder-facing `plan_program` contract in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
-## Terms
-
-kaish uses these words with one meaning each, in the docs, the help system, and the
-error messages.
-
-| Term | Meaning |
-|---|---|
-| fail loudly | An error is explicit and immediate. kaish never continues on a wrong assumption. |
-| builtin | An embedded Unix-like tool that runs inside the kernel process. |
-| external command | A program the kernel runs on the underlying system via execve(2) family, often via `$PATH`. |
-| kernel | The kaish execution core. Not the OS kernel. |
-| mount | A path prefix bound to a filesystem, or the act of binding one. |
-| typed | A value keeps its JSON type through substitution. It is not stringified. |
-| overlay | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
-| spill | To write oversize output to a file, or the file that results. |
-| hazard | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
-| override | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. An override is designed and documented intentionally. |
-
-Contributors: the writing style behind this vocabulary is in
-[AGENTS.md](AGENTS.md), "Writing style".
-
 ## Why build 会sh?
 
 会sh (kaish) was originally prototyped as part of 会術 Kaijutsu and was separate enough
@@ -322,22 +298,14 @@ are cut manually, so that one workflow is the whole CI story.
 ## Contributing
 
 Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
-love seeing what other agents come up with. **All changes go through a PR** —
-branch, push, and open a PR rather than committing to `main`. Releases are no
-exception: the version bump lands via PR too; only the `git tag` push and
-`cargo publish` run directly from `main`, after that PR merges. That said,
-please have your agent (or another model) review the PR before submitting —
-a few tokens on review goes a long way. Same goes for issues:
-agent-filed is fine, just make sure it makes sense. CI must be green before a PR
-merges; note that the runners track current stable Rust, so clippy there may know
-lints your local toolchain doesn't yet.
+love seeing what other agents come up with. **All changes go through a PR**
 
-If you're working with AI coding agents, you might also be interested in
-[kaibo](https://github.com/tobert/kaibo), an assistant for your assistant with a
-read-only kaish shell.
+Be sure to have your agent read [AGENTS.md](AGENTS.md). Most of what we do for
+kaish is standard open source process.
 
-- [**gpal**](https://github.com/tobert/gpal) — Gemini as an MCP server (pairs well with Claude Code)
-- [**cpal**](https://github.com/tobert/cpal) — Claude as an MCP server (pairs well with Gemini CLI)
+Please review your code before submitting PRs. [kaibo](https://github.com/tobert/kaibo)
+subagents use kaish as their read-only shell and it does a great job of finding defects
+before committing or pushing that PR.
 
 ## License
 
