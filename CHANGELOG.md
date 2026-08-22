@@ -95,6 +95,11 @@ breaking entries are marked **BREAKING**.
   exhaustive by design.
 
 ### Fixed
+- **A refused external command names the refusal, not "command not found".**
+  A disabled-by-configuration shell and a binary built without `subprocess`
+  each reported the same 127; each now gets its own message.
+  Backend-registered tools still resolve either way.
+
 - **`env CMD` no longer bypasses the external-commands gate.** `env` spawned
   the host binary directly with no capability check, so `env FOO=bar curl …`
   escaped a kernel built with external commands off. It now refuses with exit
