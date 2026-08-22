@@ -22,7 +22,10 @@ use tokio::process::Command;
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{
+    schema_from_clap, ExecContext, ExternalCommandsUnavailable, GlobalFlags, Tool, ToolArgs,
+    ToolCtx, ToolSchema,
+};
 
 /// Spawn tool: runs an external command as a subprocess and captures output.
 pub struct Spawn;
@@ -99,8 +102,15 @@ impl Tool for Spawn {
         parsed.global.apply(ctx);
 
         if !ctx.allow_external_commands {
-            return ExecResult::failure(1,
-                "spawn: external commands are disabled (allow_external_commands=false)");
+            // `spawn` is only registered when the `subprocess` capability is
+            // compiled in (tools/builtin/mod.rs), so reaching here always
+            // means the runtime config turned it off, never that the
+            // capability is missing — `ConfiguredOff` is the only reachable
+            // reason.
+            return ExecResult::failure(
+                1,
+                format!("spawn: {}", ExternalCommandsUnavailable::ConfiguredOff.condition()),
+            );
         }
 
         // Get command (required). A binary value goes loud rather than

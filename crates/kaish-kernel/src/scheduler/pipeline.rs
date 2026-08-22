@@ -1527,7 +1527,22 @@ mod tests {
         let result = runner.run(&stages([cmd]), &mut ctx, &dispatcher).await;
         assert!(!result.ok());
         assert_eq!(result.code, 127);
-        assert!(result.err.contains("not found"));
+        // Exit 127 is the constant here; the wording is not. With `subprocess`
+        // compiled in, the name was looked for on PATH and genuinely missed.
+        // Without it, kaish never looked, so claiming "not found" would assert
+        // something it cannot know — it reports the build instead.
+        #[cfg(feature = "subprocess")]
+        assert!(
+            result.err.contains("not found"),
+            "expected a not-found report, got {:?}",
+            result.err
+        );
+        #[cfg(not(feature = "subprocess"))]
+        assert!(
+            result.err.contains("external commands are"),
+            "expected the unavailable-externals report, got {:?}",
+            result.err
+        );
     }
 
     #[tokio::test]

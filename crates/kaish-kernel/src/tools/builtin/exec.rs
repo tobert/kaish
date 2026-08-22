@@ -20,7 +20,10 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{
+    schema_from_clap, ExecContext, ExternalCommandsUnavailable, GlobalFlags, Tool, ToolArgs,
+    ToolCtx, ToolSchema,
+};
 
 use super::spawn::resolve_in_path;
 
@@ -77,8 +80,15 @@ impl Tool for Exec {
         parsed.global.apply(ctx);
 
         if !ctx.allow_external_commands {
-            return ExecResult::failure(1,
-                "exec: external commands are disabled (allow_external_commands=false)");
+            // `exec` is only registered when the `subprocess` capability is
+            // compiled in (tools/builtin/mod.rs), so reaching here always
+            // means the runtime config turned it off, never that the
+            // capability is missing — `ConfiguredOff` is the only reachable
+            // reason.
+            return ExecResult::failure(
+                1,
+                format!("exec: {}", ExternalCommandsUnavailable::ConfiguredOff.condition()),
+            );
         }
 
         // First positional is the command, rest are argv. A binary command

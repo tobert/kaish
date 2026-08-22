@@ -377,6 +377,50 @@ impl Filesystem for MemoryFs {
         Ok(())
     }
 
+    async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        // No permission model to bypass here, unlike LocalFs — this override
+        // exists to close the trait default's read-then-write race instead.
+        // One write-lock guard covers the whole read-modify-write, so a
+        // concurrent writer can't land between the two halves the way it can
+        // against the default's two separate lock acquisitions.
+        let normalized = Self::normalize(path);
+
+        let mut entries = self.entries.write().await;
+
+        Self::ensure_parents_locked(&mut entries, &normalized)?;
+
+        if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                format!("is a directory: {}", path.display()),
+            ));
+        }
+
+        let old_len = Self::file_len(entries.get(&normalized));
+        let new_len = old_len + data.len() as u64;
+        self.charge_grow(old_len, new_len)?;
+
+        match entries.get_mut(&normalized) {
+            Some(Entry::File { data: existing, modified }) => {
+                existing.extend_from_slice(data);
+                *modified = system_now();
+            }
+            // Non-file entry (or none): same as `write` overwriting a
+            // symlink or absent path, an append creates a fresh file.
+            _ => {
+                entries.insert(
+                    normalized,
+                    Entry::File {
+                        data: data.to_vec(),
+                        modified: system_now(),
+                    },
+                );
+            }
+        }
+        self.settle(old_len, new_len);
+        Ok(())
+    }
+
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
         let normalized = Self::normalize(path);
         let mut entries = self.entries.write().await;
@@ -741,6 +785,36 @@ mod tests {
         fs.write(Path::new("test.txt"), b"hello world").await.unwrap();
         let data = fs.read(Path::new("test.txt")).await.unwrap();
         assert_eq!(data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_append_creates_a_missing_file() {
+        let fs = MemoryFs::new();
+        fs.append(Path::new("new.txt"), b"hello").await.unwrap();
+        let data = fs.read(Path::new("new.txt")).await.unwrap();
+        assert_eq!(data, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_append_extends_an_existing_file() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("existing.txt"), b"original\n").await.unwrap();
+        fs.append(Path::new("existing.txt"), b"appended\n").await.unwrap();
+        let data = fs.read(Path::new("existing.txt")).await.unwrap();
+        assert_eq!(data, b"original\nappended\n");
+    }
+
+    #[tokio::test]
+    async fn test_append_charges_only_the_grown_delta() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("a.txt"), b"0123456789").await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(10));
+
+        fs.append(Path::new("a.txt"), b"ab").await.unwrap();
+        assert_eq!(fs.resident_bytes(), Some(12), "append must charge only the 2 new bytes");
+
+        let data = fs.read(Path::new("a.txt")).await.unwrap();
+        assert_eq!(data, b"0123456789ab");
     }
 
     #[tokio::test]

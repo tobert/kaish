@@ -107,7 +107,8 @@ use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_st
 #[cfg(feature = "subprocess")]
 use crate::scheduler::{drain_to_stream_teed, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{
-    global_flag_value_is_truthy, register_builtins, ExecContext, GlobalFlags, ToolArgs,
+    external_commands_unavailable_error, global_flag_value_is_truthy, register_builtins,
+    ExecContext, ExternalCommandOutcome, ExternalCommandsUnavailable, GlobalFlags, ToolArgs,
     ToolRegistry,
 };
 #[cfg(feature = "subprocess")]
@@ -658,9 +659,13 @@ impl KernelConfig {
 
     /// Set whether external command execution is allowed.
     ///
-    /// When `false`, commands not found as builtins produce "command not found"
-    /// instead of searching PATH. The `exec` and `spawn` builtins also return
-    /// errors. Use this to prevent VFS sandbox bypass via external binaries.
+    /// When `false`, commands not found as builtins report that external
+    /// commands are disabled on this shell — distinct from "command not
+    /// found", which stays reserved for a name that genuinely isn't
+    /// resolvable — instead of searching PATH. Backend-registered tools
+    /// (MCP, an embedder's own registry) are unaffected and still resolve.
+    /// The `exec` and `spawn` builtins also refuse, with the same wording.
+    /// Use this to prevent VFS sandbox bypass via external binaries.
     pub fn with_allow_external_commands(mut self, allow: bool) -> Self {
         self.allow_external_commands = allow;
         self
@@ -3579,8 +3584,18 @@ impl Kernel {
                 // argv, the child's stdio streams, and kill/reap drop guards); leaving
                 // it inline fattens every `execute_command_depth` frame on the recursion
                 // ring even when the command is a builtin.
-                if let Some(result) = Box::pin(self.try_execute_external(name, args)).await? {
-                    return Ok(result);
+                //
+                // A refusal (compiled without `subprocess`, or configured off)
+                // does NOT return here — a backend-registered tool of the same
+                // name is a separate capability and still gets a chance below.
+                // `unavailable` carries the reason forward so the final "nothing
+                // claimed this name" message can name it, instead of the
+                // fallthrough re-deriving the wrong "command not found".
+                let mut unavailable = None;
+                match Box::pin(self.try_execute_external(name, args)).await? {
+                    ExternalCommandOutcome::Ran(result) => return Ok(*result),
+                    ExternalCommandOutcome::NotFound => {}
+                    ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
                 }
 
                 // Try backend-registered tools (embedder engines, etc.)
@@ -3655,7 +3670,10 @@ impl Kernel {
                     }
                 }
 
-                return Ok(ExecResult::failure(127, format!("command not found: {}", name)));
+                return Ok(match unavailable {
+                    Some(reason) => external_commands_unavailable_error(name, reason),
+                    None => ExecResult::failure(127, format!("command not found: {}", name)),
+                });
             }
         };
 
@@ -5217,18 +5235,38 @@ impl Kernel {
     /// - Current working directory must be on a real filesystem (not virtual like /v)
     ///
     /// # Returns
-    /// - `Ok(Some(result))` if command was found and executed
-    /// - `Ok(None)` if command was not found in PATH
+    /// - [`ExternalCommandOutcome::Ran`] if a command was resolved and run (any exit code)
+    /// - [`ExternalCommandOutcome::NotFound`] if nothing on PATH matches — the
+    ///   caller should still try a backend-registered tool of the same name
+    /// - [`ExternalCommandOutcome::Unavailable`] if kaish will not attempt a
+    ///   PATH lookup or spawn at all; a backend tool of the same name is a
+    ///   separate capability and is still tried by the caller
     /// - `Err` on execution errors
     #[cfg(not(feature = "subprocess"))]
-    async fn try_execute_external(&self, _name: &str, _args: &[Arg]) -> Result<Option<ExecResult>> {
-        Ok(None)
+    async fn try_execute_external(&self, _name: &str, _args: &[Arg]) -> Result<ExternalCommandOutcome> {
+        Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::NotCompiled))
     }
 
     /// Try to execute an external command from PATH.
     #[cfg(feature = "subprocess")]
+    async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<ExternalCommandOutcome> {
+        if !self.allow_external_commands {
+            return Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff));
+        }
+        Ok(match Box::pin(self.try_execute_external_on_path(name, args)).await? {
+            Some(result) => ExternalCommandOutcome::Ran(Box::new(result)),
+            None => ExternalCommandOutcome::NotFound,
+        })
+    }
+
+    /// The actual PATH lookup + spawn, once the caller has confirmed external
+    /// commands are allowed at all. Unchanged from before the disabled/
+    /// not-compiled cases were split out — still `Option`-shaped: `None`
+    /// means "bare name, nothing on PATH", the one case where the caller
+    /// should keep looking elsewhere.
+    #[cfg(feature = "subprocess")]
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
-    async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+    async fn try_execute_external_on_path(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
         // Read the cancel token from `self.exec_ctx`, which `dispatch_command`
         // populates from the inbound ctx.cancel on every dispatch. This is
         // what makes the `timeout` builtin's swapped child token reach the
@@ -5239,9 +5277,6 @@ impl Kernel {
             ec.cancel.clone()
         };
         let kill_grace = self.kill_grace;
-        if !self.allow_external_commands {
-            return Ok(None);
-        }
 
         // Get the shell's cwd and its real filesystem location, if any. A
         // `None` real path means the cwd is virtual (a CoW overlay, an
@@ -8043,6 +8078,38 @@ mod tests {
         assert!(
             result.err.contains("disk exploded"),
             "the real backend error must be visible, not masked: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_external_commands_still_resolve_a_backend_tool() {
+        // Regression guard for the kaijutsu shape: a read-only shell sets
+        // `allow_external_commands: false` (no host subprocess exec) but
+        // still registers its own backend tools — e.g. a sandboxed `curl`
+        // that reads the network without touching a host binary or the VFS.
+        // Refusing external commands must NOT short-circuit the
+        // backend-tool lookup that runs after it. If it did, that `curl`
+        // would stop resolving and fail with a message claiming it isn't
+        // available — the exact wrong belief this whole fix exists to
+        // prevent, just relocated one layer down. Nothing stops a future
+        // "simplification" of the disabled bail into a terminal branch;
+        // this test is what catches that.
+        use crate::backend::testing::MockBackend;
+        let (mock, calls) = MockBackend::new();
+        let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(mock);
+        let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
+            .expect("with_backend kernel");
+        assert!(!kernel.allow_external_commands, "isolated() must keep external commands off for this guard to mean anything");
+
+        let result = kernel.execute("curl").await.expect("execution failed");
+        assert!(
+            result.ok(),
+            "a backend-registered tool must still run with external commands disabled: {result:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the backend tool must actually have been invoked, not just assumed"
         );
     }
 
