@@ -159,3 +159,39 @@ async fn execution_display_is_pinned() {
     // produced: `Display` shows the outermost `.context(...)` only.
     assert_eq!(err.to_string(), "failed to evaluate assignment");
 }
+
+/// The `{:#}` form specifically, because that is the one that broke.
+///
+/// A derived `#[error("{0}")]` renders the inner error with a plain `{}` and
+/// drops the formatter's alternate flag. `anyhow` uses `{:#}` to mean "walk
+/// the whole cause chain", so wrapping an execution fault hid every cause
+/// behind the outermost `.context(...)`. Display was preserved for `{}` and
+/// broken for `{:#}` — and `{:#}` is the form a caller uses precisely when it
+/// wants the real cause.
+///
+/// Every other Display pin in this file uses `{}`, so that regression would
+/// pass them all. This is the one that fails.
+#[tokio::test]
+async fn execution_display_walks_the_cause_chain_under_alternate() {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+
+    // Assignment wraps its real cause behind a generic context, so the outer
+    // message and the underlying fault differ — which is what makes this
+    // discriminating.
+    let err = kernel
+        .execute("x=$((1/0))")
+        .await
+        .expect_err("division by zero must fail");
+
+    let plain = format!("{err}");
+    let alternate = format!("{err:#}");
+
+    assert!(
+        alternate.len() > plain.len(),
+        "`{{:#}}` must add the cause chain, not repeat `{{}}`: plain={plain:?} alternate={alternate:?}"
+    );
+    assert!(
+        alternate.contains("division by zero"),
+        "the real cause must survive `{{:#}}`: {alternate:?}"
+    );
+}
