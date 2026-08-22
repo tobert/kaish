@@ -265,7 +265,9 @@ Rules, in order:
    name or alias exactly. `--flag=value` and `--flag value` both bind a value
    flag; `-f value` binds a short alias. Clustered shorts (`-sv`) and glued
    short values (`-n5`) are not accepted; the error names the separated form.
-   Prefix abbreviations (`--forc` for `--force`) are not accepted.
+   Prefix abbreviations (`--forc` for `--force`) are not accepted. Only the
+   ASCII hyphen-minus (`-`, U+002D) starts a flag, as in `getopt`; a word that
+   starts with another dash character is a positional.
 3. Before `--`, a word that does not start with `-` fills the next declared
    positional slot. A `many` positional absorbs the rest.
 4. `--` ends flag parsing. After it, every word is positional and fills the
@@ -470,6 +472,7 @@ validated the declared shape first. Neither replaces the other.
 | A value contains a NUL byte. | Refused at the parse, exit 2, naming the argument's position. Nothing spawns, so nothing can truncate it on the way to the child. |
 | A value is binary (`Value::Bytes`). | Refused at the parse, exit 2, naming the position and the byte count — never the bytes. argv carries text; encode it or write it to a file. |
 | `path_under` and a string-prefix sibling directory. | Component-wise check after canonicalization. |
+| A symlink is created under `root` between the `path_under` check and `execve`. | None. The check canonicalizes at call time; it is not a kernel-enforced `RESOLVE_BENEATH`. Keep `root` writable only by the deployment, not by the program being gated. |
 
 ## Testing, by exposure
 
