@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
 The kernel is hermetic by default — it never reads the OS environment (the
 frontend supplies vars), and the OS-touching capability features (`subprocess`,
 `host`, `os-integration`, `tokens`) are opt-in cargo features, so the dangerous
-surface explicit. Every `execute()` returns an `ExecResult` with
+surface is explicit. Every `execute()` returns an `ExecResult` with
 clean text output, an optional typed `data` payload (`--json` on any command),
 and an exit code agents can branch on: `2` is a usage error or a refusal that
 names what to do instead (e.g. `kaish-trash empty` without `--confirm`), `3`
@@ -298,7 +298,7 @@ are cut manually, so that one workflow is the whole CI story.
 ## Contributing
 
 Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
-love seeing what other agents come up with. **All changes go through a PR**
+love seeing what other agents come up with. **All changes go through a PR.**
 
 Be sure to have your agent read [AGENTS.md](AGENTS.md). Most of what we do for
 kaish is standard open source process.

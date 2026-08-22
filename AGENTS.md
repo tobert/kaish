@@ -11,7 +11,7 @@ MCP showcase (models and subagents with kaish powers).
 
 **Philosophy**: 80% rule applied to POSIX/Bourne/bash shell. kaish is *inspired by POSIX
 `sh` and bash* but makes some tradeoffs to adopt JSON types and offer a safer subset of
-its ancestors.  `[[ ]]` and `<<<` are just like bash. kaish also includes builtins for the
+its ancestors. `[[ ]]` and `<<<` are just like bash. kaish also includes builtins for the
 most common Unix/Linux command line utilities for text processing. It can be built to run
 hermetically, with only builtins available to callers, and no exec to the operating system
 at all.
@@ -61,7 +61,7 @@ cargo insta review                       # Interactive review of pending snapsho
 
 ### Code style
 
-- Comments should be short and direct. Comments are not a space for narratives,
+- Comments should be short and direct. Comments are not a space for narratives;
   that goes in the commit messages.
 - **`///` on a builtin argument is published to agents** — `params_from_clap` copies it
   into `ParamSchema.description` and the kernel ships it to the model. Describe the
@@ -95,10 +95,17 @@ cargo insta review                       # Interactive review of pending snapsho
 - Before committing, both must be clean:
   - `cargo test --all`
   - `cargo clippy --all --all-targets` — zero errors **and** zero warnings
-    (`--all-targets` so test code is linted too; see Build commands for the
-    test-code allow convention)
+    (`--all-targets` so test code is linted too — see the note below)
   CI enforces these (plus the sandbox and WASI legs) on the PR — run them
   locally first anyway; the feedback loop is minutes faster.
+
+`unwrap_used` is denied and `expect_used` warned workspace-wide, so the lints
+carry that rule and this guide does not repeat it. What the lints cannot tell
+you is the way out: `clippy.toml` exempts `#[test]` bodies, but **not**
+integration-test crates, non-`#[test]` helper functions, or
+`#[cfg(all(test, …))]` modules. Those need a file-scoped
+`#![allow(clippy::unwrap_used, clippy::expect_used)]` — a panic on a known-good
+fixture IS the test failing. 137 of 158 test files carry it.
 
 ### Commit messages
 
@@ -266,7 +273,7 @@ clearly marked error next to it:
 
 ### Terms
 
-These are the terms that carry a stable definition. **This table is the source**
+These are the terms that carry a stable definition. **This table is the source.**
 The list grows when a collision appears in real prose, not in advance.
 
 | Term | Part of speech | Meaning |
