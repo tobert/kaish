@@ -18,6 +18,10 @@ mod context;
 mod global_flags;
 mod registry;
 mod traits;
+// Wrapped commands run external programs, so the module only exists on the
+// `subprocess` axis; a sandbox build has no `wrapped` module at all.
+#[cfg(feature = "subprocess")]
+pub mod wrapped;
 
 pub use builtin::register_builtins;
 #[cfg(feature = "subprocess")]

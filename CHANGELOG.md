@@ -17,6 +17,20 @@ breaking entries are marked **BREAKING**.
   Constructors are unchanged; only a struct literal must add the two fields.
 
 ### Added
+- **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature) —
+  an embedder can register an external program as a kaish tool with a grammar
+  instead of turning `allow_external_commands` on for everything on `$PATH`.
+  `WrappedCommand` pins the executable at registration, names the verbs and
+  flags each one accepts, and the kernel renders the child's argv itself, so a
+  value is never parsed as a flag unless the declaration put it in flag
+  position. Verbs and flags are deny-by-default: an undeclared one fails
+  validation with the allowed set named, exit 2, before anything spawns.
+  Constraints are `required`, `int`, `choices`, and `path_under` (component-wise
+  containment after canonicalization, so `/opt/scripts-evil` is not under
+  `/opt/scripts`). Declarations derive serde, so a policy file deserializes into
+  one. `Tail::{Deny, AfterDashDash, Forward}` says what happens to argv the
+  declaration does not describe. See `docs/wrapped_command.md`.
+
 - **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …`
   were parse errors ("found '!' expected condition"), so the idiomatic "run
   this unless" had to be written backwards through an empty `then` branch. It
