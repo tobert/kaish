@@ -16,7 +16,7 @@ ENABLED=true              # boolean (only true/false)
 $VAR                      # simple
 ${VAR}                    # braced
 ${VAR:-default}           # default if unset/empty
-${#VAR}                   # string length
+${#VAR}                   # string length, in characters
 $0 $1 $@ $#              # script name, args, all args, count
 $?                        # last exit code (0-255)
 $$ ${$}                   # kaish session id — see note below

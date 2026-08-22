@@ -340,9 +340,12 @@ async fn file_test(ctx: &ExecContext, op: &str, path: &str) -> bool {
     let resolved = ctx.resolve_path(path);
     let entry = ctx.backend.stat(&resolved).await.ok();
     match op {
-        "-e" | "-r" => entry.is_some(),
+        "-e" => entry.is_some(),
         "-f" => entry.as_ref().is_some_and(|e| e.is_file()),
         "-d" => entry.as_ref().is_some_and(|e| e.is_dir()),
+        "-r" => entry
+            .as_ref()
+            .is_some_and(|e| e.permissions.is_none_or(|p| p & 0o444 != 0)),
         "-w" => entry
             .as_ref()
             .is_some_and(|e| e.permissions.is_none_or(|p| p & 0o222 != 0)),

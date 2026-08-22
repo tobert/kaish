@@ -711,6 +711,20 @@ fn parse_interpolated_string_spanned(
                     }
                 }
                 let part = if let Some(name) = var_content.strip_prefix('#') {
+                    // `${#x:-y}` has no meaning: bash rejects it as a bad
+                    // substitution, and the unquoted door here already refuses
+                    // it. Without this the `#` strip wins and the whole
+                    // `x:-y` becomes the path, which resolves to unset and
+                    // reports 0 — a wrong length, silently, in the quoted
+                    // spelling only.
+                    if find_default_separator_in_content(name).is_some() {
+                        return Err(format!(
+                            "${{#{name}}}: a length cannot carry a default — \
+                             ${{#NAME}} counts, ${{NAME:-default}} substitutes. \
+                             Write ${{#NAME}} on a name you have set, or test it \
+                             first."
+                        ));
+                    }
                     StringPart::VarLength(parse_varpath(&format!("${{{name}}}")))
                 } else if var_content.starts_with("__ARITH:") && var_content.ends_with("__") {
                     let expr = var_content
@@ -969,6 +983,20 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                 // Parse the content for special syntax
                 let part = if let Some(name) = var_content.strip_prefix('#') {
                     // Variable length: ${#VAR} / ${#path[sub]}
+                    // `${#x:-y}` has no meaning: bash rejects it as a bad
+                    // substitution, and the unquoted door here already refuses
+                    // it. Without this the `#` strip wins and the whole
+                    // `x:-y` becomes the path, which resolves to unset and
+                    // reports 0 — a wrong length, silently, in the quoted
+                    // spelling only.
+                    if find_default_separator_in_content(name).is_some() {
+                        return Err(format!(
+                            "${{#{name}}}: a length cannot carry a default — \
+                             ${{#NAME}} counts, ${{NAME:-default}} substitutes. \
+                             Write ${{#NAME}} on a name you have set, or test it \
+                             first."
+                        ));
+                    }
                     StringPart::VarLength(parse_varpath(&format!("${{{name}}}")))
                 } else if var_content.starts_with("__ARITH:") && var_content.ends_with("__") {
                     // Arithmetic expression: ${__ARITH:expr__}
