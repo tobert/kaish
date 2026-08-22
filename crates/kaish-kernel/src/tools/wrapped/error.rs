@@ -112,6 +112,18 @@ pub enum WrappedError {
         word: String,
     },
 
+    /// A word filled no declared slot, and the verb takes undescribed argv
+    /// only past the `--` the agent writes.
+    #[error("{command}: unexpected argument '{word}' for '{scope}'. Write -- before arguments meant for the program.")]
+    UndeclaredPositional {
+        /// The wrapped command's name.
+        command: String,
+        /// `cargo test` for a named verb, `python` for the root verb.
+        scope: String,
+        /// The word that filled no slot.
+        word: String,
+    },
+
     /// A required flag was absent.
     #[error("{command}: required flag '{flag}' not given for '{scope}'.")]
     MissingRequiredFlag {

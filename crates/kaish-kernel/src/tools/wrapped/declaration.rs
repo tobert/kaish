@@ -256,11 +256,12 @@ pub struct Verb {
     /// verb the program does not have (`python json-tool` → `-m json.tool`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) omit_name: bool,
-    /// Declared flags, in declaration order — which is also render order.
-    #[serde(default, alias = "flag", skip_serializing_if = "Vec::is_empty")]
+    /// Declared flags, in declaration order — which is the order the schema
+    /// and `help` publish them in. A call renders in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) flags: Vec<Flag>,
     /// Declared positional slots, in slot order.
-    #[serde(default, alias = "positional", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) positionals: Vec<Positional>,
     /// What happens to argv this verb does not describe.
     #[serde(default)]
@@ -307,7 +308,7 @@ impl Verb {
         self
     }
 
-    /// Declare a flag. Declaration order is render order.
+    /// Declare a flag. Declaration order is the order agents read it in.
     pub fn flag(mut self, flag: Flag) -> Self {
         self.flags.push(flag);
         self
@@ -376,7 +377,7 @@ pub struct WrappedCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) root: Option<Verb>,
     /// Named verbs, in declaration order.
-    #[serde(default, alias = "verb", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) verbs: Vec<Verb>,
     /// Usage examples, published through the tool schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

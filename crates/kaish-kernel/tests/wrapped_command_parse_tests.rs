@@ -308,9 +308,13 @@ fn a_verb_lead_renders_after_the_verb_name_when_the_name_is_kept() {
     vec!["--no-pager", "log", "--max-count=5"]
 )]
 #[case::equals_empty_value(vec!["log", "--since="], vec!["--no-pager", "log", "--since="])]
-#[case::flags_render_in_declaration_order(
+#[case::flags_render_in_source_order(
     vec!["log", "--oneline", "-n", "5"],
-    vec!["--no-pager", "log", "--max-count=5", "--oneline"]
+    vec!["--no-pager", "log", "--oneline", "--max-count=5"]
+)]
+#[case::a_declared_flag_renders_after_a_positional_the_agent_wrote_first(
+    vec!["log", "main", "--oneline"],
+    vec!["--no-pager", "log", "main", "--oneline"]
 )]
 #[case::value_flag_takes_a_flag_looking_word(
     vec!["commit", "-m", "-foo"],
@@ -496,10 +500,21 @@ fn tail_deny_refuses_a_word_after_dash_dash_too() {
 }
 
 #[test]
-fn tail_after_dash_dash_forwards_the_tail_behind_a_rendered_dash_dash() {
+fn tail_after_dash_dash_takes_a_word_past_the_agents_own_dash_dash() {
     assert_eq!(
-        cargo().argv(&["test", "parser", "extra"]),
+        cargo().argv(&["test", "parser", "--", "extra"]),
         vec!["test", "parser", "--", "extra"]
+    );
+}
+
+#[test]
+fn tail_after_dash_dash_names_the_dash_dash_as_the_fix_before_one_is_written() {
+    // The wrapper never inserts a `--` the agent did not write, so a word past
+    // every declared slot is refused with the word that would make it legal.
+    assert_eq!(
+        cargo().refuse(&["test", "parser", "extra"]),
+        "cargo: unexpected argument 'extra' for 'cargo test'. \
+         Write -- before arguments meant for the program."
     );
 }
 
@@ -514,6 +529,17 @@ fn tail_forward_passes_an_undeclared_flag_through_in_place() {
     assert_eq!(
         cargo().argv(&["clippy", "--fix", "--all-targets"]),
         vec!["clippy", "--fix", "--all-targets"]
+    );
+}
+
+#[test]
+fn tail_forward_keeps_an_undeclared_flag_and_its_value_together() {
+    // The case that made source order the rule: a declaration-ordered flag
+    // block plus a tail rendered this as `clippy --message-format -- json`,
+    // and the child saw a flag with no value.
+    assert_eq!(
+        cargo().argv(&["clippy", "--message-format", "json"]),
+        vec!["clippy", "--message-format", "json"]
     );
 }
 

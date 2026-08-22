@@ -263,9 +263,8 @@ fn a_declaration_round_trips_through_json() {
 
 #[test]
 fn a_declaration_deserializes_from_the_documented_field_names() {
-    // The design doc writes the verb's slot list as `positional`; the Rust
-    // field is `positionals`. Both spellings deserialize so a hand-written
-    // TOML or JSON policy file matches the doc.
+    // One spelling: the wire names are the Rust field names, and
+    // `docs/wrapped_command.md` writes the same plural in its TOML sample.
     let wire = r#"{
         "name": "python",
         "executable": "/usr/bin/python3",
@@ -273,7 +272,7 @@ fn a_declaration_deserializes_from_the_documented_field_names() {
         "root": {
             "tail": "after-dash-dash",
             "stdin": "pipe",
-            "positional": [
+            "positionals": [
                 { "name": "script", "required": true, "path_under": "/opt/app/scripts" },
                 { "name": "args", "many": true }
             ]

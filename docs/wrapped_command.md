@@ -5,8 +5,8 @@ embedder declares the program, the verbs it allows, and the flags each verb
 accepts. The kernel validates a call against that declaration, renders the
 argv itself, and runs the program with `execve(2)` — never through `sh -c`.
 
-Status: design, 2026-08-22. Implementation tracks this document; when the two
-disagree, fix one and say which.
+Status: implemented 2026-08-22; this document is the contract. When the code
+and this document disagree, fix one and say which.
 
 ## What it is for
 
@@ -113,9 +113,12 @@ $ git log -n 5 -- "$branch"
   (git reports no such path; the child never parses the value as a flag)
 ```
 
-The first four are validation failures, exit 2. They fire from `kaish --plan`
-and from `plan_program` before anything spawns. `help git` renders from the
-same declaration.
+The first three are validation failures, exit 2. They fire from `kaish --plan`
+and from `plan_program` before anything spawns. The fourth fires when the call
+runs: `$branch` has no value at validation, so the word is opaque and the
+validator has nothing to judge — the expanded text is parsed like a literal and
+refused there, at the same exit 2. `help git` renders from the same
+declaration.
 
 ### python: one mechanism, two postures
 
@@ -139,10 +142,10 @@ let python = WrappedCommand::new("python")
 
 ```
 $ python -c 'import os; os.system("id")'
-python: unknown flag '-c'. Allowed: (none)
+python: unknown flag '-c' for 'python'. Allowed: (none)
 
 $ python /etc/passwd
-python: 'script' must be under /opt/app/scripts
+python: 'script' must be under /opt/app/scripts. Got '/etc/passwd'.
 
 $ python etl.py --stage=1 < input.csv
 python: unknown flag '--stage' for 'python'. Allowed: (none)
@@ -154,6 +157,11 @@ $ python etl.py -- --stage=1 < input.csv
 `-I` is isolated mode: the child ignores `PYTHON*` environment variables and
 the user site directory. The pin and the lead together close the
 `PYTHONPATH`/`sitecustomize` route into the interpreter.
+
+`-` is a word that starts with `-`, so the parser reads it in flag position:
+`python -` is refused as `unknown flag '-'`, not taken as a positional naming
+stdin. Read-code-from-stdin is closed by the same rule that closes `-c` and
+`-m`, and a program that means `-` as an operand takes it after `--`.
 
 Interpreter — deliberately open, with the module list as the allowlist:
 
@@ -232,11 +240,15 @@ env = { PYTHONDONTWRITEBYTECODE = "1" }
 [command.python.root]
 tail = "after-dash-dash"
 stdin = "pipe"
-positional = [
+positionals = [
   { name = "script", required = true, path_under = "/opt/app/scripts" },
   { name = "args", many = true },
 ]
 ```
+
+The wire names are the Rust field names: `flags`, `positionals`, `verbs`. One
+spelling, so a hand-written policy file and the builder describe the same
+declaration.
 
 ## Parsing
 
@@ -256,14 +268,26 @@ Rules, in order:
    Prefix abbreviations (`--forc` for `--force`) are not accepted.
 3. Before `--`, a word that does not start with `-` fills the next declared
    positional slot. A `many` positional absorbs the rest.
-4. `--` ends flag parsing. After it, every word is positional. Words that fill
-   no declared slot are the tail.
-5. The tail goes where `Tail` says. `Deny` fails: `unexpected argument 'X'`.
-   `AfterDashDash` forwards the tail after a rendered `--`. `Forward` is the
-   same, and additionally forwards undeclared flags from step 2 in place.
+4. `--` ends flag parsing. After it, every word is positional and fills the
+   next declared slot.
+5. A word that fills no declared slot is undescribed argv, and `Tail` decides
+   it. `Deny` fails: `unexpected argument 'X'`. `AfterDashDash` takes it past
+   the agent's own `--`, and before that names the `--` as the fix:
+   `unexpected argument 'X' for 'cargo test'. Write -- before arguments meant
+   for the program.` `Forward` takes it wherever it sits, and additionally
+   forwards undeclared flags from step 2 in place.
 6. A `required` flag or positional that is absent fails. A `choices` flag whose
    value is not in the set fails and names the set. An `int` flag that does not
    parse as an integer fails.
+7. A flag the declaration did not mark `repeatable()` may appear once. A second
+   occurrence is an error, not last-wins: `'--since' given more than once for
+   'git log'.` Two spellings of the same flag (`-n 5 --max-count 3`) are two
+   occurrences.
+
+A declaration may carry a `root` verb and named verbs at once. The first word
+selects a named verb when it matches one exactly, and otherwise falls through
+to the root — `python json-tool f.json` runs the verb, `python etl.py` runs the
+root. Without a root, a word that names no verb is `unknown verb 'X'`.
 
 A value that came from a variable is parsed like a literal. `git log "$x"`
 with `x = "--output=f"` is an unknown flag, not a positional. To pass a value
@@ -277,25 +301,49 @@ allowed set.
 ```
 argv = executable
      , command.lead…
-     , verb.name            (omitted for the root verb)
+     , verb.name            (omitted for the root verb, and for omit_name)
      , verb.lead…
-     , flags…               (in declaration order)
-     , positionals…         (in source order; a `--` the agent wrote stays where it was)
-     , "--", tail…          (only when the tail is non-empty)
+     , every word the agent wrote, in source order
 ```
 
-A flag renders under its declared name, whichever alias the agent wrote:
-`-n 5` renders as `--max-count=5`. A long value flag renders as
-`--name=value`. A one-character name (`Flag::value("m")`) renders as
-`-m value`. A switch renders as its name. `Flag::style(Style::Separate)` or
-`Flag::style(Style::Equals)` overrides the default for a flag whose program
-accepts only one form. A repeatable flag renders once per occurrence, in
-source order.
+**The declaration decides how a word is spelled, never where it sits.** A flag
+renders under its declared name, whichever alias the agent wrote — `-n 5`
+renders as `--max-count=5` — in the position the agent wrote it. A long value
+flag renders as `--name=value`. A one-character name (`Flag::value("m")`)
+renders as `-m value`. A switch renders as its name.
+`Flag::style(Style::Separate)` or `Flag::style(Style::Equals)` overrides the
+default for a flag whose program accepts only one form. A repeatable flag
+renders once per occurrence, in source order.
 
-The wrapper never inserts a `--` the agent did not write, except to introduce
-a non-empty tail. `git log -- main` means "paths named main", not "revision
-main"; inserting `--` would change the program's meaning. Mirroring the
-agent's `--` keeps the `sh` rule: what you wrote is what the child sees.
+```
+$ git log --oneline -n 5
+  argv: ["/usr/bin/git", "--no-pager", "log", "--oneline", "--max-count=5"]
+
+$ git log main --oneline
+  argv: ["/usr/bin/git", "--no-pager", "log", "main", "--oneline"]
+
+$ cargo clippy --message-format json
+  argv: [".../cargo", "clippy", "--message-format", "json"]
+```
+
+Source order is the rule because argv order carries meaning the declaration
+cannot see. `cargo clippy --message-format json` rendered as
+`clippy --message-format -- json`: `json` filled no declared slot, so it became
+a tail behind an inserted `--`, split from the flag whose value it was. Two
+things reordered argv there — a tail collected out of source order, and a block
+of declared flags collected ahead of it — and the child saw a flag with no
+value.
+
+So `Tail` no longer moves a word. Under `Tail::Forward`, every undeclared word
+— flag-looking or not — renders where the agent wrote it, which is what keeps
+`--message-format json` together. Under `AfterDashDash` a word past every
+declared slot is taken only where the agent's `--` already put it, and refused
+before that with the `--` named as the fix.
+
+The wrapper never inserts a `--` the agent did not write. `git log -- main`
+means "paths named main", not "revision main"; inserting `--` would change the
+program's meaning. Mirroring the agent's `--` keeps the `sh` rule: what you
+wrote is what the child sees.
 
 ## Constraints
 
@@ -343,9 +391,12 @@ Not in advance.
 8. The child's exit code is the result's exit code, unchanged. The program's
    own code is the contract; the wrapper adds nothing on top.
 9. A `json_output()` verb parses stdout as JSON and returns it as the result's
-   data, so `$(…)` binds it typed. Stdout that is not valid JSON is an error,
-   exit 1, naming the verb and the parse failure — not a silent fall back to
-   text.
+   data, so `$(…)` binds it typed. The text stays as the child printed it, so
+   the verb still prints its JSON when nothing captures it. Stdout that is not
+   valid JSON is an error, exit 1, naming the verb and the parse failure — not
+   a silent fall back to text. A child that exited non-zero, or whose stdout
+   was capped, is passed through untouched: it has not delivered the JSON its
+   verb promised, and its own code is the answer (rule 8 wins over this one).
 
 ## Registration
 
@@ -361,6 +412,21 @@ and has an execute bit. Anything else is an `Err` at registration, not a
 `127` on first call. `wrapped::find_executable(name, path_var)` resolves a bare
 name against a `PATH` string the embedder supplies; the kernel does not read
 the OS environment to find one.
+
+`build()` also refuses a declaration that could not describe a call
+unambiguously. Every one of these is an `Err` naming the command, the scope,
+and the two names that collide:
+
+- No `root` and no `verbs` — the declaration can accept no call.
+- An empty command name, verb name, flag name, or positional name.
+- A named verb passed to `root()`, or an unnamed verb passed to `verb()`.
+- The same verb name, flag spelling, or positional name declared twice. An
+  alias that shadows another flag's name counts.
+- `choices([…])` or `int()` on a switch — a switch binds no value.
+- A `many` positional that is not the last slot.
+- A `required` positional after an optional one — no call could fill the
+  optional slot without it.
+- A relative `path_under(root)` — the root must be an absolute path.
 
 A wrapped command is a registered tool, not an external command. It runs when
 `allow_external_commands` is `false`. It needs the `subprocess` feature; a
@@ -401,13 +467,17 @@ validated the declared shape first. Neither replaces the other.
 | The program reads stdin and would hang. | `Stdin::Closed` by default gives `/dev/null`. |
 | The program opens `$EDITOR` or a pager. | Hermetic env has neither; pin `GIT_PAGER=cat` where the program defaults to one. |
 | The declared flags drift from the installed program. | The child's own usage error, at the child's exit code. Pin `executable` to a known install. |
-| A value contains a NUL byte. | The spawn fails, exit 126, naming the argument. No truncation. |
+| A value contains a NUL byte. | Refused at the parse, exit 2, naming the argument's position. Nothing spawns, so nothing can truncate it on the way to the child. |
+| A value is binary (`Value::Bytes`). | Refused at the parse, exit 2, naming the position and the byte count — never the bytes. argv carries text; encode it or write it to a file. |
 | `path_under` and a string-prefix sibling directory. | Component-wise check after canonicalization. |
 
 ## Testing, by exposure
 
 Tests are ordered by how much a defect would expose. The first four groups
-are pure and table-driven (`rstest`); they should be dense.
+are pure and table-driven (`rstest`); they should be dense. Groups 1–4 live in
+`crates/kaish-kernel/tests/wrapped_command_parse_tests.rs` and the crate-private
+`src/tools/wrapped/tests.rs`; groups 5–11 drive a real child through a real
+kernel in `crates/kaish-kernel/tests/wrapped_command_exec_tests.rs`.
 
 1. Parse and render. Every flag form; `--` placement; each `Tail` mode;
    repeatable, choices, required, int; unknown verb, verb prefix, flag prefix,
@@ -423,34 +493,47 @@ are pure and table-driven (`rstest`); they should be dense.
    same source. (See the two-binders gotcha in CLAUDE.md's lineage: validate
    from what execute reads.)
 5. Environment. A pin overrides an exported variable of the same name; an
-   unexported scope variable is absent; an OS environment variable set in the
-   test process is absent from the child; a structured exported value fails.
+   unexported scope variable is absent; a variable the kaish process itself
+   has (`PATH`) is absent from the child; a structured exported value fails.
 6. Pinned executable. A script that sets `PATH` to an empty directory still
    runs the wrapper; `build()` fails for a missing path, a directory, a file
    without an execute bit, a relative path.
-7. stdin. `Closed` with piped input fails loudly; `Pipe` streams; `sleep 1 |
-   wrapped` does not deadlock.
-8. Cancellation. `timeout 1 wrapped-sleep 10` kills the child; a background
-   job's wrapped child joins the job's process group.
+7. stdin. `Closed` with piped input fails loudly, and with a `<` redirect too;
+   `Pipe` streams; `sleep 1 | wrapped` does not deadlock; a partial `read`
+   leaves the rest for the child, in order and once each.
+8. Cancellation. `timeout 1 wrapped-sleep 10` kills the child; `kill %1`
+   terminates a background wrapped child through the job's process group.
 9. Feature and policy gates. Runs with `allow_external_commands = false`; the
    `--no-default-features` kernel compiles without the module.
-10. Output. Oversize stdout spills like an external command's; a
-    `json_output` verb binds typed through `$(…)`; invalid JSON from the child
-    is an error.
-11. Published text. `help <name>` renders verbs, flags, constraints, and the
-    `Forward` marker; `kaish --plan` reports an unknown flag before execution.
+10. Output. Oversize stdout is capped exactly as the same program's is when it
+    runs as an external command; a `json_output` verb binds typed through
+    `$(…)` on an all-JSON tool and on a mixed one; a text verb's `$(…)` stays
+    text; invalid JSON from the child is an error.
+11. Published text. `help <name>` renders verbs, flags with their aliases,
+    constraints, and the `Forward` marker; the validator reports an unknown
+    flag before execution, and says nothing about a computed word.
 
 ## Open items
 
-- Per-verb `json_output` and `ToolSchema::typed_substitution`: **decided.** The
-  root schema sets `typed_substitution` only when *every* verb the tool can run
-  declares `json_output()`. A tool with one JSON verb among text ones would
-  otherwise make `$(cargo build)` bind a value that does not exist. Each verb's
-  own schema still carries the flag, so `help` reports it per verb, and a caller
-  who wants the data from one JSON verb among many asks with `--json`. Reading
-  the leaf is a kernel change; it is not needed until a declaration wants a
-  mixed tool to substitute typed.
+- Per-verb `json_output` and `ToolSchema::typed_substitution`: **decided, and
+  the mixed case works.** The root schema sets `typed_substitution` only when
+  *every* verb the tool can run declares `json_output()`; a tool with one JSON
+  verb among text ones would otherwise make `$(cargo build)` bind a value that
+  does not exist. A JSON verb on a mixed tool still binds typed, because the
+  wrapper stamps `ExecResult::data_is_value` on that verb's own result and the
+  kernel ORs the schema flag in rather than assigning it — so a marker the tool
+  set survives. The result keeps the child's stdout as its text, which is what
+  a data-only result would have lost: `wrapped json-verb` on its own prints the
+  JSON, and `$(wrapped json-verb)` binds the value. No kernel change was needed,
+  and `--json` is not the only route to the data any more.
 - The declaration types may move to `kaish-types` if an embedder wants to
   deserialize declarations without the kernel. Not before one asks.
 - Presets (`git`, `python`, `cargo`) ship as data outside the kernel. One small
-  `git` declaration lives in-tree as the test fixture.
+  `git` declaration lives in-tree as the test fixture, in
+  `crates/kaish-kernel/tests/wrapped_command_exec_tests.rs`. It pins
+  `/bin/echo` rather than `/usr/bin/git`, so the child prints the argv the
+  wrapper rendered and every execution assertion is about what the child
+  actually received.
+- `help <name>` renders a subcommand-aware tool's whole grammar as of this
+  change (`kaish_help::topic::tool_help`). `kj` gains the same section; nothing
+  in a flat tool's help moved except that a parameter's aliases are now named.

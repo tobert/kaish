@@ -4,18 +4,23 @@
 //! argv = command.lead…
 //!      , verb.name            (omitted for the root verb, and for omit_name)
 //!      , verb.lead…
-//!      , flags…               (in declaration order)
-//!      , positionals…         (in source order; a `--` the agent wrote stays
-//!                              where it was)
-//!      , "--", tail…          (only when the tail is non-empty)
+//!      , every word the agent wrote, in source order
 //! ```
 //!
 //! The executable itself is not in the rendered argv — the spawn site owns
 //! argv[0].
 //!
-//! The wrapper never inserts a `--` the agent did not write, except to
-//! introduce a non-empty tail. `git log -- main` means "paths named main",
-//! not "revision main"; inserting `--` would change the program's meaning.
+//! **Source order, canonical spelling.** The declaration decides how a word is
+//! spelled — `-n 5` renders as `--max-count=5` — and never where it sits.
+//! `cargo clippy --message-format json` rendered as
+//! `clippy --message-format -- json`: `json` filled no declared slot, so it
+//! became a tail behind an inserted `--`, split from the flag whose value it
+//! was. A block of declared flags collected ahead of the positionals reordered
+//! argv the same way, one step earlier.
+//!
+//! The wrapper never inserts a `--` the agent did not write. `git log -- main`
+//! means "paths named main", not "revision main"; inserting `--` would change
+//! the program's meaning.
 
 use super::declaration::{Flag, Style, Verb, WrappedCommand};
 use super::parse::{Call, Item};
@@ -42,41 +47,24 @@ pub(crate) fn render(declaration: &WrappedCommand, verb: &Verb, call: &Call) -> 
     }
     argv.extend(verb.lead.iter().cloned());
 
-    // Declaration order for the flag block; source order within one
-    // repeatable flag's occurrences.
-    for (flag_index, flag) in verb.flags.iter().enumerate() {
-        for use_ in call.flags.iter().filter(|u| u.flag_index == flag_index) {
-            render_flag(flag, use_.value.as_deref(), &mut argv);
-        }
-    }
-
     let mut item_argv_index = Vec::with_capacity(call.items.len());
-    let mut ends_with_dash_dash = false;
     for item in &call.items {
         item_argv_index.push(argv.len());
         match item {
-            Item::Positional { value, .. } => {
-                argv.push(value.clone());
-                ends_with_dash_dash = false;
+            Item::Positional { value, .. } => argv.push(value.clone()),
+            Item::Flag(use_index) => {
+                // Both lookups are in-range for any `Call` the parser built:
+                // it pushes the `Item` and the `FlagUse` together, from an
+                // index it just found in this verb's flags.
+                if let Some(use_) = call.flags.get(*use_index)
+                    && let Some(flag) = verb.flags.get(use_.flag_index)
+                {
+                    render_flag(flag, use_.value.as_deref(), &mut argv);
+                }
             }
-            Item::DashDash => {
-                argv.push("--".to_string());
-                ends_with_dash_dash = true;
-            }
-            Item::Forwarded(word) => {
-                argv.push(word.clone());
-                ends_with_dash_dash = false;
-            }
+            Item::DashDash => argv.push("--".to_string()),
+            Item::Undeclared(word) => argv.push(word.clone()),
         }
-    }
-
-    if !call.tail.is_empty() {
-        // The agent's own `--` already introduces the tail when it sits last;
-        // a second one would be a word the agent did not write.
-        if !ends_with_dash_dash {
-            argv.push("--".to_string());
-        }
-        argv.extend(call.tail.iter().cloned());
     }
 
     Rendered {

@@ -78,7 +78,10 @@ pub(crate) struct FlagUse {
     pub(crate) value_known: bool,
 }
 
-/// One word that renders between the flags and the tail, in source order.
+/// One word of the call, in the order the agent wrote it.
+///
+/// Every word the child sees is here, so rendering is a walk over this list:
+/// the declaration decides how a word is spelled, never where it sits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Item {
     /// A word that filled a declared slot.
@@ -90,10 +93,14 @@ pub(crate) enum Item {
         /// False when the word came from an expansion.
         known: bool,
     },
+    /// One declared flag occurrence: an index into [`Call::flags`].
+    Flag(usize),
     /// A `--` the agent wrote. It renders where it was written.
     DashDash,
-    /// An undeclared flag a `Tail::Forward` verb passes through in place.
-    Forwarded(String),
+    /// A word the declaration does not describe, forwarded verbatim: an
+    /// undeclared flag under `Tail::Forward`, or a word past every declared
+    /// slot that this verb's [`Tail`] lets through.
+    Undeclared(String),
 }
 
 /// A parsed call, ready to render.
@@ -101,12 +108,10 @@ pub(crate) enum Item {
 pub(crate) struct Call {
     /// Index into the declaration's `verbs`; `None` selects the root verb.
     pub(crate) verb_index: Option<usize>,
-    /// Declared flag occurrences, in source order.
+    /// Declared flag occurrences, in source order. `items` points into this.
     pub(crate) flags: Vec<FlagUse>,
-    /// Positionals, agent-written `--`, and forwarded flags, in source order.
+    /// Every word after the verb, in source order.
     pub(crate) items: Vec<Item>,
-    /// Words that filled no declared slot.
-    pub(crate) tail: Vec<String>,
     /// A word the parser could not judge landed in flag-or-positional
     /// position, so the shape after it is a guess.
     pub(crate) uncertain: bool,
@@ -119,7 +124,6 @@ impl Call {
             verb_index: None,
             flags: Vec::new(),
             items: Vec::new(),
-            tail: Vec::new(),
             uncertain: true,
         }
     }
@@ -160,18 +164,39 @@ pub(crate) fn parse(declaration: &WrappedCommand, words: &[Word]) -> Result<Call
         verb_index,
         flags: Vec::new(),
         items: Vec::new(),
-        tail: Vec::new(),
         uncertain: false,
     };
     let mut past_dash_dash = false;
     let mut slot = 0usize;
+
+    // One closure would need the whole `call` borrowed twice; a macro keeps
+    // the three call sites from drifting instead.
+    macro_rules! refuse {
+        ($result:expr) => {
+            if let Err(error) = $result {
+                return Err(ParseError {
+                    error,
+                    uncertain: call.uncertain,
+                });
+            }
+        };
+    }
 
     while index < words.len() {
         let word = &words[index];
         index += 1;
 
         if past_dash_dash {
-            fill_positional(verb, &mut call, &mut slot, &word.text, word.known);
+            refuse!(fill_positional(
+                declaration,
+                verb,
+                &scope,
+                &mut call,
+                &mut slot,
+                &word.text,
+                word.known,
+                true,
+            ));
             continue;
         }
 
@@ -181,7 +206,16 @@ pub(crate) fn parse(declaration: &WrappedCommand, words: &[Word]) -> Result<Call
             // reports no error — and mark the rest of the parse a guess.
             Known::Opaque => {
                 call.uncertain = true;
-                fill_positional(verb, &mut call, &mut slot, &word.text, word.known);
+                refuse!(fill_positional(
+                    declaration,
+                    verb,
+                    &scope,
+                    &mut call,
+                    &mut slot,
+                    &word.text,
+                    word.known,
+                    false,
+                ));
                 continue;
             }
             Known::Literal | Known::OpaqueValue => {}
@@ -194,28 +228,28 @@ pub(crate) fn parse(declaration: &WrappedCommand, words: &[Word]) -> Result<Call
         }
 
         if word.text.starts_with('-') {
-            match bind_flag(declaration, verb, &scope, &mut call, words, &mut index, word) {
-                Ok(()) => continue,
-                Err(error) => {
-                    return Err(ParseError {
-                        error,
-                        uncertain: call.uncertain,
-                    })
-                }
-            }
+            refuse!(bind_flag(
+                declaration,
+                verb,
+                &scope,
+                &mut call,
+                words,
+                &mut index,
+                word,
+            ));
+            continue;
         }
 
-        fill_positional(verb, &mut call, &mut slot, &word.text, word.known);
-    }
-
-    if !call.tail.is_empty() && verb.tail == Tail::Deny {
-        return Err(ParseError {
-            error: WrappedError::UnexpectedArgument {
-                command: declaration.name.clone(),
-                word: call.tail[0].clone(),
-            },
-            uncertain: call.uncertain,
-        });
+        refuse!(fill_positional(
+            declaration,
+            verb,
+            &scope,
+            &mut call,
+            &mut slot,
+            &word.text,
+            word.known,
+            false,
+        ));
     }
 
     Ok(call)
@@ -310,7 +344,7 @@ fn bind_flag(
         .position(|flag| flag.matches(&head))
     else {
         if verb.tail == Tail::Forward {
-            call.items.push(Item::Forwarded(word.text.clone()));
+            call.items.push(Item::Undeclared(word.text.clone()));
             return Ok(());
         }
         return Err(unknown_flag(declaration, verb, scope, &word.text, &head));
@@ -333,6 +367,7 @@ fn bind_flag(
                 flag: head,
             });
         }
+        call.items.push(Item::Flag(call.flags.len()));
         call.flags.push(FlagUse {
             flag_index,
             value: None,
@@ -357,6 +392,7 @@ fn bind_flag(
             (next.text.clone(), next.known == Known::Literal)
         }
     };
+    call.items.push(Item::Flag(call.flags.len()));
     call.flags.push(FlagUse {
         flag_index,
         value: Some(value),
@@ -441,21 +477,50 @@ fn glued_short_value(verb: &Verb, word: &str) -> Option<String> {
     Some(format!("{short} {}", chars.as_str()))
 }
 
-/// Put a word in the next declared slot, or in the tail when every slot is
-/// filled. A `many` slot absorbs the rest.
-fn fill_positional(verb: &Verb, call: &mut Call, slot: &mut usize, text: &str, known: Known) {
-    match verb.positionals.get(*slot) {
-        Some(Positional { many, .. }) => {
-            call.items.push(Item::Positional {
-                slot: *slot,
-                value: text.to_string(),
-                known: known == Known::Literal,
-            });
-            if !many {
-                *slot += 1;
-            }
+/// Put a word in the next declared slot. A `many` slot absorbs the rest.
+///
+/// A word past every declared slot is undescribed argv, and [`Tail`] decides
+/// it. `Forward` takes it wherever it sits. `AfterDashDash` takes it only past
+/// the agent's own `--`, and before that names the `--` as the fix. `Deny`
+/// refuses it either way, so it is told nothing about a `--` that would not
+/// help.
+#[allow(clippy::too_many_arguments)]
+fn fill_positional(
+    declaration: &WrappedCommand,
+    verb: &Verb,
+    scope: &str,
+    call: &mut Call,
+    slot: &mut usize,
+    text: &str,
+    known: Known,
+    past_dash_dash: bool,
+) -> Result<(), WrappedError> {
+    if let Some(Positional { many, .. }) = verb.positionals.get(*slot) {
+        call.items.push(Item::Positional {
+            slot: *slot,
+            value: text.to_string(),
+            known: known == Known::Literal,
+        });
+        if !many {
+            *slot += 1;
         }
-        None => call.tail.push(text.to_string()),
+        return Ok(());
+    }
+
+    match (verb.tail, past_dash_dash) {
+        (Tail::Forward, _) | (Tail::AfterDashDash, true) => {
+            call.items.push(Item::Undeclared(text.to_string()));
+            Ok(())
+        }
+        (Tail::AfterDashDash, false) => Err(WrappedError::UndeclaredPositional {
+            command: declaration.name.clone(),
+            scope: scope.to_string(),
+            word: text.to_string(),
+        }),
+        (Tail::Deny, _) => Err(WrappedError::UnexpectedArgument {
+            command: declaration.name.clone(),
+            word: text.to_string(),
+        }),
     }
 }
 
