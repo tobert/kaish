@@ -49,7 +49,7 @@ expands the args first and prints empty.)
 
 ```sh
 NAME=${NAME:-"default"}         # use "default" if NAME unset or empty
-echo ${#NAME}                   # string length
+echo ${#NAME}                   # string length, in characters
 
 # Positional parameters
 echo $0                         # script/tool name

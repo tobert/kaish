@@ -65,6 +65,10 @@ impl KernelBackend for MockBackend {
         Ok(())
     }
 
+    // Dispatch-counting double, not a fake filesystem: like `read` and
+    // `write` above, this reports success without storing anything. A test
+    // that needs to observe appended bytes wants a real backend (LocalFs or
+    // MemoryFs), not this one.
     async fn append(&self, _path: &Path, _content: &[u8]) -> BackendResult<()> {
         Ok(())
     }

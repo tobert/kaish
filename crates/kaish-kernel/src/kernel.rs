@@ -4279,7 +4279,9 @@ impl Kernel {
                         FileTestOp::Exists => entry.is_some(),
                         FileTestOp::IsFile => entry.as_ref().is_some_and(|e| e.is_file()),
                         FileTestOp::IsDir => entry.as_ref().is_some_and(|e| e.is_dir()),
-                        FileTestOp::Readable => entry.is_some(),
+                        FileTestOp::Readable => entry.as_ref().is_some_and(|e| {
+                            e.permissions.is_none_or(|p| p & 0o444 != 0)
+                        }),
                         FileTestOp::Writable => entry.as_ref().is_some_and(|e| {
                             e.permissions.is_none_or(|p| p & 0o222 != 0)
                         }),

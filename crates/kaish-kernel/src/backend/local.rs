@@ -244,14 +244,7 @@ impl KernelBackend for LocalBackend {
     }
 
     async fn append(&self, path: &Path, content: &[u8]) -> BackendResult<()> {
-        // Read existing content
-        let mut existing = match self.vfs.read(path).await {
-            Ok(data) => data,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
-        existing.extend_from_slice(content);
-        self.vfs.write(path, &existing).await?;
+        self.vfs.append(path, content).await?;
         Ok(())
     }
 

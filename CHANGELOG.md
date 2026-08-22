@@ -11,6 +11,7 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+
 - **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …` were
   parse errors. It binds to the command that follows, as in bash, so
   `! true && true` is `(! true) && true`. `while ! cmd` is how kaish spells
@@ -54,6 +55,7 @@ breaking entries are marked **BREAKING**.
   not be queried at all before.
 
 ### Changed
+
 - **BREAKING: `$(cmd)` binds a typed value only when the tool's data IS its
   value.** `y=$(cut -f2 f)` bound a list while `y=$(awk '{print $2}' f)`, doing
   the same job, bound text. A builtin with a POSIX counterpart now returns
@@ -93,10 +95,31 @@ breaking entries are marked **BREAKING**.
   exhaustive by design.
 
 ### Fixed
+
+- **`ls -R` and `tree` no longer swallow a directory they cannot read.** Both
+  dropped it silently at exit 0 — `tree` rendering it as a childless node,
+  indistinguishable from an empty one. Both now report it on stderr and exit
+  **1**, and `tree` marks the node `name [error opening dir]`, which carries
+  into `tree --json`. `ls -R --json` has no equivalent marker yet.
+- **`tee -a` and `>>` now append through a real VFS `Filesystem::append`
+  (`O_APPEND`):** no read permission needed, and the read-then-write race
+  is closed. New trait method, default impl — no embedder break.
+
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
   miscounting it.** Text output uses one newline per path, so a two-file
   directory reported three items under `for f in $(ls dir)`. All three exit
   **2**, naming the path and `--json`, which reads it losslessly.
+
+- **`${#x:-y}` is refused in a quoted string instead of reporting 0.** The `#`
+  strip ran first, so `x:-y` became the whole path and its unset name measured
+  0. bash rejects the form outright, and kaish's unquoted door already did.
+
+- **An absolute path stays absolute through `glob`, `grep -r`, and every
+  path-taking builtin.** `glob '/tmp/x/*.txt'` reported `tmp/x/z.txt`, and
+  `grep -rl p /srv/log` reported bare names, so a result could not be used as
+  a path. `cat`, `ls`, `wc`, `head`, `tail`, `file`, `checksum`, `base64`,
+  `tac`, and `xxd` shared it whenever the cwd was an ancestor. Relative
+  operands are unchanged; `find` never had it.
 
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
   inherited, so `cd /tmp; echo $PWD` reported the startup directory while `pwd`
@@ -175,6 +198,15 @@ breaking entries are marked **BREAKING**.
   Cyrillic А where Latin `A` belongs, bound a different variable than the
   source reads as and said nothing. The loop head was the last static door
   without the check.
+
+- **`${#v}` counts characters, not UTF-8 bytes.** `v=日本語` reported `9` while
+  `${v[0:1]}` sliced by character and returned `日` — two measures disagreeing
+  inside one shell. `${#list}`/`${#record}`/`${#PIPESTATUS}` are unchanged, and
+  `${#bytes}` stays a byte count, since bytes are not sliceable.
+
+- **`test -r` and `[[ -r ]]` check the mode bits, not just existence.** A
+  mode-000 file was `-r` true, contradicting `cat`'s own permission failure one
+  line later. `-r` now checks `0o444`, matching `-w`/`-x`'s existing style.
 
 ## [0.15.0] - 2026-08-19
 
