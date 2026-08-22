@@ -60,8 +60,9 @@ breaking entries are marked **BREAKING**.
   text — `cut`, `seq`, `find`, and `glob` join `grep`, `head`, `sort`, `sed`,
   `awk`, and `ls`; ask for the structure with `--json`. `fromjson`,
   `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, and `typeof`
-  are unchanged, as are iteration and the pipeline sideband. **Embedders:** a tool that prints
-  text AND attaches data must call `ToolSchema::with_typed_substitution()`.
+  are unchanged, as are iteration and the pipeline sideband. **Embedders:** a
+  tool that prints text AND attaches data must call
+  `ToolSchema::with_typed_substitution()`.
 
 - **BREAKING: `--json` carries one line anchor, named `line`, typed as an
   integer.** `grep`'s integer `line_number`, `head`/`tail`'s string `NUM`, and
