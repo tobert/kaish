@@ -125,6 +125,14 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   the PR description land in the history. A maintainer generally does the merging;
   write the PR title/body to carry the same decision-narrative the commit messages
   do (see below).
+- **Hard-wrap PR body prose at 72 columns.** GitHub re-wraps the merge commit
+  body at exactly 72 characters, line by line rather than paragraph by
+  paragraph, so a 76-column line becomes a 72-column line plus a one-word
+  orphan. 72 counts characters, not bytes — an em-dash costs one column.
+  Fenced code blocks pass through unwrapped, but keep them under 72 as well so
+  `git log`'s four-space indent still fits an 80-column terminal. Markdown
+  tables and `##` headings do not survive as plain text at all; use a short
+  capitalized line or a paragraph break instead.
 - **Add files by name**: `git add <file>`, never `git add -A` or `git add .`
 - Before committing, both must be clean:
   - `cargo test --all`
