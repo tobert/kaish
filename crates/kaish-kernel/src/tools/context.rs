@@ -1067,10 +1067,22 @@ impl ExecContext {
             };
             if crate::glob::contains_glob(&s) {
                 let expanded = self.expand_glob(&s).await?;
+                // An absolute pattern reports absolute paths. Stripping the
+                // cwd unconditionally is a no-op only while cwd is a real
+                // prefix; when cwd is `/` the strip removes the leading
+                // separator itself and turns `/tmp/a.txt` into `tmp/a.txt`.
+                // `/` is the default cwd for an isolated kernel, so that is
+                // the common case for an embedder, not a corner. Same guard
+                // the kernel's own argv expansion uses.
+                let absolute = s.starts_with('/');
                 let root = self.resolve_path(".");
                 for p in expanded {
-                    let rel = p.strip_prefix(&root).unwrap_or(&p);
-                    paths.push(rel.to_string_lossy().to_string());
+                    if absolute {
+                        paths.push(p.to_string_lossy().to_string());
+                    } else {
+                        let rel = p.strip_prefix(&root).unwrap_or(&p);
+                        paths.push(rel.to_string_lossy().to_string());
+                    }
                 }
             } else {
                 paths.push(s);

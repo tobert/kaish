@@ -190,6 +190,12 @@ breaking entries are marked **BREAKING**.
   losslessly. Escaping was considered and rejected: it needs a decoder on the
   other side, and kaish has no word splitting to be that decoder.
 
+- **An absolute glob pattern keeps its leading slash.** `glob '/tmp/x/*.txt'`
+  reported `tmp/x/z.txt`, and so did every path-taking builtin (`cat`, `ls`,
+  `wc`, `head`, `tail`, `file`, `checksum`, `base64`, `tac`, `xxd`) whenever
+  the working directory was an ancestor of the match — silent, and the failure
+  surfaced elsewhere as a missing file. `find` was checked and never had it.
+
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
   inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
   directory the shell started in while `pwd` reported `/tmp` — a wrong value

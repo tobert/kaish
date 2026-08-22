@@ -128,3 +128,57 @@ async fn relative_pattern_after_cd_reports_subdir_relative_names() {
         "relative pattern after cd must report a bare name relative to the new cwd: {out:?}"
     );
 }
+
+/// The same degenerate strip lived in `ExecContext::expand_paths`, which
+/// every path-taking builtin uses (`cat`, `head`, `tail`, `wc`, `ls`, `file`,
+/// `checksum`, `base64`, `tac`, `xxd`). It stripped the cwd from each match
+/// unconditionally, which is a no-op only while cwd is a real prefix — when
+/// cwd is `/` the strip removes the leading separator itself.
+///
+/// `/` is the DEFAULT cwd for an isolated kernel, so this is the ordinary
+/// case for an embedder rather than a corner. The pattern is quoted so the
+/// kernel does not expand it in argv and the builtin's own expansion runs.
+#[tokio::test]
+async fn absolute_pattern_through_expand_paths_keeps_leading_slash() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "z.txt");
+    let kernel = kernel_at(dir.path());
+    let pattern = format!("{}/*.txt", dir.path().display());
+    let expected = format!("{}/z.txt", dir.path().display());
+
+    // cd / is what makes the old strip destructive.
+    let (out, code) = run(&kernel, &format!("cd /; ls '{pattern}'")).await;
+    assert_eq!(code, 0, "ls should succeed: {out:?}");
+    assert_eq!(
+        out, expected,
+        "an absolute pattern must keep its leading slash with cwd=/: {out:?}"
+    );
+}
+
+/// The control for the case above: with a cwd that really is a prefix, the
+/// old code produced the right answer by accident. It must still be right.
+#[tokio::test]
+async fn expand_paths_absolute_pattern_unaffected_by_cwd() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "z.txt");
+    let kernel = kernel_at(dir.path());
+    let pattern = format!("{}/*.txt", dir.path().display());
+    let expected = format!("{}/z.txt", dir.path().display());
+
+    let (out, code) = run(&kernel, &format!("ls '{pattern}'")).await;
+    assert_eq!(code, 0, "ls should succeed: {out:?}");
+    assert_eq!(out, expected, "absolute stays absolute from any cwd: {out:?}");
+}
+
+/// A relative pattern through the same door still reports a bare relative
+/// name — fixing absolute must not make everything absolute.
+#[tokio::test]
+async fn relative_pattern_through_expand_paths_stays_relative() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "z.txt");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "ls '*.txt'").await;
+    assert_eq!(code, 0, "ls should succeed: {out:?}");
+    assert_eq!(out, "z.txt", "relative pattern must stay relative: {out:?}");
+}
