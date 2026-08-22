@@ -1043,16 +1043,20 @@ cat src/*.rs                    # expands to .rs files in src/
 for f in *.json; do             # iterates over matching files
     jq ".name" "$f"
 done
+for f in **/*.rs; do            # ** recurses into subdirectories
+    wc -l "$f"
+done
 ```
 
 Glob expansion is enabled by default (`set -o glob`). Disable it with `set +o glob` to pass patterns literally to tools (the pre-v0.4 behavior).
 
 If a glob matches zero files, the command fails with exit code 1 rather than passing the literal pattern through. This prevents silent bugs where a typo in a pattern goes undetected.
 
-The `glob` builtin is the exception: it consumes patterns as data, so the
-binder hands them through as written — no quoting needed, and it accepts
-multiple patterns. Use it for advanced options like `--exclude` and recursive
-`**` patterns:
+Bare `**` already recurses (above); the `glob` builtin is the exception for
+patterns, not for recursion: it consumes patterns as data, so the binder
+hands them through as written — no quoting needed, and it accepts multiple
+patterns. Reach for it for options like `--exclude`, or to union several
+patterns in one call:
 
 ```sh
 glob **/*.rs --exclude="*_test.rs"   # pattern reaches glob unexpanded

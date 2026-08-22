@@ -66,7 +66,7 @@ subscripts, and iteration without extra serialization / deserialization steps.
 ## What's Different About kaish?
 
 Kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
-language that's comes naturally, while providing better pre-execution
+language that comes naturally, while providing better pre-execution
 syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 
 - **JSON data model** — kaish's native values are JSON types: strings, numbers, booleans, arrays, and records.
@@ -92,9 +92,10 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# regular *.log works but glob adds recursive ** patterns, and its
-# data passes to the for loop as a JSON array
-for file in $(glob **/*.log); do
+# bare *.log recurses too with **; reach for the glob builtin for options
+# like --exclude. glob has a POSIX counterpart (find), so $(glob ...) binds
+# text, one path per line, same as $(find ...) or $(ls ...).
+for file in $(glob **/*.log --exclude="*.tmp.log"); do
     echo "logfile: $file"
 done
 
@@ -128,7 +129,8 @@ ask kaish itself — help is in-band: `help builtins`, `help syntax`, `help <too
 
 ## Getting Started
 
-You'll need a Rust toolchain ([rustup](https://rustup.rs)). For
+You'll need a Rust toolchain ([rustup](https://rustup.rs)) for either path
+below — the REPL or an embedded kernel.
 
 ### The REPL
 
@@ -198,8 +200,9 @@ frontend supplies vars), and the OS-touching capability features (`subprocess`,
 `host`, `os-integration`, `tokens`) are opt-in cargo features, so the dangerous
 surface is named, not inherited. Every `execute()` returns an `ExecResult` with
 clean text output, an optional typed `data` payload (`--json` on any command),
-and an exit code agents can branch on: `2` means a destructive op wants
-confirmation, `3` means output was truncated, `124` is a timeout.
+and an exit code agents can branch on: `2` is a usage error or a refusal that
+names what to do instead (e.g. `kaish-trash empty` without `--confirm`), `3`
+means output was truncated, `124` is a timeout.
 
 [docs/EMBEDDING.md](docs/EMBEDDING.md) is the full guide: kernel construction,
 capability features, `ExecuteOptions`, custom tools, the exit-code contract, and
@@ -242,7 +245,7 @@ an `awk` that never surprises.
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
-| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | `:`, assert, false, test, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-last, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version, kaish-vfs |
@@ -252,10 +255,10 @@ an `awk` that never surprises.
 - Builtins go through the VFS and see only its mounts — the agent preset
   sandboxes to `$HOME` + `/tmp`, with `/v/` as in-memory scratch under a
   64 MiB budget.
-- **External commands resolved via `PATH` run against the real filesystem** —
-  the VFS sandbox does not apply to them. Block them at runtime with
-  `allow_external_commands=false`, or build without the `subprocess` capability
-  feature and they don't exist at all.
+- **External commands — resolved via `PATH` or a direct path — run against the
+  real filesystem** — the VFS sandbox does not apply to them. Block them at
+  runtime with `allow_external_commands=false`, or build without the
+  `subprocess` capability feature and they don't exist at all.
 - `--overlay` makes a call copy-on-write: writes stay in memory unless the
   script runs `kaish-vfs commit`.
 - `set -o trash` (or `KAISH_TRASH=1`) diverts deletes and truncating
@@ -277,18 +280,16 @@ error messages.
 
 | Term | Meaning |
 |---|---|
-| loud, fail loud | An error is explicit and immediate. kaish never continues on a wrong assumption. |
-| silently | Used only in the negative, to name behavior kaish refuses. |
-| builtin | A tool that runs inside the kernel process. |
-| external command | A program the kernel runs through `PATH`. |
-| kernel | The execution core. Not the OS kernel. |
+| fail loudly | An error is explicit and immediate. kaish never continues on a wrong assumption. |
+| builtin | An embedded Unix-like tool that runs inside the kernel process. |
+| external command | A program the kernel runs on the underlying system via execve(2) family, often via `$PATH`. |
+| kernel | The kaish execution core. Not the OS kernel. |
 | mount | A path prefix bound to a filesystem, or the act of binding one. |
 | typed | A value keeps its JSON type through substitution. It is not stringified. |
 | overlay | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
-| trash | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
 | spill | To write oversize output to a file, or the file that results. |
 | hazard | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
-| override | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. Never a workaround: an override is part of the design, and every restriction that has one names it. |
+| override | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. An override is designed and documented intentionally. |
 
 Contributors: the writing style behind this vocabulary is in
 [AGENTS.md](AGENTS.md), "Writing style".
@@ -320,15 +321,17 @@ are cut manually, so that one workflow is the whole CI story.
 
 Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
 love seeing what other agents come up with. **All changes go through a PR** —
-branch, push, and open a PR rather than committing to `main` (releases are the
-exception). That said, please have your agent (or another model) review the PR
-before submitting — a few tokens on review goes a long way. Same goes for issues:
+branch, push, and open a PR rather than committing to `main`. Releases are no
+exception: the version bump lands via PR too; only the `git tag` push and
+`cargo publish` run directly from `main`, after that PR merges. That said,
+please have your agent (or another model) review the PR before submitting —
+a few tokens on review goes a long way. Same goes for issues:
 agent-filed is fine, just make sure it makes sense. CI must be green before a PR
 merges; note that the runners track current stable Rust, so clippy there may know
 lints your local toolchain doesn't yet.
 
 If you're working with AI coding agents, you might also be interested in
-[kaibo](https://github.com/tobert/kaibo), an assistant for you assistant with a
+[kaibo](https://github.com/tobert/kaibo), an assistant for your assistant with a
 read-only kaish shell.
 
 - [**gpal**](https://github.com/tobert/gpal) — Gemini as an MCP server (pairs well with Claude Code)
