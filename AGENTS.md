@@ -125,13 +125,18 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
   the PR description land in the history. A maintainer generally does the merging;
   write the PR title/body to carry the same decision-narrative the commit messages
   do (see below).
-- **Hard-wrap PR body prose at 72 columns.** GitHub re-wraps the merge commit
-  body at exactly 72 characters, line by line rather than paragraph by
-  paragraph, so a 76-column line becomes a 72-column line plus a one-word
-  orphan. 72 counts characters, not bytes — an em-dash costs one column.
-  Fenced code blocks pass through unwrapped, but keep them under 72 as well so
-  `git log`'s four-space indent still fits an 80-column terminal. Markdown
-  tables and `##` headings do not survive as plain text at all; use a short
+- **Do not wrap PR body prose — write one long line per paragraph.** GitHub
+  re-wraps the merge commit body at exactly 72 characters, word by word, so an
+  unwrapped paragraph arrives correctly filled. Wrapping it yourself is what
+  produces the ragged one-word orphan lines: a 76-column line becomes a
+  72-column line plus a four-character remainder, and every line does it.
+  Wrap **commit** messages at 72 by hand, though — git stores those verbatim
+  and GitHub never touches them. The rule tracks a real distinction: hand-wrap
+  what you hand-author into git, leave alone what GitHub is going to reflow.
+- **Put every example in a fenced code block in a PR body.** A ``` fence is
+  exempt from the re-wrap; a four-space-indented block is not, and its
+  continuation lines lose their indent when GitHub folds them. Markdown tables
+  and `##` headings do not survive as plain text at all — use a short
   capitalized line or a paragraph break instead.
 - **Add files by name**: `git add <file>`, never `git add -A` or `git add .`
 - Before committing, both must be clean:
