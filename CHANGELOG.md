@@ -312,6 +312,12 @@ breaking entries are marked **BREAKING**.
   than the source reads as and said nothing, while `PАTH=/bin` had warned since
   0.11. The loop head was the last static door without the check;
   `docs/LANGUAGE.md` claimed every door reported it, and now that is true.
+- **`glob` keeps the leading `/` of an absolute pattern.** `glob '/tmp/x/*.txt'`
+  reported `tmp/x/z.txt` — silently wrong, with no error — while a bare glob in
+  argv (`echo /tmp/x/*.txt`) reported the correct absolute path. The wrong
+  value fed straight into `$(…)` and `for`, so `cat $(glob '/tmp/x/*.txt')`
+  reported "not found" for a file that exists. `--json` carried the same wrong
+  value. `find` does not share this defect.
 
 ## [0.15.0] - 2026-08-19
 
