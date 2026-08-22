@@ -267,3 +267,71 @@ async fn ls_recursive_json_shape_is_unaffected_by_operand_spelling() {
         "the json walk-root key must stay '.', unaffected by the operand: {out:?}"
     );
 }
+
+/// `ls -R` with several operands recursed into none of them: the multi-operand
+/// arm never looked at the `recursive` flag, so the flag was silently dropped
+/// and the command exited 0. A dropped flag is worse than a display
+/// difference — the caller asked for a tree and got a list of names.
+///
+/// Checked against `/bin/ls -R d1 d2` directly, not the `ls` on PATH.
+#[tokio::test]
+async fn ls_recursive_recurses_into_every_operand() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d1/sub")).unwrap();
+    fs::create_dir_all(dir.path().join("d2")).unwrap();
+    fs::write(dir.path().join("d1/a.txt"), b"").unwrap();
+    fs::write(dir.path().join("d1/sub/deep.txt"), b"").unwrap();
+    fs::write(dir.path().join("d2/b.txt"), b"").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "ls -R d1 d2").await;
+    assert_eq!(code, 0, "ls -R should succeed: {out:?}");
+    for expected in ["d1:", "d1/sub:", "d2:", "deep.txt", "b.txt"] {
+        assert!(
+            out.contains(expected),
+            "every operand must be recursed: missing {expected:?} in {out:?}"
+        );
+    }
+}
+
+/// The `--json` half of the same fix. Each operand's recursive listing roots
+/// its nodes at `.`, so concatenating several collided — the second operand
+/// overwrote the first and `--json` reported one operand's contents under the
+/// other's name. Silent, and exactly the class of bug the text fix was for.
+#[tokio::test]
+async fn ls_recursive_multiple_operands_do_not_collide_in_json() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d1/sub")).unwrap();
+    fs::create_dir_all(dir.path().join("d2")).unwrap();
+    fs::write(dir.path().join("d1/a.txt"), b"").unwrap();
+    fs::write(dir.path().join("d1/sub/deep.txt"), b"").unwrap();
+    fs::write(dir.path().join("d2/b.txt"), b"").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "ls -R d1 d2 --json").await;
+    assert_eq!(code, 0, "ls -R --json should succeed: {out:?}");
+    assert!(out.contains("\"d1\""), "d1 must keep its own group: {out:?}");
+    assert!(out.contains("\"d2\""), "d2 must keep its own group: {out:?}");
+    assert!(
+        out.contains("a.txt") && out.contains("b.txt") && out.contains("deep.txt"),
+        "no operand's contents may be lost to a collision: {out:?}"
+    );
+}
+
+/// The control: one operand still roots at `.`, which is the shape #404
+/// deliberately preserved. Fixing the multi-operand collision must not change
+/// the single-operand `--json` contract.
+#[tokio::test]
+async fn ls_recursive_single_operand_json_still_roots_at_dot() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d1/sub")).unwrap();
+    fs::write(dir.path().join("d1/a.txt"), b"").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "ls -R d1 --json").await;
+    assert_eq!(code, 0, "ls -R --json should succeed: {out:?}");
+    assert!(
+        out.contains("\".\""),
+        "a single operand still roots at `.`: {out:?}"
+    );
+}

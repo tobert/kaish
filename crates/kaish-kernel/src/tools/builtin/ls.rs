@@ -152,10 +152,65 @@ impl Tool for Ls {
             // Single target keeps the rich behavior: glob expansion,
             // file-shown-as-name, directory contents, and recursion.
             [path] => self.list_one(ctx, path, &opts, recursive).await,
-            // Multiple targets list one node per argument — directories are
-            // shown by name, not expanded — matching the predictable
-            // structured-output model. Any glob that reached here unexpanded
-            // (e.g. globbing disabled) is still expanded.
+            // `-R` across several operands recurses into each, as GNU does.
+            // This arm used to ignore `recursive` entirely, so `ls -R d1 d2`
+            // silently produced no recursion at all and exited 0 — a dropped
+            // flag, not a display choice. Sections are joined by a blank line
+            // the way each recursive listing already separates its own
+            // directories.
+            many if recursive => {
+                let mut text = String::new();
+                let mut nodes: Vec<OutputNode> = Vec::new();
+                let mut errors: Vec<String> = Vec::new();
+                let mut code = 0i64;
+                for path in many {
+                    let one = self.list_one(ctx, path, &opts, true).await;
+                    if !one.err.is_empty() {
+                        errors.push(one.err.trim_end().to_string());
+                    }
+                    if one.code != 0 {
+                        code = one.code;
+                    }
+                    let chunk = one.text_out();
+                    if !chunk.trim().is_empty() {
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(chunk.trim_end());
+                    }
+                    if let Some(output) = one.output() {
+                        // Each operand's recursive listing roots its nodes at
+                        // `.`, which is unambiguous for one operand and a
+                        // silent collision for several — the second `.` would
+                        // overwrite the first and `--json` would report one
+                        // operand's contents under the other's. Name each
+                        // group by the operand it came from, mirroring the
+                        // text headers exactly (`d1:`, `d1/sub:`, `d2:`).
+                        for node in output.root.iter() {
+                            let mut renamed = node.clone();
+                            renamed.name = if node.name == "." {
+                                path.clone()
+                            } else {
+                                format!("{}/{}", path.trim_end_matches('/'), node.name)
+                            };
+                            nodes.push(renamed);
+                        }
+                    }
+                }
+                let mut result =
+                    ExecResult::with_output_and_text(OutputData::nodes(nodes), text);
+                if !errors.is_empty() {
+                    result.err = ExecResult::terminate_diagnostic(errors.join("\n"));
+                }
+                if code != 0 {
+                    result = result.with_code(code);
+                }
+                result
+            }
+            // Without `-R`, multiple targets list one node per argument —
+            // directories are shown by name, not expanded — matching the
+            // predictable structured-output model. Any glob that reached here
+            // unexpanded (e.g. globbing disabled) is still expanded.
             many => {
                 let mut names: Vec<String> = Vec::new();
                 for path in many {
