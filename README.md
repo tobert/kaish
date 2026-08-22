@@ -57,11 +57,14 @@ the implementation: strict parsing with pre-execution validation, builtins that
 behave identically everywhere, and a filesystem boundary the embedder controls.
 
 Underneath, kaish's data model is JSON. A variable holds an array or a record as
-naturally as a string, `$(cmd)` substitution carries structured values, so you
-can choose between old-school text parsing and using JSON-typed data. Using the
-`--json` flag on any command will get it to emit the same typed data the
-language works with internally. Structured results flow through pipes,
-subscripts, and iteration without extra serialization / deserialization steps.
+naturally as a string, and `$(cmd)` binds a typed value when the command's
+output *is* a value — `x=$(fromjson <<< '[1,2]')` binds a list, as `jq`, `keys`,
+and `values` do. A builtin with a POSIX counterpart binds text instead, so it
+reads as its POSIX self: `$(grep …)`, `$(ls …)`, and `$(find …)` are text, one
+line per result. Ask any command for its structure with `--json`, which emits
+the same typed data the language works with internally. Structured results flow
+through pipes, subscripts, and iteration without extra serialization /
+deserialization steps.
 
 ## What's Different About kaish?
 
@@ -72,8 +75,7 @@ syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 - **JSON data model** — kaish's native values are JSON types: strings, numbers, booleans, arrays, and records.
 - **Single brackets are JSON** - `[` is for json arrays and records, `[[` is for branching
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
-- **Line iteration in for-loops** — `for line in $(cat file)` splits on `\n` only; whitespace within a line is never split
-- **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
+- **Line iteration in for-loops** — a `for` head splits text on `\n` only, never on whitespace within a line: `for line in $(cat file)`, `for i in $(seq 1 5)`, and `for f in $(ls)` all iterate the same way
 - **Explicit splitting** — use `split "$VAR"` for whitespace/delimiter/regex splitting
 - **No backticks** — only `$(cmd)` substitution
 - **Strict booleans** — only lowercase `true`/`false` are booleans; `TRUE` and `yes` are ordinary strings
