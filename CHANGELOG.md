@@ -10,7 +10,22 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding
+  only an `ExecContext` can spawn a child with the kernel's external-command
+  discipline. `tools::DEFAULT_KILL_GRACE` (2s) is the stand-alone default.
+  Constructors are unchanged; only a struct literal must add the two fields.
+
 ### Added
+- **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
+  register an external program as a tool with a declared grammar — pinned
+  executable, allowlisted verbs and flags (deny-by-default, exit 2 before any
+  spawn, reported by the validator), kernel-rendered argv, hermetic env plus
+  pins, `Stdin::{Closed,Pipe}`, `Tail::{Deny,AfterDashDash,Forward}`,
+  constraints `required`/`int`/`choices`/`path_under`, `json_output` verbs
+  binding typed. Runs with `allow_external_commands` off. See
+  `docs/wrapped_command.md`.
+
 - **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …`
   were parse errors ("found '!' expected condition"), so the idiomatic "run
   this unless" had to be written backwards through an empty `then` branch. It
@@ -181,6 +196,10 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- `help <tool>` renders a tool's subcommands and their flags, and names each
+  parameter's aliases. `help kj` and every wrapped command showed "No
+  parameters." before.
+
 - **`ls -R` and `tree` no longer swallow a directory they can't read.** Both
   hit `Err(_) => continue` with no comment on a failed listing, so an
   unreadable subdirectory just vanished: `ls -R` exited 0 with nothing to say

@@ -18,12 +18,18 @@ mod context;
 mod global_flags;
 mod registry;
 mod traits;
+// Wrapped commands run external programs, so the module only exists on the
+// `subprocess` axis; a sandbox build has no `wrapped` module at all.
+#[cfg(feature = "subprocess")]
+pub mod wrapped;
 
 pub use builtin::register_builtins;
 #[cfg(feature = "subprocess")]
 pub use builtin::{resolve_in_path, virtual_cwd_error};
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
-pub use context::{ExecContext, GateExpectations, OutputContext, OverwriteExpectation};
+pub use context::{
+    ExecContext, GateExpectations, OutputContext, OverwriteExpectation, DEFAULT_KILL_GRACE,
+};
 pub(crate) use context::{cas_overwrite, is_trash_excluded};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
