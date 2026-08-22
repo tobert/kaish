@@ -38,6 +38,29 @@ pub trait Filesystem: Send + Sync {
     /// Returns `Err` if the filesystem is read-only.
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
 
+    /// Append data to a file, creating it if it doesn't exist.
+    ///
+    /// The default composes `read` (treating a missing file as empty) with
+    /// `write` of the concatenation, which is correct for any backend but
+    /// costs a read permission the caller may not have and is not atomic —
+    /// a writer landing between the read and the write is silently
+    /// overwritten. Backends that can answer a true `O_APPEND`-style append
+    /// — no read, one atomic write — override this to grant it. Backends
+    /// that must materialize state on first write (a copy-on-write overlay
+    /// snapshotting its base) should keep the default: it routes through
+    /// `write`, so materialization still happens correctly.
+    ///
+    /// Returns `Err` if the filesystem is read-only.
+    async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        let mut existing = match self.read(path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        existing.extend_from_slice(data);
+        self.write(path, &existing).await
+    }
+
     /// List entries in a directory.
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
 

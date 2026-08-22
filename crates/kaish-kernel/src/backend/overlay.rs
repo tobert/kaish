@@ -189,13 +189,7 @@ impl KernelBackend for VirtualOverlayBackend {
 
     async fn append(&self, path: &Path, content: &[u8]) -> BackendResult<()> {
         if self.is_virtual_path(path) {
-            let mut existing = match self.vfs.read(path).await {
-                Ok(data) => data,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                Err(e) => return Err(e.into()),
-            };
-            existing.extend_from_slice(content);
-            self.vfs.write(path, &existing).await?;
+            self.vfs.append(path, content).await?;
             Ok(())
         } else if self.is_shared_ancestor(path) {
             Err(BackendError::IsDirectory(synth_dir_note(path)))
