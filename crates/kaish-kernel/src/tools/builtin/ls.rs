@@ -471,12 +471,26 @@ impl Ls {
         )];
 
         let ignore_filter = ctx.build_ignore_filter(root).await;
+        // Every directory the walk could not open: reported on stderr and
+        // folded into a nonzero exit once the walk finishes, but the walk
+        // itself continues past each one — matching GNU `ls -R`, which
+        // reports every unreadable directory rather than stopping at the
+        // first. A directory the ignore filter already dropped (see below)
+        // never reaches this call, so a gitignored-and-unreadable directory
+        // is not an error.
+        let mut errors: Vec<String> = Vec::new();
 
         while let Some((dir_path, display_path)) = dirs_to_visit.pop() {
             // List this directory
             let entries = match ctx.backend.list(Path::new(&dir_path)).await {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) => {
+                    errors.push(format!(
+                        "ls: cannot open directory '{}': {}",
+                        display_path, e
+                    ));
+                    continue;
+                }
             };
 
             // Add header for this directory (text output)
@@ -560,7 +574,15 @@ impl Ls {
         } else {
             OutputData::nodes(dir_nodes)
         };
-        ExecResult::with_output_and_text(output, text_output.trim_end().to_string())
+        let mut result = ExecResult::with_output_and_text(output, text_output.trim_end().to_string());
+        // The readable parts of the walk still print above; a nonzero exit
+        // plus the accumulated stderr is what tells the difference between
+        // "the tree is genuinely this small" and "part of it was skipped."
+        if !errors.is_empty() {
+            result.err = ExecResult::terminate_diagnostic(errors.join("\n"));
+            result = result.with_code(1);
+        }
+        result
     }
 }
 

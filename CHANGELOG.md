@@ -181,6 +181,19 @@ breaking entries are marked **BREAKING**.
   the default, so an option at its default looked the same as an unknown one.
 
 ### Fixed
+- **`ls -R` and `tree` no longer swallow a directory they can't read.** Both
+  hit `Err(_) => continue` with no comment on a failed listing, so an
+  unreadable subdirectory just vanished: `ls -R` exited 0 with nothing to say
+  so, and `tree` rendered it as a childless node — indistinguishable from a
+  genuinely empty directory, not merely omitted. `ls -R` now names every
+  unreadable directory on stderr, keeps listing the rest of the tree, and
+  exits 1, matching GNU `ls -R`, which continues past each failure instead of
+  stopping at the first. `tree` marks the node inline as
+  `name [error opening dir]` (GNU `tree`'s own convention) plus the same
+  stderr diagnostic and exit 1; the marker is part of the node's name, so it
+  also survives into `tree --json`. `ls -R --json` does not yet carry an
+  equivalent marker for an unreadable directory — a known gap, not fixed here.
+
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
   miscounting it.** Text output uses one newline per path, so a name that
   already contains one split into two paths naming no file — measured, a
