@@ -24,15 +24,7 @@
 //! # }
 //! ```
 //!
-//! See `docs/wrapped_command.md` for the design.
-//!
-//! # What this module does not do
-//!
-//! [`WrappedTool`] deliberately does **not** implement
-//! [`Tool`](crate::tools::Tool). The declaration, the schema, the parse, the
-//! render, and the constraint checks are here; spawning the child, streaming
-//! its stdin, and turning its exit code into an `ExecResult` are the execute
-//! half and land separately.
+//! See `docs/wrapped_command.md` for the contract.
 
 mod constraint;
 mod declaration;
@@ -43,9 +35,16 @@ mod render;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use kaish_types::{ParamSchema, ToolArgs, ToolSchema, Value};
+use async_trait::async_trait;
+
+use kaish_types::{ExecResult, ParamSchema, ToolArgs, ToolSchema, Value};
 
 use kaish_tool_api::{IssueCode, Severity, ValidationIssue};
+
+use crate::spawn::{
+    hermetic_env, spawn_process, OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy,
+};
+use crate::tools::{virtual_cwd_error, ExecContext, Tool, ToolCtx};
 
 pub use declaration::{find_executable, Flag, Positional, Stdin, Style, Tail, Verb, WrappedCommand};
 pub use error::WrappedError;
@@ -152,9 +151,11 @@ impl WrappedTool {
         schema = schema.with_raw_argv();
         // The kernel reads `typed_substitution` from the root schema, so
         // `$(cmd …)` binds typed only when every verb the tool can run says
-        // its stdout is JSON. A tool with one JSON verb among text ones keeps
-        // the flag on that verb's schema for `help`, and a caller who wants
-        // the data asks with `--json`.
+        // its stdout is JSON — a mixed tool must not make `$(cargo build)`
+        // bind a value that does not exist. A JSON verb on a mixed tool still
+        // binds typed: `bind_json_output` stamps `data_is_value` on that
+        // verb's own result, and the kernel ORs this flag in rather than
+        // assigning it. The flag stays on the verb's schema for `help`.
         if self.every_verb_is_json() {
             schema = schema.with_typed_substitution();
         }
@@ -304,6 +305,162 @@ impl WrappedTool {
             words.push(Word::literal(text));
         }
         Ok(words)
+    }
+}
+
+#[async_trait]
+impl Tool for WrappedTool {
+    fn name(&self) -> &str {
+        // The inherent methods carry these three; method-call syntax resolves
+        // to them anyway, and naming the type says so.
+        WrappedTool::name(self)
+    }
+
+    fn schema(&self) -> ToolSchema {
+        WrappedTool::schema(self)
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        WrappedTool::validate(self, args)
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
+            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
+        };
+        self.run(args, ctx).await
+    }
+}
+
+impl WrappedTool {
+    /// Run a call against the pinned executable.
+    ///
+    /// Every refusal the declaration raises exits 2 and spawns nothing. Past
+    /// that point the child's own exit code is the answer, unchanged — the
+    /// wrapper adds nothing on top.
+    async fn run(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let call = match self.plan_call(&args) {
+            Ok(call) => call,
+            Err(error) => return ExecResult::failure(error.exit_code(), error.to_string()),
+        };
+        let label = match &call.verb {
+            Some(verb) => format!("{} {verb}", self.declaration.name),
+            None => self.declaration.name.clone(),
+        };
+
+        // A virtual cwd has no location to spawn in. The same refusal an
+        // external command gets, named for this command.
+        let Some(real_cwd) = ctx.backend.resolve_real_path(&ctx.cwd) else {
+            return virtual_cwd_error(&self.declaration.name, &ctx.cwd);
+        };
+
+        // A relative `path_under` value could not be decided when the call was
+        // planned; the real cwd is only known here. The canonical path
+        // replaces the word the agent wrote, so the child opens what kaish
+        // checked.
+        let mut argv = call.argv;
+        for check in &call.path_checks {
+            if check.resolved {
+                continue;
+            }
+            match self.resolve_path_check(check, &real_cwd) {
+                Ok(resolved) => {
+                    if let Some(word) = argv.get_mut(check.argv_index) {
+                        *word = resolved.to_string_lossy().into_owned();
+                    }
+                }
+                Err(error) => return ExecResult::failure(error.exit_code(), error.to_string()),
+            }
+        }
+
+        // The kernel's hermetic environment, then the declaration's pins,
+        // which win on conflict.
+        let mut env = match hermetic_env(&ctx.scope) {
+            Ok(env) => env,
+            Err(e) => return ExecResult::failure(1, format!("{label}: {e}")),
+        };
+        env.retain(|(name, _)| !self.declaration.env.contains_key(name));
+        env.extend(
+            self.declaration
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+
+        let stdin = match call.stdin {
+            Stdin::Closed => {
+                // Silently dropping the input is not an option: the call said
+                // one thing and the declaration another. Refuse without
+                // taking the stdin, so whatever produced it is still intact.
+                if ctx.pipe_stdin.is_some() || ctx.stdin.is_some() {
+                    return ExecResult::failure(2, format!("{label}: does not read stdin"));
+                }
+                StdinPolicy::Null
+            }
+            Stdin::Pipe => {
+                // Take both, and do not drain: a pipe read can block on a
+                // still-running upstream stage, so `sleep 1 | wrapped` would
+                // deadlock. `spawn_process` streams them after the fork.
+                let pipe = ctx.pipe_stdin.take();
+                let prefix = ctx.take_stdin();
+                match (prefix, pipe) {
+                    (None, None) => StdinPolicy::Null,
+                    (prefix, pipe) => StdinPolicy::Piped { prefix, pipe },
+                }
+            }
+        };
+
+        let spawn_ctx = SpawnContext::from_exec_context(ctx);
+        let request = SpawnRequest {
+            executable: self.executable.clone(),
+            argv,
+            cwd: real_cwd,
+            // Never `Inherit`: a wrapped command's output belongs to the
+            // kernel, so the output limits and the spill contract see it.
+            output: OutputPolicy::Captured,
+            env,
+            stdin,
+            label: label.clone(),
+        };
+        let result = spawn_process(request, &spawn_ctx).await;
+
+        if call.json_output {
+            return bind_json_output(result, &label);
+        }
+        result
+    }
+}
+
+/// Parse a `json_output` verb's stdout and hand it back as the result's value.
+///
+/// The text stays as the child printed it, so the REPL still shows the JSON;
+/// `data_is_value` is what makes `$(…)` bind it typed. The kernel ORs that
+/// marker in rather than assigning it, so a JSON verb on a tool with text
+/// verbs binds typed without the whole tool claiming
+/// [`ToolSchema::typed_substitution`].
+fn bind_json_output(mut result: ExecResult, label: &str) -> ExecResult {
+    // A child that failed, or whose stdout was evicted from the capture ring,
+    // has not delivered the JSON its verb promised. Its own code is the
+    // answer; a parse failure here would replace it with the wrapper's.
+    if !result.ok() || result.did_spill {
+        return result;
+    }
+    let text = match result.try_text_out() {
+        Ok(text) => text.into_owned(),
+        Err(e) => return ExecResult::failure(1, format!("{label}: declared JSON output, but {e}")),
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        // No envelope sniffing: a child's JSON object that happens to match
+        // the base64 bytes envelope is a plain record, not binary.
+        Ok(json) => {
+            result.data = Some(kaish_types::json_to_value_no_envelope(json));
+            result.data_is_value = true;
+            result
+        }
+        Err(e) => ExecResult::failure(
+            1,
+            format!("{label}: declared JSON output, but stdout does not parse: {e}"),
+        ),
     }
 }
 

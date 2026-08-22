@@ -116,12 +116,22 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
         output.push_str("No parameters.\n");
     } else {
         output.push_str("Parameters:\n");
-        for param in &schema.params {
-            let req = if param.required { " (required)" } else { "" };
-            output.push_str(&format!(
-                "  {} : {}{}\n    {}\n",
-                param.name, param.param_type, req, param.description
-            ));
+        push_params(&mut output, &schema.params, "  ");
+    }
+
+    // A subcommand-aware tool (`kj`, every wrapped command) keeps its real
+    // grammar here, one level down. Without this the whole allowlist a
+    // wrapped command publishes — its verbs, their flags, and the
+    // constraints in their descriptions — was invisible to `help`.
+    if !schema.subcommands.is_empty() {
+        output.push_str("\nSubcommands:\n");
+        for sub in &schema.subcommands {
+            if sub.description.is_empty() {
+                output.push_str(&format!("  {}\n", sub.name));
+            } else {
+                output.push_str(&format!("  {} — {}\n", sub.name, sub.description));
+            }
+            push_params(&mut output, &sub.params, "    ");
         }
     }
 
@@ -134,6 +144,26 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
     }
 
     Some(output)
+}
+
+/// One line per parameter, plus its description indented under it.
+///
+/// Aliases are named here because they are the spelling agents actually
+/// write: a declaration that publishes `-n` for `--max-count` was telling
+/// `help` something it then dropped.
+fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent: &str) {
+    for param in params {
+        let req = if param.required { " (required)" } else { "" };
+        let aliases = if param.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" (also: {})", param.aliases.join(", "))
+        };
+        output.push_str(&format!(
+            "{indent}{} : {}{}{}\n{indent}  {}\n",
+            param.name, param.param_type, req, aliases, param.description
+        ));
+    }
 }
 
 /// Format help for a single tool.
