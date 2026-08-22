@@ -11,201 +11,104 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
-- **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …`
-  were parse errors ("found '!' expected condition"), so the idiomatic "run
-  this unless" had to be written backwards through an empty `then` branch. It
-  binds to the command that follows, not to the whole chain, which is bash's
-  reading: `! true && true` is `(! true) && true` and takes the `else` branch.
-  Repeatable (`! ! cmd`), works with `[[ … ]]` and a plain command alike, and a
-  negated condition's output still reaches the statement. `while ! cmd` is also
-  how kaish spells `until`, which it deliberately does not have.
 
+- **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …` were
+  parse errors. It binds to the command that follows, as in bash, so
+  `! true && true` is `(! true) && true`. `while ! cmd` is how kaish spells
+  `until`, which it deliberately does not have.
 
 - **`set -o pipefail` and `PIPESTATUS`** — a failed pipeline stage is
-  detectable. `cat missing | wc -l` exited **0** and there was no second way to
-  ask: the status is the last stage's and kaish had neither the mode nor the
-  variable. `PIPESTATUS` now records every stage's code, in order, for every
-  pipeline including a one-command one, and `set -o pipefail` makes a pipeline
-  report its **rightmost** non-zero stage (bash's rule — `(exit 3) | (exit 4) |
-  true` is 4, not 3). `PIPESTATUS` is a list rather than bash's word-array, so
-  `${PIPESTATUS[0]}` indexes it, `${#PIPESTATUS}` counts the stages, and
-  `$(values $PIPESTATUS)` iterates them; reading it runs a command, and that
-  command replaces it, as in bash. `set -o` reports `pipefail`, and
-  `set -o pipefail` no longer exits 1 as an unimplemented name — so the
-  `set -euo pipefail` prelude works, where before it died on line 1.
+  detectable; `cat missing | wc -l` exited 0 with no second way to ask.
+  `PIPESTATUS` is a list of every stage's code; `pipefail` reports the
+  rightmost non-zero stage. The `set -euo pipefail` prelude no longer dies on
+  line 1.
 
-### Changed
-- **BREAKING: `$(cmd)` binds a typed value only when the tool's data IS its
-  value.** `y=$(cut -f2 f)` bound `["benign"]` while `y=$(awk '{print $2}' f)`,
-  doing the identical job, bound text — because `.data` was answering three
-  questions at once (it feeds `--json`, it is the pipeline's structured
-  sideband, and it is what a substitution binds) and any builtin that wanted
-  the first two got the third. A builtin with a POSIX counterpart now returns
-  **text**, so it reads as its POSIX self: `cut`, `seq`, `find`, and `glob`
-  join `grep`, `head`, `sort`, `sed`, `awk`, and `ls`. Ask for the structure
-  with `--json`, which is unchanged. A builtin whose output IS a value —
-  `fromjson`, `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`,
-  `typeof` — is unchanged, so collections and `${r[key]}` behave exactly as
-  before. Iteration is unchanged everywhere: a `for` head newline-splits text,
-  which is how `grep` and `ls` have always iterated. The pipeline's structured
-  sideband is untouched, so `seq 1 3 | jq .` still sees `[1,2,3]`.
-  **Embedders with their own tools:** a tool that returns data and prints
-  nothing needs no change — a text-less result's data is its value. A tool that
-  prints text AND attaches data must call `ToolSchema::with_typed_substitution()`
-  to keep binding typed.
+- **BREAKING: `KernelConfig::errexit_enabled` and `ExecuteOptions::errexit`** —
+  a kernel-wide errexit default and a per-call override, for an embedder whose
+  exit status gates a decision and that cannot rely on the script to write
+  `set -e`. Both feed the state `set -e` mutates, so `set -o` reports it either
+  way. Off by default; breaking only because two public structs gain a field.
 
+- **`plan` builtin** — emits the same JSON `kaish --plan` does, reachable from
+  inside a kaish body; reads the statement from stdin with no argument. Nothing
+  executes and no substitution runs. `commands` descends into loop bodies,
+  conditions, and `$(…)`. Takes exactly one statement, exiting 2 otherwise.
 
-- **BREAKING: `--json` carries one line anchor, named `line`, typed as an
-  integer.** "Which line of the file is this" had three spellings: `grep`
-  emitted an integer `line_number` in its rich payload, `head`/`tail` emitted a
-  *string* under `NUM` beside a `LINE` column holding the line's text, and
-  `cat -n` formatted the number into the text and emitted nothing structured.
-  `LINE` therefore named the text in one builtin and the number in another.
-  Now every row that came from a line of a file carries `line` as an integer,
-  and a row with no line to point at has no `line` key at all. `head`/`tail`
-  rows are `{"TEXT": …, "line": N}`; `grep`'s rich payload renames
-  `line_number` to `line` and drops its `LINE` column; `cat -n --json` returns
-  rows instead of one formatted string, on the file and stdin paths alike.
-  Builtins declare it with `OutputNode::at_line(n)`; nothing above them reads a
-  number back out of `cells` any more. Text output is unchanged everywhere,
-  including GNU's `%6d\t` from `cat -n`. `OutputNode` is now
-  `#[non_exhaustive]` — build one with `OutputNode::new`/`text` and the
-  builders rather than a struct literal.
-- **The interactive REPL prints line-anchored output as the builtin wrote it.**
-  `head`/`tail` used to render an aligned `LINE`/`NUM` table and `grep -n` a
-  `MATCH`/`LINE` one; plain `grep` columnized its matches side by side. All of
-  them now print what `kaish -c` prints — `head`'s bare lines, `grep -n`'s
-  `3:` prefix, one line per line.
-- **BREAKING: `GlobalFlags::apply_from_args` takes the tool's `raw_argv`
-  flag.** `apply_from_args(&args, ctx)` becomes
-  `apply_from_args(&args, schema.raw_argv, ctx)`. Only a `raw_argv` tool keeps
-  `--json` among its positionals with a `--` marker to bound it; searching any
-  other tool's positionals read an operand after `--` back as the kernel's
-  flag.
-- **BREAKING: plan `index` is now the position in the `statements` list**, with
-  no gaps — `statements[i].index == i`, always. It previously counted dropped
-  empty statements, so any source opening with a comment or a blank line
-  numbered every statement one too high while the list stayed dense. The gap
-  existed to line up with `Capture::Statement`, approval-ledger vocabulary that
-  was removed before 0.14.0, so it had no remaining consumer. A consumer that
-  read `index` as a list position was already right and needs no change; one
-  that compensated for the offset must stop.
-
-### Added
-- **BREAKING: `KernelConfig::errexit_enabled` and `ExecuteOptions::errexit` —
-  a config-level errexit default and per-call override.** An embedder whose
-  exit status is a security or gating decision (a policy hook: 0 continues a
-  tool call, non-zero denies it) needs an early failure to abort the script,
-  not vanish behind a later statement's success — kaish's default is standard
-  shell behavior, where the script's status is the *last* statement's, not
-  the first failure's. `set -e` written into the script already does this,
-  and stays the preferred fix wherever the embedder controls the script
-  text — a reader sees it. The new knobs cover the case where an embedder
-  cannot rely on the script's author to write it:
-  `KernelConfig::errexit_enabled` sets a kernel-wide default (`.with_errexit`,
-  same shape as `trash_enabled`/`.with_trash`), and `ExecuteOptions::errexit`
-  overrides it for one call (e.g. a strict guard alongside advisory calls
-  left at the default). Both feed the same runtime state `set -e`/`set +e`
-  mutate, so there is one notion of "errexit is on" — `set -o` reports it
-  regardless of which one set it, which is what makes a config-set default
-  (invisible in the script text) acceptable at all. **Off by default; no
-  behavior change for an existing embedder.** Marked breaking because it adds
-  a field to two public, non-`#[non_exhaustive]` structs — any construction
-  by full literal (not the documented `::new()`/preset + builder pattern)
-  needs the new field.
-- **`plan` builtin — the statement projection, reachable from a kaish body.**
-  `plan '<statement>' --json` emits the same object `kaish --plan` does, byte
-  for byte, and `plan` with no argument reads the statement from stdin. Nothing
-  executes and no substitution runs. Its `commands` list descends into loop
-  bodies, `if` conditions, and `$(...)`, so a command buried in a statement
-  surfaces on its own rather than being scored as part of the whole. Takes
-  exactly one statement — `plan rm build` exits 2 naming the fix rather than
-  planning `rm` and discarding `build`. Previously this analysis was reachable
-  only from Rust or the `--plan` CLI flag, so an embedder whose hooks are
-  written in kaish could not use it.
-
-### Added
 - **`ArgBinding::Verbatim` — a tool can parse its own argv.**
   `ToolSchema::with_verbatim_argv()` fills `ToolArgs::words` with every word
-  after the tool name, in source order, instead of splitting them into
-  `positional`/`named`/`flags` — so order and repeated flags survive for a tool
-  with a clap subcommand tree, which the split cannot represent. `--json` stays
-  kernel-owned and never reaches the words, unless the tool also declares
-  `with_owned_output()` — then it reaches the tool, which is rendering. `Typed`
-  is the default; nothing existing changes.
-- **`KernelBackend::patch` states its batch contract.** The trait doc now says
-  what all three implementations already do: operations apply in order to one
-  snapshot and the result is written once, so an operation that fails — a CAS
-  `expected` mismatch, an out-of-range line — stops the batch before the write
-  and leaves the file untouched, and each operation sees the edits before it.
-  Persisting the result stays `write`'s business, including its I/O-error
-  behavior. Pinned by tests that run against every in-tree backend.
+  after the tool name in source order, so a clap subcommand tree keeps order
+  and repeated flags. `Typed` stays the default; nothing existing changes.
+
+- **`KernelBackend::patch` states its batch contract** — operations apply in
+  order to one snapshot and the result is written once, so a failed operation
+  stops the batch before the write and leaves the file untouched. Pinned by
+  tests against every in-tree backend.
+
+- **`test` rejects `-a`/`-o`/`(`/`)` before the statement runs (E020).** They
+  were refused at runtime, but an `if` reads only the exit code, so exit 2 took
+  the `else` branch and the message reached nobody. Compose with `&&`/`||`, or
+  use `[[ ]]`. Only the operator slot is judged: `test "-a" = "-a"` still
+  compares two strings.
+
+- **`set -o` reports every option and its state** (`glob`, `output-limit`,
+  `trash`, `pipefail`), as a table so `--json` answers too. Option state could
+  not be queried at all before.
 
 ### Changed
-- **BREAKING:** Public enums in `kaish-kernel`'s AST, lexer, and error types
-  are now `#[non_exhaustive]` — `Stmt`, `Expr`, `Arg`, `RedirectKind`,
-  `PipelineStage`, `ParamType`, `ListElem`, `RecordKey`, `TestExpr`,
-  `FileTestOp`, `StringTestOp`, `TestCmpOp`, `VarSegment`, `StringPart`,
-  `Token`, `LexerError`, `EvalError`, `PathError`, `TrashError`,
-  `FragmentError`, `NameErrorKind`, `KernelOperation`, `ControlFlow`,
-  `OutputContext`, `OverwriteExpectation`, `SpillMode`, `IgnoreScope`,
-  `VfsMountMode`, and (Unix, `subprocess` feature) `WaitResult`. Every one of
-  0.15.0's five undeclared breaking changes was the same shape: a public
-  kaish-kernel enum grew a variant and silently broke an embedder's exhaustive
-  `match`. An embedder that matches any of these exhaustively must add a
-  `_ => …` arm — one that does something loud (a fallback error, a logged
-  "unrecognized variant"), never a silent default, so a future variant is
-  caught rather than misclassified. `BinaryOp`, `PipelinePosition`, and
-  `TokenCategory` are deliberately left exhaustive — see their doc comments
-  for why each is closed by design.
 
-### Added
-- **`test` rejects `-a`/`-o`/`(`/`)` before the statement runs (E020).** They
-  were already refused at runtime, but `test` lives in an `if`, and an `if`
-  reads only the exit code — so exit 2 chose the `else` branch and the message
-  reached nobody. Reported as "`test -o` silently returns false rather than
-  OR-ing". A validator error stops the statement instead. Implementing the
-  operators was tried and rejected: bash overloads both spellings (`-a FILE`
-  is a synonym for `-e`, `-o NAME` an option query), which is what makes the
-  binary form ambiguous, and three of its operand-count rules outrank `!`
-  (`test ! = x` compares two strings, `test ! x -o x` negates the whole
-  expression). Compose with `&&`/`||`, or use `[[ ]]`. Only the operator slot
-  is judged: `test "-a" = "-a"` compares two strings, `test -f "-a"` stats a
-  file named `-a`, and `test "-a" = 1` compares a string to a number — all
-  still run, as before. A single operand has no operator slot, so `test -a`
-  stays the lone-operator error (`'-a' needs an operand`, exit 2) rather than
-  E020, which would name a compound the author did not write.
-- **`set -o` reports every option and its state** (`glob`, `output-limit`,
-  `trash`), as bash does, and as a table so `--json` answers too. Option state
-  could not be queried at all before: bare `set` prints only what differs from
-  the default, so an option at its default looked the same as an unknown one.
+- **BREAKING: `$(cmd)` binds a typed value only when the tool's data IS its
+  value.** `y=$(cut -f2 f)` bound a list while `y=$(awk '{print $2}' f)`, doing
+  the same job, bound text. A builtin with a POSIX counterpart now returns
+  text — `cut`, `seq`, `find`, and `glob` join `grep`, `head`, `sort`, `sed`,
+  `awk`, and `ls`; ask for the structure with `--json`. `fromjson`,
+  `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, and `typeof`
+  are unchanged, as are iteration and the pipeline sideband. **Embedders:** a
+  tool that prints text AND attaches data must call
+  `ToolSchema::with_typed_substitution()`.
+
+- **BREAKING: `--json` carries one line anchor, named `line`, typed as an
+  integer.** `grep`'s integer `line_number`, `head`/`tail`'s string `NUM`, and
+  `cat -n`'s formatted text were three spellings of the same thing. A row with
+  no line to point at has no `line` key. Text output is unchanged everywhere.
+  `OutputNode` is now `#[non_exhaustive]` — use `OutputNode::new`/`text` and
+  the builders.
+
+- **The interactive REPL prints line-anchored output as the builtin wrote
+  it** — `head`, `tail`, and `grep` no longer render aligned tables. They print
+  what `kaish -c` prints.
+
+- **BREAKING: `GlobalFlags::apply_from_args` takes the tool's `raw_argv`
+  flag** — `apply_from_args(&args, schema.raw_argv, ctx)`. Only a `raw_argv`
+  tool keeps `--json` among its positionals, bounded by `--`.
+
+- **BREAKING: plan `index` is the position in the `statements` list**, with no
+  gaps: `statements[i].index == i`. It previously counted dropped empty
+  statements, so a source opening with a comment numbered every statement one
+  too high. A consumer that compensated for the offset must stop.
+
+- **BREAKING:** Public enums in `kaish-kernel`'s AST, lexer, and error types
+  are now `#[non_exhaustive]` — `Stmt`, `Expr`, `Token`, `LexerError`,
+  `KernelOperation`, `VfsMountMode`, and 23 more. Every one of 0.15.0's five
+  undeclared breaking changes was an enum growing a variant and silently
+  breaking an exhaustive `match`. Add a `_ => …` arm that fails loudly, never a
+  silent default. `BinaryOp`, `PipelinePosition`, and `TokenCategory` stay
+  exhaustive by design.
 
 ### Fixed
-- **`ls -R` and `tree` no longer swallow a directory they can't read.** Both
-  hit `Err(_) => continue` with no comment on a failed listing, so an
-  unreadable subdirectory just vanished: `ls -R` exited 0 with nothing to say
-  so, and `tree` rendered it as a childless node — indistinguishable from a
-  genuinely empty directory, not merely omitted. `ls -R` now names every
-  unreadable directory on stderr, keeps listing the rest of the tree, and
-  exits 1, matching GNU `ls -R`, which continues past each failure instead of
-  stopping at the first. `tree` marks the node inline as
-  `name [error opening dir]` (GNU `tree`'s own convention) plus the same
-  stderr diagnostic and exit 1; the marker is part of the node's name, so it
-  also survives into `tree --json`. `ls -R --json` does not yet carry an
-  equivalent marker for an unreadable directory — a known gap, not fixed here.
 
+- **`ls -R` and `tree` no longer swallow a directory they cannot read.** Both
+  dropped it silently at exit 0 — `tree` rendering it as a childless node,
+  indistinguishable from an empty one. Both now report it on stderr and exit
+  **1**, and `tree` marks the node `name [error opening dir]`, which carries
+  into `tree --json`. `ls -R --json` has no equivalent marker yet.
 - **`tee -a` and `>>` now append through a real VFS `Filesystem::append`
   (`O_APPEND`):** no read permission needed, and the read-then-write race
   is closed. New trait method, default impl — no embedder break.
 
 - **`ls`/`find`/`glob` refuse a filename containing a newline instead of
-  miscounting it.** Text output uses one newline per path, so a name that
-  already contains one split into two paths naming no file — measured, a
-  two-file directory reported **three** items under `for f in $(ls dir)`, with
-  nothing to say so. All three now exit **2**, naming the offending path and
-  `--json`, which serializes each name as its own JSON string and reads it
-  losslessly. Escaping was considered and rejected: it needs a decoder on the
-  other side, and kaish has no word splitting to be that decoder.
+  miscounting it.** Text output uses one newline per path, so a two-file
+  directory reported three items under `for f in $(ls dir)`. All three exit
+  **2**, naming the path and `--json`, which reads it losslessly.
 
 - **`${#x:-y}` is refused in a quoted string instead of reporting 0.** The `#`
   strip ran first, so `x:-y` became the whole path and its unset name measured
@@ -219,146 +122,91 @@ breaking entries are marked **BREAKING**.
   operands are unchanged; `find` never had it.
 
 - **`$PWD` and `$OLDPWD` follow `cd`.** Both were whatever the process
-  inherited and `cd` never wrote either, so `cd /tmp; echo $PWD` reported the
-  directory the shell started in while `pwd` reported `/tmp` — a wrong value
-  with nothing to say so, and the validator vouched for the name because
-  `PWD`/`OLDPWD` are in its known-variable list. `$OLDPWD` was worse than
-  stale: it held a directory from the INVOKING shell's history. They are now
-  maintained at the one place a working directory changes, seeded at startup,
-  and put back by `reset()`. `$OLDPWD` is absent until the first `cd`, matching
-  `cd -`'s existing "OLDPWD not set" refusal instead of contradicting it.
+  inherited, so `cd /tmp; echo $PWD` reported the startup directory while `pwd`
+  reported `/tmp`. `$OLDPWD` is absent until the first `cd`, matching `cd -`'s
+  existing refusal.
 
 - **A spill stays reported when a later statement succeeds.** `did_spill` was
-  assigned rather than OR-ed as a block accumulated its statements, so
-  `seq 1 100000; echo after` under an output limit reported `did_spill: false`
-  with output still truncated — an embedder asking "did I get everything" was
-  told yes. It is a fact about the output, not a status, so a later statement
-  does not clear it; `original_code` follows the same rule and keeps the first
-  one. The exit CODE is unchanged and still belongs to the last statement, as
-  in any shell.
+  assigned rather than OR-ed as a block accumulated, so
+  `seq 1 100000; echo after` reported `did_spill: false` with output still
+  truncated. `original_code` keeps the first one for the same reason. The exit
+  code still belongs to the last statement.
 
 - **Arithmetic inside a `$(…)` inside a double-quoted string works, and stops
-  leaking an internal name.** `echo "$(seq 1 $((1+1)))"` and
-  `echo "$(echo $((1+1)))"` were parse errors, and
-  `echo "$(echo '$((1+1))')"` printed `${__ARITH:1+1__}` — an internal marker
-  in place of the author's own text, with no error at all. The pre-pass that
-  lifts `$((…))` out of a string reached into command bodies: it rewrote
-  arithmetic a command's single quotes had made literal, and for the unquoted
-  form it put the marker in the outer string's token while the body is parsed
-  as its own program, which never resolved it. A `$(…)` in a string is now
-  copied verbatim and scanned when the body itself is parsed. Arithmetic that
-  is genuinely in the string, single quotes and all, still expands:
-  `echo "'$((1+1))'"` is `'2'`, as in bash.
+  leaking an internal name.** `echo "$(echo $((1+1)))"` was a parse error, and
+  `echo "$(echo '$((1+1))')"` printed the internal marker `${__ARITH:1+1__}`
+  with no error at all. A `$(…)` in a string is now copied verbatim and scanned
+  when its own body is parsed.
+
 - **A double-quoted string may hold a `$(…)` whose body has its own quoted
-  words.** `echo "$(basename "$p")"` was a parse error — "unterminated command
-  substitution: missing `)`" — and so was every form where BOTH levels were
-  double-quoted: `"$(echo "hi")"`, `x="$(echo "hi")"`, `"pre $(echo "hi") post"`.
-  A quote inside a `$(…)` is the substitution's, not the string's, at any depth.
-  Unquoted (`$(echo "hi")`) and single-quoted (`"$(echo 'hi')"`) forms always
-  worked, which is why the first report — "any literal double quote between
-  `$(` and `)`" — sent people to unquote variables inside `$()` for nothing.
-  `"$(echo 'a"b')"` works too.
+  words.** `echo "$(basename "$p")"` was a parse error, as was every form with
+  both levels double-quoted. A quote inside a `$(…)` is the substitution's, not
+  the string's, at any depth.
+
 - **An unterminated string says which thing is unterminated.** `echo "oops`
-  reported "unexpected character"; it now reports "unterminated string", and
-  `echo "pre $(echo hi"` reports the missing `)` — the paren is the mistake and
-  the unclosed string is only its consequence. Spans are unchanged.
-- **A file of unterminated openers no longer costs O(N²).** A token that scans
-  for its own terminator reads to end of input when there is none, and the
-  lexer then retries from the next character, collecting an error each time.
-  Lexer errors are capped at 64: 20000 unterminated `"$(echo "` openers went
-  from 4.6s to 0.02s, and 20000 unterminated `${` — which had the same shape
-  before this change — from 1.1s to 0.01s. A parse error now reports at most
-  64 lexer diagnostics rather than one per opener.
-- **An `if`/`while` condition's output reaches the author.** The condition
-  command's `ExecResult` was dropped after its exit code was read, so
-  everything a condition produced disappeared: `if cat /nonexistent; then …`
-  printed nothing at all and `if echo COND; then echo BODY; fi` printed only
-  `BODY`, where bash prints both. A command that failed loudly became a silent
-  false purely by sitting in a condition. The rule already existed one arm
-  over — `$(…)` routes its stderr to the enclosing statement because it
-  "belongs to the statement, never to its value" — and a condition is the same
-  case. stderr rides the statement's stderr stream; stdout is folded into the
-  statement's own result, so it reaches a pipe, a `$(…)` capture, and a
-  redirect too. `&&`/`||` chains and `elif` conditions print the same way, a
-  short-circuited side still runs nothing, and a `$(…)` inside a condition is
-  not printed twice — its stdout is its value. The condition's exit code is
-  still the `if`'s answer, not the statement's status. A condition's output
-  obeys the output limit like any other output, and a condition whose output
-  was capped still counts as true. stderr reads in the order it was produced:
-  the condition ran before the branch, so it reports first.
+  reported "unexpected character" and now reports "unterminated string";
+  `echo "pre $(echo hi"` names the missing `)`, since the paren is the mistake
+  and the unclosed string only its consequence.
+
+- **A file of unterminated openers no longer costs O(N²).** Lexer errors are
+  capped at 64: 20000 unterminated `"$(echo "` openers went from 4.6s to 0.02s,
+  and 20000 unterminated `${` from 1.1s to 0.01s.
+
+- **An `if`/`while` condition's output reaches the author.** The condition's
+  `ExecResult` was dropped once its exit code was read, so
+  `if cat /nonexistent; then …` printed nothing and a command that failed
+  loudly became a silent false. stdout now folds into the statement's result,
+  reaching a pipe, a `$(…)` capture, and a redirect; stderr rides the
+  statement's stderr. The condition's exit code is still the `if`'s answer.
+
 - **Validation binds a `raw_argv` tool's words in source order**, the way
-  execution does. It split them by token shape instead, so a leading-dash word
-  went to `flags` and a bareword to `positional` and the operand ORDER was
-  gone — leaving `test "-a" = "-a"` and `test a = a -a b = b` with identical
-  `ToolArgs`. A `Tool::validate` on a raw_argv tool could not tell an operator
-  from a literal. The verbatim binder already had this arm; raw_argv never
-  did.
+  execution does. It split them by token shape instead, so operand order was
+  lost and `test "-a" = "-a"` and `test a = a -a b = b` had identical
+  `ToolArgs`.
+
 - **`test -e ""` and `[[ -e "" ]]` are both false.** The empty path resolved to
-  the working directory, so every file operator answered true for it, in both
-  spellings.
+  the working directory, so every file operator answered true for it.
+
 - **`test` with no operands is false**, as in bash, rather than exit 2. An
-  operator missing its operand stays a loud error — that one is a deliberate
-  divergence, since bash reads `test -f` as a non-empty string and returns
-  true.
-- **`--json=VALUE` means the same thing on every builtin.** `--json=1`,
-  `--json=yes`, and `--json=""` exited 2 with a clap parse error on an ordinary
-  builtin while `test` and a verbatim tool accepted them, and `--json=0` *enabled*
-  JSON before erroring. The three argument binders each decided truthiness
-  their own way; they now share one rule — off for `0`, `false`, and an empty
-  value, on for anything else — exported as `global_flag_value_is_truthy` for
-  embedders binding argv themselves. The bare `--json` and `--json=true` /
-  `--json=false` forms are unchanged. scatter/gather's own option-parse errors
-  read the same rule, so `scatter --limit x --json=1` reports as JSON instead
-  of silently falling back to text.
+  operator missing its operand stays a loud error — a deliberate divergence,
+  since bash reads `test -f` as a non-empty string.
+
+- **`--json=VALUE` means the same thing on every builtin.** `--json=1` and
+  `--json=yes` exited 2 on an ordinary builtin while `test` accepted them, and
+  `--json=0` enabled JSON before erroring. The three argument binders now share
+  one rule — off for `0`, `false`, and empty — exported as
+  `global_flag_value_is_truthy`.
+
 - **`cat -n` keeps the trailing newline past an empty operand.** An empty file
   contributes no line but still answered the trailing-newline question for the
-  file before it, so `cat -n a.txt empty.txt` ended without the newline
-  `cat -n a.txt` has.
+  file before it.
+
 - **`--` ends the options, including for `--flag=value` and `--json`.**
-  `echo -- --flag=value` was a parse error ("adjacent words with no space
-  between them"): the post-`--` grammar had no `--flag=value` production, so
-  the three tokens hit the no-token-pasting guard that exists for pre-`--`
-  argv. It is now one operand, and the value still expands. Separately,
-  `echo -- --json hi` answered in JSON — a positional `--json` was read back as
-  the kernel's flag by a scan that exists for `raw_argv` tools, which keep the
-  bounding `--` among their positionals; that scan is now asked only of them.
-  `-n=1` is still not a word on either side of `--`, as before.
+  `echo -- --flag=value` was a parse error, and `echo -- --json hi` answered in
+  JSON because a positional `--json` was read back as the kernel's flag.
+  `-n=1` is still not a word on either side of `--`.
+
 - **A fragment glued after a `--key=value` word is refused.** `echo --a=1--b=2`
-  and `echo -- --a=$V--b` split into separate arguments instead of reporting
-  the pasting — `Arg::Named`/`Arg::WordAssign` were exempt from the
-  no-token-pasting guard, which covered the boundaries inside the word but not
-  the one after the value. Loud only by accident before (clap rejected the
-  stray `-a`), and silent after `--`.
+  split into separate arguments instead of reporting the pasting —
+  `Arg::Named`/`Arg::WordAssign` were exempt from the no-token-pasting guard.
+
 - **`env` reports a mixed-script variable name (W007).** `env PАTH=x cmd` and
-  `env -u PАTH cmd` were both silent — `env` names variables in argv words, so
-  no assignment reached the validator and `env` had no check of its own. An
-  unquoted `key=value` argument to the command being run is judged too, because
-  the binder does not keep the order that separates them; quote it to keep it
-  positional.
+  `env -u PАTH cmd` were both silent: `env` names variables in argv words, so
+  no assignment reached the validator and `env` had no check of its own.
+
 - **`for` reports a mixed-script loop variable (W007).** `for PАTH in a`, with
-  CYRILLIC CAPITAL LETTER A where Latin `A` belongs, bound a different variable
-  than the source reads as and said nothing, while `PАTH=/bin` had warned since
-  0.11. The loop head was the last static door without the check;
-  `docs/LANGUAGE.md` claimed every door reported it, and now that is true.
-- **`${#v}` counts characters, matching slicing.** `v=日本語; echo ${#v}`
-  reported `9` — the UTF-8 byte length — while `${v[0:1]}` sliced by
-  character and returned `日`, a silent disagreement inside one shell.
-  `${#v}` now counts Unicode scalar values, matching `${v[…]}` and bash.
-  `${#list}`/`${#record}`/`${#PIPESTATUS}` are unchanged (element/key/stage
-  counts), and `${#bytes}` stays the byte count — `Value::Bytes` is not
-  sliceable, so there is no character unit for it to agree with.
+  Cyrillic А where Latin `A` belongs, bound a different variable than the
+  source reads as and said nothing. The loop head was the last static door
+  without the check.
 
-- **`test -r FILE` and `[[ -r FILE ]]` check the mode bits, not just
-  existence.** Both answered "does it exist" — a mode-000 file was `-r` true,
-  contradicting `cat`'s own EACCES one line later. `-r` now checks `0o444`,
-  the same style `-w`/`-x` already use for `0o222`/`0o111`.
+- **`${#v}` counts characters, not UTF-8 bytes.** `v=日本語` reported `9` while
+  `${v[0:1]}` sliced by character and returned `日` — two measures disagreeing
+  inside one shell. `${#list}`/`${#record}`/`${#PIPESTATUS}` are unchanged, and
+  `${#bytes}` stays a byte count, since bytes are not sliceable.
 
-- **`glob` keeps the leading `/` of an absolute pattern.** `glob '/tmp/x/*.txt'`
-  reported `tmp/x/z.txt` — silently wrong, with no error — while a bare glob in
-  argv (`echo /tmp/x/*.txt`) reported the correct absolute path. The wrong
-  value fed straight into `$(…)` and `for`, so `cat $(glob '/tmp/x/*.txt')`
-  reported "not found" for a file that exists. `--json` carried the same wrong
-  value. `find` does not share this defect.
+- **`test -r` and `[[ -r ]]` check the mode bits, not just existence.** A
+  mode-000 file was `-r` true, contradicting `cat`'s own permission failure one
+  line later. `-r` now checks `0o444`, matching `-w`/`-x`'s existing style.
 
 ## [0.15.0] - 2026-08-19
 
