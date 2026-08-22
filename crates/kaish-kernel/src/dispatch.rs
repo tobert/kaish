@@ -228,7 +228,7 @@ impl BackendDispatcher {
             return ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff);
         }
         match self.try_external_on_path(name, args, ctx).await {
-            Some(result) => ExternalCommandOutcome::Ran(result),
+            Some(result) => ExternalCommandOutcome::Ran(Box::new(result)),
             None => ExternalCommandOutcome::NotFound,
         }
     }
@@ -659,7 +659,7 @@ impl CommandDispatcher for BackendDispatcher {
                 // `Unavailable` is a final answer here, not something that
                 // needs to survive a later backend lookup.
                 match self.try_external(&cmd.name, &cmd.args, ctx).await {
-                    ExternalCommandOutcome::Ran(result) => result,
+                    ExternalCommandOutcome::Ran(result) => *result,
                     ExternalCommandOutcome::NotFound => {
                         ExecResult::failure(127, format!("command not found: {}", cmd.name))
                     }

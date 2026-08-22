@@ -3542,7 +3542,7 @@ impl Kernel {
                 // fallthrough re-deriving the wrong "command not found".
                 let mut unavailable = None;
                 match Box::pin(self.try_execute_external(name, args)).await? {
-                    ExternalCommandOutcome::Ran(result) => return Ok(result),
+                    ExternalCommandOutcome::Ran(result) => return Ok(*result),
                     ExternalCommandOutcome::NotFound => {}
                     ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
                 }
@@ -5203,7 +5203,7 @@ impl Kernel {
             return Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff));
         }
         Ok(match Box::pin(self.try_execute_external_on_path(name, args)).await? {
-            Some(result) => ExternalCommandOutcome::Ran(result),
+            Some(result) => ExternalCommandOutcome::Ran(Box::new(result)),
             None => ExternalCommandOutcome::NotFound,
         })
     }

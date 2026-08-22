@@ -105,7 +105,9 @@ pub fn external_commands_unavailable_error(name: &str, reason: ExternalCommandsU
 #[cfg_attr(not(feature = "subprocess"), allow(dead_code))]
 pub(crate) enum ExternalCommandOutcome {
     /// A command was resolved and run; this IS the final result.
-    Ran(ExecResult),
+    /// Boxed: `ExecResult` dwarfs the other two variants, and clippy's
+    /// `large_enum_variant` fires on the difference.
+    Ran(Box<ExecResult>),
     /// Nothing on PATH matches `name`, and no explicit-path form resolved
     /// either — a genuine "not found" specific to external resolution.
     NotFound,
