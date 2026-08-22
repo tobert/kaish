@@ -182,3 +182,57 @@ async fn relative_pattern_through_expand_paths_stays_relative() {
     assert_eq!(code, 0, "ls should succeed: {out:?}");
     assert_eq!(out, "z.txt", "relative pattern must stay relative: {out:?}");
 }
+
+// ── grep -r shares the same "an absolute operand comes back relative" defect ──
+
+/// `grep -r PATTERN /abs/dir` reported bare names, so a match could not be
+/// used as a path: `for f in $(grep -rl …); do cat "$f"; done` looked for a
+/// file that was never there. GNU keeps the operand it was given, and so does
+/// kaish now.
+#[tokio::test]
+async fn grep_recursive_absolute_operand_reports_absolute_paths() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "a.txt");
+    fs::write(dir.path().join("a.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let expected = format!("{}/a.txt", dir.path().display());
+
+    let (out, code) = run(&kernel, &format!("grep -rl HIT {}", dir.path().display())).await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    assert_eq!(out, expected, "an absolute operand keeps absolute results: {out:?}");
+}
+
+/// The same, from a cwd of `/`. Stripping `/` as a prefix removes the leading
+/// separator rather than relativizing, and `/` is the default cwd for an
+/// isolated kernel.
+#[tokio::test]
+async fn grep_recursive_absolute_operand_is_unaffected_by_cwd() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "a.txt");
+    fs::write(dir.path().join("a.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let expected = format!("{}/a.txt", dir.path().display());
+
+    let (out, code) = run(
+        &kernel,
+        &format!("cd /; grep -rl HIT {}", dir.path().display()),
+    )
+    .await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    assert_eq!(out, expected, "cwd must not change an absolute answer: {out:?}");
+}
+
+/// The control. A relative operand keeps kaish's documented display: the sole
+/// walk root is stripped, so `grep -r p dir` reports `file`. Fixing the
+/// absolute case must not disturb this.
+#[tokio::test]
+async fn grep_recursive_relative_operand_display_is_unchanged() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("d")).unwrap();
+    fs::write(dir.path().join("d/a.txt"), b"HIT\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -rl HIT d").await;
+    assert_eq!(code, 0, "grep should match: {out:?}");
+    assert_eq!(out, "a.txt", "a relative operand keeps the historical display: {out:?}");
+}
