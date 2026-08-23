@@ -198,8 +198,13 @@ impl Example {
 /// subcommand tree: `kj block list --limit 5` renders back as
 /// `--limit=5 -- block list`, which clap rejects because `--limit` belongs to
 /// `list`, not the root. Order and multiplicity are gone by then.
+///
+/// A third binding is plausible, so this enum is `#[non_exhaustive]` from the
+/// day it ships: adding the attribute later is itself a breaking change. Match
+/// with a wildcard arm that fails loudly, never a silent default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ArgBinding {
     /// Decompose into `positional`/`named`/`flags`. The default; every tool
     /// that does not ask for something else gets this.

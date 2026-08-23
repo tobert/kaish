@@ -40,6 +40,7 @@ breaking entries are marked **BREAKING**.
   `ToolSchema::with_verbatim_argv()` fills `ToolArgs::words` with every word
   after the tool name in source order, so a clap subcommand tree keeps order
   and repeated flags. `Typed` stays the default; nothing existing changes.
+  `ArgBinding` is `#[non_exhaustive]` from the day it ships.
 
 - **`KernelBackend::patch` states its batch contract** — operations apply in
   order to one snapshot and the result is written once, so a failed operation
