@@ -105,7 +105,8 @@ impl Tool for Diff {
                     IssueCode::DiffNeedsTwoFiles,
                     format!("diff: needs exactly two file operands (got {operand_count})"),
                 )
-                .with_suggestion("usage: diff OLD NEW"),
+                .with_suggestion("usage: diff OLD NEW")
+                .with_command(self.name()),
             );
         }
 

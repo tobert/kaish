@@ -230,7 +230,9 @@ impl<'a> Validator<'a> {
             self.issues.push(ValidationIssue::warning(
                 IssueCode::UndefinedCommand,
                 format!("command '{}' not found in builtin registry", cmd.name),
-            ).with_suggestion("this may be a script in PATH or external command"));
+            )
+            .with_suggestion("this may be a script in PATH or external command")
+            .with_command(cmd.name.clone()));
         }
 
         // Validate arguments expressions
@@ -299,7 +301,9 @@ impl<'a> Validator<'a> {
                 ValidationIssue::error(
                     IssueCode::ScatterWithoutGather,
                     "scatter without gather — parallel results would be lost",
-                ).with_suggestion("add gather: ... | scatter | cmd | gather")
+                )
+                .with_suggestion("add gather: ... | scatter | cmd | gather")
+                .with_command("scatter")
             );
         }
 
@@ -692,7 +696,8 @@ impl<'a> Validator<'a> {
                     "'{}' requires {} arguments, got {}",
                     tool_def.name, required_count, positional_count
                 ),
-            ));
+            )
+            .with_command(tool_def.name.clone()));
         }
     }
 }
