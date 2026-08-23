@@ -78,6 +78,7 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
                 message: format!("required parameter '{}' not provided", param.name),
                 span: None,
                 suggestion: Some(format!("add {} or {}=<value>", param.name, param.name)),
+                command: Some(schema.name.clone()),
             });
         }
     }
@@ -97,6 +98,7 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
                 message: format!("required parameter '{}' not provided", param.name),
                 span: None,
                 suggestion: Some(format!("add --{} <value>", param.name)),
+                command: Some(schema.name.clone()),
             });
         }
     }
@@ -130,6 +132,7 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
                     message: format!("unknown flag '{}'", flag),
                     span: None,
                     suggestion: None,
+                    command: Some(schema.name.clone()),
                 });
             }
         }
@@ -139,7 +142,7 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
     // may name either a positional or a flag param).
     for (key, value) in &args.named {
         if let Some(param) = schema.params.iter().find(|p| &p.name == key)
-            && let Some(issue) = check_type_compatibility(key, value, &param.param_type) {
+            && let Some(issue) = check_type_compatibility(key, value, &param.param_type, &schema.name) {
                 issues.push(issue);
             }
     }
@@ -149,7 +152,7 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
     // many builtins (cat, cp, mkdir) accept variadic positionals.
     for (slot, value) in args.positional.iter().enumerate() {
         if let Some(param) = positional_params.get(slot)
-            && let Some(issue) = check_type_compatibility(&param.name, value, &param.param_type) {
+            && let Some(issue) = check_type_compatibility(&param.name, value, &param.param_type, &schema.name) {
                 issues.push(issue);
             }
     }
@@ -182,7 +185,12 @@ pub fn is_global_output_flag(name: &str) -> bool {
 }
 
 /// Check if a value is compatible with a type.
-fn check_type_compatibility(name: &str, value: &Value, expected_type: &str) -> Option<ValidationIssue> {
+fn check_type_compatibility(
+    name: &str,
+    value: &Value,
+    expected_type: &str,
+    command: &str,
+) -> Option<ValidationIssue> {
     let compatible = match expected_type {
         "any" => true,
         "string" => true, // Everything can be a string
@@ -207,6 +215,7 @@ fn check_type_compatibility(name: &str, value: &Value, expected_type: &str) -> O
             ),
             span: None,
             suggestion: None,
+            command: Some(command.to_string()),
         })
     }
 }
@@ -316,5 +325,39 @@ mod validate_tests {
             "required flag should error when missing; got {:?}",
             issues
         );
+    }
+
+    /// The schema always names the command being checked, so every issue
+    /// `validate_against_schema` raises should carry it — a caller that
+    /// calls `Tool::validate` directly (no walker in between) still gets a
+    /// structured command name, not just message text.
+    #[test]
+    fn missing_required_positional_carries_command_name() {
+        let schema = schema_with_positionals_after_flags();
+        let args = ToolArgs::new();
+
+        let issues = validate_against_schema(&args, &schema);
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::MissingRequiredArg)
+            .expect("expected a MissingRequiredArg issue");
+        assert_eq!(issue.command.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn invalid_arg_type_carries_command_name() {
+        let schema = ToolSchema::new("demo", "demo").param(
+            ParamSchema::new("count", "int").with_required(true).positional(),
+        );
+        let mut args = ToolArgs::new();
+        // Bool is not int-compatible per check_type_compatibility.
+        args.positional.push(Value::Bool(true));
+
+        let issues = validate_against_schema(&args, &schema);
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::InvalidArgType)
+            .expect("expected an InvalidArgType issue");
+        assert_eq!(issue.command.as_deref(), Some("demo"));
     }
 }

@@ -253,6 +253,17 @@ pub struct ValidationIssue {
     pub span: Option<Span>,
     /// Optional suggestion for fixing the issue.
     pub suggestion: Option<String>,
+    /// The command this issue concerns, when one is genuinely known —
+    /// `UndefinedCommand`'s unresolved name, or the builtin whose own
+    /// `Tool::validate` raised the issue (a bad regex, a missing required
+    /// argument, a zero `seq` increment, ...).
+    ///
+    /// Absent, never a placeholder, when an issue is not about a command at
+    /// all — an assignment target, a bare `break`, an undefined variable.
+    /// Route on `code` (this crate's own advice), then narrow by `command`
+    /// when the code can fire for more than one command; don't parse
+    /// `message` to recover a name this field already gives you.
+    pub command: Option<String>,
 }
 
 impl ValidationIssue {
@@ -264,6 +275,7 @@ impl ValidationIssue {
             message: message.into(),
             span: None,
             suggestion: None,
+            command: None,
         }
     }
 
@@ -275,6 +287,7 @@ impl ValidationIssue {
             message: message.into(),
             span: None,
             suggestion: None,
+            command: None,
         }
     }
 
@@ -287,6 +300,16 @@ impl ValidationIssue {
     /// Add a suggestion to this issue.
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// Record the command this issue concerns.
+    ///
+    /// Call this only where the name is genuinely known at the construction
+    /// site — the tool being validated, or the unresolved name itself for
+    /// `UndefinedCommand`. Leave it unset rather than guess.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
         self
     }
 
@@ -380,6 +403,22 @@ mod tests {
         assert!(formatted.contains("E001"));
         assert!(formatted.contains("command 'foo' not found"));
         assert!(formatted.contains("did you mean 'for'?"));
+    }
+
+    #[test]
+    fn command_absent_by_default() {
+        let error = ValidationIssue::error(IssueCode::BreakOutsideLoop, "break outside a loop");
+        assert_eq!(error.command, None);
+
+        let warning = ValidationIssue::warning(IssueCode::PossiblyUndefinedVariable, "maybe undefined");
+        assert_eq!(warning.command, None);
+    }
+
+    #[test]
+    fn with_command_records_the_name() {
+        let issue = ValidationIssue::error(IssueCode::SeqZeroIncrement, "seq: increment cannot be zero")
+            .with_command("seq");
+        assert_eq!(issue.command.as_deref(), Some("seq"));
     }
 
     #[test]
