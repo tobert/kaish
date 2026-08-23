@@ -32,9 +32,9 @@ breaking entries are marked **BREAKING**.
   way. Off by default; breaking only because two public structs gain a field.
 
 - **`plan` builtin** — emits the same JSON `kaish --plan` does, reachable from
-  inside a kaish body; reads the statement from stdin with no argument. Nothing
-  executes and no substitution runs. `commands` descends into loop bodies,
-  conditions, and `$(…)`. Takes exactly one statement, exiting 2 otherwise.
+  inside a kaish body; takes the statement as one quoted argument, or reads it
+  from stdin. Nothing executes and no substitution runs. `commands` descends
+  into loop bodies, conditions, and `$(…)`. More than one word exits 2.
 
 - **`ArgBinding::Verbatim` — a tool can parse its own argv.**
   `ToolSchema::with_verbatim_argv()` fills `ToolArgs::words` with every word
@@ -52,9 +52,9 @@ breaking entries are marked **BREAKING**.
   use `[[ ]]`. Only the operator slot is judged: `test "-a" = "-a"` still
   compares two strings.
 
-- **`set -o` reports every option and its state** (`glob`, `output-limit`,
-  `trash`, `pipefail`), as a table so `--json` answers too. Option state could
-  not be queried at all before.
+- **`set -o` reports every option and its state** (`errexit`, `glob`,
+  `pipefail`, `output-limit`, `trash`), as a table so `--json` answers too.
+  Option state could not be queried at all before.
 
 ### Changed
 
