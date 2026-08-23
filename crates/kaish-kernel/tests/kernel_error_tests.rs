@@ -195,3 +195,46 @@ async fn execution_display_walks_the_cause_chain_under_alternate() {
         "the real cause must survive `{{:#}}`: {alternate:?}"
     );
 }
+
+// ── 4: ValidationIssue::command — structural command routing, not prose
+//       parsing ─────────────────────────────────────────────────────────
+
+/// A validation issue that concerns a specific command exposes that command
+/// name structurally, so an embedder can route on it instead of parsing
+/// `message` (which also happens to say "seq" here, but a caller must not
+/// have to scrape it out).
+#[tokio::test]
+async fn validation_issue_about_a_command_carries_its_name() {
+    let kernel = make_kernel();
+    // seq's own `Tool::validate` raises SeqZeroIncrement (E004, Error
+    // severity) directly — not through the generic schema check — so this
+    // also pins that a builtin's own validate() populates `command`, not
+    // just the shared `validate_against_schema` path.
+    let err = kernel.execute("seq 1 0 10").await.expect_err("zero increment must be rejected");
+
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("seq with a zero increment must be KernelError::Validation, not {err:?}");
+    };
+
+    assert!(
+        issues.iter().any(|i| i.code == kaish_kernel::validator::IssueCode::SeqZeroIncrement
+            && i.command.as_deref() == Some("seq")),
+        "expected a SeqZeroIncrement issue naming 'seq': {issues:?}"
+    );
+}
+
+/// A validation issue that is not about any command — `break` outside a
+/// loop is a language-level statement, not a command invocation — reports
+/// the command as genuinely absent, never an empty string or a guess.
+#[tokio::test]
+async fn validation_issue_without_a_command_reports_absence() {
+    let kernel = make_kernel();
+    let err = kernel.execute("break").await.expect_err("break outside a loop must be rejected");
+
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("break outside a loop must be KernelError::Validation, not {err:?}");
+    };
+
+    assert_eq!(issues.len(), 1, "expected exactly one validation issue: {issues:?}");
+    assert_eq!(issues[0].command, None);
+}
