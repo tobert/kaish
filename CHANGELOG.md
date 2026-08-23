@@ -11,12 +11,21 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING (embedders): `IssueCode` and `Severity` are `#[non_exhaustive]`.**
+  Embedders are told to route on `IssueCode` rather than message text, and the
+  list grows every cycle. An exhaustive `match` needs a wildcard arm.
+
 - **BREAKING: `grep -r` prefixes matches with the operand as written,
   matching GNU.** `grep -r p dir` now reports `dir/a.txt`, not the bare
   `a.txt` kaish stripped it to. An explicit `.` is joined as GNU joins it (`./d/a.txt`); only a defaulted operand stays bare.;
   several directories or a mixed file+dir operand list were already correct.
 
 ### Fixed
+- **`ls -R` with several operands recurses into each.** The multi-operand path
+  never read the `recursive` flag, so `ls -R d1 d2` silently produced no
+  recursion and exited 0. `--json` now names each operand's group instead of
+  rooting them all at `.`, where the second overwrote the first.
+
 - **`ls -R` headers the operand as written, matching GNU, instead of always
   printing `.`.** `ls -R dir` headered every level `.:`/`sub:` regardless of
   the operand; an absolute operand never appeared in the headers at all.
