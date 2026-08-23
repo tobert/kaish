@@ -89,8 +89,9 @@ breaking entries are marked **BREAKING**.
   `awk`, and `ls`; ask for the structure with `--json`. `fromjson`,
   `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, and `typeof`
   are unchanged, as are iteration and the pipeline sideband. **Embedders:** a
-  tool that prints text AND attaches data must call
-  `ToolSchema::with_typed_substitution()`.
+  tool that leaves `.data` unset is unaffected — `ExecResult::with_output`
+  alone never bound. A tool that prints text AND attaches data must call
+  `ToolSchema::with_typed_substitution()` to keep binding the data.
 
 - **BREAKING: `--json` carries one line anchor, named `line`, typed as an
   integer.** `grep`'s integer `line_number`, `head`/`tail`'s string `NUM`, and
@@ -110,7 +111,9 @@ breaking entries are marked **BREAKING**.
 - **BREAKING: plan `index` is the position in the `statements` list**, with no
   gaps: `statements[i].index == i`. It previously counted dropped empty
   statements, so a source opening with a comment numbered every statement one
-  too high. A consumer that compensated for the offset must stop.
+  too high. A consumer that compensated for the offset must stop. **Embedders:**
+  affected only if you store or display `index` — it changes which statement a
+  saved index names.
 
 - **BREAKING: `grep -r` prefixes matches with the operand as written,
   matching GNU.** `grep -r p dir` now reports `dir/a.txt`, not the bare
