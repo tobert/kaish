@@ -28,11 +28,32 @@ Verify the repo is ready for release:
 
 1. Confirm on `main` branch with clean working tree (`git status`)
 2. Confirm up to date with remote (`git fetch origin && git log HEAD..origin/main --oneline`)
-3. Run `cargo clippy --all` — must be 0 warnings
+3. Run `cargo clippy --all --all-targets -- -D warnings` — must be 0 warnings.
+   `cargo clippy` **exits 0 with warnings**, so the exit code is not the
+   answer; pass `-D warnings` or grep the output.
 4. Run `cargo test --all` — all must pass
 5. Run `cargo insta test --check` — no pending snapshots
+6. Confirm the crates.io token is live: `cargo owner --list kaish-types`.
+   It must print the owner and exit 0.
 
 If any check fails, stop and report. Do not proceed.
+
+**Why the token check is here and not in Phase 8.** It is the only
+pre-flight that cannot be recovered cheaply. Phases 1–7 are reversible —
+a branch can be re-cut, a tag deleted and re-pushed — but they all run
+*before* the first `cargo publish`, so an expired token fails at the
+single most expensive moment: after the bump PR has merged and the tag is
+public. `cargo publish --dry-run` does **not** cover this; it skips
+authentication entirely and reports success with a dead token. Only a
+call that actually authenticates proves the token, and `cargo owner
+--list` is the cheapest one.
+
+Receipt: the 0.16.0 release 403'd on `cargo publish -p kaish-types` with
+"authentication failed", after #408 was merged and `v0.16.0` was tagged
+and pushed. Nothing was published (the 403 lands before upload, and both
+crates still read 0.15.0 afterward), but the release stopped dead until a
+new token was issued. Tokens expire by default and 0.14.1 had been
+published two months earlier.
 
 ## Phase 2: Docs Consistency Check
 
@@ -260,6 +281,8 @@ and retry once.
   available at the registry before returning, which covers it (the 15s waits are
   belt-and-suspenders; foreground `sleep` is blocked in some harnesses anyway).
 - The crates.io token needs the **`publish-new`** scope for first-time crate
-  publishes; a publish-update-only token 403s on a brand-new crate.
+  publishes; a publish-update-only token 403s on a brand-new crate. Tokens
+  also **expire**, which produces the same 403 on an ordinary update —
+  Phase 1 step 6 exists to catch both before the tag goes out.
 - `kaish-wasi` is deliberately **not published** (wasm binary target, no library
   consumers) — it is absent from the Phase 8 publish list on purpose.
