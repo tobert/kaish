@@ -10,6 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`ValidationIssue::command`** — the command an issue concerns, when one is
+  genuinely known (`UndefinedCommand`'s name, a builtin's own regex/schema
+  failure), so an embedder can route on it instead of parsing `message`.
+  Absent, not a placeholder, for issues that aren't about a command at all
+  (a bad assignment target, `break` outside a loop). `#[non_exhaustive]`
+  already blocked struct-literal construction, so this is not breaking.
+
 ## [0.16.0] - 2026-08-23
 
 ### Added
