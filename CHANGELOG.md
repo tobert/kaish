@@ -10,26 +10,7 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Changed
-- **BREAKING (embedders): `IssueCode` and `Severity` are `#[non_exhaustive]`.**
-  Embedders are told to route on `IssueCode` rather than message text, and the
-  list grows every cycle. An exhaustive `match` needs a wildcard arm.
-
-- **BREAKING: `grep -r` prefixes matches with the operand as written,
-  matching GNU.** `grep -r p dir` now reports `dir/a.txt`, not the bare
-  `a.txt` kaish stripped it to. An explicit `.` is joined as GNU joins it (`./d/a.txt`); only a defaulted operand stays bare.;
-  several directories or a mixed file+dir operand list were already correct.
-
-### Fixed
-- **`ls -R` with several operands recurses into each.** The multi-operand path
-  never read the `recursive` flag, so `ls -R d1 d2` silently produced no
-  recursion and exited 0. `--json` now names each operand's group instead of
-  rooting them all at `.`, where the second overwrote the first.
-
-- **`ls -R` headers the operand as written, matching GNU, instead of always
-  printing `.`.** `ls -R dir` headered every level `.:`/`sub:` regardless of
-  the operand; an absolute operand never appeared in the headers at all.
-  `--json` node names are unchanged.
+## [0.16.0] - 2026-08-23
 
 ### Added
 
@@ -51,14 +32,15 @@ breaking entries are marked **BREAKING**.
   way. Off by default; breaking only because two public structs gain a field.
 
 - **`plan` builtin** — emits the same JSON `kaish --plan` does, reachable from
-  inside a kaish body; reads the statement from stdin with no argument. Nothing
-  executes and no substitution runs. `commands` descends into loop bodies,
-  conditions, and `$(…)`. Takes exactly one statement, exiting 2 otherwise.
+  inside a kaish body; takes the statement as one quoted argument, or reads it
+  from stdin. Nothing executes and no substitution runs. `commands` descends
+  into loop bodies, conditions, and `$(…)`. More than one word exits 2.
 
 - **`ArgBinding::Verbatim` — a tool can parse its own argv.**
   `ToolSchema::with_verbatim_argv()` fills `ToolArgs::words` with every word
   after the tool name in source order, so a clap subcommand tree keeps order
   and repeated flags. `Typed` stays the default; nothing existing changes.
+  `ArgBinding` is `#[non_exhaustive]` from the day it ships.
 
 - **`KernelBackend::patch` states its batch contract** — operations apply in
   order to one snapshot and the result is written once, so a failed operation
@@ -71,9 +53,9 @@ breaking entries are marked **BREAKING**.
   use `[[ ]]`. Only the operator slot is judged: `test "-a" = "-a"` still
   compares two strings.
 
-- **`set -o` reports every option and its state** (`glob`, `output-limit`,
-  `trash`, `pipefail`), as a table so `--json` answers too. Option state could
-  not be queried at all before.
+- **`set -o` reports every option and its state** (`errexit`, `glob`,
+  `pipefail`, `output-limit`, `trash`), as a table so `--json` answers too.
+  Option state could not be queried at all before.
 
 ### Changed
 
@@ -87,6 +69,18 @@ breaking entries are marked **BREAKING**.
   `#[non_exhaustive]` and gained a `Kernel(KernelError)` variant** —
   `EmbeddedClient` carries the kernel's typed error through it instead of
   flattening execution failures to `ClientError::Execution(String)`.
+
+- **BREAKING:** Public enums in `kaish-kernel`'s AST, lexer, and error types
+  are now `#[non_exhaustive]` — `Stmt`, `Expr`, `Token`, `LexerError`,
+  `KernelOperation`, `VfsMountMode`, and 23 more. Every one of 0.15.0's five
+  undeclared breaking changes was an enum growing a variant and silently
+  breaking an exhaustive `match`. Add a `_ => …` arm that fails loudly, never a
+  silent default. `BinaryOp`, `PipelinePosition`, and `TokenCategory` stay
+  exhaustive by design.
+
+- **BREAKING (embedders): `IssueCode` and `Severity` are `#[non_exhaustive]`.**
+  Embedders are told to route on `IssueCode` rather than message text, and the
+  list grows every cycle. An exhaustive `match` needs a wildcard arm.
 
 - **BREAKING: `$(cmd)` binds a typed value only when the tool's data IS its
   value.** `y=$(cut -f2 f)` bound a list while `y=$(awk '{print $2}' f)`, doing
@@ -118,15 +112,14 @@ breaking entries are marked **BREAKING**.
   statements, so a source opening with a comment numbered every statement one
   too high. A consumer that compensated for the offset must stop.
 
-- **BREAKING:** Public enums in `kaish-kernel`'s AST, lexer, and error types
-  are now `#[non_exhaustive]` — `Stmt`, `Expr`, `Token`, `LexerError`,
-  `KernelOperation`, `VfsMountMode`, and 23 more. Every one of 0.15.0's five
-  undeclared breaking changes was an enum growing a variant and silently
-  breaking an exhaustive `match`. Add a `_ => …` arm that fails loudly, never a
-  silent default. `BinaryOp`, `PipelinePosition`, and `TokenCategory` stay
-  exhaustive by design.
+- **BREAKING: `grep -r` prefixes matches with the operand as written,
+  matching GNU.** `grep -r p dir` now reports `dir/a.txt`, not the bare
+  `a.txt` kaish stripped it to. An explicit `.` is joined as GNU joins it
+  (`./d/a.txt`); only a defaulted operand stays bare. Several directories
+  or a mixed file+dir operand list were already correct.
 
 ### Fixed
+
 - **A refused external command names the refusal, not "command not found".**
   A disabled-by-configuration shell and a binary built without `subprocess`
   each reported the same 127; each now gets its own message.
@@ -142,6 +135,17 @@ breaking entries are marked **BREAKING**.
   indistinguishable from an empty one. Both now report it on stderr and exit
   **1**, and `tree` marks the node `name [error opening dir]`, which carries
   into `tree --json`. `ls -R --json` has no equivalent marker yet.
+
+- **`ls -R` headers the operand as written, matching GNU, instead of always
+  printing `.`.** `ls -R dir` headered every level `.:`/`sub:` regardless of
+  the operand; an absolute operand never appeared in the headers at all.
+  `--json` node names are unchanged.
+
+- **`ls -R` with several operands recurses into each.** The multi-operand path
+  never read the `recursive` flag, so `ls -R d1 d2` silently produced no
+  recursion and exited 0. `--json` now names each operand's group instead of
+  rooting them all at `.`, where the second overwrote the first.
+
 - **`tee -a` and `>>` now append through a real VFS `Filesystem::append`
   (`O_APPEND`):** no read permission needed, and the read-then-write race
   is closed. New trait method, default impl — no embedder break.
@@ -172,6 +176,11 @@ breaking entries are marked **BREAKING**.
   `seq 1 100000; echo after` reported `did_spill: false` with output still
   truncated. `original_code` keeps the first one for the same reason. The exit
   code still belongs to the last statement.
+
+- **`Kernel::execute("ls").output()` returns the structured tree, not
+  `None`.** Three sites folded it into `.out` and dropped it, so an embedder
+  rendering its own listing got nothing. The REPL's own colors came back
+  with it.
 
 - **Arithmetic inside a `$(…)` inside a double-quoted string works, and stops
   leaking an internal name.** `echo "$(echo $((1+1)))"` was a parse error, and
@@ -2399,7 +2408,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/tobert/kaish/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/tobert/kaish/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/tobert/kaish/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/tobert/kaish/compare/v0.13.0...v0.14.0
