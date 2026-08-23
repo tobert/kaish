@@ -6,7 +6,7 @@ and output capture.
 
 ## Stability
 
-kaish is pre-1.0 (currently 0.15.x, MSRV 1.85). The language has settled;
+kaish is pre-1.0 (currently 0.16.x, MSRV 1.85). The language has settled;
 the embedding API may still change between minor versions where it improves
 both kaish and its embedders — [kaijutsu](https://github.com/tobert/kaijutsu)
 is the reference embedder. Pin a minor version and read release notes when
@@ -1132,7 +1132,7 @@ with no gaps, so indexing the list by it reads the statement it names.
 object" is a promise about a kaish that has `--plan`; an older one prints
 `Unknown option: --plan` to stderr and exits **1** with an empty stdout, which
 is indistinguishable from a malformed command if you branch on the exit code
-alone. Require **kaish 0.15 or newer** with `kaish -V`, and treat unparseable
+alone. Require **kaish 0.16 or newer** with `kaish -V`, and treat unparseable
 stdout as an unsupported binary rather than as a broken source.
 
 **Keep the analysis an optimization, never a requirement.** A consumer that
