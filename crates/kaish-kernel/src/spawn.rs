@@ -102,9 +102,8 @@ pub(crate) struct SpawnRequest {
 
 /// The pieces of an [`ExecContext`] that spawning a child reads.
 ///
-/// Every field is either already on `ExecContext` or was moved there for this
-/// helper. The table is in the module docs of `ExecContext` for the two that
-/// moved; the rest were there already.
+/// Each field is documented on `ExecContext` itself. The copies live here so a
+/// spawn reads the context once and releases the lock before it runs.
 pub(crate) struct SpawnContext {
     /// Fires when this execution path is cancelled — a Ctrl-C, a request
     /// timeout, or the `timeout` builtin's child token. Drives the
