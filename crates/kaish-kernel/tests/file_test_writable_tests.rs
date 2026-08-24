@@ -365,3 +365,43 @@ async fn missing_paths_answer_false_everywhere() {
         both_spellings(&kernel, "", op, "/v/bin/definitely-not-a-builtin", false).await;
     }
 }
+
+// ── Synthesized directories (no mount of their own) ────────────────────────
+
+/// A router with no `/` mount, only a nested one — the shape the
+/// `Kernel::with_backend` doc example builds (`vfs.mount_arc("/v/docs", …)`).
+fn nested_mount_only_kernel() -> Kernel {
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/v/docs", MemoryFs::new());
+    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
+        .expect("with_backend kernel")
+}
+
+/// `VfsRouter::stat` synthesizes a directory for the root and for any
+/// ancestor of a mount, so `-e /v` is true even though nothing is mounted
+/// there. `-r` and `-x` have to agree with `-e` about the same path: a
+/// `path_access` that went straight to `find_mount` would error where `stat`
+/// succeeds, and `[[ -e /v ]] && [[ -r /v ]]` would answer true then false.
+#[tokio::test]
+async fn synthesized_ancestor_directories_are_readable_and_searchable() {
+    let kernel = nested_mount_only_kernel();
+    for path in ["/", "/v"] {
+        both_spellings(&kernel, "", "-e", path, true).await;
+        both_spellings(&kernel, "", "-d", path, true).await;
+        both_spellings(&kernel, "", "-r", path, true).await;
+        both_spellings(&kernel, "", "-x", path, true).await;
+        // The router creates nothing in a directory it synthesized.
+        both_spellings(&kernel, "", "-w", path, false).await;
+    }
+}
+
+/// The real mount underneath still answers for itself.
+#[tokio::test]
+async fn a_real_mount_under_a_synthesized_ancestor_still_answers() {
+    let kernel = nested_mount_only_kernel();
+    both_spellings(&kernel, "", "-w", "/v/docs", true).await;
+    let (_, code) = run(&kernel, "echo hi > /v/docs/note.txt").await;
+    assert_eq!(code, 0, "the real mount must accept the write");
+    both_spellings(&kernel, "", "-w", "/v/docs/note.txt", true).await;
+}
