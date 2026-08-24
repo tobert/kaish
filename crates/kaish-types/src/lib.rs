@@ -12,6 +12,7 @@ pub mod dir_entry;
 pub mod job;
 pub mod kernel;
 pub mod output;
+pub mod path_access;
 // `plan` is deliberately NOT in the flat re-export block below: its names
 // are generic (Plan, PlannedCommand, PlannedValue) and would collide at the
 // crate root. Consumers write `kaish_types::plan::Plan`, like `clock`.
@@ -29,6 +30,7 @@ pub use dir_entry::*;
 pub use job::*;
 pub use kernel::*;
 pub use output::*;
+pub use path_access::*;
 pub use result::*;
 pub use tool::*;
 pub use value::*;
