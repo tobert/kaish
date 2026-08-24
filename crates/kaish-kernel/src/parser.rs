@@ -1288,14 +1288,14 @@ fn parse_tokens(
         if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
-        // `reject_glued_args`'s own `Rich::custom` already carries the right
-        // span (see `glued_run_span`), but it is buried inside a `try_map`
-        // wrapping a whole `.repeated()` argv, so the same chumsky
-        // choice/alt bookkeeping (see `validate_cmd_subst_bodies`'s doc
-        // comment) can steal its span for an unrelated, shallower sibling
-        // failure — a `git show HEAD:training/v9/x.py` glue used to be
-        // reported at `show`, not at `HEAD:training/v9/x.py`. Re-detect the
-        // same condition directly from tokens, outside that machinery.
+        // `reject_glued_args` raises the same rejection from inside the
+        // grammar, but its span never survives: it is buried in a `try_map`
+        // wrapping a whole `.repeated()` argv, and chumsky's choice/alt
+        // bookkeeping (see `validate_cmd_subst_bodies`'s doc comment) hands
+        // our message an unrelated, shallower sibling's span — a
+        // `git show HEAD:training/v9/x.py` glue reported at `show`, not at
+        // `HEAD:training/v9/x.py`. Re-detect the condition directly from
+        // tokens, outside that machinery, and report the span from here.
         if let Err(specific) = validate_glued_args(&tokens) {
             return specific;
         }
@@ -2221,11 +2221,11 @@ fn is_glue_candidate(arg: &Arg) -> bool {
 fn reject_glued_args<'src>(
     args: Vec<(Arg, Span)>,
 ) -> Result<Vec<Arg>, Rich<'src, Token, Span>> {
-    for i in 0..args.len().saturating_sub(1) {
-        let (prev, prev_span) = &args[i];
-        let (next, next_span) = &args[i + 1];
+    for pair in args.windows(2) {
+        let (prev, prev_span) = &pair[0];
+        let (next, next_span) = &pair[1];
         if is_glue_candidate(prev) && is_glue_candidate(next) && prev_span.end == next_span.start {
-            return Err(Rich::custom(glued_run_span(&args, i), GLUED_ARGS_MESSAGE));
+            return Err(Rich::custom(*next_span, GLUED_ARGS_MESSAGE));
         }
     }
     Ok(args.into_iter().map(|(arg, _)| arg).collect())
@@ -2237,30 +2237,6 @@ fn reject_glued_args<'src>(
 const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are not joined into \
      one argument (kaish does no token pasting); quote the whole word, e.g. \
      \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
-
-/// The full span of the maximal run of glue-candidate args around the
-/// adjacent pair at `args[first]`/`args[first + 1]` — extends backward and
-/// forward through every further zero-gap glue-candidate neighbor, so a
-/// paste with 3+ fragments (`/tmp/$(echo x).txt` → 3 fragments) reports the
-/// whole pasted word, not just the two fragments that happened to trip the
-/// check first.
-fn glued_run_span(args: &[(Arg, Span)], first: usize) -> Span {
-    let mut start_idx = first;
-    while start_idx > 0
-        && is_glue_candidate(&args[start_idx - 1].0)
-        && args[start_idx - 1].1.end == args[start_idx].1.start
-    {
-        start_idx -= 1;
-    }
-    let mut end_idx = first + 1;
-    while end_idx + 1 < args.len()
-        && is_glue_candidate(&args[end_idx + 1].0)
-        && args[end_idx].1.end == args[end_idx + 1].1.start
-    {
-        end_idx += 1;
-    }
-    (args[start_idx].1.start..args[end_idx].1.end).into()
-}
 
 /// Arguments list parser that handles `--` flag terminator.
 ///
@@ -3551,6 +3527,13 @@ fn validate_heredoc_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseErro
 /// `ShortFlag` and `DoubleDash`, matching `is_glue_candidate`'s own
 /// exclusion of `Arg::ShortFlag`/`Arg::DoubleDash` — see that function's
 /// doc comment for why.
+///
+/// Known gap: `keyword_word`'s tokens (`do`, `in`, `done`, …) also bind as
+/// `Positional` args, so `git checkout do:x` is a real glue paste this
+/// scanner does not see. It falls through to the grammar's unchanged
+/// generic span (`checkout`) — no worse than before, but not fixed either.
+/// Adding them here needs care: a keyword token in argv position is not
+/// always a word, and this scanner has no grammar context to tell which.
 fn is_word_token(tok: &Token) -> bool {
     matches!(
         tok,
@@ -3710,10 +3693,10 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// and for the same reason as [`validate_cmd_subst_bodies`] (see its doc
 /// comment for the mechanism).
 ///
-/// `reject_glued_args`'s own `Rich::custom` already carries the right span
-/// (`glued_run_span` computes the same maximal-run span this function
-/// does), but it is raised deep inside a `try_map` wrapping the whole argv
-/// `.repeated()`. An unrelated, shallower failed alternative tried
+/// `reject_glued_args` raises the same rejection with its own
+/// `Rich::custom`, but that error's span is unusable: it is raised deep
+/// inside a `try_map` wrapping the whole argv `.repeated()`, and never
+/// reaches the caller intact. An unrelated, shallower failed alternative tried
 /// elsewhere in the grammar for the *same* statement — e.g. an early
 /// attempt to read `git show HEAD:training/v9/x.py` as something other
 /// than a plain command — can still win chumsky's furthest-error
