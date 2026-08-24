@@ -170,3 +170,82 @@ fn parser_custom_guard_count_is_pinned() {
          read this test's doc comment before changing the number"
     );
 }
+
+/// The message and span of a parse failure that is NOT the argv-glue
+/// rejection, after asserting it is not.
+///
+/// `glued_span_text` above cannot express this: it requires the glue
+/// message, so it structurally cannot check that an unrelated error
+/// SURVIVED. That is the half the inversion in `parse_tokens` exists to
+/// guarantee, so it needs its own helper.
+fn unrelated_error(source: &str) -> (String, usize, usize) {
+    let errors = parse(source).expect_err("must be a parse error");
+    let e = &errors[0];
+    assert!(
+        !e.message.contains(PASTE_MESSAGE),
+        "the glued-argv rescan stole an unrelated error for {source:?}: {e:?}"
+    );
+    (e.message.clone(), e.span.start, e.span.end)
+}
+
+/// The distinctive head of the argv-glue message, shared by the tests that
+/// assert it is absent.
+const PASTE_MESSAGE: &str = "adjacent words with no space between them are not joined into one";
+
+/// A program that fails for an unrelated reason, but contains an adjacent
+/// run the token scanner would flag if it ever ran, must keep its own
+/// error.
+///
+/// This is the over-recognition hole: the token scan is an approximation of
+/// the argv grammar and finds adjacency in regions the grammar parses
+/// happily (`$X==1` inside `[[ ]]`, `if=/dev/urandom` as a `dd` operand,
+/// `$a/b` as a `for` list). Each of these ends up a generic
+/// `ExpectedFound`, so `is_glued_args_error` keeps the rescan from running
+/// and the real error — an unterminated construct at end of input —
+/// survives with its own span. All three were verified byte-identical to
+/// shipped 0.16 before being pinned here.
+#[test]
+fn unrelated_failure_keeps_its_own_error_and_span() {
+    let cases = [
+        "if [[ $X==1 ]]; then echo; fi / for x in",
+        "dd if=/dev/urandom / for x in",
+        "for x in $a/b",
+    ];
+    for source in cases {
+        let (message, start, end) = unrelated_error(source);
+        assert!(
+            message.contains("expected expression"),
+            "expected the original end-of-input error for {source:?}, got: {message}"
+        );
+        assert_eq!(
+            (start, end),
+            (source.len(), source.len()),
+            "the error for {source:?} must still point at end of input: {message}"
+        );
+    }
+}
+
+/// `--key=value` must scan as ONE unit, so spaced long flags are never read
+/// as a paste.
+///
+/// This drives the `LongFlag` half of `is_assign_key_token`. Without that
+/// fusion `--a=1` scans as three adjacent fragments, and since the scanner
+/// reports the first zero-gap run it finds, it would blame `--a=1` instead
+/// of the real paste later in the line. Nothing else in this file drives
+/// `--key=value` through the scanner at all.
+#[test]
+fn long_flag_value_fusion_keeps_spaced_flags_out_of_the_run() {
+    assert_eq!(
+        glued_span_text("foo --a=1 --b=2 HEAD:x/y"),
+        "HEAD:x/y",
+        "spaced --key=value flags must not be mistaken for the pasted word"
+    );
+}
+
+/// The control for the test above: spaced long flags with no paste present
+/// parse cleanly, so the case above is testing the run's boundary and not
+/// merely that the program fails.
+#[test]
+fn spaced_long_flag_values_parse() {
+    parse("foo --a=1 --b=2").expect("spaced --key=value flags are valid");
+}
