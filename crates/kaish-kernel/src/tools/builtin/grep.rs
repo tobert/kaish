@@ -401,7 +401,11 @@ impl Tool for Grep {
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
                 };
-            let operands = if operands.is_empty() {
+            // GNU distinguishes a WRITTEN `.` from a defaulted one:
+            // `grep -r p .` reports `./d/a.txt` while a bare `grep -r p`
+            // reports `d/a.txt`. Remember which happened.
+            let operand_defaulted = operands.is_empty();
+            let operands = if operand_defaulted {
                 vec![".".to_string()]
             } else {
                 operands
@@ -412,14 +416,14 @@ impl Tool for Grep {
             // Kept alongside `dir_roots`: the display rule below depends on how
             // the caller SPELLED the operand, which the resolved path no longer
             // shows.
-            let mut dir_written_absolute: Vec<bool> = Vec::new();
+            let mut dir_operand_text: Vec<String> = Vec::new();
             for operand in &operands {
                 let resolved = ctx.resolve_path(operand);
                 match ctx.backend.stat(&resolved).await {
                     Ok(entry) if entry.is_file() => file_operands.push(resolved),
                     _ => {
                         dir_roots.push(resolved);
-                        dir_written_absolute.push(operand.starts_with('/'));
+                        dir_operand_text.push(operand.clone());
                     }
                 }
             }
@@ -487,11 +491,18 @@ impl Tool for Grep {
                 let has_file_operands = !file_operands.is_empty();
                 files.extend(file_operands);
 
-                // Display prefix: strip the sole walk root — preserving the
-                // historical `grep -r p dir` → `file` display byte-for-byte —
-                // whenever there's exactly one directory and no file operand
-                // mixed in. Otherwise strip cwd so each source shows under its
-                // own subpath (`top.txt`, `sub/inner.txt`).
+                // Display prefix: GNU prefixes every result with the operand
+                // exactly as written — `grep -r p dir` → `dir/a.txt`,
+                // `grep -r p ./dir` → `./dir/a.txt`, and `grep -r p .` →
+                // `./d/a.txt`. The `.` is NOT a special case: GNU joins it
+                // like any other operand. Only a DEFAULTED operand (no path
+                // written at all) reports bare names, which is why the two
+                // are tracked apart above. `display_root` still
+                // strips the resolved walk root from each match; `display_prefix`
+                // is then joined back on for a sole relative directory operand.
+                // Several directories or a mixed file+dir operand list instead
+                // strip cwd so each source shows under its own subpath
+                // (`dir/top.txt`, `dir2/inner.txt`), which already matches GNU.
                 //
                 // An operand written absolute keeps absolute results, as GNU
                 // does: `grep -r p /srv/log` reports `/srv/log/a.txt`, not
@@ -502,21 +513,24 @@ impl Tool for Grep {
                 // instead of relativizing, and `/` is the default cwd for an
                 // isolated kernel.
                 let sole_dir = dir_roots.len() == 1 && !has_file_operands;
-                let display_root = if sole_dir && dir_written_absolute[0] {
-                    PathBuf::new()
+                let sole_dir_absolute = sole_dir && dir_operand_text[0].starts_with('/');
+                let (display_root, display_prefix) = if sole_dir_absolute {
+                    (PathBuf::new(), None)
+                } else if sole_dir && !operand_defaulted {
+                    (dir_roots[0].clone(), Some(dir_operand_text[0].clone()))
                 } else if sole_dir {
-                    dir_roots[0].clone()
+                    (dir_roots[0].clone(), None)
                 } else {
                     let cwd = ctx.resolve_path(".");
-                    if cwd == Path::new("/") {
-                        PathBuf::new()
-                    } else {
-                        cwd
-                    }
+                    let root = if cwd == Path::new("/") { PathBuf::new() } else { cwd };
+                    (root, None)
                 };
 
                 return self
-                    .grep_multiple_files(ctx, &files, &display_root, &matcher, &grep_opts, quiet, files_only, count_only, false)
+                    .grep_multiple_files(
+                        ctx, &files, &display_root, display_prefix.as_deref(), &matcher,
+                        &grep_opts, quiet, files_only, count_only, false,
+                    )
                     .await;
             }
         }
@@ -540,7 +554,7 @@ impl Tool for Grep {
                 .collect();
             return self
                 .grep_multiple_files(
-                    ctx, &resolved, &root, &matcher, &grep_opts, quiet, files_only, count_only, true,
+                    ctx, &resolved, &root, None, &matcher, &grep_opts, quiet, files_only, count_only, true,
                 )
                 .await;
         }
@@ -799,6 +813,11 @@ impl Grep {
         ctx: &mut ExecContext,
         files: &[PathBuf],
         root: &Path,
+        // The sole-directory GNU-parity case: the operand text to re-join
+        // after stripping `root`, e.g. `dir` or `./dir` (see the call site).
+        // `None` for every other case — the stripped path is the display name
+        // as-is.
+        display_prefix: Option<&str>,
         matcher: &RegexMatcher,
         base_opts: &GrepOptions,
         quiet: bool,
@@ -829,11 +848,16 @@ impl Grep {
 
         for file_path in files {
             // Create relative filename for display
-            let display_name = file_path
-                .strip_prefix(root)
-                .unwrap_or(file_path)
-                .to_string_lossy()
-                .to_string();
+            let stripped = file_path.strip_prefix(root).unwrap_or(file_path);
+            let display_name = match display_prefix {
+                // Join the operand text back on, trimming any trailing slash
+                // it carried (`dir/` → `dir/a.txt`, not `dir//a.txt`) so the
+                // result is the same path GNU prints for the same operand.
+                Some(prefix) => {
+                    format!("{}/{}", prefix.trim_end_matches('/'), stripped.to_string_lossy())
+                }
+                None => stripped.to_string_lossy().to_string(),
+            };
 
             let bytes = match ctx.backend.read(file_path, None).await {
                 Ok(data) => data,

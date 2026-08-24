@@ -3,7 +3,12 @@
 use std::fmt;
 
 /// Severity level for validation issues.
+///
+/// `#[non_exhaustive]`: `KernelError` tells embedders to route on a
+/// rejection's issues, so a level added later must not break a matcher that
+/// already handles the ones it knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     /// Errors prevent execution.
     Error,
@@ -21,7 +26,14 @@ impl fmt::Display for Severity {
 }
 
 /// Categorizes validation issues for filtering and tooling.
+///
+/// `#[non_exhaustive]`: `docs/EMBEDDING.md` tells embedders to route on this
+/// code rather than on message text, and this list grows every cycle. An
+/// exhaustive `match` here would break on each new check, which is the same
+/// shape as all five of 0.15.0's undeclared breaking changes. Add a
+/// wildcard arm that fails loudly, never a silent default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IssueCode {
     /// Command not found in registry or user tools.
     UndefinedCommand,

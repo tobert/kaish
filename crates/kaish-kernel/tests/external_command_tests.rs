@@ -939,6 +939,65 @@ async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
 }
 
 // ---------------------------------------------------------------------------
+// A kernel with external commands turned off must name that condition, not
+// claim the command doesn't exist. This is the kaijutsu bug the fix exists
+// for: a read-only shell's `git` lookup came back "command not found", and
+// the calling model concluded git wasn't installed and gave up — when
+// `allow_external_commands: false` was the actual, actionable reason.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn disabled_external_commands_report_the_condition_not_command_not_found() {
+    // `/bin/sh` genuinely exists — verify that first, so a passing result
+    // here can't be confused with the genuinely-missing case the control
+    // test below covers.
+    assert!(
+        std::path::Path::new("/bin/sh").exists(),
+        "test fixture requires /bin/sh to exist on this system"
+    );
+
+    let config = KernelConfig::repl().with_allow_external_commands(false);
+    let kernel = Kernel::new(config).expect("kernel with external commands disabled");
+
+    let result = kernel.execute("/bin/sh -c true").await.expect("execute");
+
+    assert_eq!(result.code, 127, "policy refusal keeps the not-found exit code: {result:?}");
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        !msg.contains("command not found"),
+        "a resolvable command refused by policy must not be misreported as missing: {msg}"
+    );
+    assert!(
+        msg.contains("external commands are disabled on this shell"),
+        "the refusal should name the actual condition: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn enabled_external_commands_still_report_not_found_for_a_missing_command() {
+    // Control for the test above: proves the fix didn't just relabel every
+    // external-command failure as "disabled". With external commands
+    // allowed, a name that genuinely isn't on PATH must still say so.
+    let kernel = repl_kernel();
+
+    let result = kernel
+        .execute("definitely-not-a-real-command-disabled-reason-fix")
+        .await
+        .expect("execute");
+
+    assert_eq!(result.code, 127, "not found is still exit 127: {result:?}");
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        msg.contains("command not found"),
+        "a genuinely missing command must keep the generic not-found message: {msg}"
+    );
+    assert!(
+        !msg.contains("external commands are disabled"),
+        "must not claim policy refusal when the command simply isn't on PATH: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // A partial `read` leaves a buffered prefix AND a live pipe. They are one
 // stream: an external command's stdin must receive the prefix first, then the
 // rest of the pipe. Choosing one and dropping the other silently skips the
@@ -967,5 +1026,42 @@ async fn an_external_command_after_a_partial_read_sees_the_remainder() {
         result.text_out(),
         "second\nthird\n",
         "the external command must resume where `read` stopped"
+    );
+}
+
+/// `env CMD` spawns CMD, so it must answer to the external-commands gate.
+/// It did not: `env` reached `tokio::process::Command` directly with no check,
+/// so a kernel with external commands off still ran the host binary. A sandbox
+/// bypass, shipped in 0.15.0, and reachable by any embedder running a
+/// read-only shell — `env FOO=bar curl ...` escaped it.
+///
+/// Found by a kaibo review of the refusal-message work, which asked whether
+/// every route to a refused external command was covered. This one was not.
+#[tokio::test]
+async fn env_cannot_bypass_the_external_commands_gate() {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+
+    // The control: a direct external command is refused. This also stands in
+    // for the precondition — `allow_external_commands` is private, so the
+    // refusal itself is how the test proves the gate is closed.
+
+    let direct = kernel.execute("/bin/echo MARKER").await.expect("exec");
+    assert_ne!(direct.code, 0, "direct external must be refused");
+    assert!(!direct.text_out().contains("MARKER"));
+
+    // The bug: the same binary reached through `env`.
+    let via_env = kernel
+        .execute("env FOO=bar /bin/echo MARKER")
+        .await
+        .expect("exec");
+    assert!(
+        !via_env.text_out().contains("MARKER"),
+        "SANDBOX BYPASS: env ran a host binary with external commands disabled: {via_env:?}"
+    );
+    assert_ne!(via_env.code, 0, "env must refuse, not silently succeed");
+    assert!(
+        via_env.err.contains("external commands are"),
+        "the refusal must name the condition: {:?}",
+        via_env.err
     );
 }

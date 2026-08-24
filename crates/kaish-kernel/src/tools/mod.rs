@@ -28,9 +28,10 @@ pub use builtin::register_builtins;
 pub use builtin::{resolve_in_path, virtual_cwd_error};
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use context::{
-    ExecContext, GateExpectations, OutputContext, OverwriteExpectation, DEFAULT_KILL_GRACE,
+    external_commands_unavailable_error, ExecContext, ExternalCommandsUnavailable,
+    GateExpectations, OutputContext, OverwriteExpectation, DEFAULT_KILL_GRACE,
 };
-pub(crate) use context::{cas_overwrite, is_trash_excluded};
+pub(crate) use context::{cas_overwrite, is_trash_excluded, ExternalCommandOutcome};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
 pub use traits::{ArgBinding, global_flag_value_is_truthy, is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};

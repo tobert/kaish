@@ -39,7 +39,7 @@ use async_trait::async_trait;
 
 use kaish_types::{ExecResult, ParamSchema, ToolArgs, ToolSchema, Value};
 
-use kaish_tool_api::{IssueCode, Severity, ValidationIssue};
+use kaish_tool_api::{IssueCode, ValidationIssue};
 
 use crate::spawn::{
     hermetic_env, spawn_process, OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy,
@@ -484,14 +484,10 @@ fn issue(error: &WrappedError, uncertain: bool) -> ValidationIssue {
         }
         _ => IssueCode::WrappedCallRejected,
     };
-    let severity = if uncertain {
-        Severity::Warning
+    if uncertain {
+        ValidationIssue::warning(code, error.to_string())
     } else {
-        Severity::Error
-    };
-    match severity {
-        Severity::Warning => ValidationIssue::warning(code, error.to_string()),
-        Severity::Error => ValidationIssue::error(code, error.to_string()),
+        ValidationIssue::error(code, error.to_string())
     }
 }
 
