@@ -11,20 +11,15 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
-- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding
-  only an `ExecContext` can spawn a child with the kernel's external-command
-  discipline. `tools::DEFAULT_KILL_GRACE` (2s) is the stand-alone default.
-  Constructors are unchanged; only a struct literal must add the two fields.
+- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding only
+  an `ExecContext` can spawn a child with the kernel's external-command
+  discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
 
 ### Added
 - **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
-  register an external program as a tool with a declared grammar — pinned
-  executable, allowlisted verbs and flags (deny-by-default, exit 2 before any
-  spawn, reported by the validator), kernel-rendered argv, hermetic env plus
-  pins, `Stdin::{Closed,Pipe}`, `Tail::{Deny,AfterDashDash,Forward}`,
-  constraints `required`/`int`/`choices`/`path_under`, `json_output` verbs
-  binding typed. Runs with `allow_external_commands` off. See
-  `docs/wrapped_command.md`.
+  register an external program as a tool with a declared grammar. Verbs and flags
+  are deny-by-default, refused with exit 2 before any spawn; the kernel renders
+  argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
 
 ### Fixed
 - `help <tool>` renders a tool's subcommands and their flags, and names each
