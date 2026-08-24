@@ -636,3 +636,30 @@ async fn jq_arg_two_value_form_still_binds_name_and_value() {
     assert_eq!(code, 0, "out={out:?}");
     assert_eq!(out.trim(), "\"kaish\"", "--arg NAME VAL binds both slots: {out:?}");
 }
+
+// ───────── builtin echo keeps a non-canonical numeral's source text ─────────
+// `echo -0` used to print `0`: the builtin reads `args.positional` directly
+// as a typed `Value` (never the clap-parsed field, which is a
+// validation-only sink), and `Value::Int` has no way to reproduce `-0` —
+// the external-command fix (`kernel.rs::build_args_flat`) never touches
+// this path at all, since `echo` is a builtin, not a spawned process.
+// `ToolArgs::positional_raw` closes the same class of bug for builtin argv
+// that build_args_flat closed for external-command argv.
+
+#[tokio::test]
+async fn echo_builtin_preserves_noncanonical_numeral_source_text() {
+    let (out, code) = run("echo -0 0.10 1.0 -0.0", "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(
+        out.trim(),
+        "-0 0.10 1.0 -0.0",
+        "the builtin must print the exact source words, not their typed re-serialization"
+    );
+}
+
+#[tokio::test]
+async fn echo_builtin_still_prints_canonical_numerals_plainly() {
+    let (out, code) = run("echo -1 -5 -0.5 42", "").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.trim(), "-1 -5 -0.5 42");
+}

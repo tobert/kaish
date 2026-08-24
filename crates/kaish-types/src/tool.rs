@@ -471,8 +471,34 @@ impl ToolSchema {
 pub struct ToolArgs {
     /// Positional arguments in order.
     pub positional: Vec<Value>,
+    /// Verbatim source text for a `positional` entry whose typed `Display`
+    /// would not reproduce it — a negative zero or a non-canonical trailing
+    /// fraction digit (`-0`, `0.10`, `1.0`; see `lexer::Token::NumericLiteral`
+    /// in kaish-kernel). Keyed by index into `positional`; absent at every
+    /// index holding an ordinary value, so this stays empty for the common
+    /// case and costs nothing there.
+    ///
+    /// This exists because most builtins read a positional's real value
+    /// straight off `positional`, never off the clap-parsed struct (see
+    /// `value_to_argv_token`'s doc comment) — a plain `Value::Int`/`Float`
+    /// genuinely cannot carry back the source text once typed. A builtin
+    /// that echoes a positional's text verbatim (`echo`) should check this
+    /// first: `args.positional_raw.get(&i)`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub positional_raw: BTreeMap<usize, String>,
     /// Named arguments by key.
     pub named: BTreeMap<String, Value>,
+    /// Verbatim source text for a `named` entry whose typed `Display` would
+    /// not reproduce it — same idea as `positional_raw`, keyed by the same
+    /// key. Unlike a positional, a named value is normally read off the
+    /// clap-parsed struct (`parsed.count`, …) rather than `named` directly,
+    /// so `to_argv`/`to_argv_excluding` consult this when rendering
+    /// `--key=value`, and the fix reaches the clap field the usual way.
+    /// Only ever populated for a single (non-repeated) value — a repeatable
+    /// flag's accumulated `Value::Json(Array(Array(...)))` is not a bare
+    /// numeral literal in the first place.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named_raw: BTreeMap<String, String>,
     /// Boolean flags (e.g., -l, --force).
     pub flags: HashSet<String>,
     /// Every word after the tool name, in source order, post-expansion —
@@ -487,6 +513,10 @@ pub struct ToolArgs {
     /// Render it to a clap argv with [`ToolArgs::words_argv`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub words: Option<Vec<Value>>,
+    /// Same idea as `positional_raw`, but for `words` — keyed by index into
+    /// `words`. Only ever populated when `words` is `Some`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub words_raw: BTreeMap<usize, String>,
 }
 
 impl ToolArgs {
@@ -495,18 +525,44 @@ impl ToolArgs {
         Self::default()
     }
 
+    /// The display text for positional `index`: its verbatim source text
+    /// from `positional_raw` when the literal there was a non-canonical
+    /// numeral, otherwise `value_to_argv_token` on the typed value. `None`
+    /// when `index` is out of range.
+    ///
+    /// A builtin that prints a positional's text as-is (`echo`) should call
+    /// this instead of stringifying `positional[index]` itself — that is
+    /// exactly the gap this method closes. A builtin that needs the typed
+    /// value (arithmetic, a numeric comparison) should keep reading
+    /// `positional[index]` directly; `value` there is unaffected by this
+    /// field and stays a real `Int`/`Float`.
+    pub fn positional_text(&self, index: usize) -> Option<String> {
+        if let Some(raw) = self.positional_raw.get(&index) {
+            return Some(raw.clone());
+        }
+        self.positional.get(index).map(value_to_argv_token)
+    }
+
     /// Render [`words`](Self::words) into argv tokens for a verbatim tool's
     /// own parser. Empty when the tool is not verbatim.
     ///
     /// A [`Value::Bytes`] word renders as an inert placeholder token, as
     /// [`to_argv`](Self::to_argv) does for a binary positional; the real bytes
-    /// stay at the matching index in `words`.
+    /// stay at the matching index in `words`. A non-canonical numeral (`-0`,
+    /// `0.10`) renders its `words_raw` entry instead of `value`'s `Display`,
+    /// the same substitution `positional_text` makes for `positional`.
     pub fn words_argv(&self) -> Vec<String> {
         self.words
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(value_to_argv_token)
+            .enumerate()
+            .map(|(i, value)| {
+                self.words_raw
+                    .get(&i)
+                    .cloned()
+                    .unwrap_or_else(|| value_to_argv_token(value))
+            })
             .collect()
     }
 
@@ -694,6 +750,10 @@ impl ToolArgs {
             if exclude.contains(&key.as_str()) {
                 continue;
             }
+            if let Some(raw) = self.named_raw.get(key) {
+                argv.push(format!("{}={}", flag_token(key), raw));
+                continue;
+            }
             for rendered in render_named_value(key, value)? {
                 argv.push(format!("{}={}", flag_token(key), rendered));
             }
@@ -703,8 +763,13 @@ impl ToolArgs {
         // they begin with `-` (e.g. `echo -- -n` should print `-n`).
         if !self.positional.is_empty() {
             argv.push("--".to_string());
-            for value in &self.positional {
-                argv.push(value_to_argv_token(value));
+            for (i, value) in self.positional.iter().enumerate() {
+                argv.push(
+                    self.positional_raw
+                        .get(&i)
+                        .cloned()
+                        .unwrap_or_else(|| value_to_argv_token(value)),
+                );
             }
         }
 
@@ -970,6 +1035,59 @@ mod to_argv_tests {
         args.positional.push(Value::String("hello".into()));
         args.positional.push(Value::String("world".into()));
         assert_eq!(args.to_argv().unwrap(), vec!["--", "hello", "world"]);
+    }
+
+    // ─────────────────── positional_raw / named_raw / words_raw ───────────────────
+    // A non-canonical numeral (`-0`) is still typed as `Value::Int(0)` — that's
+    // the mathematically correct value — but its own `Display` cannot get back
+    // to `-0`. `*_raw` is where the source text that `Value` alone lost lives.
+
+    #[test]
+    fn positional_raw_overrides_the_typed_value_in_to_argv() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(0));
+        args.positional_raw.insert(0, "-0".to_string());
+        assert_eq!(args.to_argv().unwrap(), vec!["--", "-0"]);
+    }
+
+    #[test]
+    fn positional_text_prefers_raw_and_falls_back_to_the_typed_value() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(0));
+        args.positional.push(Value::Int(5));
+        args.positional_raw.insert(0, "-0".to_string());
+        assert_eq!(args.positional_text(0).as_deref(), Some("-0"));
+        assert_eq!(args.positional_text(1).as_deref(), Some("5"));
+        assert_eq!(args.positional_text(2), None, "out of range");
+    }
+
+    #[test]
+    fn named_raw_overrides_the_typed_value_in_to_argv() {
+        let mut args = ToolArgs::new();
+        args.named.insert("count".into(), Value::Float(0.10));
+        args.named_raw.insert("count".into(), "0.10".to_string());
+        assert_eq!(args.to_argv().unwrap(), vec!["--count=0.10"]);
+    }
+
+    #[test]
+    fn words_raw_overrides_the_typed_value_in_words_argv() {
+        let mut args = ToolArgs::new();
+        args.words = Some(vec![Value::String("echo".into()), Value::Float(1.0)]);
+        args.words_raw.insert(1, "1.0".to_string());
+        assert_eq!(args.words_argv(), vec!["echo", "1.0"]);
+    }
+
+    #[test]
+    fn a_canonical_numeral_is_unaffected_by_the_raw_fields() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(5));
+        args.named.insert("count".into(), Value::Int(3));
+        args.words = Some(vec![Value::Int(7)]);
+        assert!(args.positional_raw.is_empty());
+        assert!(args.named_raw.is_empty());
+        assert!(args.words_raw.is_empty());
+        assert_eq!(args.to_argv().unwrap(), vec!["--count=3", "--", "5"]);
+        assert_eq!(args.words_argv(), vec!["7"]);
     }
 
     #[test]

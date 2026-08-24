@@ -21,6 +21,11 @@ breaking entries are marked **BREAKING**.
   not a JSON number, and `fromjson` already refused it. `-0`, `0.10`, and
   `1.0` are unaffected; they stay numbers.
 
+- **A builtin's argv lost a numeral's exact text too** — `echo -0` printed
+  `0`, `echo 0.10` printed `0.1`. `echo`, function calls, and script
+  `$1`/`$2` now keep the source word, matching the external-command fix
+  above.
+
 ## [0.16.0] - 2026-08-23
 
 ### Added
