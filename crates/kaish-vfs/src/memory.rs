@@ -114,6 +114,40 @@ impl MemoryFs {
     }
 
     /// Maximum symlink follow depth (matches Linux ELOOP limit).
+    /// Mode reported for a `MemoryFs` directory: readable, writable, and
+    /// searchable by everyone.
+    ///
+    /// `MemoryFs` has no permission model — it never refuses an operation
+    /// over a mode — so these constants describe what it actually does
+    /// rather than restricting anything. Reporting them (instead of `None`)
+    /// is what lets `test -w` close its absent-mode default: with every
+    /// writable backend reporting a mode, an absent mode means "this backend
+    /// does not model permissions", and every backend still in that position
+    /// is read-only. There is no `chmod` builtin; these are observations.
+    pub const DIRECTORY_MODE: u32 = 0o777;
+
+    /// Mode reported for a `MemoryFs` file: readable and writable, never
+    /// executable. `real_path` is `None` for a memory-backed path, so there
+    /// is nothing for exec(2) to open and the `x` bit would be a lie.
+    pub const FILE_MODE: u32 = 0o666;
+
+    /// Mode reported for a `MemoryFs` symlink, matching `lrwxrwxrwx` on
+    /// Linux. Only `lstat` and `list` ever show it — `stat` follows the link
+    /// and reports the target's mode.
+    pub const SYMLINK_MODE: u32 = 0o777;
+
+    /// The mode this filesystem reports for an entry of `kind`.
+    fn mode_for(kind: DirEntryKind) -> Option<u32> {
+        Some(match kind {
+            DirEntryKind::Directory => Self::DIRECTORY_MODE,
+            DirEntryKind::File => Self::FILE_MODE,
+            DirEntryKind::Symlink => Self::SYMLINK_MODE,
+            // A kind this crate does not know about gets the conservative
+            // answer rather than a guess: not writable, not executable.
+            _ => 0o444,
+        })
+    }
+
     const MAX_SYMLINK_DEPTH: usize = 40;
 
     /// Read a file, following symlinks with depth limit.
@@ -210,7 +244,7 @@ impl MemoryFs {
                     kind: DirEntryKind::Directory,
                     size: 0,
                     modified: Some(system_now()),
-                    permissions: None,
+                    permissions: Some(Self::DIRECTORY_MODE),
                     symlink_target: None,
                 });
             }
@@ -224,7 +258,7 @@ impl MemoryFs {
                             kind: DirEntryKind::File,
                             size: data.len() as u64,
                             modified: Some(*modified),
-                            permissions: None,
+                            permissions: Some(Self::FILE_MODE),
                             symlink_target: None,
                         },
                         None,
@@ -235,7 +269,7 @@ impl MemoryFs {
                             kind: DirEntryKind::Directory,
                             size: 0,
                             modified: Some(*modified),
-                            permissions: None,
+                            permissions: Some(Self::DIRECTORY_MODE),
                             symlink_target: None,
                         },
                         None,
@@ -246,7 +280,7 @@ impl MemoryFs {
                             kind: DirEntryKind::File, // placeholder, will be overridden
                             size: 0,
                             modified: None,
-                            permissions: None,
+                            permissions: Some(Self::FILE_MODE),
                             symlink_target: None,
                         },
                         Some(target.clone()),
@@ -490,7 +524,7 @@ impl Filesystem for MemoryFs {
                             kind,
                             size,
                             modified,
-                            permissions: None,
+                            permissions: Self::mode_for(kind),
                             symlink_target,
                         });
                     }
@@ -529,7 +563,7 @@ impl Filesystem for MemoryFs {
                 kind: DirEntryKind::Directory,
                 size: 0,
                 modified: Some(system_now()),
-                permissions: None,
+                permissions: Some(Self::DIRECTORY_MODE),
                 symlink_target: None,
             });
         }
@@ -540,7 +574,7 @@ impl Filesystem for MemoryFs {
                 kind: DirEntryKind::File,
                 size: data.len() as u64,
                 modified: Some(*modified),
-                permissions: None,
+                permissions: Some(Self::FILE_MODE),
                 symlink_target: None,
             }),
             Some(Entry::Directory { modified }) => Ok(DirEntry {
@@ -548,7 +582,7 @@ impl Filesystem for MemoryFs {
                 kind: DirEntryKind::Directory,
                 size: 0,
                 modified: Some(*modified),
-                permissions: None,
+                permissions: Some(Self::DIRECTORY_MODE),
                 symlink_target: None,
             }),
             Some(Entry::Symlink { target, modified }) => Ok(DirEntry {
@@ -556,7 +590,7 @@ impl Filesystem for MemoryFs {
                 kind: DirEntryKind::Symlink,
                 size: 0,
                 modified: Some(*modified),
-                permissions: None,
+                permissions: Some(Self::SYMLINK_MODE),
                 symlink_target: Some(target.clone()),
             }),
             None => Err(io::Error::new(
