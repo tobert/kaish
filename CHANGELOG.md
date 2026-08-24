@@ -10,6 +10,23 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`test -w` on a virtual path** — `-w /v/bin/echo` and `-w /v/jobs/1/status`
+  answered yes about read-only mounts. `MemoryFs` and `DevFs` now report modes,
+  and `-w` needs the mount and the mode to agree.
+
+### Changed
+
+- **`test -x DIR` on a memory-backed directory** — now yes. `x` on a directory
+  means searchable, which these are; it answered no while modes were absent.
+
+### Added
+
+- **`KernelBackend::path_access` and `Filesystem::path_access`** — the per-path
+  read/write/execute query behind the file tests. Both are defaulted, so
+  existing implementations keep compiling; not breaking.
+
 ## [0.16.0] - 2026-08-23
 
 ### Added
