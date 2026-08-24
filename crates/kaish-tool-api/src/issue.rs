@@ -253,13 +253,28 @@ pub struct ValidationIssue {
     pub span: Option<Span>,
     /// Optional suggestion for fixing the issue.
     pub suggestion: Option<String>,
-    /// The command this issue concerns, when one is genuinely known —
-    /// `UndefinedCommand`'s unresolved name, or the builtin whose own
-    /// `Tool::validate` raised the issue (a bad regex, a missing required
-    /// argument, a zero `seq` increment, ...).
+    /// The command this issue concerns, when one is genuinely known.
     ///
-    /// Absent, never a placeholder, when an issue is not about a command at
-    /// all — an assignment target, a bare `break`, an undefined variable.
+    /// `Some(name)` for an Error-severity issue a builtin's own
+    /// `Tool::validate` override raises about *itself* — a bad `grep`
+    /// regex, an invalid `sed`/`jq` expression, a zero `seq` increment, a
+    /// wrong `diff` operand count, .... These reach an embedder matching
+    /// `KernelError::Validation`, since kaish-kernel filters that variant's
+    /// issues to Error severity (see `docs/EMBEDDING.md`).
+    ///
+    /// Also `Some(name)` for `UndefinedCommand`'s unresolved name — but that
+    /// issue is Warning severity, so it never reaches
+    /// `KernelError::Validation`; reading it means driving kaish-kernel's
+    /// `Validator` directly rather than going through `Kernel::execute`.
+    ///
+    /// `None`, never a placeholder, when an issue is not about a command at
+    /// all — an assignment target, a bare `break`, an undefined variable —
+    /// and also when a builtin's own `Tool::validate` raises an issue about
+    /// one of its *arguments* rather than about the command itself:
+    /// `MixedScriptName` fires from `export`/`read`/`unset`/`push`/
+    /// `scatter --as`'s own `validate()`, but the mis-spelled name is the
+    /// argument, not the command, so it stays absent there too.
+    ///
     /// Route on `code` (this crate's own advice), then narrow by `command`
     /// when the code can fire for more than one command; don't parse
     /// `message` to recover a name this field already gives you.
