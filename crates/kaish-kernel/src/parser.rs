@@ -1295,8 +1295,14 @@ fn parse_tokens(
         // bookkeeping (see `validate_cmd_subst_bodies`'s doc comment) hands
         // our message an unrelated, shallower sibling's span — a
         // `git show HEAD:training/v9/x.py` glue reported at `show`, not at
-        // `HEAD:training/v9/x.py`. Re-detect the condition directly from
-        // tokens, outside that machinery, and report the span from here.
+        // `HEAD:training/v9/x.py`. Re-derive the paste directly from tokens,
+        // outside that machinery, and report the span from here.
+        //
+        // "Re-derive", not "re-check": the token scan is an independent
+        // approximation of the argv grammar, and it neither sees exactly
+        // what `reject_glued_args` saw nor stays inside argv — it will find
+        // adjacency in regions the grammar parses happily. That is why the
+        // gate below is the load-bearing part and not a formality.
         //
         // Only when the grammar's surviving error IS that rejection. This
         // corrects a span; it must never author a verdict. Every other
@@ -3551,73 +3557,98 @@ fn validate_heredoc_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseErro
 }
 
 /// True for a lexer token that becomes exactly one glue-candidate `Arg`
-/// (`Positional` or a bare `LongFlag`) on its own — every single-token
-/// `primary_expr_parser` production, plus the `test`/`[` operators
-/// (`test_operator_arg_parser`'s `=`, `==`, `!=`, `!`). Excludes
-/// `ShortFlag` and `DoubleDash`, matching `is_glue_candidate`'s own
-/// exclusion of `Arg::ShortFlag`/`Arg::DoubleDash` — see that function's
-/// doc comment for why.
+/// (`Positional` or a bare `LongFlag`) on its own.
 ///
-/// Known gap: `keyword_word`'s tokens (`do`, `in`, `done`, …) also bind as
-/// `Positional` args, so `git checkout do:x` is a real glue paste this
-/// scanner does not see. It falls through to the grammar's unchanged
-/// generic span (`checkout`) — no worse than before, but not fixed either.
-/// Adding them here needs care: a keyword token in argv position is not
-/// always a word, and this scanner has no grammar context to tell which.
+/// Exhaustive over `Token`, with no wildcard arm, the same way
+/// `Token::category` is in `lexer.rs`. `Token` is `#[non_exhaustive]`, but
+/// this parser lives in the same crate, so an in-crate exhaustive match is
+/// allowed — and a new `Token` variant then becomes a compile error here
+/// that forces a decision, instead of a silently un-improved span.
+///
+/// The limit of that guarantee is worth stating plainly, because it is a
+/// real one: this enforces completeness against the `Token` ENUM, not
+/// against the GRAMMAR. If `primary_expr_parser` later grows a production
+/// built from a token already listed `false` below, nothing fails to
+/// compile and this scanner just keeps missing it — exactly the drift the
+/// exhaustive match looks like it prevents. `parser_custom_guard_count_is_pinned`
+/// pins a third axis again (diagnoses, not words). None of the three is a
+/// total solution; each closes one way for this code to rot quietly.
 fn is_word_token(tok: &Token) -> bool {
-    matches!(
-        tok,
-        Token::Ident(_)
-            | Token::LongFlag(_)
-            | Token::Path(_)
-            | Token::RelativePath(_)
-            | Token::DotSlashPath(_)
-            | Token::TildePath(_)
-            | Token::DottedIdent(_)
-            | Token::NumberIdent(_)
-            | Token::DashNumWord(_)
-            | Token::AtWord(_)
-            | Token::JobSpec(_)
-            | Token::GlobWord(_)
-            | Token::String(_)
-            | Token::SingleString(_)
-            | Token::Int(_)
-            | Token::Float(_)
-            | Token::True
-            | Token::False
-            | Token::SimpleVarRef(_)
-            | Token::VarRef(_)
-            | Token::VarLength(_)
-            | Token::Positional(_)
-            | Token::AllArgs
-            | Token::ArgCount
-            | Token::LastExitCode
-            | Token::CurrentPid
-            | Token::Arithmetic(_)
-            | Token::PlusBare(_)
-            | Token::MinusBare(_)
-            | Token::MinusAlone
-            | Token::DoubleDashBare(_)
-            | Token::Star
-            | Token::Question
-            | Token::Colon
-            | Token::Comma
-            | Token::Dot
-            | Token::DotDot
-            | Token::Tilde
-            | Token::Eq
-            | Token::EqEq
-            | Token::NotEq
-            | Token::Bang
-    )
+    match tok {
+        Token::True | Token::False | Token::EqEq | Token::NotEq | Token::Eq
+        | Token::Colon | Token::Comma | Token::DotDot | Token::Dot | Token::TildePath(_)
+        | Token::Tilde | Token::RelativePath(_) | Token::DotSlashPath(_)
+        | Token::DottedIdent(_) | Token::Star | Token::Bang | Token::Question
+        | Token::GlobWord(_) | Token::Arithmetic(_) | Token::LongFlag(_)
+        | Token::DoubleDashBare(_) | Token::PlusBare(_) | Token::MinusBare(_)
+        | Token::JobSpec(_) | Token::MinusAlone | Token::String(_)
+        | Token::SingleString(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
+        | Token::Positional(_) | Token::AllArgs | Token::ArgCount | Token::LastExitCode
+        | Token::CurrentPid | Token::VarLength(_) | Token::Int(_) | Token::Float(_)
+        | Token::NumberIdent(_) | Token::DashNumWord(_) | Token::AtWord(_)
+        | Token::Path(_) | Token::Ident(_) => true,
+
+        // Known gap, deliberately left open. These nine are the keywords
+        // `keyword_as_bareword` accepts in argument position, where they
+        // bind as `Expr::Literal` and so ARE glue candidates: `git checkout
+        // do:x` is a real paste this scanner does not see. It falls through
+        // to the grammar's own span (`checkout`) — no worse than before,
+        // but not fixed either. Closing it is small, and is just flipping
+        // these to `true`; it is not done here because it changes error
+        // text for inputs outside this change's scope and deserves its own
+        // probes. (`keyword_word`'s wider 19-token set is a different
+        // thing: assignment KEYS, `in=a` — see `is_assign_key_token`.)
+        Token::Done | Token::Fi | Token::Then | Token::Else | Token::Elif | Token::In
+        | Token::Do | Token::Esac | Token::Set => false,
+
+        // Keywords that are only ever keywords in argument position.
+        Token::Local | Token::If | Token::For | Token::While | Token::Case
+        | Token::Function | Token::Break | Token::Continue | Token::Return | Token::Exit => false,
+
+        // Type names, only meaningful in a declaration.
+        Token::TypeString | Token::TypeInt | Token::TypeFloat | Token::TypeBool => false,
+
+        // Operators: never a word, and each already breaks a run.
+        Token::And | Token::Or | Token::Match | Token::NotMatch | Token::GtEq
+        | Token::LtEq => false,
+
+        // Redirect operators. A redirect's target is diagnosed by
+        // `redirect_parser` with its own wording, and `is_glued_args_error`
+        // keeps this scanner from ever running for those inputs.
+        Token::Gt | Token::GtGt | Token::Lt | Token::Stderr | Token::Both
+        | Token::HereString | Token::HereDocStart | Token::StderrToStdout
+        | Token::StdoutToStderr | Token::StdoutToStderr2 => false,
+
+        // Statement and collection structure.
+        Token::Pipe | Token::Amp | Token::Semi | Token::DoubleSemi | Token::DotDotDot
+        | Token::LBrace | Token::RBrace | Token::LBracket | Token::RBracket
+        | Token::LParen | Token::RParen => false,
+
+        // `$(` opens a balanced group, not a single-token word — `word_unit`
+        // handles it by scanning to the matching `)`.
+        Token::CmdSubstStart => false,
+
+        // Excluded to match `is_glue_candidate`'s own exclusion of
+        // `Arg::ShortFlag`/`Arg::DoubleDash` — see that function.
+        Token::ShortFlag(_) | Token::PlusFlag(_) | Token::DoubleDash => false,
+
+        // Heredoc bodies, lexer errors, trivia: never argv words.
+        Token::HereDoc(_) | Token::InvalidFloatNoLeading | Token::InvalidFloatNoTrailing
+        | Token::Comment | Token::Newline | Token::LineContinuation
+        | Token::BacktickRejected => false,
+    }
 }
 
 /// A key token `word_assign_arg_parser`/`long_flag_with_value` accept —
-/// `Ident` for `key=value`, `LongFlag` for `--key=value`. `keyword_word`'s
-/// wider key set (`if=1`-style) is deliberately not reproduced here: this
-/// scanner is a fallback for the common bareword/path/flag pastes the four
-/// reported examples cover, not a full re-implementation of the grammar —
-/// see `validate_glued_args`'s doc comment.
+/// `Ident` for `key=value`, `LongFlag` for `--key=value`.
+///
+/// The `LongFlag` half is what fuses `--key=value` into ONE unit. Without
+/// it a spaced `--a=1 --b=2` would scan as separate adjacent fragments and
+/// be flagged as a paste it is not.
+///
+/// `keyword_word`'s wider 19-token key set (`in=a`, `do=b`) is deliberately
+/// not reproduced: this scanner re-derives the common bareword, path, and
+/// flag shapes, not the whole grammar — see `validate_glued_args`.
 fn is_assign_key_token(tok: &Token) -> bool {
     matches!(tok, Token::Ident(_) | Token::LongFlag(_))
 }
