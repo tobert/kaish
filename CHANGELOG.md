@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **Plan JSON carries build identity** — `kaish_version`, `kaish_git_hash`,
+  and `kaish_build_date` ride along on every `--plan`/`--plan-file`/`plan`
+  document, success or error, so a consumer windowing measurements by build
+  no longer shells out to `kaish --version` per call.
+
 ## [0.16.0] - 2026-08-23
 
 ### Added
