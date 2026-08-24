@@ -35,10 +35,16 @@ pub struct Validator<'a> {
     /// it hits, and a hit is what skips the fallback. The kernel cannot go
     /// stale — the registry is frozen before `set_tool_schemas` snapshots it —
     /// but an embedder hand-building a catalog can. A hit also assumes
-    /// `tool.name() == tool.schema().name`; `validate_command` `debug_assert_eq!`s
-    /// `schema.name == cmd.name` right after selecting `schema`, so a mismatch
-    /// (catalog or fallback) fails loudly in tests instead of silently
-    /// misattributing `ValidationIssue::command`.
+    /// `tool.name() == tool.schema().name` — on the fallback path this is
+    /// what keeps `validate_against_schema`'s `schema.name` (which populates
+    /// `ValidationIssue::command`) matching the command the walker actually
+    /// resolved and dispatched by. Nothing at runtime enforces this; ship
+    /// builds have no `[profile.release]` override in this workspace, so
+    /// `debug_assert!` compiles to nothing there. What holds it is
+    /// `tools::registry::tests::every_builtin_tool_name_matches_its_own_schema_name`,
+    /// which walks every builtin `register_builtins` installs and is true
+    /// for all of them today. It does not cover a third-party tool an
+    /// embedder registers — nothing does.
     catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,
@@ -269,9 +275,15 @@ impl<'a> Validator<'a> {
             // catalog hit already guarantees `schema.name == cmd.name` (the
             // binary search matched on it); the fallback trusts
             // `tool.schema().name == tool.name()`, which the `catalog` field
-            // doc above calls out as unenforced. Enforce it here so a tool
-            // whose `schema()` disagrees with its own `name()` fails loudly
-            // in tests instead of silently misattributing an issue.
+            // doc above calls out as unenforced by anything at this call
+            // site — this `debug_assert_eq!` documents that trust here, but
+            // it is not the enforcement: `debug_assertions` is off in every
+            // build this workspace ships (no `[profile.release]` override),
+            // so it compiles to nothing outside `cargo test`/`cargo build`
+            // without `--release`. The actual invariant is pinned by
+            // `tools::registry::tests::every_builtin_tool_name_matches_its_own_schema_name`,
+            // which walks every in-tree builtin regardless of which script
+            // happens to exercise it.
             debug_assert_eq!(
                 schema.name, cmd.name,
                 "schema-driven validation issues for '{}' would carry the wrong command \

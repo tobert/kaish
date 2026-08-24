@@ -106,6 +106,48 @@ mod tests {
         assert!(!registry.contains("nonexistent"));
     }
 
+    /// `validate_command` (validator/walker.rs) falls back to `tool.schema()`
+    /// on a catalog miss, and `validate_against_schema` attributes every
+    /// `ValidationIssue` it raises to that schema's `.name` — not to the AST
+    /// `cmd.name` the walker actually resolved and dispatched by (`==
+    /// tool.name()`, since `register`/`register_arc` key this map on it).
+    /// Nothing at the `Tool` trait level keeps `name()` and `schema().name`
+    /// in sync; a tool whose two names disagree would silently misattribute
+    /// every issue it raises to the wrong command.
+    ///
+    /// This test is the actual enforcement of that invariant. A
+    /// `debug_assert!` at the call site would compile to nothing in a
+    /// release build — this workspace has no `[profile.release]` override,
+    /// so `debug_assertions` is off wherever kaish actually ships — while
+    /// this test runs in CI on every `cargo test` and covers every in-tree
+    /// builtin at once, not only the ones a particular script happens to
+    /// exercise.
+    ///
+    /// Only covers what `register_builtins` installs — a third-party tool
+    /// an embedder registers at runtime is not walked here and is not
+    /// covered by anything else either.
+    #[test]
+    fn every_builtin_tool_name_matches_its_own_schema_name() {
+        let mut registry = ToolRegistry::new();
+        crate::tools::register_builtins(&mut registry);
+
+        for name in registry.names() {
+            let tool = registry.get(name).expect("a name from names() must resolve via get()");
+            assert_eq!(
+                tool.name(),
+                tool.schema().name.as_str(),
+                "tool '{name}': Tool::name() == {:?} but Tool::schema().name == {:?} -- \
+                 these must agree. validate_against_schema attributes every ValidationIssue \
+                 it raises to schema.name, while the walker resolves and dispatches the \
+                 command by cmd.name (== tool.name()); a mismatch here means an embedder \
+                 reading ValidationIssue::command sees the wrong command. Fix the tool so \
+                 Tool::name() and Tool::schema().name agree -- do not relax this test.",
+                tool.name(),
+                tool.schema().name,
+            );
+        }
+    }
+
     #[test]
     fn test_names_sorted() {
         let mut registry = ToolRegistry::new();
