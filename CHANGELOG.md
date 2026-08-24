@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A numeral argv word like `-0` or `007` lost its sign or leading zeros**
+  when re-serialized from its typed value; `xargs -0 rm -f` ran as
+  `xargs 0 rm -f`. External-command argv and `plan`/`--plan` now keep the
+  source text exactly.
+
 ## [0.16.0] - 2026-08-23
 
 ### Added

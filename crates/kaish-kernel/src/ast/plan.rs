@@ -501,6 +501,7 @@ fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
         // Special forms ($1, $@, $#, $?, $$) are not session variables; an
         // embedder cannot peek them with `get_var`, so they are not listed.
         Expr::Literal(_)
+        | Expr::NumericLiteral { .. }
         | Expr::Positional(_)
         | Expr::AllArgs
         | Expr::ArgCount
@@ -860,6 +861,11 @@ pub(crate) fn render_expr(expr: &Expr) -> String {
             format!("${{{}:-{}}}", render_varpath(path), render_parts(default))
         }
         Expr::Arithmetic(e) => format!("$(({e}))"),
+        // The whole reason this variant exists: a numeral whose `Display`
+        // would not reproduce its own source (`-0`, `007`, `1.0`) renders
+        // as the verbatim text it was written as, not `value`'s canonical
+        // form.
+        Expr::NumericLiteral { raw, .. } => raw.clone(),
         Expr::Command(cmd) => render_command(cmd),
         Expr::LastExitCode => "$?".to_string(),
         Expr::CurrentPid => "$$".to_string(),

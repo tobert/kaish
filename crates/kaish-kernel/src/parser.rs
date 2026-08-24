@@ -3096,6 +3096,7 @@ where
         var_expr_parser(),
         interpolated_string_parser(),
         literal_parser().map(Expr::Literal),
+        numeric_literal_parser(),
         // Glob patterns before ident (GlobWord is more specific)
         glob_pattern,
         // Bare identifiers become string literals (shell barewords)
@@ -3602,6 +3603,23 @@ where
     ))
     .labelled("literal")
     .boxed()
+}
+
+/// A numeral whose source text does not round-trip through its own typed
+/// `Display` — a negative zero, a leading zero, or a non-canonical trailing
+/// fraction digit. See `lexer::Token::NumericLiteral`. Kept separate from
+/// `literal_parser` because it produces `Expr::NumericLiteral` directly
+/// (carrying `raw` alongside `value`), not a bare `Value` for `Expr::Literal`
+/// to wrap.
+fn numeric_literal_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! {
+        Token::NumericLiteral(d) => Expr::NumericLiteral { value: d.value, raw: d.raw },
+    }
+    .labelled("literal")
 }
 
 /// Identifier parser.

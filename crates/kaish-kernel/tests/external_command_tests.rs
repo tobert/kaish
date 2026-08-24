@@ -51,6 +51,27 @@ async fn external_command_with_args() {
     assert!(result.ok());
 }
 
+/// The real argv an external process receives must be the exact source
+/// text of a numeral argv word, not a re-serialized typed value.
+///
+/// `/bin/echo` (an absolute path, so it always resolves externally, past the
+/// builtin `echo`) prints back whatever `execve` actually received. Before
+/// the fix, `-0` planned AND executed as a bare `0` — `Value::Int` has no
+/// negative zero, so the sign was gone before `build_args_flat` ever ran —
+/// which is the same silent corruption `xargs -0 rm -f` suffers on its
+/// null-delimiter flag.
+#[tokio::test]
+async fn external_command_argv_preserves_noncanonical_numeral_source_text() {
+    let kernel = repl_kernel();
+    let result = kernel.execute("/bin/echo -0 007 -0.0").await.unwrap();
+    assert!(result.ok(), "echo should succeed: {:?}", result);
+    assert_eq!(
+        result.text_out().trim(),
+        "-0 007 -0.0",
+        "the external argv must be the exact source words, not their typed re-serialization"
+    );
+}
+
 #[tokio::test]
 async fn large_buffered_stdin_does_not_deadlock() {
     // A buffered String stdin used to be write_all'd INLINE, before the

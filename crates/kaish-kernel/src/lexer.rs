@@ -38,6 +38,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use kaish_types::clock::system_now;
+use kaish_types::Value;
 
 /// Global counter for generating unique markers across all tokenize calls.
 static MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -207,6 +208,15 @@ impl fmt::Display for LexerError {
 ///   from `content` only for an interpolated body containing `$((…))`, which
 ///   `content` carries in the rewritten `${__ARITH:…}` form — a kernel-internal
 ///   spelling that must never reach a plan.
+/// A numeral's typed value and its verbatim source text — see
+/// `Token::NumericLiteral`. Logos requires a single-field variant payload,
+/// hence the wrapper struct (the same shape as `HereDocData`, below).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NumericLiteralData {
+    pub value: Value,
+    pub raw: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocData {
     pub content: String,
@@ -640,6 +650,25 @@ pub enum Token {
     #[regex(r"-?[0-9]+\.[0-9]+", lex_float)]
     Float(f64),
 
+    /// A plain `Int`/`Float` whose own `Display` does not reproduce the
+    /// source text it was lexed from — a negative zero (`-0`, `-0.0`; an
+    /// `i64`/`f64` has no distinct negative-zero spelling once parsed back
+    /// out for `Int`, and `f64::to_string` drops the trailing `.0` for
+    /// `Float`), a leading zero (`007`, `010`), or a non-canonical trailing
+    /// fraction digit (`0.10`, `1.0`). Carries both the typed value (so
+    /// arithmetic, comparisons, and `--json` still see a real `Int`/`Float`)
+    /// and the verbatim source text (so argv/plan rendering can reproduce
+    /// exactly what was typed).
+    ///
+    /// Never produced directly by logos — `tokenize_impl`'s
+    /// `preserve_numeric_source_text` pass synthesizes it from a plain
+    /// `Int`/`Float` token as the LAST step, after the fusion passes run, so
+    /// `is_colon_mergeable`/`is_glob_mergeable` (which match `Int`/`Float`
+    /// directly) see the ordinary token during fusion and this variant only
+    /// ever reaches the parser. The common case (`-1`, `42`, `3.14`) is
+    /// untouched and pays nothing.
+    NumericLiteral(NumericLiteralData),
+
     // ═══════════════════════════════════════════════════════════════════
     // Invalid patterns (caught before valid tokens for better errors)
     // ═══════════════════════════════════════════════════════════════════
@@ -830,7 +859,9 @@ impl Token {
             Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) => TokenCategory::String,
 
             // Numbers
-            Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) => TokenCategory::Number,
+            Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) | Token::NumericLiteral(_) => {
+                TokenCategory::Number
+            }
 
             // Variables
             Token::VarRef(_)
@@ -1305,6 +1336,7 @@ impl fmt::Display for Token {
             Token::VarLength(v) => write!(f, "${{#{}}}", v),
             Token::Int(n) => write!(f, "INT({})", n),
             Token::Float(n) => write!(f, "FLOAT({})", n),
+            Token::NumericLiteral(d) => write!(f, "NUMERICLITERAL({:?}, raw={:?})", d.value, d.raw),
             Token::Path(s) => write!(f, "PATH({})", s),
             Token::Ident(s) => write!(f, "IDENT({})", s),
             Token::NumberIdent(s) => write!(f, "NUMIDENT({})", s),
@@ -1392,6 +1424,7 @@ impl Token {
                 | Token::Arithmetic(_)
                 | Token::Int(_)
                 | Token::Float(_)
+                | Token::NumericLiteral(_)
                 | Token::True
                 | Token::False
                 | Token::VarRef(_)
@@ -3501,10 +3534,47 @@ fn tokenize_impl(
         })
         .collect();
 
-    Ok(merge_glob_adjacent(
-        merge_colon_adjacent(merge_flag_metachar_adjacent(mapped), source),
+    Ok(preserve_numeric_source_text(
+        merge_glob_adjacent(
+            merge_colon_adjacent(merge_flag_metachar_adjacent(mapped), source),
+            source,
+        ),
         source,
     ))
+}
+
+/// Replace a plain `Int`/`Float` token with `NumericLiteral` when the source
+/// text it was lexed from does not round-trip through its own `Display` —
+/// see `Token::NumericLiteral` for the exact cases (negative zero, leading
+/// zeros, non-canonical trailing fraction digits). The common case pays one
+/// string comparison and stays a plain `Int`/`Float`.
+///
+/// Runs as the LAST step of `tokenize_impl`, after every fusion pass — those
+/// passes (`is_colon_mergeable`, `is_glob_mergeable`) match `Int`/`Float`
+/// directly, so a numeral must still present its ordinary shape while fusion
+/// decisions are made. Spans are already original-source coordinates by this
+/// point, so `source[span]` is the exact word the author typed.
+fn preserve_numeric_source_text(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
+    tokens
+        .into_iter()
+        .map(|t| {
+            let (value, canonical): (Value, String) = match &t.token {
+                Token::Int(n) => (Value::Int(*n), n.to_string()),
+                Token::Float(n) => (Value::Float(*n), n.to_string()),
+                _ => return t,
+            };
+            let Some(raw) = source.get(t.span.start..t.span.end) else {
+                return t;
+            };
+            if raw == canonical {
+                return t;
+            }
+            Spanned::new(
+                Token::NumericLiteral(NumericLiteralData { value, raw: raw.to_string() }),
+                t.span,
+            )
+        })
+        .collect()
 }
 
 /// Extract the string content from a string token (removes quotes, processes escapes).

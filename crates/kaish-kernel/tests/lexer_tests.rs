@@ -131,6 +131,14 @@ fn format_token(token: &Token) -> String {
                 format!("FLOAT({}.0)", s)
             }
         }
+        // A numeral whose source text does not round-trip through its typed
+        // `Display` (`-0`, `007`, `0.0`, `1.0`, …) — `raw` is the exact
+        // source, so it needs none of `Float`'s reconstruction above.
+        Token::NumericLiteral(d) => match &d.value {
+            kaish_kernel::ast::Value::Int(_) => format!("INT({})", d.raw),
+            kaish_kernel::ast::Value::Float(_) => format!("FLOAT({})", d.raw),
+            other => panic!("format_token: NumericLiteral wrapping unexpected {other:?}"),
+        },
 
         // Identifiers and paths
         Token::Ident(s) => format!("IDENT({})", s),

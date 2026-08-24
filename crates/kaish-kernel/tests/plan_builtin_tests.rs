@@ -179,3 +179,76 @@ async fn an_empty_plan_stays_empty_under_the_kernel_json_rule() {
     assert_eq!(code, 0, "an empty statement is not an error");
     assert_eq!(out, "", "an empty success stays empty under --json");
 }
+
+/// A numeral argv word must round-trip its exact source text: `Plan.rendered`
+/// and `PlannedCommand::args` are lexed into a typed `Int`/`Float` and were
+/// re-serialized from the *value*, not the source. `i64`/`f64` have no
+/// negative zero (`-0` → `0`) or memory of leading zeros (`007` → `7`) or
+/// non-canonical trailing fraction digits (`1.0` → `1`), so every one of
+/// these silently rewrote the word it was given.
+///
+/// `xargs -0 rm -f` is the case that matters: `-0` planned (and executed) as
+/// a bare `0`, turning `xargs`'s idiomatic null-delimiter flag into a
+/// positional argument with no error.
+#[tokio::test]
+async fn noncanonical_numeric_argv_words_round_trip_in_rendered() {
+    let cases: &[(&str, &str)] = &[
+        ("echo -0", "echo -0"),
+        ("echo -00", "echo -00"),
+        ("echo -0.0", "echo -0.0"),
+        ("echo -0.00", "echo -0.00"),
+        ("echo 00", "echo 00"),
+        ("echo 007", "echo 007"),
+        ("echo 010", "echo 010"),
+        ("echo 0.10", "echo 0.10"),
+        ("echo 1.0", "echo 1.0"),
+        ("xargs -0 rm -f", "xargs -0 rm -f"),
+    ];
+    for (source, expected) in cases {
+        let doc = plan_json(&format!("plan '{source}' --json")).await;
+        assert_eq!(
+            doc["statements"][0]["plan"]["rendered"], *expected,
+            "rendered must reproduce the source word exactly for {source:?}: {doc}"
+        );
+    }
+}
+
+/// The same fidelity, checked on the structured `args[].plain` field —
+/// `Plan.rendered` is a flat string a classifier might not re-split, but
+/// `PlannedCommand::args` is what a hook is meant to read argument-by-argument.
+#[tokio::test]
+async fn noncanonical_numeric_argv_words_round_trip_in_args_plain() {
+    let doc = plan_json("plan 'xargs -0 rm -f' --json").await;
+    let args: Vec<&str> = doc["statements"][0]["plan"]["commands"][0]["args"]
+        .as_array()
+        .expect("args")
+        .iter()
+        .map(|a| a["plain"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        args,
+        vec!["-0", "rm", "-f"],
+        "xargs -0 must survive as its own argv word, not become a bare 0: {doc}"
+    );
+}
+
+/// Canonical numerals — the common case — must stay exactly as correct as
+/// they were before: this class of fix must not touch a numeral whose
+/// `Display` already reproduces the source.
+#[tokio::test]
+async fn canonical_numeric_argv_words_are_unaffected() {
+    let cases: &[(&str, &str)] = &[
+        ("echo -1", "echo -1"),
+        ("echo -5", "echo -5"),
+        ("echo -0.5", "echo -0.5"),
+        ("echo +0", "echo +0"),
+        ("echo +1", "echo +1"),
+    ];
+    for (source, expected) in cases {
+        let doc = plan_json(&format!("plan '{source}' --json")).await;
+        assert_eq!(
+            doc["statements"][0]["plan"]["rendered"], *expected,
+            "a canonical numeral must round-trip too: {source:?}: {doc}"
+        );
+    }
+}

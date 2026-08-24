@@ -3479,6 +3479,9 @@ impl Kernel {
             Expr::Literal(Value::Float(f)) => f.to_string(),
             Expr::Literal(Value::Bool(b)) => b.to_string(),
             Expr::Literal(Value::Null) => "null".to_string(),
+            // A numeral whose own `Display` would drop a leading zero or a
+            // negative zero: show the source text, not the typed value.
+            Expr::NumericLiteral { raw, .. } => raw.clone(),
             Expr::VarRef(path) => {
                 let mut name = String::new();
                 for (i, seg) in path.segments.iter().enumerate() {
@@ -3914,6 +3917,17 @@ impl Kernel {
                             continue;
                         }
                     }
+                    // A numeral whose typed `Display` would not reproduce its
+                    // source (`-0`, `007`, `1.0`) goes to the external
+                    // process as the exact word it was written as — the same
+                    // rule `ast::plan::render_expr` applies, so the argv that
+                    // executes matches the argv a plan showed. Skips
+                    // `eval_expr_async`/text-sink entirely: there is no
+                    // `Value` that could reproduce `raw` anyway.
+                    if let Expr::NumericLiteral { raw, .. } = expr {
+                        argv.push(raw.clone());
+                        continue;
+                    }
                     let value = self.eval_expr_async(expr).await?;
                     // Decision D: a bare collection can't cross the external
                     // process boundary as an argv element — refuse rather than
@@ -3929,6 +3943,10 @@ impl Kernel {
                     argv.push(value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}"))?);
                 }
                 Arg::Named { key, value } => {
+                    if let Expr::NumericLiteral { raw, .. } = value {
+                        argv.push(format!("--{key}={raw}"));
+                        continue;
+                    }
                     let val = self.eval_expr_async(value).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
@@ -3938,6 +3956,10 @@ impl Kernel {
                     argv.push(format!("--{key}={val_str}"));
                 }
                 Arg::WordAssign { key, value } => {
+                    if let Expr::NumericLiteral { raw, .. } = value {
+                        argv.push(format!("{key}={raw}"));
+                        continue;
+                    }
                     let val = self.eval_expr_async(value).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
@@ -4045,6 +4067,9 @@ impl Kernel {
                 Ok(Value::Bool(!is_truthy(&value)))
             }
             Expr::Literal(value) => Ok(value.clone()),
+            // Typed evaluation only ever needs `value`; `raw` is for
+            // argv/plan text-sink positions that read the `Expr` directly.
+            Expr::NumericLiteral { value, .. } => Ok(value.clone()),
             Expr::VarRef(path) => {
                 let scope = self.scope.read().await;
                 match scope.resolve_path(path) {
