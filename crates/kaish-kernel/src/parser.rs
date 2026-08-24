@@ -11,6 +11,7 @@ use crate::ast::{
     VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
+use chumsky::error::RichReason;
 use chumsky::input::{MappedInput, Stream, ValueInput};
 use chumsky::prelude::*;
 
@@ -1296,7 +1297,17 @@ fn parse_tokens(
         // `git show HEAD:training/v9/x.py` glue reported at `show`, not at
         // `HEAD:training/v9/x.py`. Re-detect the condition directly from
         // tokens, outside that machinery, and report the span from here.
-        if let Err(specific) = validate_glued_args(&tokens) {
+        //
+        // Only when the grammar's surviving error IS that rejection. This
+        // corrects a span; it must never author a verdict. Every other
+        // `Rich::custom` in this parser names a different mistake and its
+        // own fix — an unquoted multi-word record value (GH #183), a
+        // redirect target, `--flag = value` spacing — and the paste advice
+        // is both wrong and less useful in their place. See
+        // `is_glued_args_error` for why the check is sound.
+        if errs.iter().all(is_glued_args_error)
+            && let Err(specific) = validate_glued_args(&tokens)
+        {
             return specific;
         }
         errs.into_iter()
@@ -2237,6 +2248,25 @@ fn reject_glued_args<'src>(
 const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are not joined into \
      one argument (kaish does no token pasting); quote the whole word, e.g. \
      \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
+
+/// True when `e` is `reject_glued_args`'s own rejection and nothing else —
+/// the only case where [`validate_glued_args`] may restate the span.
+///
+/// `RichReason` has exactly two shapes (chumsky 0.13). A `Custom` carrying
+/// any other message is a purpose-built diagnosis from one of this parser's
+/// other eleven `try_map` guards, and `RichReason::flat_merge` always
+/// prefers a `Custom` reason — so if any of them fired, its message is the
+/// one standing here and must reach the caller untouched. An
+/// `ExpectedFound` means the grammar never judged this a paste at all;
+/// inventing that verdict from the token stream would change what kaish
+/// rejects, not merely where it points.
+///
+/// This is why there is no list of constructs to skip. A new guard added
+/// anywhere in the grammar is protected the day it is written, with no
+/// edit here.
+fn is_glued_args_error(e: &Rich<'_, Token, Span>) -> bool {
+    matches!(e.reason(), RichReason::Custom(msg) if msg.as_str() == GLUED_ARGS_MESSAGE)
+}
 
 /// Arguments list parser that handles `--` flag terminator.
 ///
