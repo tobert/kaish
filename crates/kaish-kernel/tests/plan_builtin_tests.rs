@@ -252,3 +252,42 @@ async fn canonical_numeric_argv_words_are_unaffected() {
         );
     }
 }
+
+/// A leading-zero numeral (`007`, `010`) is not a valid JSON number (RFC
+/// 8259's `int = zero / (digit1-9 *DIGIT)` excludes it), and kaish's own
+/// `fromjson` already refuses it (`fromjson '007'` is a parse error) — the
+/// lexer used to disagree, typing it `Int(7)`. Nobody writing `007` expects
+/// the number 7, so it types as a string instead. `typeof` observes the
+/// TYPE directly, which a rendered-text check cannot: `007` already
+/// rendered as `007` once the source-text fix landed, whether it was typed
+/// `Int` or `String` underneath — this test is the one that would fail if
+/// the type were still `Int` even though the text looked right.
+#[tokio::test]
+async fn leading_zero_numeral_types_as_string_not_number() {
+    for c in ["00", "007", "010", "-022", "007.5", "-00.5"] {
+        let (code, out, err) = run(&format!("typeof {c}")).await;
+        assert_eq!(code, 0, "typeof should succeed for {c:?}: {err}");
+        assert_eq!(
+            out.trim(),
+            "string",
+            "{c:?} has a leading zero, not a valid JSON number, so it must type as a string: got {out:?}"
+        );
+    }
+}
+
+/// A numeral without a leading-zero problem — including the `-0`/`0.10`
+/// class Ruling 1 keeps typed but re-spells at render time — must still
+/// type as `number`. Ruling 2 narrows what counts as a numeral; it must not
+/// widen what counts as a string.
+#[tokio::test]
+async fn non_leading_zero_numeral_still_types_as_number() {
+    for c in ["0", "7", "123", "-1", "3.14", "-0", "-0.0", "0.10", "1.0"] {
+        let (code, out, err) = run(&format!("typeof {c}")).await;
+        assert_eq!(code, 0, "typeof should succeed for {c:?}: {err}");
+        assert_eq!(
+            out.trim(),
+            "number",
+            "{c:?} is a valid JSON number and must keep typing as one: got {out:?}"
+        );
+    }
+}

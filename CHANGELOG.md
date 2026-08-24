@@ -17,6 +17,10 @@ breaking entries are marked **BREAKING**.
   `xargs 0 rm -f`. External-command argv and `plan`/`--plan` now keep the
   source text exactly.
 
+- **`007` is now the string `007`, not the number 7** — a leading zero is
+  not a JSON number, and `fromjson` already refused it. `-0`, `0.10`, and
+  `1.0` are unaffected; they stay numbers.
+
 ## [0.16.0] - 2026-08-23
 
 ### Added

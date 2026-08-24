@@ -244,8 +244,12 @@ fn lexer_identifiers(#[case] input: &str, #[case] expected: &[&str]) {
 
 // Digit-leading bare words are valid argv tokens: SHA prefixes (019dda1c),
 // UUIDs, version-ish identifiers. Lex them as NumberIdent so the parser
-// can treat them as bareword strings. (Pure digit sequences still lex as
-// Int — at least one alpha character is required to land here.)
+// can treat them as bareword strings via THIS regex — it requires at
+// least one alpha character to match, so a pure digit run (`123`) still
+// lexes as Int here. A pure digit run CAN still end up NumberIdent, just
+// not through this regex: a leading zero with more digits (`007`) is not
+// a JSON number and is reclassified to NumberIdent by a later pass — see
+// `lexer_leading_zero_is_not_a_number`, below.
 #[rstest]
 #[case::numident_hex("019dda1c", &["NUMIDENT(019dda1c)"])]
 #[case::numident_alpha_after_digit("123abc", &["NUMIDENT(123abc)"])]
@@ -285,6 +289,26 @@ fn lexer_source_alias_preserved(#[case] input: &str, #[case] expected: &[&str]) 
 #[case::int_negative("-456", &["INT(-456)"])]
 #[case::int_large("999999999", &["INT(999999999)"])]
 fn lexer_integers(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// A leading zero followed by another digit is not a JSON number (RFC 8259:
+// `int = zero / (digit1-9 *DIGIT)`) — kaish already agrees for `fromjson`
+// (`fromjson '007'` is a loud parse error), and there is no reason for a
+// reader to expect `007` to mean the number 7. It lexes as a bareword
+// string instead, the same shape `NumberIdent` already gives a digit run
+// with a trailing letter (`019dda1c`) — see `preserve_numeric_source_text`.
+// A LONE `0` is the JSON `zero` production and stays `Int`; so does a
+// leading zero that got fused into a larger word (`a:007`, `007*` —
+// Bug 4 below), since by then it is not a standalone numeral at all.
+#[rstest]
+#[case::leading_zero_two_digits("00", &["NUMIDENT(00)"])]
+#[case::leading_zero_three_digits("007", &["NUMIDENT(007)"])]
+#[case::leading_zero_ten("010", &["NUMIDENT(010)"])]
+#[case::leading_zero_negative("-022", &["NUMIDENT(-022)"])]
+#[case::leading_zero_float("007.5", &["NUMIDENT(007.5)"])]
+#[case::leading_zero_float_negative("-00.5", &["NUMIDENT(-00.5)"])]
+fn lexer_leading_zero_is_not_a_number(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 

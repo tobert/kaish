@@ -654,11 +654,16 @@ pub enum Token {
     /// source text it was lexed from — a negative zero (`-0`, `-0.0`; an
     /// `i64`/`f64` has no distinct negative-zero spelling once parsed back
     /// out for `Int`, and `f64::to_string` drops the trailing `.0` for
-    /// `Float`), a leading zero (`007`, `010`), or a non-canonical trailing
-    /// fraction digit (`0.10`, `1.0`). Carries both the typed value (so
-    /// arithmetic, comparisons, and `--json` still see a real `Int`/`Float`)
-    /// and the verbatim source text (so argv/plan rendering can reproduce
-    /// exactly what was typed).
+    /// `Float`), or a non-canonical trailing fraction digit (`0.10`,
+    /// `1.0`). Carries both the typed value (so arithmetic, comparisons,
+    /// and `--json` still see a real `Int`/`Float`) and the verbatim
+    /// source text (so argv/plan rendering can reproduce exactly what was
+    /// typed).
+    ///
+    /// A leading zero (`007`, `010`) is a DIFFERENT case, reclassified to
+    /// `NumberIdent` instead — see `has_invalid_leading_zero`. It is not a
+    /// valid JSON number, and kaish's own `fromjson` already refuses it, so
+    /// it is not a number here either: a string, not a mistyped `Int`.
     ///
     /// Never produced directly by logos — `tokenize_impl`'s
     /// `preserve_numeric_source_text` pass synthesizes it from a plain
@@ -3543,17 +3548,38 @@ fn tokenize_impl(
     ))
 }
 
-/// Replace a plain `Int`/`Float` token with `NumericLiteral` when the source
-/// text it was lexed from does not round-trip through its own `Display` —
-/// see `Token::NumericLiteral` for the exact cases (negative zero, leading
-/// zeros, non-canonical trailing fraction digits). The common case pays one
-/// string comparison and stays a plain `Int`/`Float`.
+/// True when a numeral's own integer part is not a valid JSON number (RFC
+/// 8259: `int = zero / (digit1-9 *DIGIT)`) — more than one digit and a
+/// leading `0`: `007`, `010`, `-022`, and (since JSON's `int` production is
+/// shared by the float grammar) the integer part of `007.5`. A lone `0`
+/// (`0`, `-0`, `0.5`) is the `zero` alternative and is fine.
+///
+/// `fromjson` already refuses these (`fromjson '007'` is a parse error);
+/// before this pass the lexer disagreed and typed them as `Int(7)`. Nobody
+/// writing `007` expects the number 7, so the lexer now agrees: not a
+/// number, a string.
+fn has_invalid_leading_zero(raw: &str) -> bool {
+    let unsigned = raw.strip_prefix('-').unwrap_or(raw);
+    let int_part = unsigned.split('.').next().unwrap_or(unsigned);
+    int_part.len() > 1 && int_part.starts_with('0')
+}
+
+/// Reclassify a plain `Int`/`Float` token from its own source text — see
+/// `has_invalid_leading_zero` (a leading zero makes it a string, not a
+/// number: `Token::NumberIdent`, the same shape a digit run with a trailing
+/// letter already gets) and `Token::NumericLiteral`'s doc comment (a numeral
+/// whose source text does not round-trip through its own typed `Display`:
+/// negative zero, a non-canonical trailing fraction digit). The common case
+/// (`-1`, `42`, `3.14`) pays one string comparison and stays a plain
+/// `Int`/`Float`.
 ///
 /// Runs as the LAST step of `tokenize_impl`, after every fusion pass — those
 /// passes (`is_colon_mergeable`, `is_glob_mergeable`) match `Int`/`Float`
 /// directly, so a numeral must still present its ordinary shape while fusion
-/// decisions are made. Spans are already original-source coordinates by this
-/// point, so `source[span]` is the exact word the author typed.
+/// decisions are made — a leading zero fused into a larger word (`a:007`,
+/// `007*`) is not a standalone numeral and never reaches this pass at all.
+/// Spans are already original-source coordinates by this point, so
+/// `source[span]` is the exact word the author typed.
 fn preserve_numeric_source_text(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
     tokens
         .into_iter()
@@ -3566,6 +3592,9 @@ fn preserve_numeric_source_text(tokens: Vec<Spanned<Token>>, source: &str) -> Ve
             let Some(raw) = source.get(t.span.start..t.span.end) else {
                 return t;
             };
+            if has_invalid_leading_zero(raw) {
+                return Spanned::new(Token::NumberIdent(raw.to_string()), t.span);
+            }
             if raw == canonical {
                 return t;
             }

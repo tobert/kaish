@@ -862,9 +862,10 @@ pub(crate) fn render_expr(expr: &Expr) -> String {
         }
         Expr::Arithmetic(e) => format!("$(({e}))"),
         // The whole reason this variant exists: a numeral whose `Display`
-        // would not reproduce its own source (`-0`, `007`, `1.0`) renders
-        // as the verbatim text it was written as, not `value`'s canonical
-        // form.
+        // would not reproduce its own source (`-0`, `1.0`) renders as the
+        // verbatim text it was written as, not `value`'s canonical form. A
+        // leading zero (`007`) is a different case: `Expr::Literal(String)`
+        // by the time it gets here, handled above like any other bareword.
         Expr::NumericLiteral { raw, .. } => raw.clone(),
         Expr::Command(cmd) => render_command(cmd),
         Expr::LastExitCode => "$?".to_string(),

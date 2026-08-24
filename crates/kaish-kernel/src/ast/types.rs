@@ -395,12 +395,17 @@ pub enum Expr {
     RecordLiteral(Vec<RecordEntry>),
     /// A numeral (`Int`/`Float`) whose own `Display` does not reproduce the
     /// source text it was written as — `-0` (negative zero has no distinct
-    /// `i64` spelling), `007` (a leading zero), `0.10`/`1.0` (a non-canonical
-    /// trailing fraction digit). `value` is the typed value: arithmetic,
-    /// comparisons, `set x = 007`, and `--json` all still see a real
-    /// `Int`/`Float`. `raw` is the exact source text: argv/plan rendering and
-    /// real external-command argv use it instead of `value`'s `Display`, so
+    /// `i64` spelling), `0.10`/`1.0` (a non-canonical trailing fraction
+    /// digit). `value` is the typed value: arithmetic, comparisons,
+    /// `set x = -0`, and `--json` all still see a real `Int`/`Float`. `raw`
+    /// is the exact source text: argv/plan rendering and real
+    /// external-command argv use it instead of `value`'s `Display`, so
     /// `xargs -0 rm -f` keeps its `-0`.
+    ///
+    /// A leading zero (`007`) is a DIFFERENT case and never reaches this
+    /// variant — not a valid JSON number, so it parses as
+    /// `Literal(Value::String("007"))` instead, the same as any other
+    /// bareword.
     ///
     /// A canonical numeral (`-1`, `42`, `3.14`) never reaches this variant —
     /// it parses as the plain `Literal(Value::Int/Float)` it always did,
