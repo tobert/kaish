@@ -216,12 +216,26 @@ async fn devfs_directory_is_searchable_but_not_writable() {
 
 // ── LocalFs: real OS mode bits ─────────────────────────────────────────────
 
-/// A writable LocalFs mount still has to honour the mode bits — an
-/// implementation that answered from the mount alone and ignored the stat
-/// would call a mode-444 file writable.
+/// True when the environment ignores mode restrictions — running as root, or
+/// a filesystem/container that bypasses DAC. Detected empirically by trying
+/// the thing, not by checking uid, so it covers every cause.
+#[cfg(unix)]
+fn dac_is_bypassed(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let probe = dir.join(".dac-probe");
+    std::fs::write(&probe, b"x").unwrap();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bypassed = std::fs::File::open(&probe).is_ok();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o644)).unwrap();
+    bypassed
+}
+
+/// A writable LocalFs mount still has to honour the file's permissions — an
+/// implementation that answered from the mount alone would call a mode-444
+/// file writable.
 #[cfg(unix)]
 #[tokio::test]
-async fn localfs_mode_bits_still_decide() {
+async fn localfs_permissions_still_decide() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -233,11 +247,93 @@ async fn localfs_mode_bits_still_decide() {
     )
     .unwrap();
 
+    if dac_is_bypassed(tmp.path()) {
+        eprintln!("skipping: environment bypasses DAC (root?)");
+        return;
+    }
+
     let kernel = kernel_at(tmp.path());
     let rw = tmp.path().join("rw.txt");
     let ro = tmp.path().join("ro.txt");
     both_spellings(&kernel, "", "-w", &rw.display().to_string(), true).await;
     both_spellings(&kernel, "", "-w", &ro.display().to_string(), false).await;
+}
+
+/// **The case that was wrong before this change.** `0o222` means "some
+/// principal may write", not "this process may write".
+///
+/// A file the running user owns at mode `0o022` has the `0o222` mask set —
+/// for group and other — while the owner class, which is the class that
+/// applies to us, has no write bit. Unix checks the owner class and stops,
+/// so the write fails. A mode-bit test says YES; the kernel says NO; the
+/// `open()` below proves the kernel is right.
+///
+/// This is the root-owned-`/etc/passwd` shape, reproduced without root: a
+/// permissive bit that belongs to a principal we are not. `0o044` and `0o011`
+/// do the same for `-r` and `-x`.
+#[cfg(unix)]
+#[tokio::test]
+async fn permission_bits_for_another_principal_do_not_grant_access() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    if dac_is_bypassed(tmp.path()) {
+        eprintln!("skipping: environment bypasses DAC (root?)");
+        return;
+    }
+
+    // (mode, op, the answer the raw mask would give, the true answer)
+    let cases = [
+        (0o022u32, "-w", "w.txt"),
+        (0o044u32, "-r", "r.txt"),
+        (0o011u32, "-x", "x.txt"),
+    ];
+
+    let kernel = kernel_at(tmp.path());
+    for (mode, op, name) in cases {
+        let path = tmp.path().join(name);
+        std::fs::write(&path, b"hi\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        // The raw mask a mode-bit implementation would consult IS set.
+        let mask = match op {
+            "-w" => 0o222,
+            "-r" => 0o444,
+            _ => 0o111,
+        };
+        assert_ne!(
+            mode & mask,
+            0,
+            "fixture is pointless unless the raw mask is set for {name}",
+        );
+
+        both_spellings(&kernel, "", op, &path.display().to_string(), false).await;
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+/// The kernel really does refuse, so the answers above are not a theory.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_other_principal_fixture_really_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    if dac_is_bypassed(tmp.path()) {
+        eprintln!("skipping: environment bypasses DAC (root?)");
+        return;
+    }
+    let path = tmp.path().join("w.txt");
+    std::fs::write(&path, b"hi\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o022)).unwrap();
+
+    let opened = std::fs::OpenOptions::new().append(true).open(&path);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        opened.is_err(),
+        "mode 0o022 owned by us must refuse a write despite 0o222 being set",
+    );
 }
 
 /// `-x` on a real path keeps answering from the mode bits. Pinned so a later

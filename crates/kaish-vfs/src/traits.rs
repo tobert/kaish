@@ -128,7 +128,7 @@ pub trait Filesystem: Send + Sync {
     ///
     /// | Backend | Modes |
     /// |---|---|
-    /// | `LocalFs` | Real OS bits on Unix; synthesized from `Permissions::readonly()` elsewhere (the live path on `wasm32-wasip1`) |
+    /// | `LocalFs` | The OS's effective-access answer on Unix (see its `path_access`); synthesized from `Permissions::readonly()` on a non-Unix target that enables `localfs` |
     /// | `MemoryFs` | Constants: dir `0o777`, file `0o666`, symlink `0o777` |
     /// | `DevFs` | Constants: device `0o666`, the `/dev` directory `0o555` |
     /// | `OverlayFs` | Whichever layer holds the path |

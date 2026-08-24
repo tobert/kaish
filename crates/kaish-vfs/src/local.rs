@@ -198,17 +198,22 @@ impl LocalFs {
     /// Synthesize a Unix-shaped mode from the one permission fact a non-Unix
     /// platform exposes.
     ///
-    /// This arm is live, not a Windows courtesy: `wasm32-wasip1` is not
-    /// `unix`, `mod local` is declared unconditionally, and kaish ships and
-    /// builds that target every CI run.
+    /// Reached on a non-Unix target that enables `localfs` — Windows in
+    /// practice. **Not** WASI: `mod local` is gated on `localfs`, `localfs`
+    /// pulls `tokio/fs`, and wasm rejects that feature, so `wasm32-wasip1`
+    /// never compiles `LocalFs` at all. (An earlier version of this comment
+    /// claimed the WASI build depended on this arm. It does not; the claim
+    /// was checked and removed rather than left to mislead.)
     ///
-    /// `LocalFs` is writable, so returning `None` here would put it in the
-    /// same position `MemoryFs` was in: a writable backend reporting an
-    /// absent mode, which `PathAccess::resolve` reads as read-only. Every
-    /// file test on the WASI build would answer "not writable", and the wasi
-    /// CI leg compiles without running these tests, so nothing would say so.
-    /// There is exactly one bit to work from — `Permissions::readonly()` — so
-    /// that is what the mode carries.
+    /// CI is Linux-only, so nothing here exercises this. That is the reason
+    /// `synthesized_mode` is split out as a pure function with a test that
+    /// runs everywhere.
+    ///
+    /// `LocalFs` is writable, so returning `None` would put it in the same
+    /// position `MemoryFs` was in: a writable backend reporting an absent
+    /// mode, which `PathAccess::resolve` reads as read-only — every file test
+    /// answering "not writable". There is exactly one bit to work from,
+    /// `Permissions::readonly()`, so that is what the mode carries.
     ///
     /// The `x` bit is never set. Executability is not a permission on these
     /// platforms (it is decided by the file extension), so claiming it would

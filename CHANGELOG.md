@@ -12,14 +12,10 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
-- **`test -w` on a virtual path** — `-w /v/bin/echo` and `-w /v/jobs/1/status`
-  answered yes about read-only mounts. `MemoryFs` and `DevFs` now report modes,
-  and `-w` needs the mount and the mode to agree.
-
-### Changed
-
-- **`test -x DIR` on a memory-backed directory** — now yes. `x` on a directory
-  means searchable, which these are; it answered no while modes were absent.
+- **File tests on virtual and real paths** — `-w` claimed read-only mounts and
+  root-owned files were writable, and `-x` denied that a memory-backed
+  directory is searchable. `-w`/`-r`/`-x` now answer from the owning mount plus
+  the OS's effective access.
 
 ### Added
 
