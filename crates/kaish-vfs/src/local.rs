@@ -198,11 +198,17 @@ impl LocalFs {
     /// Synthesize a Unix-shaped mode from the one permission fact a non-Unix
     /// platform exposes.
     ///
+    /// This arm is live, not a Windows courtesy: `wasm32-wasip1` is not
+    /// `unix`, `mod local` is declared unconditionally, and kaish ships and
+    /// builds that target every CI run.
+    ///
     /// `LocalFs` is writable, so returning `None` here would put it in the
     /// same position `MemoryFs` was in: a writable backend reporting an
-    /// absent mode, which is what makes `test -w` unanswerable. There is
-    /// exactly one bit to work from — `Permissions::readonly()` — so that is
-    /// what the mode carries.
+    /// absent mode, which `PathAccess::resolve` reads as read-only. Every
+    /// file test on the WASI build would answer "not writable", and the wasi
+    /// CI leg compiles without running these tests, so nothing would say so.
+    /// There is exactly one bit to work from — `Permissions::readonly()` — so
+    /// that is what the mode carries.
     ///
     /// The `x` bit is never set. Executability is not a permission on these
     /// platforms (it is decided by the file extension), so claiming it would

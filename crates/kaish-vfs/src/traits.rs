@@ -118,6 +118,35 @@ pub trait Filesystem: Send + Sync {
     /// deciding what mode a path that does not exist in the upper yet should
     /// be judged by — a question with no answer in the code today.
     ///
+    /// # If you are adding a backend, report a mode
+    ///
+    /// Report real modes from `stat` and `list` unless your backend is
+    /// read-only. Absent modes are not a neutral default here; they are read
+    /// as a statement.
+    ///
+    /// Who answers from what today:
+    ///
+    /// | Backend | Modes |
+    /// |---|---|
+    /// | `LocalFs` | Real OS bits on Unix; synthesized from `Permissions::readonly()` elsewhere (the live path on `wasm32-wasip1`) |
+    /// | `MemoryFs` | Constants: dir `0o777`, file `0o666`, symlink `0o777` |
+    /// | `DevFs` | Constants: device `0o666`, the `/dev` directory `0o555` |
+    /// | `OverlayFs` | Whichever layer holds the path |
+    /// | `VfsRouter` | The owning mount; `0o555` for directories it synthesizes |
+    /// | `BuiltinFs`, `JobFs` | **None** — and both are read-only |
+    ///
+    /// That last row is load-bearing. `PathAccess::resolve` treats an absent
+    /// mode as not writable, and that is correct **only** because every
+    /// backend still reporting `None` is read-only. A writable backend that
+    /// reports `None` will have every one of its paths called unwritable —
+    /// `test -w` says no, and the write that follows succeeds anyway.
+    ///
+    /// Nothing catches that for you. There is no assertion tying
+    /// `read_only() == false` to reporting a mode, and the failure is a wrong
+    /// answer rather than an error, so the tests you write for your backend
+    /// will pass. If you add a writable backend, either report a mode or come
+    /// change `resolve` and this table together.
+    ///
     /// Errors exactly as `stat` does: a path that does not exist is an error,
     /// not a `PathAccess` of all-false.
     async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
