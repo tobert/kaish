@@ -344,6 +344,48 @@ mod validate_tests {
         assert_eq!(issue.command.as_deref(), Some("demo"));
     }
 
+    /// The positional and flag branches are two separate loops in
+    /// `validate_against_schema` (see `required_flag_still_errors_when_missing`
+    /// above) — both push the same `IssueCode::MissingRequiredArg` from their
+    /// own `ValidationIssue { .. }` literal, so the field has to be pinned on
+    /// each independently. The positional branch is covered by
+    /// `missing_required_positional_carries_command_name`; this is the flag one.
+    #[test]
+    fn missing_required_flag_carries_command_name() {
+        let schema = ToolSchema::new("demo", "demo").param(
+            ParamSchema::new("output", "string")
+                .with_required(true)
+                .with_aliases(["o"]),
+        );
+
+        let args = ToolArgs::new();
+        let issues = validate_against_schema(&args, &schema);
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::MissingRequiredArg)
+            .expect("expected a MissingRequiredArg issue");
+        assert_eq!(issue.command.as_deref(), Some("demo"));
+    }
+
+    /// `UnknownFlag` is its own `ValidationIssue { .. }` literal in the
+    /// unknown-flags loop, not shared with either `MissingRequiredArg` branch
+    /// — it needs its own pin.
+    #[test]
+    fn unknown_flag_carries_command_name() {
+        let schema = ToolSchema::new("demo", "demo").param(
+            ParamSchema::new("verbose", "bool").with_default(Some(Value::Bool(false))),
+        );
+        let mut args = ToolArgs::new();
+        args.flags.insert("bogus".to_string());
+
+        let issues = validate_against_schema(&args, &schema);
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::UnknownFlag)
+            .expect("expected an UnknownFlag issue");
+        assert_eq!(issue.command.as_deref(), Some("demo"));
+    }
+
     #[test]
     fn invalid_arg_type_carries_command_name() {
         let schema = ToolSchema::new("demo", "demo").param(

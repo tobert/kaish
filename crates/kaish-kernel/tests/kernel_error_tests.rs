@@ -11,6 +11,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::{Kernel, KernelConfig, KernelError};
+use rstest::rstest;
 
 /// Transient kernel, matching the other error-surface test files.
 fn make_kernel() -> Kernel {
@@ -196,7 +197,7 @@ async fn execution_display_walks_the_cause_chain_under_alternate() {
     );
 }
 
-// ── 4: ValidationIssue::command — structural command routing, not prose
+// ── 5: ValidationIssue::command — structural command routing, not prose
 //       parsing ─────────────────────────────────────────────────────────
 
 /// A validation issue that concerns a specific command exposes that command
@@ -237,4 +238,62 @@ async fn validation_issue_without_a_command_reports_absence() {
 
     assert_eq!(issues.len(), 1, "expected exactly one validation issue: {issues:?}");
     assert_eq!(issues[0].command, None);
+}
+
+// ── 6: ValidationIssue::command — pinned at every populated site a review
+//       found untested at the field level ──────────────────────────────
+
+/// Every populated `ValidationIssue::command` construction site that (a)
+/// raises an Error-severity issue and (b) is reachable through a real,
+/// parseable script, so `Kernel::execute` surfaces it as
+/// `KernelError::Validation` without hand-building an AST.
+///
+/// The prior two tests in this section pin exactly two paths — seq's Int
+/// branch and `break`'s absence — which is a by-convention property, not a
+/// falsifiable one: deleting a `.with_command(...)` call at any other
+/// populated site left nothing red. This table closes that: each case
+/// names the exact site's issue code and the exact command name it must
+/// carry, so removing the call at that site turns `Some(name)` into `None`
+/// and fails the matching case, not just the two already covered.
+///
+/// seq's other two literal-typed increment branches (`seq.rs:68`, `:76`)
+/// join the existing Int case (`seq.rs:62`); the rest are one case per
+/// builtin's own `Tool::validate` override (grep.rs, sed.rs, jq_native.rs,
+/// diff.rs, test.rs) plus the one non-builtin site, `walker.rs`'s own
+/// scatter/gather pipeline check.
+#[rstest]
+#[case("seq 1 0.0 10", kaish_kernel::validator::IssueCode::SeqZeroIncrement, Some("seq"))]
+#[case("seq 1 \"0\" 10", kaish_kernel::validator::IssueCode::SeqZeroIncrement, Some("seq"))]
+#[case("grep '[' /dev/null", kaish_kernel::validator::IssueCode::InvalidRegex, Some("grep"))]
+#[case("sed 's/a/' /dev/null", kaish_kernel::validator::IssueCode::InvalidSedExpr, Some("sed"))]
+#[case("jq '.['", kaish_kernel::validator::IssueCode::InvalidJqFilter, Some("jq"))]
+#[case("diff a.txt", kaish_kernel::validator::IssueCode::DiffNeedsTwoFiles, Some("diff"))]
+#[case("test foo -a bar", kaish_kernel::validator::IssueCode::TestCompoundOperator, Some("test"))]
+#[case(
+    "seq 1 3 | scatter | echo hi",
+    kaish_kernel::validator::IssueCode::ScatterWithoutGather,
+    Some("scatter")
+)]
+#[tokio::test]
+async fn validation_issue_command_is_pinned_at_every_populated_site(
+    #[case] script: &str,
+    #[case] code: kaish_kernel::validator::IssueCode,
+    #[case] expected_command: Option<&str>,
+) {
+    let kernel = make_kernel();
+    let err = kernel.execute(script).await.expect_err(&format!("`{script}` must be rejected"));
+
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("`{script}` must be KernelError::Validation, not {err:?}");
+    };
+
+    let issue = issues
+        .iter()
+        .find(|i| i.code == code)
+        .unwrap_or_else(|| panic!("`{script}` must raise {code:?}: {issues:?}"));
+    assert_eq!(
+        issue.command.as_deref(),
+        expected_command,
+        "`{script}` ({code:?}) command mismatch: {issues:?}"
+    );
 }

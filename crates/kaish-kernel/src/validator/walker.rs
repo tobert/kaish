@@ -35,7 +35,10 @@ pub struct Validator<'a> {
     /// it hits, and a hit is what skips the fallback. The kernel cannot go
     /// stale — the registry is frozen before `set_tool_schemas` snapshots it —
     /// but an embedder hand-building a catalog can. A hit also assumes
-    /// `tool.name() == tool.schema().name`, which nothing enforces.
+    /// `tool.name() == tool.schema().name`; `validate_command` `debug_assert_eq!`s
+    /// `schema.name == cmd.name` right after selecting `schema`, so a mismatch
+    /// (catalog or fallback) fails loudly in tests instead of silently
+    /// misattributing `ValidationIssue::command`.
     catalog: &'a [ToolSchema],
     /// Variable scope tracker.
     scope: ScopeTracker,
@@ -261,6 +264,20 @@ impl<'a> Validator<'a> {
                         &owned
                     }
                 };
+            // `validate_against_schema` reads `schema.name` — not `cmd.name` —
+            // to populate `ValidationIssue::command` (E002/W001/E003). A
+            // catalog hit already guarantees `schema.name == cmd.name` (the
+            // binary search matched on it); the fallback trusts
+            // `tool.schema().name == tool.name()`, which the `catalog` field
+            // doc above calls out as unenforced. Enforce it here so a tool
+            // whose `schema()` disagrees with its own `name()` fails loudly
+            // in tests instead of silently misattributing an issue.
+            debug_assert_eq!(
+                schema.name, cmd.name,
+                "schema-driven validation issues for '{}' would carry the wrong command \
+                 name — schema.name ('{}') must match the command actually invoked",
+                cmd.name, schema.name
+            );
             let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
             let tool_issues = tool.validate(&tool_args);
             self.issues.extend(tool_issues);
@@ -287,23 +304,24 @@ impl<'a> Validator<'a> {
 
     /// Validate a pipeline.
     fn validate_pipeline(&mut self, pipe: &Pipeline) {
-        // Check for scatter without gather
-        let named = |name: &str| {
-            pipe.stages
-                .iter()
-                .filter_map(|s| s.as_command())
-                .any(|c| c.name == name)
-        };
-        let has_scatter = named("scatter");
-        let has_gather = named("gather");
-        if has_scatter && !has_gather {
+        // Check for scatter without gather. `command` is cloned off the
+        // matched stage's own name rather than hardcoded, so it can never
+        // drift from the guard that found it (both currently read "scatter",
+        // but nothing ties them together otherwise).
+        let scatter_stage =
+            pipe.stages.iter().filter_map(|s| s.as_command()).find(|c| c.name == "scatter");
+        let has_gather =
+            pipe.stages.iter().filter_map(|s| s.as_command()).any(|c| c.name == "gather");
+        if let Some(scatter_cmd) = scatter_stage
+            && !has_gather
+        {
             self.issues.push(
                 ValidationIssue::error(
                     IssueCode::ScatterWithoutGather,
                     "scatter without gather — parallel results would be lost",
                 )
                 .with_suggestion("add gather: ... | scatter | cmd | gather")
-                .with_command("scatter")
+                .with_command(scatter_cmd.name.clone()),
             );
         }
 
@@ -1249,6 +1267,17 @@ mod tests {
         let issues = validator.validate(&program);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.code == IssueCode::UndefinedCommand));
+        // The unresolved name is the whole point of the issue, so `command`
+        // must carry it structurally, not just inside `message`. Warning
+        // severity — this site is unreachable through `KernelError::Validation`
+        // (Error-only), so this direct `Validator` call is the only way to
+        // pin it at the field level.
+        assert!(
+            issues.iter().any(|i| i.code == IssueCode::UndefinedCommand
+                && i.command.as_deref() == Some("nonexistent_command")),
+            "UndefinedCommand must carry the unresolved name: {:?}",
+            issues
+        );
     }
 
     /// `test` is a first-class builtin now, so it validates through the
@@ -1352,10 +1381,15 @@ mod tests {
              got {fallback_issues:?}"
         );
 
-        fn render(issues: &[ValidationIssue]) -> Vec<(Severity, IssueCode, &str, Option<&str>)> {
+        // `command` is included on purpose: it is schema-driven the same way
+        // `message` is (both read `schema.name`), so a catalog-hit/fallback
+        // divergence on the command name is exactly the class of bug this
+        // comparison exists to catch — dropping the field here would make
+        // that divergence invisible to the one test built to find it.
+        fn render(issues: &[ValidationIssue]) -> Vec<(Severity, IssueCode, &str, Option<&str>, Option<&str>)> {
             issues
                 .iter()
-                .map(|i| (i.severity, i.code, i.message.as_str(), i.suggestion.as_deref()))
+                .map(|i| (i.severity, i.code, i.message.as_str(), i.suggestion.as_deref(), i.command.as_deref()))
                 .collect()
         }
         assert_eq!(
@@ -1550,6 +1584,14 @@ mod tests {
         let issues = validator.validate(&program);
         assert!(issues.iter().any(|i| i.code == IssueCode::ScatterWithoutGather),
             "should flag scatter without gather: {:?}", issues);
+        // `command` is cloned off the matched stage, not hardcoded — pin that
+        // it names the stage that actually triggered the check.
+        assert!(
+            issues.iter().any(|i| i.code == IssueCode::ScatterWithoutGather
+                && i.command.as_deref() == Some("scatter")),
+            "ScatterWithoutGather must carry the scatter stage's own name: {:?}",
+            issues
+        );
     }
 
     #[test]
@@ -1649,6 +1691,21 @@ mod tests {
         assert!(
             issues.iter().any(|i| i.code == IssueCode::MissingRequiredArg),
             "missing positional should still error; got {:?}",
+            issues
+        );
+        // A real script can never reach this site today — every `ToolDef`
+        // the parser produces has `params: vec![]` (`posix_function_parser`
+        // and `bash_function_parser` both hardcode it), so `required_count`
+        // is always 0 and the branch is dead outside a hand-built
+        // `HashMap<String, ToolDef>` like this fixture's. Pin the field
+        // anyway: it is still a genuinely populated construction site
+        // (`walker.rs`'s own `.with_command(tool_def.name.clone())`), and a
+        // future parser change that lets user tools declare required params
+        // must not silently regress it.
+        assert!(
+            issues.iter().any(|i| i.code == IssueCode::MissingRequiredArg
+                && i.command.as_deref() == Some("mytool")),
+            "user-tool MissingRequiredArg must carry the tool's own name: {:?}",
             issues
         );
     }
