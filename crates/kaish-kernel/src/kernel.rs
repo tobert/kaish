@@ -8709,18 +8709,68 @@ AFTER="yes"'"#)
         let kernel = Arc::new(Kernel::transient().expect("failed to create kernel"));
         kernel.execute("COUNT=0").await.expect("init failed");
 
-        schedule_cancel(&kernel, std::time::Duration::from_millis(10));
+        // Same swallowed-cancel race as the for-loop test above, but this one
+        // never went red — it HUNG. `while true` has no iteration count to run
+        // out and there was no bound, so a cancel dropped by `reset_cancel()`
+        // left the loop spinning until CI's own job timeout killed the run: no
+        // assertion, no message, one core burned. Confirmed by forcing the
+        // swallow, at which point this loop simply never returns.
+        //
+        // Fixed the same way as the for-loop — an `interrupt` tripwire, polled
+        // at the `Stmt::While` arm's per-iteration checkpoint and impossible to
+        // consult until after `reset_cancel()` has run, so the cancel can no
+        // longer be dropped — plus a bound so a broken checkpoint can never
+        // hang again. The bound does fire here: measured, a 3s
+        // `tokio::time::timeout` preempts this loop even though the body is
+        // bare arithmetic, so each iteration yields to the runtime somewhere.
+        let bound = std::time::Duration::from_secs(10);
 
-        let result = kernel
-            .execute("while true; do COUNT=$((COUNT + 1)); done")
-            .await
-            .expect("execute failed");
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tripwire = Arc::clone(&running);
+        let opts = ExecuteOptions::new().with_interrupt(Arc::new(move || {
+            tripwire.store(true, Ordering::SeqCst);
+            false
+        }));
 
-        assert_eq!(result.code, 130);
+        {
+            let k = Arc::clone(&kernel);
+            let tripped = Arc::clone(&running);
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + bound;
+                while !tripped.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                k.cancel();
+            });
+        }
 
-        let count = kernel.get_var("COUNT").await;
-        if let Some(Value::Int(n)) = count {
-            assert!(n > 0, "loop should have run at least once");
+        let result = tokio::time::timeout(
+            bound,
+            kernel.execute_with_options("while true; do COUNT=$((COUNT + 1)); done", opts),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "while-loop did not return within {bound:?} — `while true` never ends on \
+                 its own, so the per-iteration cancellation checkpoint is not honoring the \
+                 token and this loop would have spun forever"
+            )
+        })
+        .expect("execute failed");
+
+        assert_eq!(result.code, 130, "cancelled execution should exit with code 130");
+
+        // Unconditional, unlike the `if let Some(Value::Int(n))` this replaces:
+        // that arm quietly asserted nothing whenever the type did not match,
+        // which is exactly how the for-loop test above lost its own check. A
+        // count above zero proves the body ran before the cancel landed, so a
+        // *running* loop was interrupted rather than one that never started.
+        // Deliberately no upper bound: the body is bare arithmetic with no
+        // sleep, so how far it gets in the millisecond before the cancel
+        // arrives is a function of host speed and is not worth asserting on.
+        match kernel.get_var("COUNT").await {
+            Some(Value::Int(n)) => assert!(n > 0, "loop should have run at least once, got {n}"),
+            other => panic!("COUNT should be an integer set by the loop body, got {other:?}"),
         }
     }
 
