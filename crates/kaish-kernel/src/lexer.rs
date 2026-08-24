@@ -208,15 +208,6 @@ impl fmt::Display for LexerError {
 ///   from `content` only for an interpolated body containing `$((…))`, which
 ///   `content` carries in the rewritten `${__ARITH:…}` form — a kernel-internal
 ///   spelling that must never reach a plan.
-/// A numeral's typed value and its verbatim source text — see
-/// `Token::NumericLiteral`. Logos requires a single-field variant payload,
-/// hence the wrapper struct (the same shape as `HereDocData`, below).
-#[derive(Debug, Clone, PartialEq)]
-pub struct NumericLiteralData {
-    pub value: Value,
-    pub raw: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocData {
     pub content: String,
@@ -225,6 +216,15 @@ pub struct HereDocData {
     pub literal: bool,
     pub strip_tabs: bool,
     pub body_start_offset: usize,
+}
+
+/// A numeral's typed value and its verbatim source text — see
+/// `Token::NumericLiteral`. Logos requires a single-field variant payload,
+/// hence the wrapper struct (the same shape as `HereDocData`, above).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NumericLiteralData {
+    pub value: Value,
+    pub raw: String,
 }
 
 /// A word is anything that is not whitespace and not an operator, so the
