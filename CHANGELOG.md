@@ -10,7 +10,21 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding only
+  an `ExecContext` can spawn a child with the kernel's external-command
+  discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
+
+### Added
+- **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
+  register an external program as a tool with a declared grammar. Verbs and flags
+  are deny-by-default, refused with exit 2 before any spawn; the kernel renders
+  argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
+
 ### Fixed
+- `help <tool>` renders a tool's subcommands and their flags, and names each
+  parameter's aliases. `help kj` and every wrapped command showed "No
+  parameters." before.
 
 - **A numeral argv word like `-0` or `007` lost its sign or leading zeros**
   when re-serialized from its typed value; `xargs -0 rm -f` ran as
@@ -105,8 +119,9 @@ breaking entries are marked **BREAKING**.
   `awk`, and `ls`; ask for the structure with `--json`. `fromjson`,
   `fromjsonl`, `jq`, `keys`, `values`, `split`, `gather`, `plan`, and `typeof`
   are unchanged, as are iteration and the pipeline sideband. **Embedders:** a
-  tool that prints text AND attaches data must call
-  `ToolSchema::with_typed_substitution()`.
+  tool that leaves `.data` unset is unaffected — `ExecResult::with_output`
+  alone never bound. A tool that prints text AND attaches data must call
+  `ToolSchema::with_typed_substitution()` to keep binding the data.
 
 - **BREAKING: `--json` carries one line anchor, named `line`, typed as an
   integer.** `grep`'s integer `line_number`, `head`/`tail`'s string `NUM`, and
@@ -126,7 +141,9 @@ breaking entries are marked **BREAKING**.
 - **BREAKING: plan `index` is the position in the `statements` list**, with no
   gaps: `statements[i].index == i`. It previously counted dropped empty
   statements, so a source opening with a comment numbered every statement one
-  too high. A consumer that compensated for the offset must stop.
+  too high. A consumer that compensated for the offset must stop. **Embedders:**
+  affected only if you store or display `index` — it changes which statement a
+  saved index names.
 
 - **BREAKING: `grep -r` prefixes matches with the operand as written,
   matching GNU.** `grep -r p dir` now reports `dir/a.txt`, not the bare
