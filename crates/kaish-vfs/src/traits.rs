@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 // DirEntry and DirEntryKind live in kaish-types.
-pub use kaish_types::{DirEntry, DirEntryKind, ReadRange};
+pub use kaish_types::{DirEntry, DirEntryKind, PathAccess, ReadRange};
 
 /// Abstract filesystem interface.
 ///
@@ -93,6 +93,29 @@ pub trait Filesystem: Send + Sync {
 
     /// Returns true if this filesystem is read-only.
     fn read_only(&self) -> bool;
+
+    /// What the kernel can do with one path on this filesystem.
+    ///
+    /// This is the query behind `test -w`, `test -r`, and `test -x`. It
+    /// exists because neither [`Filesystem::read_only`] nor
+    /// `DirEntry.permissions` answers "can this path be written" on its own:
+    /// `MemoryFs` (writable) and `JobFs` (read-only) both report
+    /// `permissions: None`, and a `LocalFs::read_only` wrapper over an
+    /// OS-writable directory reports mode bits with the write bit set.
+    /// [`PathAccess::resolve`] is the only place the two combine.
+    ///
+    /// The default asks `stat` for the mode and this filesystem for the
+    /// read-only state, which is right for any filesystem that is uniformly
+    /// read-only or uniformly writable. `VfsRouter` overrides it to ask the
+    /// mount that owns the path, and `OverlayFs` overrides it because writes
+    /// land in a different layer than reads resolve against.
+    ///
+    /// Errors exactly as `stat` does: a path that does not exist is an error,
+    /// not a `PathAccess` of all-false.
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        let entry = self.stat(path).await?;
+        Ok(PathAccess::resolve(entry.permissions, self.read_only()))
+    }
 
     /// Memory-resident content bytes this filesystem is holding, if it
     /// tracks them.

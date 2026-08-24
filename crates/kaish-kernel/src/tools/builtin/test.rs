@@ -338,20 +338,29 @@ async fn file_test(ctx: &ExecContext, op: &str, path: &str) -> bool {
         return false;
     }
     let resolved = ctx.resolve_path(path);
-    let entry = ctx.backend.stat(&resolved).await.ok();
+    // `-r`/`-w`/`-x` go through `path_access`, never through the raw mode
+    // bits: the mount's read-only state is half the answer and `stat` does
+    // not carry it. `eval_test_async` reads the same query, and
+    // `file_test_writable_tests` runs every case through both.
     match op {
-        "-e" => entry.is_some(),
-        "-f" => entry.as_ref().is_some_and(|e| e.is_file()),
-        "-d" => entry.as_ref().is_some_and(|e| e.is_dir()),
-        "-r" => entry
-            .as_ref()
-            .is_some_and(|e| e.permissions.is_none_or(|p| p & 0o444 != 0)),
-        "-w" => entry
-            .as_ref()
-            .is_some_and(|e| e.permissions.is_none_or(|p| p & 0o222 != 0)),
-        "-x" => entry
-            .as_ref()
-            .is_some_and(|e| e.permissions.is_some_and(|p| p & 0o111 != 0)),
+        "-e" => ctx.backend.stat(&resolved).await.is_ok(),
+        "-f" => ctx.backend.stat(&resolved).await.is_ok_and(|e| e.is_file()),
+        "-d" => ctx.backend.stat(&resolved).await.is_ok_and(|e| e.is_dir()),
+        "-r" => ctx
+            .backend
+            .path_access(&resolved)
+            .await
+            .is_ok_and(|access| access.readable),
+        "-w" => ctx
+            .backend
+            .path_access(&resolved)
+            .await
+            .is_ok_and(|access| access.writable),
+        "-x" => ctx
+            .backend
+            .path_access(&resolved)
+            .await
+            .is_ok_and(|access| access.executable),
         _ => unreachable!("file_test called with non-file op {op:?}"),
     }
 }

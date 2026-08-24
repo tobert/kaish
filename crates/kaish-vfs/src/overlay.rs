@@ -7,7 +7,7 @@
 
 use crate::budget::ByteBudget;
 use crate::paths::normalize;
-use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem, PathAccess, ReadRange};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -1089,6 +1089,25 @@ impl Filesystem for OverlayFs {
 
     fn read_only(&self) -> bool {
         false
+    }
+
+    /// Reads resolve against whichever layer holds the path; writes always
+    /// land in the upper. So the upper answers `writable` and the visible
+    /// entry answers the rest — a lower file whose mode clears `0o222` is
+    /// still writable here, because `write` copies it up and writes the
+    /// upper without consulting the lower's mode.
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        let path = normalize(path);
+        // `self.stat` honours whiteouts, so a removed path errors NotFound.
+        let visible = self.stat(&path).await?;
+        // Absent from the upper means the write would create it there.
+        let upper_mode = match self.upper.stat(&path).await {
+            Ok(entry) => entry.permissions,
+            Err(error) if is_not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(PathAccess::resolve(visible.permissions, self.read_only())
+            .with_write_layer(upper_mode, self.upper.read_only()))
     }
 
     /// Base snapshots plus whatever the upper reports as memory-resident.

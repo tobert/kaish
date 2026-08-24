@@ -13,6 +13,7 @@ use super::{
 };
 use crate::tools::{ToolArgs, ToolCtx, ToolRegistry};
 use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
+use kaish_types::PathAccess;
 
 /// Local backend implementation using VfsRouter and ToolRegistry.
 ///
@@ -398,6 +399,14 @@ impl KernelBackend for LocalBackend {
 
     fn read_only(&self) -> bool {
         self.vfs.read_only()
+    }
+
+    /// Asks the router, which asks the mount that owns the path. The trait
+    /// default would use `read_only()` above — the whole-router answer —
+    /// which is false whenever any one mount is writable and would call
+    /// `/v/bin/echo` writable on the strength of `/tmp`.
+    async fn path_access(&self, path: &Path) -> BackendResult<PathAccess> {
+        Ok(self.vfs.path_access(path).await?)
     }
 
     fn backend_type(&self) -> &str {

@@ -32,7 +32,7 @@ mod common;
 
 use std::sync::Arc;
 
-use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
+use kaish_kernel::vfs::{DevFs, LocalFs, MemoryFs, VfsRouter};
 use kaish_kernel::{Kernel, KernelBackend, KernelConfig, LocalBackend};
 
 use common::{kernel_at, run};
@@ -163,14 +163,28 @@ async fn jobfs_node_is_not_writable() {
 
 // ── DevFs: writable on purpose, reports no mode ────────────────────────────
 
+/// Mount DevFs explicitly rather than trusting a config to do it.
+///
+/// `kernel_at` is Passthrough — `/` is `LocalFs("/")`, so `/dev/null` there
+/// is the host's device node and these assertions would pass without DevFs
+/// being involved at all. That is how the first draft of this file was
+/// vacuously green.
+fn devfs_kernel() -> Kernel {
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/", MemoryFs::new());
+    vfs.mount("/dev", DevFs::new());
+    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
+        .expect("with_backend kernel")
+}
+
 /// `DevFs::read_only()` is deliberately `false` — refusing the write would
 /// break `> /dev/null`. So the mount cannot carry the answer here and the
 /// mode has to: the device files report `0o666`, matching crw-rw-rw- on
 /// Linux.
 #[tokio::test]
 async fn devfs_null_is_writable() {
-    let tmp = tempfile::tempdir().unwrap();
-    let kernel = kernel_at(tmp.path());
+    let kernel = devfs_kernel();
     both_spellings(&kernel, "", "-w", "/dev/null", true).await;
     let (_, code) = run(&kernel, "echo discard > /dev/null").await;
     assert_eq!(code, 0, "/dev/null must accept the write it says it accepts");
@@ -179,8 +193,7 @@ async fn devfs_null_is_writable() {
 /// A character device is not executable.
 #[tokio::test]
 async fn devfs_null_is_not_executable() {
-    let tmp = tempfile::tempdir().unwrap();
-    let kernel = kernel_at(tmp.path());
+    let kernel = devfs_kernel();
     both_spellings(&kernel, "", "-x", "/dev/null", false).await;
     both_spellings(&kernel, "", "-r", "/dev/null", true).await;
 }
@@ -189,12 +202,11 @@ async fn devfs_null_is_not_executable() {
 /// deliberate one-bit divergence from Linux's 0755: kaish's `DevFs::mkdir`
 /// and `DevFs::remove` refuse unconditionally, for every caller, because
 /// kaish has no root user to be the exception 0755 carves out. `0o555` is
-/// the mode that tells the truth about this mount. The write below is the
+/// the mode that tells the truth about this mount. The `mkdir` below is the
 /// receipt — `-w` and `mkdir` have to agree.
 #[tokio::test]
 async fn devfs_directory_is_searchable_but_not_writable() {
-    let tmp = tempfile::tempdir().unwrap();
-    let kernel = kernel_at(tmp.path());
+    let kernel = devfs_kernel();
     both_spellings(&kernel, "", "-x", "/dev", true).await;
     both_spellings(&kernel, "", "-r", "/dev", true).await;
     both_spellings(&kernel, "", "-w", "/dev", false).await;
@@ -267,7 +279,6 @@ async fn memory_backed_files_are_not_executable() {
     both_spellings(&kernel, "echo hi > /v/probe.txt", "-x", "/v/probe.txt", false).await;
     // a backend that models no permissions at all: not executable either
     both_spellings(&kernel, "", "-x", "/v/bin/echo", false).await;
-    both_spellings(&kernel, "", "-x", "/dev/null", false).await;
 }
 
 // ── The hazard: read-only wrapper over an OS-writable directory ────────────

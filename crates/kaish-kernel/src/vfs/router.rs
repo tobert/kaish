@@ -3,6 +3,7 @@
 //! Routes filesystem operations to the appropriate backend based on path.
 
 use super::{DirEntry, Filesystem};
+use kaish_vfs::PathAccess;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::io;
@@ -386,6 +387,15 @@ impl Filesystem for VfsRouter {
         }
 
         from_fs.rename(&from_relative, &to_relative).await
+    }
+
+    /// Delegates to the mount that owns the path, so the answer is that
+    /// mount's — not the whole router's. `read_only()` above is the
+    /// whole-router question and cannot answer for one path: a router with a
+    /// writable `/` and a read-only `/v/bin` is read-only for neither.
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        let (fs, relative) = self.find_mount(path)?;
+        fs.path_access(&relative).await
     }
 
     fn read_only(&self) -> bool {
