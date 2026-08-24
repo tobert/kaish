@@ -1,18 +1,23 @@
-//! `-w` must answer "can kaish write this path", and an absent mode is not
-//! that answer.
+//! `-w` must answer "can kaish write this path", and it gets that answer from
+//! the mount's read-only state AND the mode bits the mount reports.
 //!
-//! `DirEntry.permissions` is `None` on MemoryFs (writable), on DevFs
-//! (writable — writes discard), on BuiltinFs (read-only) and on JobFs
-//! (read-only). Both defaults are therefore wrong for half the backends:
-//! shipped 0.16 opened it (`is_none_or`) and said `/v/bin/echo` and
-//! `/v/jobs/1/status` were writable; closing it said `/v/probe.txt` was not,
-//! about a path the very next line writes. The bit being defaulted is not
-//! the bit that answers the question.
+//! Before this change `DirEntry.permissions` was `None` on MemoryFs
+//! (writable), DevFs (writable — writes discard), BuiltinFs (read-only) and
+//! JobFs (read-only), so an absent mode carried no information and neither
+//! default was right: opening it (shipped 0.16) called `/v/bin/echo` and
+//! `/v/jobs/1/status` writable; closing it called `/v/probe.txt` unwritable,
+//! about a path the very next line writes.
 //!
-//! The answer needs both facts: the owning mount's read-only state AND the
-//! mode bits that mount reports. `PathAccess::resolve` is the only place
-//! they combine, and `KernelBackend::path_access` is the only thing the two
-//! file-test sites call.
+//! The fix fills the signal in at the source. MemoryFs and DevFs now report
+//! real modes, so the only backends left reporting `None` are read-only ones
+//! and "absent" now means "this backend does not model permissions" —
+//! readable, not writable, not executable. `permissions` is a read-only
+//! observation: there is no `chmod` builtin in this tree.
+//!
+//! A mode alone is still not enough. `LocalFs::stat` asks the OS, and the OS
+//! does not know about a `LocalFs::read_only` wrapper, so a mode-644 file on
+//! a read-only mount reports the write bit set while every write to it fails.
+//! `PathAccess::resolve` combines the two facts and is the only constructor.
 //!
 //! Every case runs twice — once through the `test` builtin
 //! (`tools/builtin/test.rs::file_test`) and once through `[[ ]]`
@@ -64,9 +69,10 @@ async fn both_spellings(kernel: &Kernel, setup: &str, op: &str, path: &str, expe
 // ── MemoryFs: writable, reports no mode ────────────────────────────────────
 
 /// The regression that killed the close-the-default attempt: `/v` is
-/// MemoryFs, MemoryFs reports `permissions: None` everywhere, and MemoryFs
-/// is writable. Any implementation that reads an absent mode as "not
-/// writable" fails here.
+/// MemoryFs and MemoryFs is writable. Closing the absent-mode default is
+/// only safe because MemoryFs now reports a real file mode (`0o666`) — an
+/// implementation that closed the default without filling the mode in fails
+/// here.
 #[tokio::test]
 async fn memoryfs_file_is_writable() {
     let tmp = tempfile::tempdir().unwrap();
@@ -86,18 +92,32 @@ async fn memoryfs_file_really_takes_a_second_write() {
     assert_eq!(out, "one\ntwo");
 }
 
-/// A MemoryFs *directory* is writable too — `mkdir`/`touch` land there.
+/// A MemoryFs *directory* is writable too — `mkdir`/`touch` land there —
+/// and it is searchable, which is what the `x` bit means for a directory.
+/// `-x` on a MemoryFs directory answered NO before this change; `0o777` makes
+/// it YES, which is the POSIX answer. This is the user-visible behavior
+/// change in this commit.
 #[tokio::test]
-async fn memoryfs_directory_is_writable() {
+async fn memoryfs_directory_is_writable_and_searchable() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
     both_spellings(&kernel, "mkdir -p /v/sub", "-w", "/v/sub", true).await;
+    both_spellings(&kernel, "", "-x", "/v/sub", true).await;
+    both_spellings(&kernel, "", "-r", "/v/sub", true).await;
+    // and the mount root itself
+    both_spellings(&kernel, "", "-x", "/v", true).await;
+    both_spellings(&kernel, "", "-w", "/v", true).await;
+    // the directory really does accept the entry `-w` promises
+    let (_, code) = run(&kernel, "mkdir -p /v/sub/deeper").await;
+    assert_eq!(code, 0, "a MemoryFs directory must accept mkdir");
 }
 
 // ── BuiltinFs: read-only, reports no mode ──────────────────────────────────
 
 /// `/v/bin` is BuiltinFs, whose `read_only()` is `true` and whose entries
-/// report `permissions: None`. Shipped 0.16 answered "writable" here.
+/// report no mode. Shipped 0.16 answered "writable" here. This is one of the
+/// two backends that still report `None` after the source fix, and both are
+/// read-only — which is what makes the closed default correct.
 #[tokio::test]
 async fn builtinfs_entry_is_not_writable() {
     let tmp = tempfile::tempdir().unwrap();
@@ -126,9 +146,10 @@ async fn builtinfs_entry_really_refuses_a_write() {
 
 // ── JobFs: read-only, reports no mode ──────────────────────────────────────
 
-/// `/v/jobs/{id}/status` is JobFs — read-only, `permissions: None`. Same
-/// wrong answer as BuiltinFs in shipped 0.16, from a different mount, so a
-/// fix that special-cased `/v/bin` would still fail here.
+/// `/v/jobs/{id}/status` is JobFs — read-only, and the other backend that
+/// reports no mode. Same wrong answer as BuiltinFs in shipped 0.16, from a
+/// different mount, so a fix that special-cased `/v/bin` would still fail
+/// here.
 #[tokio::test]
 async fn jobfs_node_is_not_writable() {
     let tmp = tempfile::tempdir().unwrap();
@@ -143,8 +164,9 @@ async fn jobfs_node_is_not_writable() {
 // ── DevFs: writable on purpose, reports no mode ────────────────────────────
 
 /// `DevFs::read_only()` is deliberately `false` — refusing the write would
-/// break `> /dev/null`. `-w /dev/null` must agree with that, so an
-/// implementation that read "no mode bits" as "not writable" fails here.
+/// break `> /dev/null`. So the mount cannot carry the answer here and the
+/// mode has to: the device files report `0o666`, matching crw-rw-rw- on
+/// Linux.
 #[tokio::test]
 async fn devfs_null_is_writable() {
     let tmp = tempfile::tempdir().unwrap();
@@ -152,6 +174,32 @@ async fn devfs_null_is_writable() {
     both_spellings(&kernel, "", "-w", "/dev/null", true).await;
     let (_, code) = run(&kernel, "echo discard > /dev/null").await;
     assert_eq!(code, 0, "/dev/null must accept the write it says it accepts");
+}
+
+/// A character device is not executable.
+#[tokio::test]
+async fn devfs_null_is_not_executable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    both_spellings(&kernel, "", "-x", "/dev/null", false).await;
+    both_spellings(&kernel, "", "-r", "/dev/null", true).await;
+}
+
+/// The `/dev` *directory* is searchable but NOT writable, and that is a
+/// deliberate one-bit divergence from Linux's 0755: kaish's `DevFs::mkdir`
+/// and `DevFs::remove` refuse unconditionally, for every caller, because
+/// kaish has no root user to be the exception 0755 carves out. `0o555` is
+/// the mode that tells the truth about this mount. The write below is the
+/// receipt — `-w` and `mkdir` have to agree.
+#[tokio::test]
+async fn devfs_directory_is_searchable_but_not_writable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    both_spellings(&kernel, "", "-x", "/dev", true).await;
+    both_spellings(&kernel, "", "-r", "/dev", true).await;
+    both_spellings(&kernel, "", "-w", "/dev", false).await;
+    let (_, code) = run(&kernel, "mkdir /dev/newthing").await;
+    assert_ne!(code, 0, "/dev must refuse mkdir, as `-w /dev` said it would");
 }
 
 // ── LocalFs: real OS mode bits ─────────────────────────────────────────────
@@ -203,18 +251,22 @@ async fn localfs_executable_bit_still_decides() {
     both_spellings(&kernel, "", "-x", &plain.display().to_string(), false).await;
 }
 
-/// A memory-backed path has no executable to run — no mode bits, and
-/// `real_path` is `None`, so there is nothing for exec(2). `-x` says false,
-/// and read-only-ness has nothing to do with it. This pins the deliberate
-/// answer to the `-x` question rather than leaving it to inference.
+/// No memory-backed *file* is executable. `real_path` is `None` for these
+/// mounts, so there is nothing for exec(2) to open, and the modes say so:
+/// MemoryFs files are `0o666` and DevFs devices are `0o666`. This is the
+/// deliberate answer to "does `-x` mean anything on a memory-backed path" —
+/// for files, no, and the mode is where that is written down.
+///
+/// Directories are the exception, and not an inconsistency: `x` on a
+/// directory means searchable, not executable, and these directories are
+/// searchable. `memoryfs_directory_is_writable_and_searchable` pins that.
 #[tokio::test]
-async fn memory_backed_paths_are_not_executable() {
+async fn memory_backed_files_are_not_executable() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
     both_spellings(&kernel, "echo hi > /v/probe.txt", "-x", "/v/probe.txt", false).await;
-    // read-only mount, same answer, for the same reason
+    // a backend that models no permissions at all: not executable either
     both_spellings(&kernel, "", "-x", "/v/bin/echo", false).await;
-    // writable mount, same answer
     both_spellings(&kernel, "", "-x", "/dev/null", false).await;
 }
 
