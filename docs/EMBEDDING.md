@@ -1053,7 +1053,8 @@ PY"
 "statement_kind":"pipeline","commands":[{"name":"python3","args":[],
 "redirects":[{"kind":"<<","target":{"plain":"'PY'"}}],"background":false,
 "heredocs":[{"index":0,"delimiter":"PY","literal":true,"strip_tabs":false,
-"body":{"plain":"import os\n"},"body_offset":15}]}]}}]}
+"body":{"plain":"import os\n"},"body_offset":15}]}]}}],
+"kaish_version":"0.16.0","kaish_git_hash":"b27ea4dd","kaish_build_date":"2026-08-23"}
 ```
 
 **Nothing executes and no kernel is built** — planning is a pure function of the
@@ -1062,7 +1063,13 @@ source text, so it touches no filesystem and needs no capability feature.
 
 The output is always a JSON object, so a caller parses one shape whatever
 happened: `{"statements": [...]}` and exit **0**, or `{"errors": [...]}` and
-exit **2** — the same usage code a builtin returns for bad argv.
+exit **2** — the same usage code a builtin returns for bad argv. Both shapes
+also carry `kaish_version` (bare semver, e.g. `"0.16.0"`), `kaish_git_hash`
+(short hash, or `"unknown"` when kaish was built with no `.git` present — a
+crates.io tarball build, for instance), and `kaish_build_date`
+(`YYYY-MM-DD`) at the top level, so a caller windowing measurements by
+version reads it from the plan document instead of shelling out to
+`kaish --version` separately.
 
 **`body_offset` plus the body's length is the body's byte span in the source
 you passed.** That is the primitive for the inverse of classification: instead
@@ -1098,8 +1105,9 @@ question about it.
 
 An embedder whose hooks are written in kaish reaches the same analysis without
 leaving the shell. `plan '<statement>' --json` emits the same
-`{"statements": [...]}` object `kaish --plan` emits, and `plan` with no argument
-reads the statement from stdin:
+`{"statements": [...]}` object `kaish --plan` emits — `kaish_version`,
+`kaish_git_hash`, and `kaish_build_date` included — and `plan` with no
+argument reads the statement from stdin:
 
 ```kaish
 plan "$stmt" --json | jq '.statements[].plan.commands[].name'
@@ -1120,10 +1128,11 @@ shorter command.
 
 Two differences from `kaish --plan`, both following the kernel's `--json`
 contract rather than the CLI's. A failure carries the kernel's envelope,
-`{"error": …, "code": 2, "data": {"errors": [...]}}`, so the parse errors sit
-under `data` instead of at the top level. And a plan with no statements prints
+`{"error": …, "code": 2, "data": {"errors": [...], "kaish_version": …, …}}`,
+so the parse errors — and the version fields alongside them — sit under
+`data` instead of at the top level. And a plan with no statements prints
 nothing, because `--json` leaves an empty success empty — the CLI prints
-`{"statements": []}` there.
+`{"statements": [], "kaish_version": …, …}` there.
 
 `index` is the statement's position in the `statements` list, counted from 0
 with no gaps, so indexing the list by it reads the statement it names.

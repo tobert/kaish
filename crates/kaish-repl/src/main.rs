@@ -326,7 +326,11 @@ Options:
                                and each heredoc body with its byte offset.
                                Executes nothing and touches no filesystem.
                                Prints {{"statements": [...]}} and exits 0, or
-                               {{"errors": [...]}} and exits 2.
+                               {{"errors": [...]}} and exits 2. Both carry
+                               kaish_version, kaish_git_hash, and
+                               kaish_build_date at the top level, so a
+                               caller can window results by build without
+                               a separate kaish --version call.
   --plan-file <path>           Plan the source in <path>, or stdin for -. Keeps
                                a whole script out of argv, which is capped.
   -h, --help                   Show this help
