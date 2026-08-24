@@ -1288,6 +1288,17 @@ fn parse_tokens(
         if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
+        // `reject_glued_args`'s own `Rich::custom` already carries the right
+        // span (see `glued_run_span`), but it is buried inside a `try_map`
+        // wrapping a whole `.repeated()` argv, so the same chumsky
+        // choice/alt bookkeeping (see `validate_cmd_subst_bodies`'s doc
+        // comment) can steal its span for an unrelated, shallower sibling
+        // failure — a `git show HEAD:training/v9/x.py` glue used to be
+        // reported at `show`, not at `HEAD:training/v9/x.py`. Re-detect the
+        // same condition directly from tokens, outside that machinery.
+        if let Err(specific) = validate_glued_args(&tokens) {
+            return specific;
+        }
         errs.into_iter()
             .map(|e| ParseError {
                 span: *e.span(),
@@ -2210,17 +2221,45 @@ fn is_glue_candidate(arg: &Arg) -> bool {
 fn reject_glued_args<'src>(
     args: Vec<(Arg, Span)>,
 ) -> Result<Vec<Arg>, Rich<'src, Token, Span>> {
-    for pair in args.windows(2) {
-        let (prev, prev_span) = &pair[0];
-        let (next, next_span) = &pair[1];
+    for i in 0..args.len().saturating_sub(1) {
+        let (prev, prev_span) = &args[i];
+        let (next, next_span) = &args[i + 1];
         if is_glue_candidate(prev) && is_glue_candidate(next) && prev_span.end == next_span.start {
-            let msg = "adjacent words with no space between them are not joined into one \
-                 argument (kaish does no token pasting); quote the whole word, e.g. \
-                 \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
-            return Err(Rich::custom(*next_span, msg));
+            return Err(Rich::custom(glued_run_span(&args, i), GLUED_ARGS_MESSAGE));
         }
     }
     Ok(args.into_iter().map(|(arg, _)| arg).collect())
+}
+
+/// The message `reject_glued_args` and [`validate_glued_args`] both raise —
+/// kept as one constant so the raw-token fallback can never drift from the
+/// grammar-level check it exists to correct the span for.
+const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are not joined into \
+     one argument (kaish does no token pasting); quote the whole word, e.g. \
+     \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
+
+/// The full span of the maximal run of glue-candidate args around the
+/// adjacent pair at `args[first]`/`args[first + 1]` — extends backward and
+/// forward through every further zero-gap glue-candidate neighbor, so a
+/// paste with 3+ fragments (`/tmp/$(echo x).txt` → 3 fragments) reports the
+/// whole pasted word, not just the two fragments that happened to trip the
+/// check first.
+fn glued_run_span(args: &[(Arg, Span)], first: usize) -> Span {
+    let mut start_idx = first;
+    while start_idx > 0
+        && is_glue_candidate(&args[start_idx - 1].0)
+        && args[start_idx - 1].1.end == args[start_idx].1.start
+    {
+        start_idx -= 1;
+    }
+    let mut end_idx = first + 1;
+    while end_idx + 1 < args.len()
+        && is_glue_candidate(&args[end_idx + 1].0)
+        && args[end_idx].1.end == args[end_idx + 1].1.start
+    {
+        end_idx += 1;
+    }
+    (args[start_idx].1.start..args[end_idx].1.end).into()
 }
 
 /// Arguments list parser that handles `--` flag terminator.
@@ -3501,6 +3540,213 @@ fn validate_heredoc_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseErro
         {
             return Err(vec![ParseError { span: *span, message }]);
         }
+    }
+    Ok(())
+}
+
+/// True for a lexer token that becomes exactly one glue-candidate `Arg`
+/// (`Positional` or a bare `LongFlag`) on its own — every single-token
+/// `primary_expr_parser` production, plus the `test`/`[` operators
+/// (`test_operator_arg_parser`'s `=`, `==`, `!=`, `!`). Excludes
+/// `ShortFlag` and `DoubleDash`, matching `is_glue_candidate`'s own
+/// exclusion of `Arg::ShortFlag`/`Arg::DoubleDash` — see that function's
+/// doc comment for why.
+fn is_word_token(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Ident(_)
+            | Token::LongFlag(_)
+            | Token::Path(_)
+            | Token::RelativePath(_)
+            | Token::DotSlashPath(_)
+            | Token::TildePath(_)
+            | Token::DottedIdent(_)
+            | Token::NumberIdent(_)
+            | Token::DashNumWord(_)
+            | Token::AtWord(_)
+            | Token::JobSpec(_)
+            | Token::GlobWord(_)
+            | Token::String(_)
+            | Token::SingleString(_)
+            | Token::Int(_)
+            | Token::Float(_)
+            | Token::True
+            | Token::False
+            | Token::SimpleVarRef(_)
+            | Token::VarRef(_)
+            | Token::VarLength(_)
+            | Token::Positional(_)
+            | Token::AllArgs
+            | Token::ArgCount
+            | Token::LastExitCode
+            | Token::CurrentPid
+            | Token::Arithmetic(_)
+            | Token::PlusBare(_)
+            | Token::MinusBare(_)
+            | Token::MinusAlone
+            | Token::DoubleDashBare(_)
+            | Token::Star
+            | Token::Question
+            | Token::Colon
+            | Token::Comma
+            | Token::Dot
+            | Token::DotDot
+            | Token::Tilde
+            | Token::Eq
+            | Token::EqEq
+            | Token::NotEq
+            | Token::Bang
+    )
+}
+
+/// A key token `word_assign_arg_parser`/`long_flag_with_value` accept —
+/// `Ident` for `key=value`, `LongFlag` for `--key=value`. `keyword_word`'s
+/// wider key set (`if=1`-style) is deliberately not reproduced here: this
+/// scanner is a fallback for the common bareword/path/flag pastes the four
+/// reported examples cover, not a full re-implementation of the grammar —
+/// see `validate_glued_args`'s doc comment.
+fn is_assign_key_token(tok: &Token) -> bool {
+    matches!(tok, Token::Ident(_) | Token::LongFlag(_))
+}
+
+/// A redirect operator whose target `redirect_parser` diagnoses on its own
+/// (with its own, differently-worded message) when a fragment is glued to
+/// it — `validate_glued_args` must not re-diagnose that region.
+fn is_redirect_operator(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Gt
+            | Token::GtGt
+            | Token::Lt
+            | Token::Stderr
+            | Token::Both
+            | Token::HereDocStart
+            | Token::HereString
+    )
+}
+
+/// If `tokens[i]` starts a single glue-candidate word — one `is_word_token`
+/// token, or a balanced `$(...)` group — returns its span and the index
+/// just past it. `None` when `tokens[i]` cannot start a word (an operator,
+/// a `ShortFlag`, a keyword used as a keyword, an unterminated `$(...)`).
+fn word_unit(tokens: &[(Token, Span)], i: usize) -> Option<(Span, usize)> {
+    let (tok, span) = tokens.get(i)?;
+    if matches!(tok, Token::CmdSubstStart) {
+        let close_rel = find_cmd_subst_close(&tokens[i + 1..])?;
+        let close_idx = i + 1 + close_rel;
+        return Some(((span.start..tokens[close_idx].1.end).into(), close_idx + 1));
+    }
+    if is_word_token(tok) {
+        return Some((*span, i + 1));
+    }
+    None
+}
+
+/// Skip the whole zero-gap word run starting at `i` (one or more
+/// `word_unit`s chained edge-to-edge) without recording anything — used
+/// right after a redirect operator, whose target is `redirect_parser`'s own
+/// diagnostic territory (see `is_redirect_operator`). Returns `i` unchanged
+/// when nothing there can start a word.
+fn skip_redirect_target(tokens: &[(Token, Span)], i: usize) -> usize {
+    let Some((first_span, mut next_i)) = word_unit(tokens, i) else {
+        return i;
+    };
+    let mut end = first_span.end;
+    while tokens.get(next_i).is_some_and(|(_, span)| span.start == end) {
+        match word_unit(tokens, next_i) {
+            Some((unit_span, advanced)) => {
+                end = unit_span.end;
+                next_i = advanced;
+            }
+            None => break,
+        }
+    }
+    next_i
+}
+
+/// Walk `tokens` producing the same glue-candidate units
+/// `arg_before_double_dash_parser` would bind as `Arg`s — a single word
+/// token, a `key=value`/`--key=value` assignment (one unit, per
+/// `word_assign_arg_parser`'s and `long_flag_with_value`'s own `=`
+/// adjacency), or a balanced `$(...)`. A `ShortFlag`, keyword, or other
+/// token this scanner doesn't recognize as a word simply breaks the chain
+/// (never merges across it) — see `validate_glued_args`.
+fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let (tok, span) = &tokens[i];
+
+        if is_redirect_operator(tok) {
+            i = skip_redirect_target(tokens, i + 1);
+            continue;
+        }
+
+        if is_assign_key_token(tok)
+            && let Some((Token::Eq, eq_span)) = tokens.get(i + 1)
+            && eq_span.start == span.end
+            && let Some((value_span, next_i)) = word_unit(tokens, i + 2)
+            && eq_span.end == value_span.start
+        {
+            units.push((span.start..value_span.end).into());
+            i = next_i;
+            continue;
+        }
+
+        if let Some((unit_span, next_i)) = word_unit(tokens, i) {
+            units.push(unit_span);
+            i = next_i;
+            continue;
+        }
+
+        i += 1;
+    }
+    units
+}
+
+/// Re-detect a genuine glued-argv paste directly from `tokens`, outside
+/// chumsky's `choice`/`try_map` bookkeeping — called only after
+/// [`parse_tokens`]'s main grammar pass has already failed, the same way
+/// and for the same reason as [`validate_cmd_subst_bodies`] (see its doc
+/// comment for the mechanism).
+///
+/// `reject_glued_args`'s own `Rich::custom` already carries the right span
+/// (`glued_run_span` computes the same maximal-run span this function
+/// does), but it is raised deep inside a `try_map` wrapping the whole argv
+/// `.repeated()`. An unrelated, shallower failed alternative tried
+/// elsewhere in the grammar for the *same* statement — e.g. an early
+/// attempt to read `git show HEAD:training/v9/x.py` as something other
+/// than a plain command — can still win chumsky's furthest-error
+/// bookkeeping (`RichReason::flat_merge` always prefers a `Custom` reason,
+/// but `Rich::merge` always keeps `self`'s span) and end up reporting our
+/// message at ITS span: `show`, not `HEAD:training/v9/x.py`.
+///
+/// This is deliberately conservative — it only recognizes the bareword,
+/// path, flag, and `$(...)` shapes `glue_candidate_units` classifies, and
+/// skips a redirect's own target entirely (`redirect_parser` already
+/// diagnoses that correctly on its own). Under-recognizing a construct just
+/// falls through to the generic chumsky error unchanged; the scope stays
+/// "report the right span for a rejection that already happened," never
+/// "change what is accepted."
+fn validate_glued_args(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
+    let units = glue_candidate_units(tokens);
+    for i in 0..units.len().saturating_sub(1) {
+        if units[i].end != units[i + 1].start {
+            continue;
+        }
+        let mut start_idx = i;
+        while start_idx > 0 && units[start_idx - 1].end == units[start_idx].start {
+            start_idx -= 1;
+        }
+        let mut end_idx = i + 1;
+        while end_idx + 1 < units.len() && units[end_idx].end == units[end_idx + 1].start {
+            end_idx += 1;
+        }
+        let span: Span = (units[start_idx].start..units[end_idx].end).into();
+        return Err(vec![ParseError {
+            span,
+            message: GLUED_ARGS_MESSAGE.to_string(),
+        }]);
     }
     Ok(())
 }
