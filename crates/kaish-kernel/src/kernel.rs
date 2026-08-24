@@ -1597,6 +1597,15 @@ impl Kernel {
     }
 
     /// Reset the cancellation token (called at the start of each execute).
+    ///
+    /// A `Kernel::cancel()` that arrives while nothing is running is dropped
+    /// here: the next `execute()` replaces the cancelled token and runs
+    /// normally, and nothing in that call's result reports a cancel was
+    /// discarded. An embedder can see the pending cancel before it is dropped —
+    /// `is_cancelled()` reports true until the next `execute()` clears it — but
+    /// a call that must start already cancelled has to supply its own
+    /// `ExecuteOptions::cancel_token`, which is a read-only input and is never
+    /// reset; a pre-cancelled one stops the call at its first checkpoint.
     fn reset_cancel(&self) -> tokio_util::sync::CancellationToken {
         #[allow(clippy::expect_used)]
         let mut token = self.cancel_token.lock().expect("cancel_token poisoned");
@@ -8592,8 +8601,17 @@ AFTER="yes"'"#)
     // Cancellation Tests
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Helper: schedule a cancel after a delay from a background thread.
-    /// Uses std::thread because cancel() is sync and Kernel is not Send.
+    /// Helper: schedule a cancel after a delay from a background OS thread.
+    ///
+    /// `Kernel` is `Send + Sync` — an `Arc<Kernel>` is moved into the thread
+    /// below. The thread is an OS thread because `cancel()` is sync and because
+    /// it must run while the current-thread test runtime is inside `execute()`.
+    ///
+    /// The delay races `execute()`: a cancel firing before `execute()` reaches
+    /// `reset_cancel()` is discarded, because `reset_cancel()` replaces a token
+    /// that is already cancelled. Tests that need the cancel to actually land
+    /// use an `ExecuteOptions::interrupt` tripwire instead, as the loop tests
+    /// below do.
     fn schedule_cancel(kernel: &Arc<Kernel>, delay: std::time::Duration) {
         let k = Arc::clone(kernel);
         std::thread::spawn(move || {

@@ -588,8 +588,11 @@ async fn vars_plus_timeout_combo_kills_child_with_vars_visible() {
 
     assert_eq!(result.code, 124, "expected 124, got {}", result.code);
 
-    // Child wrote its PID and the WHO line before sleeping. Poll: the second
-    // line (WHO) may flush a beat after execute() returns under load.
+    // The child writes its pid on line 1 and the WHO line on line 2. This poll
+    // covers line 1 only: `read_pid` parses `lines().next()`, so it returns as
+    // soon as the pid is readable and waits for nothing else. If the WHO line
+    // has not landed yet, the `who line` expect below panics instead of waiting
+    // for it.
     let _ = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     let contents = std::fs::read_to_string(&pid_file).expect("read pid_file");
     let mut lines = contents.lines();
