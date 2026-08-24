@@ -27,6 +27,22 @@ echo "${NAME} more text"
 
 **Why lowercase only?** `true` and `false` are the boolean literals. `TRUE`, `Yes`, `yes`, `on`, and `1` are ordinary values — `x=TRUE` binds the string `"TRUE"` and `x=1` binds the number `1`, neither a boolean. Check with `typeof` when it matters.
 
+### A bare number follows JSON rules
+
+```sh
+echo 007      # the string 007 — a leading zero is not a JSON number
+echo -0       # the number 0 — valid JSON; -0 and 0 are the same number
+echo "-0"     # the string -0 — quote it to keep those two characters
+```
+
+`007`, `010`, and `00` are strings: nobody writes `007` expecting the number
+7, and `fromjson '007'` already refused it as invalid JSON — the bare word
+now agrees. `-0`, `0.10`, and `1.0` are numbers, and kaish prints back the
+word you typed (`-0`, not `0`) wherever that word crosses into argv or a
+plan. Once the number moves — through a variable, `--json`, arithmetic — it
+is a plain typed number again and prints its canonical form: `x=-0; echo
+$x` prints `0`. Quote a number (`"-0"`) to keep it a string on purpose.
+
 ### Inline environment prefix — `NAME=value command`
 
 One or more assignments placed *before* a command scope those variables to that

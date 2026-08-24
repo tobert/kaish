@@ -305,6 +305,22 @@ ENABLED=true              # boolean (only true/false)
 ```"#,
     ),
     syntax_section(
+        "numbers",
+        "Numbers",
+        r#"```sh
+echo 007      # the string 007 — a leading zero is not a JSON number
+echo -0       # the number 0 — valid JSON; -0 and 0 are the same number
+echo "-0"     # the string -0 — quote it to keep those two characters
+```
+
+`007`, `010`, and `00` are strings — `fromjson '007'` already refuses them
+as invalid JSON, and a bare number now agrees. `-0`, `0.10`, and `1.0` are
+numbers; kaish prints back the word you typed wherever it crosses into argv
+or a plan. Once the number moves through a variable, arithmetic, or
+`--json`, it is a plain typed number again: `x=-0; echo $x` prints `0`.
+Quote a number to keep it a string on purpose."#,
+    ),
+    syntax_section(
         "expansion",
         "Expansion",
         r#"```sh
