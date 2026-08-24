@@ -3622,22 +3622,6 @@ fn is_assign_key_token(tok: &Token) -> bool {
     matches!(tok, Token::Ident(_) | Token::LongFlag(_))
 }
 
-/// A redirect operator whose target `redirect_parser` diagnoses on its own
-/// (with its own, differently-worded message) when a fragment is glued to
-/// it — `validate_glued_args` must not re-diagnose that region.
-fn is_redirect_operator(tok: &Token) -> bool {
-    matches!(
-        tok,
-        Token::Gt
-            | Token::GtGt
-            | Token::Lt
-            | Token::Stderr
-            | Token::Both
-            | Token::HereDocStart
-            | Token::HereString
-    )
-}
-
 /// If `tokens[i]` starts a single glue-candidate word — one `is_word_token`
 /// token, or a balanced `$(...)` group — returns its span and the index
 /// just past it. `None` when `tokens[i]` cannot start a word (an operator,
@@ -3655,28 +3639,6 @@ fn word_unit(tokens: &[(Token, Span)], i: usize) -> Option<(Span, usize)> {
     None
 }
 
-/// Skip the whole zero-gap word run starting at `i` (one or more
-/// `word_unit`s chained edge-to-edge) without recording anything — used
-/// right after a redirect operator, whose target is `redirect_parser`'s own
-/// diagnostic territory (see `is_redirect_operator`). Returns `i` unchanged
-/// when nothing there can start a word.
-fn skip_redirect_target(tokens: &[(Token, Span)], i: usize) -> usize {
-    let Some((first_span, mut next_i)) = word_unit(tokens, i) else {
-        return i;
-    };
-    let mut end = first_span.end;
-    while tokens.get(next_i).is_some_and(|(_, span)| span.start == end) {
-        match word_unit(tokens, next_i) {
-            Some((unit_span, advanced)) => {
-                end = unit_span.end;
-                next_i = advanced;
-            }
-            None => break,
-        }
-    }
-    next_i
-}
-
 /// Walk `tokens` producing the same glue-candidate units
 /// `arg_before_double_dash_parser` would bind as `Arg`s — a single word
 /// token, a `key=value`/`--key=value` assignment (one unit, per
@@ -3684,16 +3646,16 @@ fn skip_redirect_target(tokens: &[(Token, Span)], i: usize) -> usize {
 /// adjacency), or a balanced `$(...)`. A `ShortFlag`, keyword, or other
 /// token this scanner doesn't recognize as a word simply breaks the chain
 /// (never merges across it) — see `validate_glued_args`.
+///
+/// A redirect's target needs no special handling here. `redirect_parser`
+/// diagnoses a glued target itself, with its own wording, and that
+/// `Rich::custom` is the message left standing — so `is_glued_args_error`
+/// never lets this scanner run for those inputs at all.
 fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
     let mut units = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let (tok, span) = &tokens[i];
-
-        if is_redirect_operator(tok) {
-            i = skip_redirect_target(tokens, i + 1);
-            continue;
-        }
 
         if is_assign_key_token(tok)
             && let Some((Token::Eq, eq_span)) = tokens.get(i + 1)
@@ -3734,13 +3696,15 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// but `Rich::merge` always keeps `self`'s span) and end up reporting our
 /// message at ITS span: `show`, not `HEAD:training/v9/x.py`.
 ///
-/// This is deliberately conservative — it only recognizes the bareword,
-/// path, flag, and `$(...)` shapes `glue_candidate_units` classifies, and
-/// skips a redirect's own target entirely (`redirect_parser` already
-/// diagnoses that correctly on its own). Under-recognizing a construct just
-/// falls through to the generic chumsky error unchanged; the scope stays
+/// Only reached when `is_glued_args_error` has already confirmed the
+/// grammar's own standing error is this exact rejection, so this function
+/// never has to know which other constructs to avoid — no construct it
+/// might collide with can reach it. It is conservative in the other
+/// direction too: it recognizes only the bareword, path, flag, and
+/// `$(...)` shapes `glue_candidate_units` classifies, and under-recognizing
+/// one just leaves the grammar's own span in place. The scope stays
 /// "report the right span for a rejection that already happened," never
-/// "change what is accepted."
+/// "change what is rejected."
 fn validate_glued_args(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
     let units = glue_candidate_units(tokens);
     for i in 0..units.len().saturating_sub(1) {
