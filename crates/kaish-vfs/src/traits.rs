@@ -107,8 +107,16 @@ pub trait Filesystem: Send + Sync {
     /// The default asks `stat` for the mode and this filesystem for the
     /// read-only state, which is right for any filesystem that is uniformly
     /// read-only or uniformly writable. `VfsRouter` overrides it to ask the
-    /// mount that owns the path, and `OverlayFs` overrides it because writes
-    /// land in a different layer than reads resolve against.
+    /// mount that owns the path.
+    ///
+    /// `OverlayFs` keeps the default, and inherits one known inaccuracy from
+    /// it: reads resolve against whichever layer holds the path, but writes
+    /// always land in the upper and `OverlayFs::write` never consults the
+    /// lower's mode. So a lower file whose mode clears `0o222` reports
+    /// unwritable while copy-up would in fact write it. That answer is
+    /// unchanged from before this query existed, and correcting it means
+    /// deciding what mode a path that does not exist in the upper yet should
+    /// be judged by — a question with no answer in the code today.
     ///
     /// Errors exactly as `stat` does: a path that does not exist is an error,
     /// not a `PathAccess` of all-false.

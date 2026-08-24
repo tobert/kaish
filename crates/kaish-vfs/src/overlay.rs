@@ -7,7 +7,7 @@
 
 use crate::budget::ByteBudget;
 use crate::paths::normalize;
-use crate::traits::{DirEntry, DirEntryKind, Filesystem, PathAccess, ReadRange};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -1091,25 +1091,6 @@ impl Filesystem for OverlayFs {
         false
     }
 
-    /// Reads resolve against whichever layer holds the path; writes always
-    /// land in the upper. So the upper answers `writable` and the visible
-    /// entry answers the rest — a lower file whose mode clears `0o222` is
-    /// still writable here, because `write` copies it up and writes the
-    /// upper without consulting the lower's mode.
-    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
-        let path = normalize(path);
-        // `self.stat` honours whiteouts, so a removed path errors NotFound.
-        let visible = self.stat(&path).await?;
-        // Absent from the upper means the write would create it there.
-        let upper_mode = match self.upper.stat(&path).await {
-            Ok(entry) => entry.permissions,
-            Err(error) if is_not_found(&error) => None,
-            Err(error) => return Err(error),
-        };
-        Ok(PathAccess::resolve(visible.permissions, self.read_only())
-            .with_write_layer(upper_mode, self.upper.read_only()))
-    }
-
     /// Base snapshots plus whatever the upper reports as memory-resident.
     /// With the conventional private `MemoryFs` upper this is the full 2× of
     /// copy-up; with a disk-backed upper it's the bases alone — this counter
@@ -2051,6 +2032,17 @@ mod tests {
     mod localfs {
         use super::*;
         use crate::local::LocalFs;
+
+        // A whiteouted path is gone, so it has no access at all — not a
+        // PathAccess of all-false, an error, the same as stat.
+        #[tokio::test]
+        async fn path_access_errors_on_a_whiteouted_path() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("gone.txt"), b"x").unwrap();
+            let overlay = OverlayFs::over(Arc::new(LocalFs::read_only(dir.path())));
+            overlay.remove(Path::new("gone.txt")).await.unwrap();
+            assert!(overlay.path_access(Path::new("gone.txt")).await.is_err());
+        }
 
         #[tokio::test]
         async fn test_real_tree_byte_identical_after_overlay_writes() {

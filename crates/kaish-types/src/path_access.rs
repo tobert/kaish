@@ -18,10 +18,7 @@
 /// writable device from the unwritable directory above it.
 ///
 /// [`PathAccess::resolve`] takes both and is the only constructor, so no
-/// caller can answer from one of them by accident.
-/// [`PathAccess::with_write_layer`] takes both again, for a copy-on-write
-/// overlay whose writes land somewhere other than where its reads resolve.
-/// The struct is
+/// caller can answer from one of them by accident. The struct is
 /// `#[non_exhaustive]`: read the fields, do not construct it by literal.
 ///
 /// # What an absent mode means
@@ -80,23 +77,6 @@ impl PathAccess {
         }
     }
 
-    /// Re-answer `writable` from a different layer than the one that answered
-    /// `readable` and `executable`.
-    ///
-    /// Copy-on-write overlays need this: reads resolve against whichever
-    /// layer holds the path, but every write lands in the upper layer, so the
-    /// upper layer decides writability. A lower file whose mode clears `0o222`
-    /// is still writable through copy-up, because `OverlayFs::write` copies
-    /// the content up and writes the upper — it never consults the lower's
-    /// mode.
-    ///
-    /// Takes the same pair as [`PathAccess::resolve`], for the write layer.
-    pub fn with_write_layer(self, mode: Option<u32>, mount_read_only: bool) -> Self {
-        Self {
-            writable: Self::resolve(mode, mount_read_only).writable,
-            ..self
-        }
-    }
 }
 
 #[cfg(test)]
@@ -151,24 +131,5 @@ mod tests {
         assert!(access.executable, "read-only says nothing about exec");
     }
 
-    /// Copy-up: the lower's mode answers read and exec, the upper answers
-    /// write.
-    #[test]
-    fn write_layer_replaces_only_the_write_answer() {
-        let lower = PathAccess::resolve(Some(0o444), false);
-        assert!(!lower.writable);
-        // The upper is MemoryFs, so it reports 0o666 for the copied-up file.
-        let overlaid = lower.with_write_layer(Some(0o666), false);
-        assert!(overlaid.writable, "copy-up makes a mode-444 lower writable");
-        assert!(overlaid.readable);
-        assert_eq!(overlaid.executable, lower.executable);
-    }
 
-    /// A read-only upper makes the whole overlay unwritable, whatever the
-    /// lower reports.
-    #[test]
-    fn a_read_only_write_layer_wins() {
-        let overlaid = PathAccess::resolve(Some(0o755), false).with_write_layer(Some(0o755), true);
-        assert!(!overlaid.writable);
-    }
 }
