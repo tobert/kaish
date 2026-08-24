@@ -195,9 +195,38 @@ impl LocalFs {
         Some(meta.permissions().mode())
     }
 
+    /// Synthesize a Unix-shaped mode from the one permission fact a non-Unix
+    /// platform exposes.
+    ///
+    /// `LocalFs` is writable, so returning `None` here would put it in the
+    /// same position `MemoryFs` was in: a writable backend reporting an
+    /// absent mode, which is what makes `test -w` unanswerable. There is
+    /// exactly one bit to work from — `Permissions::readonly()` — so that is
+    /// what the mode carries.
+    ///
+    /// The `x` bit is never set. Executability is not a permission on these
+    /// platforms (it is decided by the file extension), so claiming it would
+    /// be a fabrication; `-x` answered false here before this and still does.
     #[cfg(not(unix))]
-    fn extract_permissions(_meta: &std::fs::Metadata) -> Option<u32> {
-        None
+    fn extract_permissions(meta: &std::fs::Metadata) -> Option<u32> {
+        Some(Self::synthesized_mode(meta.is_dir(), meta.permissions().readonly()))
+    }
+
+    /// The mode [`extract_permissions`](Self::extract_permissions) reports on
+    /// a platform with no Unix mode bits. Split out from the `cfg` so it can
+    /// be tested on every platform, including the Unix ones that never call
+    /// it.
+    // Only the non-Unix `extract_permissions` calls this; the tests call it
+    // on every platform, which is the reason it is split out at all.
+    #[cfg_attr(unix, allow(dead_code))]
+    pub(crate) fn synthesized_mode(is_dir: bool, readonly: bool) -> u32 {
+        match (is_dir, readonly) {
+            // Searchable, and writable unless the read-only attribute is set.
+            (true, false) => 0o777,
+            (true, true) => 0o555,
+            (false, false) => 0o666,
+            (false, true) => 0o444,
+        }
     }
 
     /// Build a [`DirEntry`] for one directory member named by `path`, *without*
@@ -697,6 +726,27 @@ mod tests {
         assert_eq!(data, b"nested");
 
         cleanup(&dir).await;
+    }
+
+    // The non-Unix mode synthesis, exercised on every platform. Without it
+    // `LocalFs` would be a writable backend reporting an absent mode on
+    // Windows — the same hole MemoryFs had — and `test -w` would answer NO
+    // about every file there.
+    #[test]
+    fn synthesized_mode_keeps_writability_and_never_claims_exec() {
+        assert_eq!(LocalFs::synthesized_mode(false, false) & 0o222, 0o222);
+        assert_eq!(LocalFs::synthesized_mode(false, true) & 0o222, 0);
+        assert_eq!(LocalFs::synthesized_mode(true, false) & 0o222, 0o222);
+        assert_eq!(LocalFs::synthesized_mode(true, true) & 0o222, 0);
+        // Everything readable, whatever the read-only attribute says.
+        for (is_dir, readonly) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_ne!(LocalFs::synthesized_mode(is_dir, readonly) & 0o444, 0);
+        }
+        // Only directories get the x bit, and it means searchable.
+        assert_eq!(LocalFs::synthesized_mode(false, false) & 0o111, 0);
+        assert_eq!(LocalFs::synthesized_mode(false, true) & 0o111, 0);
+        assert_ne!(LocalFs::synthesized_mode(true, false) & 0o111, 0);
+        assert_ne!(LocalFs::synthesized_mode(true, true) & 0o111, 0);
     }
 
     #[tokio::test]
