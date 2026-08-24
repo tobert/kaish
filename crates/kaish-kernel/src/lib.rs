@@ -32,6 +32,8 @@ pub mod paths;
 #[cfg(all(unix, feature = "subprocess"))]
 pub mod pidfd;
 pub mod scheduler;
+#[cfg(feature = "subprocess")]
+pub(crate) mod spawn;
 pub(crate) mod telemetry;
 pub mod tools;
 pub mod trash;

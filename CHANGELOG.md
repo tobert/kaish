@@ -10,12 +10,26 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding only
+  an `ExecContext` can spawn a child with the kernel's external-command
+  discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
+
 ### Added
+- **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
+  register an external program as a tool with a declared grammar. Verbs and flags
+  are deny-by-default, refused with exit 2 before any spawn; the kernel renders
+  argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
 
 - **Plan JSON carries build identity** — `kaish_version`, `kaish_git_hash`,
   and `kaish_build_date` ride along on every `--plan`/`--plan-file`/`plan`
   document, success or error, so a consumer windowing measurements by build
   no longer shells out to `kaish --version` per call.
+
+### Fixed
+- `help <tool>` renders a tool's subcommands and their flags, and names each
+  parameter's aliases. `help kj` and every wrapped command showed "No
+  parameters." before.
 
 ## [0.16.0] - 2026-08-23
 
