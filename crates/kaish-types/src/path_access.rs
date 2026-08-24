@@ -2,32 +2,51 @@
 
 /// Whether the kernel can read, write, or execute a path.
 ///
-/// A file test needs two facts that neither one answers alone: the read-only
+/// A file test needs two facts, and neither one answers alone: the read-only
 /// state of the mount that owns the path, and the mode bits that mount
 /// reports for the path itself.
 ///
-/// Neither fact is sufficient. `DirEntry.permissions` is `None` on MemoryFs
-/// (writable), on DevFs (writable — writes discard), on BuiltinFs
-/// (read-only) and on JobFs (read-only), so an absent mode carries no
-/// information about writability at all. In the other direction a
-/// `LocalFs::read_only` wrapper over an OS-writable directory reports real
-/// mode bits with the write bit set, because `LocalFs::stat` asks the OS and
-/// the OS does not know about the wrapper.
+/// The mode is not enough. A `LocalFs::read_only` wrapper over an
+/// OS-writable directory reports real mode bits with the write bit set,
+/// because `LocalFs::stat` asks the OS and the OS does not know about the
+/// wrapper. Every write to such a path fails; a mode-only check says it
+/// would succeed.
 ///
-/// [`PathAccess::resolve`] is the only way to build a `PathAccess`, and it
-/// takes both facts, so a caller cannot answer from one of them by accident.
-/// The struct is `#[non_exhaustive]`: read the fields, do not construct it
-/// by literal.
+/// The mount is not enough either. `DevFs::read_only()` is deliberately
+/// `false` — refusing writes would break `> /dev/null` — while
+/// `mkdir /dev/x` is refused for every caller. Only the mode separates the
+/// writable device from the unwritable directory above it.
+///
+/// [`PathAccess::resolve`] takes both and is the only constructor, so no
+/// caller can answer from one of them by accident.
+/// [`PathAccess::with_write_layer`] takes both again, for a copy-on-write
+/// overlay whose writes land somewhere other than where its reads resolve.
+/// The struct is
+/// `#[non_exhaustive]`: read the fields, do not construct it by literal.
+///
+/// # What an absent mode means
+///
+/// `DirEntry.permissions` is `None` only for a backend that does not model
+/// permissions at all. Every backend in this workspace that can be written
+/// reports a mode — `LocalFs` on every platform, `MemoryFs`, `DevFs`, and
+/// `OverlayFs` through whichever layer holds the path — so the backends
+/// still reporting `None` (`BuiltinFs`, `JobFs`) are read-only ones. An
+/// absent mode therefore reads as: readable, not writable, not executable.
+///
+/// That premise is load-bearing. **A backend that is writable and reports
+/// `None` will be told its paths are unwritable.** An embedder adding one
+/// should report a mode rather than rely on a default here.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathAccess {
     /// The path's contents can be read. A read-only mount is readable.
     pub readable: bool,
-    /// The path can be written. False whenever the owning mount is read-only,
-    /// whatever the mode bits say.
+    /// The path can be written. Needs both facts to agree: false whenever the
+    /// owning mount is read-only, whatever the mode says, and false whenever
+    /// the mode clears `0o222`, whatever the mount says.
     pub writable: bool,
-    /// The path can be executed. False when the mount reports no mode bits —
-    /// a mount with nothing to hand exec(2) has no executable path on it.
+    /// The path can be executed, or — on a directory — searched. False when
+    /// the mount reports no mode.
     pub executable: bool,
 }
 
@@ -36,26 +55,27 @@ impl PathAccess {
     /// one path.
     ///
     /// `mode` is `DirEntry.permissions` — `None` when the mount does not
-    /// model Unix modes. `mount_read_only` is that mount's
-    /// `Filesystem::read_only()`, for the mount that actually owns the path,
-    /// not the whole router.
+    /// model Unix modes. `mount_read_only` is the `read_only()` of the mount
+    /// that actually owns the path, not of the whole router.
     ///
-    /// The three answers do not treat an absent mode the same way, because
-    /// the three questions are not the same question:
+    /// The three answers treat an absent mode differently, because the three
+    /// questions are different:
     ///
-    /// - `readable` — an absent mode means the mount does not restrict reads,
-    ///   so it reads. Read-only mounts read.
-    /// - `writable` — an absent mode says nothing, so the mount decides. Both
-    ///   must agree: a read-only mount is never writable, and a writable
-    ///   mount still honours a mode that clears `0o222`.
-    /// - `executable` — an absent mode means there is no executable here.
-    ///   Read-only-ness is about writes and contributes nothing; a mount that
-    ///   reports no modes (MemoryFs, JobFs, BuiltinFs, DevFs) also has no real
-    ///   path for exec(2) to open.
+    /// - `readable` — a backend that does not model permissions does not
+    ///   restrict reads, and read-only mounts read. So: readable.
+    /// - `writable` — every writable backend reports a mode, so an absent one
+    ///   means read-only. Both facts must agree for a yes: a read-only mount
+    ///   is never writable, and a writable mount still honors a mode that
+    ///   clears `0o222`.
+    /// - `executable` — an absent mode means there is nothing here to run.
+    ///   Read-only-ness contributes nothing; it is about writes.
+    ///
+    /// On a directory, `0o111` means searchable, which is the POSIX meaning
+    /// and what `test -x DIR` should answer.
     pub fn resolve(mode: Option<u32>, mount_read_only: bool) -> Self {
         Self {
             readable: mode.is_none_or(|p| p & 0o444 != 0),
-            writable: !mount_read_only && mode.is_none_or(|p| p & 0o222 != 0),
+            writable: !mount_read_only && mode.is_some_and(|p| p & 0o222 != 0),
             executable: mode.is_some_and(|p| p & 0o111 != 0),
         }
     }
@@ -83,23 +103,32 @@ impl PathAccess {
 mod tests {
     use super::PathAccess;
 
-    /// MemoryFs and DevFs: no modes, writable mount.
+    /// A backend that models no permissions reads, and nothing else — the
+    /// mount being writable does not make up for an absent mode, because
+    /// every writable backend in the workspace reports one.
     #[test]
-    fn absent_mode_on_a_writable_mount_is_writable_not_executable() {
-        let access = PathAccess::resolve(None, false);
-        assert!(access.readable);
-        assert!(access.writable);
-        assert!(!access.executable);
+    fn absent_mode_reads_and_nothing_else() {
+        for mount_read_only in [false, true] {
+            let access = PathAccess::resolve(None, mount_read_only);
+            assert!(access.readable, "read-only is about writes");
+            assert!(!access.writable, "absent mode means read-only backend");
+            assert!(!access.executable, "nothing here to hand exec(2)");
+        }
     }
 
-    /// BuiltinFs and JobFs: no modes, read-only mount. The shipped 0.16 bug
-    /// answered `writable` here.
+    /// A directory mode of `0o777` (MemoryFs) is writable and searchable;
+    /// `0o555` (the `/dev` directory) is searchable and not writable. The
+    /// pair is the whole reason DevFs needed a mode of its own.
     #[test]
-    fn absent_mode_on_a_read_only_mount_is_readable_only() {
-        let access = PathAccess::resolve(None, true);
-        assert!(access.readable);
-        assert!(!access.writable);
-        assert!(!access.executable);
+    fn directory_modes_separate_searchable_from_writable() {
+        let memory_dir = PathAccess::resolve(Some(0o777), false);
+        assert!(memory_dir.writable);
+        assert!(memory_dir.executable, "0o111 on a directory is searchable");
+
+        let dev_dir = PathAccess::resolve(Some(0o555), false);
+        assert!(!dev_dir.writable, "/dev accepts no mkdir");
+        assert!(dev_dir.executable);
+        assert!(dev_dir.readable);
     }
 
     /// A writable mount still honours the mode bits it reports.
@@ -128,7 +157,8 @@ mod tests {
     fn write_layer_replaces_only_the_write_answer() {
         let lower = PathAccess::resolve(Some(0o444), false);
         assert!(!lower.writable);
-        let overlaid = lower.with_write_layer(None, false);
+        // The upper is MemoryFs, so it reports 0o666 for the copied-up file.
+        let overlaid = lower.with_write_layer(Some(0o666), false);
         assert!(overlaid.writable, "copy-up makes a mode-444 lower writable");
         assert!(overlaid.readable);
         assert_eq!(overlaid.executable, lower.executable);
