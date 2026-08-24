@@ -33,6 +33,25 @@
 /// That premise is load-bearing. **A backend that is writable and reports
 /// `None` will be told its paths are unwritable.** An embedder adding one
 /// should report a mode rather than rely on a default here.
+/// What the operating system says *this process* may do with a path.
+///
+/// The answer to `faccessat(..., AT_EACCESS)` — an access check against the
+/// effective uid and gid, which is the same primitive `bash`'s `test -w` uses.
+///
+/// This is not the same question as the mode bits. `0o222` means "some
+/// principal may write"; a root-owned `0o644` file has it set for a process
+/// that cannot write a byte. Only the OS knows the process's identity, so
+/// only the OS can answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveAccess {
+    /// The process may read the path.
+    pub read: bool,
+    /// The process may write the path.
+    pub write: bool,
+    /// The process may execute the path, or search it if it is a directory.
+    pub execute: bool,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathAccess {
@@ -74,6 +93,27 @@ impl PathAccess {
             readable: mode.is_none_or(|p| p & 0o444 != 0),
             writable: !mount_read_only && mode.is_some_and(|p| p & 0o222 != 0),
             executable: mode.is_some_and(|p| p & 0o111 != 0),
+        }
+    }
+
+    /// Combine the OS's effective-access answer with a mount's read-only
+    /// state.
+    ///
+    /// For a backend whose paths are real OS paths, this is the accurate
+    /// constructor and [`PathAccess::resolve`] is not: `resolve` reads mode
+    /// bits, and mode bits answer "may some principal do this", while a file
+    /// test has to answer "may this process do this". Only `LocalFs` can use
+    /// this, because only its paths have an OS identity to check against.
+    ///
+    /// `mount_read_only` is still ANDed into `writable`, and still has to be:
+    /// a `LocalFs::read_only` wrapper is a kaish-level restriction that the
+    /// OS cannot see, so the kernel granting write does not settle it. Both
+    /// facts, one funnel — the same contract `resolve` keeps.
+    pub fn from_effective_access(access: EffectiveAccess, mount_read_only: bool) -> Self {
+        Self {
+            readable: access.read,
+            writable: !mount_read_only && access.write,
+            executable: access.execute,
         }
     }
 

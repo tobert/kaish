@@ -14,7 +14,7 @@ mod traits;
 
 pub use budget::ByteBudget;
 pub use dev::DevFs;
-pub use traits::{DirEntry, DirEntryKind, Filesystem, PathAccess, ReadRange};
+pub use traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
 
 // `LocalFs` pulls in `tokio/fs`; gated so the in-memory/wasm sandbox build
 // (which doesn't enable `localfs`) stays free of a real-filesystem dependency.

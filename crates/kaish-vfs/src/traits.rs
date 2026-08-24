@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 // DirEntry and DirEntryKind live in kaish-types.
-pub use kaish_types::{DirEntry, DirEntryKind, PathAccess, ReadRange};
+pub use kaish_types::{DirEntry, DirEntryKind, EffectiveAccess, PathAccess, ReadRange};
 
 /// Abstract filesystem interface.
 ///

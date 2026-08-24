@@ -24,6 +24,15 @@ getrandom = { workspace = true }
 # `MemoryFs` needs only `tokio/sync` (no runtime, works on wasm).
 tokio = { version = "1", features = [], optional = true }
 
+# `LocalFs::path_access` asks the OS whether THIS process can read/write/exec a
+# path (faccessat with AT_EACCESS), which mode bits cannot answer. Unix-only:
+# wasm32-wasip1 has no effective-uid model and takes the synthesized-mode path.
+# rustix rather than libc because `unsafe_code = "deny"` workspace-wide; it is
+# already a normal dependency in this tree via rustyline, procfs and
+# terminal_size, so this adds no new supply chain.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [features]
 default = []
 # The real-filesystem backend. Off → only the `Filesystem` trait + `DirEntry`,

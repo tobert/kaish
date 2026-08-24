@@ -2,7 +2,7 @@
 //!
 //! Provides access to real filesystem paths, with optional read-only mode.
 
-use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
+use crate::traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
 use async_trait::async_trait;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -222,6 +222,30 @@ impl LocalFs {
     /// a platform with no Unix mode bits. Split out from the `cfg` so it can
     /// be tested on every platform, including the Unix ones that never call
     /// it.
+    /// Ask the OS whether this process may read, write, and execute `full`.
+    ///
+    /// `faccessat(AT_FDCWD, full, ..., AT_EACCESS)` — an access check against
+    /// the effective uid/gid, the same primitive `bash`'s `test -w` uses. The
+    /// three questions are asked separately because the kernel answers them
+    /// separately.
+    ///
+    /// rustix rather than `libc` because `unsafe_code` is denied
+    /// workspace-wide.
+    #[cfg(unix)]
+    fn effective_access(full: &Path) -> EffectiveAccess {
+        use rustix::fs::{Access, AtFlags, accessat};
+        use rustix::fs::CWD;
+
+        let ask = |mode: Access| {
+            accessat(CWD, full, mode, AtFlags::EACCESS).is_ok()
+        };
+        EffectiveAccess {
+            read: ask(Access::READ_OK),
+            write: ask(Access::WRITE_OK),
+            execute: ask(Access::EXEC_OK),
+        }
+    }
+
     // Only the non-Unix `extract_permissions` calls this; the tests call it
     // on every platform, which is the reason it is split out at all.
     #[cfg_attr(unix, allow(dead_code))]
@@ -562,6 +586,41 @@ impl Filesystem for LocalFs {
         }
 
         fs::rename(&from_path, &to_path).await
+    }
+
+    /// Answers from the OS, not from the mode bits — the one backend that
+    /// can, and therefore the one backend that does not use
+    /// [`PathAccess::resolve`].
+    ///
+    /// `resolve` reads `0o222` and friends, which say whether *some*
+    /// principal may write. That is the wrong question for a real file: a
+    /// root-owned `0o644` file has the bit set for a kaish running as an
+    /// ordinary user who cannot write a byte of it, and `test -w` would have
+    /// said yes. Every other backend in this crate models modes we chose
+    /// ourselves, where the bits are the whole truth and `resolve` is right;
+    /// only `LocalFs` has paths with an OS identity to check against, so only
+    /// `LocalFs` can ask the real question.
+    ///
+    /// The read-only wrapper is still ANDed in by `from_effective_access`.
+    /// The OS cannot know about it — it is a kaish-level restriction over an
+    /// OS-writable directory — so the kernel granting write does not settle
+    /// the answer.
+    ///
+    /// On non-Unix the OS has no effective-uid model to ask, so this falls
+    /// through to the trait default over the synthesized mode; see
+    /// `synthesized_mode`.
+    #[cfg(unix)]
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        let full = self.resolve(path)?;
+        // Stat first so a missing path errors exactly the way `stat` does —
+        // `faccessat` would report a plain EACCES/ENOENT with no distinction
+        // the callers can use, and the trait contract is "errors as stat".
+        let _ = fs::metadata(&full).await?;
+        let access =
+            tokio::task::spawn_blocking(move || Self::effective_access(&full))
+                .await
+                .map_err(io::Error::other)?;
+        Ok(PathAccess::from_effective_access(access, self.read_only))
     }
 
     fn read_only(&self) -> bool {
