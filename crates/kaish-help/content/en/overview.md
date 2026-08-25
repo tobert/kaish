@@ -2,6 +2,10 @@
 
 Bourne-like shell for AI agents. Familiar syntax, typed values, structured output.
 Validates before execution. Builtins run in-process; external commands via PATH.
+An embedder can also register a *wrapped command* — one external program with a
+declared grammar, which runs where a PATH command does not. It appears in
+`help builtins`, and `help <name>` lists the verbs and flags it accepts;
+anything else fails before it spawns, naming the allowed set.
 
 ## Topics
 
