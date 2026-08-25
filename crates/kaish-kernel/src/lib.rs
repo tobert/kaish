@@ -110,6 +110,8 @@ pub use tools::{Tool, ToolRegistry, ExecContext};
 
 // Statement metadata without execution (embedders compose their own
 // approval machinery over it — see docs/EMBEDDING.md)
-pub use ast::plan::{plan_program, PlannedStatement};
+pub use ast::plan::{
+    plan_program, PlannedStatement, KAISH_BUILD_DATE, KAISH_GIT_HASH, KAISH_VERSION,
+};
 pub use fragment::{expand_fragment, FragmentError};
 pub use kaish_types::plan::{Expansion, FragmentAddr, Hole, PlannedHeredoc};

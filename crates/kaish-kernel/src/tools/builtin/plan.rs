@@ -106,7 +106,12 @@ impl Tool for PlanTool {
         // before anything it names can happen.
         match crate::plan_program(&source) {
             Ok(statements) => {
-                let doc = serde_json::json!({ "statements": statements });
+                let doc = serde_json::json!({
+                    "statements": statements,
+                    "kaish_version": crate::KAISH_VERSION,
+                    "kaish_git_hash": crate::KAISH_GIT_HASH,
+                    "kaish_build_date": crate::KAISH_BUILD_DATE,
+                });
                 let text = render_plan_text(&statements);
                 ExecResult::success_with_data(
                     text,
@@ -123,6 +128,9 @@ impl Tool for PlanTool {
                             "end": e.span.end,
                         }))
                         .collect::<Vec<_>>(),
+                    "kaish_version": crate::KAISH_VERSION,
+                    "kaish_git_hash": crate::KAISH_GIT_HASH,
+                    "kaish_build_date": crate::KAISH_BUILD_DATE,
                 });
                 let mut msg = String::from("plan: parse error:\n");
                 for err in &errors {

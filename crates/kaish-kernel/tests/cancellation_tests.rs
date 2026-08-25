@@ -110,6 +110,31 @@ mod common_cancel {
         }
     }
 
+    /// Builds a script whose process installs a SIGTERM *ignore* before it
+    /// records its pid, then `exec`s `sleep` so the recorded pid is the very
+    /// process holding that ignore (SIG_IGN survives execve).
+    ///
+    /// The ordering is the whole point. Observing the pid file proves that pid
+    /// already ignores SIGTERM, so a later death can only have come from
+    /// SIGKILL. `pid_writer` records the pid from an outer shell and only then
+    /// execs the trapping one, which leaves a window where the pid exists but
+    /// the ignore does not — a SIGTERM landing in that window kills the child
+    /// outright and a test asserting "it died" still passes, having never
+    /// exercised any escalation.
+    pub fn term_ignoring_pid_writer(tmp_dir: &Path, pid_file: &Path) -> std::path::PathBuf {
+        let script_path = tmp_dir.join("term_ignoring_pid_writer.sh");
+        let script = format!(
+            "#!/bin/bash\ntrap \"\" TERM\necho $$ > {pf}\nexec sleep 60\n",
+            pf = pid_file.display(),
+        );
+        fs::write(&script_path, script).expect("write term_ignoring_pid_writer script");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod script");
+        script_path
+    }
+
     pub fn kernel_for_test() -> Arc<Kernel> {
         Kernel::new(
             KernelConfig::repl()
@@ -122,7 +147,10 @@ mod common_cancel {
     }
 }
 
-use common_cancel::{child_alive, kernel_for_test, path_vars, pid_writer, wait_for_dead, wait_for_pid};
+use common_cancel::{
+    child_alive, kernel_for_test, path_vars, pid_writer, term_ignoring_pid_writer,
+    wait_for_dead, wait_for_pid,
+};
 
 // ════════════════════════════════════════════════════════════════════════════
 // 1. request_timeout kills a foreground external
@@ -321,44 +349,90 @@ async fn pipeline_cascade_kills_both_stages() {
 
 #[tokio::test]
 async fn grace_escalation_sigkills_term_trapping_child() {
+    const GRACE: Duration = Duration::from_millis(200);
+    // Setup gets a budget of its own, and a generous one: how long bash needs
+    // to start is not what this test measures.
+    const SETUP_BUDGET: Duration = Duration::from_secs(10);
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let pid_file = tmp.path().join("pid");
-    // Trap SIGTERM and ignore; SIGKILL is uncatchable so the child dies after grace.
-    let script = pid_writer(tmp.path(), &pid_file, "bash -c 'trap \"\" TERM; sleep 60'");
+    // Ignores SIGTERM before recording its pid, so the pid file appearing is
+    // proof the process cannot be killed by SIGTERM. SIGKILL is uncatchable, so
+    // if it dies at all, the escalation is what killed it.
+    let script = term_ignoring_pid_writer(tmp.path(), &pid_file);
 
     let kernel = Kernel::new(
         KernelConfig::repl()
             .with_skip_validation(true)
-            .with_kill_grace(Duration::from_millis(200))
+            .with_kill_grace(GRACE)
             .with_initial_vars(path_vars()),
     )
     .expect("kernel")
     .into_arc();
 
-    let started = Instant::now();
-    // 500ms timeout so the (nested) bash records its pid before the kill; the
-    // 200ms grace above is what this test really exercises — SIGKILL after the
-    // TERM-trapping child ignores SIGTERM.
-    let result = kernel
-        .execute_with_options(
-            &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(500)))
-        .await
-        .expect("execute");
-    let elapsed = started.elapsed();
+    // Setup and measurement used to share one clock: a 500ms request timeout
+    // started the kill while bash was still starting up, so on a loaded runner
+    // the child was killed before it ever wrote its pid and the test died at an
+    // `.expect("pid")` — in setup, having never reached the escalation it is
+    // named for. Reproduced at 11 failures in 20 runs under 4x CPU
+    // oversubscription. So the two phases are now separate: run with no request
+    // timeout at all, wait for the child to report itself ready on a budget that
+    // is allowed to be slow, and only then start the kill clock.
+    let command = format!("bash {}", script.display());
+    let (result, ready) = tokio::join!(
+        kernel.execute(&command),
+        async {
+            let pid = wait_for_pid(&pid_file, SETUP_BUDGET).await.unwrap_or_else(|| {
+                panic!(
+                    "SETUP FAILED — this is not a cancellation bug. The child never \
+                     recorded its pid in {SETUP_BUDGET:?} at {path}. The script writes its \
+                     pid immediately after installing its SIGTERM ignore, so nothing ever \
+                     reached a state that could be escalated, and the SIGTERM-to-SIGKILL \
+                     path this test exists to check was never exercised. Suspect a host too \
+                     loaded to start bash within the budget, or a broken PATH/spawn.",
+                    path = pid_file.display(),
+                )
+            });
+            // The child is up and provably ignoring SIGTERM. Measurement starts
+            // here, not before.
+            let kill_requested = Instant::now();
+            kernel.cancel();
+            (pid, kill_requested)
+        }
+    );
+    let result = result.expect("execute");
+    let (pid, kill_requested) = ready;
+    let elapsed = kill_requested.elapsed();
 
-    assert_eq!(result.code, 124);
-    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid");
+    // 137 is 128 + SIGKILL(9): the child's own wait status, reported straight
+    // through. This is the sharpest evidence the test has — 143 (128 + SIGTERM)
+    // would mean plain SIGTERM did the job and no escalation ever happened.
+    assert_eq!(
+        result.code, 137,
+        "expected 137 (128 + SIGKILL) — the TERM-ignoring child should have been \
+         escalated to SIGKILL; 143 would mean SIGTERM killed it and the escalation \
+         never ran",
+    );
+
     assert!(
         wait_for_dead(pid, Duration::from_secs(3)).await,
-        "TERM-trapping pid {} survived SIGKILL escalation",
-        pid,
+        "pid {pid} ignores SIGTERM and was still alive 3s after cancellation — the \
+         SIGTERM-to-SIGKILL escalation never fired (kill grace is {GRACE:?})",
     );
-    // Sanity: total time ≈ timeout + grace, not ~60s.
+
+    // Escalation rather than a lucky SIGTERM: the child cannot die before the
+    // grace window closes, so anything faster means SIGKILL was sent without
+    // honoring the grace.
+    assert!(
+        elapsed >= GRACE,
+        "child was reaped {elapsed:?} after cancellation, inside the {GRACE:?} grace — \
+         SIGKILL looks like it was sent without waiting out the grace period",
+    );
+
+    // Sanity: grace plus reaping, not ~60s of `sleep`.
     assert!(
         elapsed < Duration::from_secs(5),
-        "took too long ({:?}) — escalation may not have fired",
-        elapsed,
+        "took too long ({elapsed:?}) — escalation may not have fired",
     );
 }
 
@@ -514,8 +588,11 @@ async fn vars_plus_timeout_combo_kills_child_with_vars_visible() {
 
     assert_eq!(result.code, 124, "expected 124, got {}", result.code);
 
-    // Child wrote its PID and the WHO line before sleeping. Poll: the second
-    // line (WHO) may flush a beat after execute() returns under load.
+    // The child writes its pid on line 1 and the WHO line on line 2. This poll
+    // covers line 1 only: `read_pid` parses `lines().next()`, so it returns as
+    // soon as the pid is readable and waits for nothing else. If the WHO line
+    // has not landed yet, the `who line` expect below panics instead of waiting
+    // for it.
     let _ = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     let contents = std::fs::read_to_string(&pid_file).expect("read pid_file");
     let mut lines = contents.lines();

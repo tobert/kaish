@@ -249,7 +249,12 @@ fn print_plan(source: Option<String>) -> ExitCode {
     };
     match kaish_kernel::plan_program(&source) {
         Ok(statements) => {
-            let doc = serde_json::json!({ "statements": statements });
+            let doc = serde_json::json!({
+                "statements": statements,
+                "kaish_version": kaish_kernel::KAISH_VERSION,
+                "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
+                "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
+            });
             println!("{doc}");
             ExitCode::SUCCESS
         }
@@ -264,7 +269,12 @@ fn print_plan(source: Option<String>) -> ExitCode {
                     })
                 })
                 .collect();
-            let doc = serde_json::json!({ "errors": errors });
+            let doc = serde_json::json!({
+                "errors": errors,
+                "kaish_version": kaish_kernel::KAISH_VERSION,
+                "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
+                "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
+            });
             println!("{doc}");
             // 2 is the usage/parse code, matching a builtin's argv rejection.
             ExitCode::from(2)
@@ -277,7 +287,12 @@ fn print_plan(source: Option<String>) -> ExitCode {
 /// as a parse failure, because a caller branches on the shape, not on which
 /// of our internal paths produced it.
 fn print_plan_error(message: &str) -> ExitCode {
-    let doc = serde_json::json!({ "errors": [{ "message": message }] });
+    let doc = serde_json::json!({
+        "errors": [{ "message": message }],
+        "kaish_version": kaish_kernel::KAISH_VERSION,
+        "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
+        "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
+    });
     println!("{doc}");
     ExitCode::from(2)
 }
@@ -311,7 +326,11 @@ Options:
                                and each heredoc body with its byte offset.
                                Executes nothing and touches no filesystem.
                                Prints {{"statements": [...]}} and exits 0, or
-                               {{"errors": [...]}} and exits 2.
+                               {{"errors": [...]}} and exits 2. Both carry
+                               kaish_version, kaish_git_hash, and
+                               kaish_build_date at the top level, so a
+                               caller can window results by build without
+                               a separate kaish --version call.
   --plan-file <path>           Plan the source in <path>, or stdin for -. Keeps
                                a whole script out of argv, which is capped.
   -h, --help                   Show this help

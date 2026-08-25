@@ -41,6 +41,42 @@ use super::types::{
     WhileLoop,
 };
 
+/// The kaish version reported alongside a plan document.
+///
+/// Both JSON emitters — `kaish --plan`/`--plan-file` in kaish-repl and the
+/// in-shell `plan` builtin — read this constant for their `kaish_version`
+/// field, instead of each reading its own crate's `CARGO_PKG_VERSION`. The
+/// kernel is what actually produces the plan, so its version is the honest
+/// answer, and an embedder calling [`plan_program`] gets the same string a
+/// `kaish --plan` caller does.
+///
+/// This is the bare semver (`"0.16.0"`), with no `kaish ` prefix and no
+/// parenthesized hash/date suffix — a consumer windowing measurements by
+/// version compares and sorts this value as-is, with no parsing. The build
+/// identity lives in the sibling [`KAISH_GIT_HASH`] and [`KAISH_BUILD_DATE`]
+/// fields instead of being folded into this one.
+pub const KAISH_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The git commit kaish was built from, short form, or `"unknown"` when none
+/// was available at build time — a crates.io tarball build has no `.git` to
+/// read, and `kaish-kernel/build.rs` falls back to this literal string.
+/// Reported alongside [`KAISH_VERSION`] in every plan document, success or
+/// error.
+pub const KAISH_GIT_HASH: &str = match option_env!("KAISH_GIT_HASH") {
+    Some(hash) => hash,
+    None => "unknown",
+};
+
+/// The UTC date kaish was built, `YYYY-MM-DD`. Reported alongside
+/// [`KAISH_VERSION`] in every plan document, success or error. Unlike
+/// [`KAISH_GIT_HASH`], this is always the real build date — it comes from
+/// the build script's clock, not from git, so it does not depend on a
+/// `.git` checkout being present.
+pub const KAISH_BUILD_DATE: &str = match option_env!("KAISH_BUILD_DATE") {
+    Some(date) => date,
+    None => "unknown",
+};
+
 /// One statement's plan, plus the redemption credentials its argv presented.
 pub struct StatementPlan {
     /// What the statement was asked to run, with every credential redacted.
