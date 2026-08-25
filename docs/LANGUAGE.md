@@ -30,9 +30,11 @@ echo "${NAME} more text"
 ### A bare number follows JSON rules
 
 ```sh
-echo 007      # the string 007 — a leading zero is not a JSON number
-echo -0       # the number 0 — valid JSON; -0 and 0 are the same number
-echo "-0"     # the string -0 — quote it to keep those two characters
+echo 007        # the string 007 — a leading zero is not a JSON number
+chmod 0644 f    # the string 0644 — a mode keeps every digit you typed
+echo -0         # the number 0 — valid JSON; -0 and 0 are the same number
+echo "-0"       # the string -0 — quote it to keep those two characters
+break 7         # a loop count is a number — `break 007` is an error
 ```
 
 `007`, `010`, and `00` are strings: nobody writes `007` expecting the number
@@ -42,6 +44,31 @@ word you typed (`-0`, not `0`) wherever that word crosses into argv or a
 plan. Once the number moves — through a variable, `--json`, arithmetic — it
 is a plain typed number again and prints its canonical form: `x=-0; echo
 $x` prints `0`. Quote a number (`"-0"`) to keep it a string on purpose.
+
+Where kaish needs a number, a leading zero is an error, and the error names
+the number to write. That covers a `break`/`continue` count, arithmetic, and
+a list index:
+
+```sh
+break 007            # error — write `break 7`
+echo $((010 + 1))    # error — kaish reads no octal; write `10`
+xs=[10 20]
+echo ${xs[007]}      # error — a list is indexed by number; write ${xs[7]}
+```
+
+`$((010 + 1))` is the case worth stating plainly: bash reads `010` as octal
+and answers 9, and reading it as decimal would answer 11. kaish reads no
+octal, so it refuses rather than answering a third number. Convert a base
+deliberately instead — `printf "%o"` and `printf "%x"` format one, and
+`xxd` dumps bytes.
+
+A record key is text, so a leading zero is a key like any other and reads
+back under the name it was stored under:
+
+```sh
+r={"007":9}
+echo ${r[007]}       # 9
+```
 
 ### Inline environment prefix — `NAME=value command`
 

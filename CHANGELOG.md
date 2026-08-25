@@ -40,6 +40,18 @@ breaking entries are marked **BREAKING**.
   not a JSON number, and `fromjson` already refused it. `-0`, `0.10`, and
   `1.0` are unaffected; they stay numbers.
 
+- **Where kaish needs a number, a leading zero is an error** — `break 007`,
+  `$((010 + 1))`, and a list index name the number to write. kaish reads no
+  octal, so arithmetic refuses instead of answering 11 where bash answers 9.
+
+- **A record key like `"007"` could not be read back** — `${r[007]}` resolved
+  to index 7 and `r[007]=v` was a parse error. Read and write now name the
+  same text key.
+
+- **`echo hi > -0` created a file named `0`** while `--plan` reported the
+  target as `-0`. Redirect targets keep the source text, so a plan document
+  and the run it describes agree.
+
 - **A builtin's argv lost a numeral's exact text too** — `echo -0` printed
   `0`, `echo 0.10` printed `0.1`. `echo`, function calls, and script
   `$1`/`$2` now keep the source word, matching the external-command fix

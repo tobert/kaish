@@ -308,9 +308,11 @@ ENABLED=true              # boolean (only true/false)
         "numbers",
         "Numbers",
         r#"```sh
-echo 007      # the string 007 — a leading zero is not a JSON number
-echo -0       # the number 0 — valid JSON; -0 and 0 are the same number
-echo "-0"     # the string -0 — quote it to keep those two characters
+echo 007        # the string 007 — a leading zero is not a JSON number
+chmod 0644 f    # the string 0644 — a mode keeps every digit you typed
+echo -0         # the number 0 — valid JSON; -0 and 0 are the same number
+echo "-0"       # the string -0 — quote it to keep those two characters
+break 7         # a loop count is a number — `break 007` is an error
 ```
 
 `007`, `010`, and `00` are strings — `fromjson '007'` already refuses them
@@ -318,7 +320,13 @@ as invalid JSON, and a bare number now agrees. `-0`, `0.10`, and `1.0` are
 numbers; kaish prints back the word you typed wherever it crosses into argv
 or a plan. Once the number moves through a variable, arithmetic, or
 `--json`, it is a plain typed number again: `x=-0; echo $x` prints `0`.
-Quote a number to keep it a string on purpose."#,
+Quote a number to keep it a string on purpose.
+
+Where kaish needs a number, a leading zero is an error that names the
+number to write: a `break`/`continue` count, arithmetic, and a list index.
+kaish reads no octal, so `$((010 + 1))` is an error rather than 9 (bash's
+answer) or 11 (the decimal one). A record key is text, so `${r[007]}` reads
+the `"007"` key."#,
     ),
     syntax_section(
         "expansion",
