@@ -810,6 +810,60 @@ Distinct from `.with_raw_argv()`, which also keeps source order but binds into
 position-sensitive POSIX command (`test`, `kill`); verbatim serves a tool with
 its own parser.
 
+### Wrapped commands: an external program as a tool
+
+`allow_external_commands` is a single switch. Off, nothing spawns. On, every
+program on `$PATH` spawns, with any arguments, and the validator sees each call
+as an opaque word list. A **wrapped command** is the setting between: an
+allowlist with a grammar. The embedder declares one program, the verbs it
+allows, and the flags each verb accepts; the kernel validates a call against
+that declaration, renders the child's argv itself, and runs the program with
+`execve(2)` — never through `sh -c`. It runs while
+`allow_external_commands = false`, so a kernel can name every program it is
+able to run.
+
+The kernel holds the mechanism that makes the policy correct: the parse, the
+render, the real-path resolution, the hermetic environment plus the
+declaration's pins, captured output under the same limits and cancel discipline
+as an external command, and the child's own exit code unchanged. Verbs and
+flags are deny-by-default — an undeclared one exits 2 with the allowed set
+named, before anything spawns, from `kaish --plan` and `plan_program` as well
+as from a live call. `Tail::Forward` is the documented override for a verb
+whose flags you do not want to model, and `help <name>` marks it. Requires the
+`subprocess` feature; a sandbox build has no `wrapped` module.
+
+```rust
+use kaish_kernel::tools::wrapped::{find_executable, Positional, Stdin, Verb, WrappedCommand};
+
+// The kernel never reads the OS environment to find a program: the
+// deployment names the PATH it wants resolved, or pins an absolute path.
+let python3 = find_executable("python3", "/usr/bin:/bin")
+    .ok_or_else(|| anyhow::anyhow!("python3 is not installed"))?;
+
+let python = WrappedCommand::new("python")
+    .executable(python3)
+    .lead(["-I"])                       // isolated mode: no PYTHON* env, no user site
+    .env("PYTHONDONTWRITEBYTECODE", "1")
+    .root(Verb::root()
+        .positional(Positional::one("script").required().path_under("/opt/app/scripts"))
+        .positional(Positional::many("args"))
+        .stdin(Stdin::Pipe))
+    .build()?;                          // verifies the executable, here, not on first call
+
+let kernel = Kernel::with_backend(backend, config, |_| {}, |tools| {
+    tools.register(python);
+})?;
+```
+
+That declaration runs the scripts this deployment ships and nothing else:
+`python -c '…'` is an unknown flag, `python /etc/passwd` is outside
+`path_under`, and `python etl.py -- --stage=1` renders
+`["/usr/bin/python3", "-I", "/opt/app/scripts/etl.py", "--", "--stage=1"]`.
+
+`docs/wrapped_command.md` is the contract: the declaration vocabulary, the
+parse and render rules, the constraint set, and what the kernel owns versus
+what the embedder owns.
+
 ### Patient tools: suspending the script timeout
 
 The script timeout (`ExecuteOptions::timeout` / `KernelConfig::request_timeout`)

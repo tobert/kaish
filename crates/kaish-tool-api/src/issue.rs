@@ -98,6 +98,13 @@ pub enum IssueCode {
     /// `test` was given an XSI compound/grouping operator (`-a`, `-o`,
     /// `(`, `)`), which kaish does not implement.
     TestCompoundOperator,
+    /// A wrapped command's declaration refuses the call: the verb, the
+    /// argument shape, or a constrained path is not one it describes. The
+    /// message names the offending word and the allowed set. Covers the
+    /// refusals no other code fits — an unknown flag, a missing required
+    /// argument, and a bad value keep `UnknownFlag`, `MissingRequiredArg`,
+    /// and `InvalidArgType`.
+    WrappedCallRejected,
 }
 
 impl IssueCode {
@@ -136,6 +143,7 @@ impl IssueCode {
             IssueCode::InvisibleAssignmentTarget => "E019",
             IssueCode::MixedScriptName => "W007",
             IssueCode::TestCompoundOperator => "E020",
+            IssueCode::WrappedCallRejected => "E021",
         }
     }
 
@@ -169,6 +177,7 @@ impl IssueCode {
             | IssueCode::ForLoopScalarVar
             | IssueCode::ScatterWithoutGather
             | IssueCode::TestCompoundOperator
+            | IssueCode::WrappedCallRejected
             | IssueCode::LastResultFieldAccess
             | IssueCode::LvalueUndefinedRoot
             | IssueCode::DottedAssignmentTarget
