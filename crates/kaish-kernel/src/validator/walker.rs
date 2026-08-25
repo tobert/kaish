@@ -1398,10 +1398,19 @@ mod tests {
         // divergence on the command name is exactly the class of bug this
         // comparison exists to catch — dropping the field here would make
         // that divergence invisible to the one test built to find it.
-        fn render(issues: &[ValidationIssue]) -> Vec<(Severity, IssueCode, &str, Option<&str>, Option<&str>)> {
+        type Rendered<'a> = (Severity, IssueCode, &'a str, Option<&'a str>, Option<&'a str>);
+        fn render(issues: &[ValidationIssue]) -> Vec<Rendered<'_>> {
             issues
                 .iter()
-                .map(|i| (i.severity, i.code, i.message.as_str(), i.suggestion.as_deref(), i.command.as_deref()))
+                .map(|i| {
+                    (
+                        i.severity,
+                        i.code,
+                        i.message.as_str(),
+                        i.suggestion.as_deref(),
+                        i.command.as_deref(),
+                    )
+                })
                 .collect()
         }
         assert_eq!(

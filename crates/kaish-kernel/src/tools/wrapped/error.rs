@@ -228,7 +228,7 @@ impl WrappedError {
     }
 
     /// The wrapped command this refusal is about. Empty only for a path
-    /// failure that has not been through [`Self::attributed_to`] yet.
+    /// failure that `attributed_to` has not filled in yet.
     pub fn command(&self) -> &str {
         match self {
             WrappedError::UnknownVerb { command, .. }
