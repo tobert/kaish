@@ -27,6 +27,11 @@ breaking entries are marked **BREAKING**.
   (a bad assignment target, `break` outside a loop). `#[non_exhaustive]`
   already blocked struct-literal construction, so this is not breaking.
 
+- **Plan JSON carries build identity** — `kaish_version`, `kaish_git_hash`,
+  and `kaish_build_date` ride along on every `--plan`/`--plan-file`/`plan`
+  document, success or error, so a consumer windowing measurements by build
+  no longer shells out to `kaish --version` per call.
+
 ### Fixed
 - `help <tool>` renders a tool's subcommands and their flags, and names each
   parameter's aliases. `help kj` and every wrapped command showed "No

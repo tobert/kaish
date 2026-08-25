@@ -1597,6 +1597,15 @@ impl Kernel {
     }
 
     /// Reset the cancellation token (called at the start of each execute).
+    ///
+    /// A `Kernel::cancel()` that arrives while nothing is running is dropped
+    /// here: the next `execute()` replaces the cancelled token and runs
+    /// normally, and nothing in that call's result reports a cancel was
+    /// discarded. An embedder can see the pending cancel before it is dropped —
+    /// `is_cancelled()` reports true until the next `execute()` clears it — but
+    /// a call that must start already cancelled has to supply its own
+    /// `ExecuteOptions::cancel_token`, which is a read-only input and is never
+    /// reset; a pre-cancelled one stops the call at its first checkpoint.
     fn reset_cancel(&self) -> tokio_util::sync::CancellationToken {
         #[allow(clippy::expect_used)]
         let mut token = self.cancel_token.lock().expect("cancel_token poisoned");
@@ -8592,8 +8601,12 @@ AFTER="yes"'"#)
     // Cancellation Tests
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Helper: schedule a cancel after a delay from a background thread.
-    /// Uses std::thread because cancel() is sync and Kernel is not Send.
+    /// Schedule a cancel after a delay, from an OS thread because `cancel()`
+    /// is sync and must run while the test runtime is inside `execute()`.
+    ///
+    /// The delay races `execute()`: a cancel firing before `reset_cancel()` is
+    /// discarded. Tests that need it to land use an `interrupt` tripwire
+    /// instead, as the loop tests below do.
     fn schedule_cancel(kernel: &Arc<Kernel>, delay: std::time::Duration) {
         let k = Arc::clone(kernel);
         std::thread::spawn(move || {
@@ -8606,31 +8619,49 @@ AFTER="yes"'"#)
     async fn test_cancel_interrupts_for_loop() {
         let kernel = Arc::new(Kernel::transient().expect("failed to create kernel"));
 
-        // Schedule cancel after a short delay from a background OS thread
-        schedule_cancel(&kernel, std::time::Duration::from_millis(10));
-
-        // #149: a bare `X=$i` body has no await point, so the for-loop's
-        // cancellation checkpoint (checked once per iteration, see the
-        // `Stmt::For` arm above) never gets a chance to run mid-body — under
-        // host load, 100_000 trivial iterations could complete and return
-        // before the background thread's 10ms sleep ever elapsed, racing a
-        // natural exit-0 completion against the scheduled cancel. Rather than
-        // widen the margin (there's no bound on how slow "under load" can be),
-        // make completion deterministically impossible inside the test
-        // window: `sleep` is a real interruptible await point (it races
-        // `tokio::time::sleep` against the same cancellation token — see
-        // `tools/builtin/sleep.rs`), so a per-iteration sleep both gives
-        // cancellation somewhere to land almost immediately AND, at enough
-        // iterations, makes natural completion take far longer than the
-        // bounded wait below. The outer timeout is the "must not hang CI if
-        // cancellation is broken" backstop: it fails loudly well before the
-        // loop could ever finish on its own.
+        // A `sleep` body, per #149: a bare `X=$i` has no await point for the
+        // per-iteration checkpoint to land on, and at this count natural
+        // completion (~100s) stays far past the bound.
+        //
+        // The timer this used to use raced `execute()`: `reset_cancel()`
+        // replaces an already-cancelled token, so a cancel firing first was
+        // dropped and the loop ran all 2000 iterations. The `interrupt` slot is
+        // installed after that line, so it cannot be dropped.
+        // `Kernel::cancel()` still does the cancelling.
         const ITERATIONS: u32 = 2000;
         const PER_ITERATION_SLEEP_SECS: f64 = 0.05;
         let bound = std::time::Duration::from_secs(10);
+
+        // Counted, not latched: the checkpoint polls before the body, so a
+        // cancel released on the first poll can land before the body runs at
+        // all. The second poll puts one completed iteration between them.
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tripwire = Arc::clone(&polls);
+        let opts = ExecuteOptions::new().with_interrupt(Arc::new(move || {
+            tripwire.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+
+        // A background OS thread, not `tokio::spawn`: the cancel has to land
+        // while the current-thread test runtime is busy inside the loop.
+        {
+            let k = Arc::clone(&kernel);
+            let tripped = Arc::clone(&polls);
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + bound;
+                while tripped.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                // Cancel even if the tripwire never tripped, so a loop that
+                // never started fails on an assertion below instead of just
+                // running out the bound.
+                k.cancel();
+            });
+        }
+
         let script = format!("for i in $(seq 1 {ITERATIONS}); do X=$i; sleep {PER_ITERATION_SLEEP_SECS}; done");
 
-        let result = tokio::time::timeout(bound, kernel.execute(&script))
+        let result = tokio::time::timeout(bound, kernel.execute_with_options(&script, opts))
             .await
             .unwrap_or_else(|_| {
                 panic!(
@@ -8644,16 +8675,26 @@ AFTER="yes"'"#)
 
         assert_eq!(result.code, 130, "cancelled execution should exit with code 130");
 
-        // The loop variable should be set to something well short of the full
-        // iteration count — i.e. cancellation landed long before the loop
-        // could complete on its own.
-        let x = kernel.get_var("X").await;
-        if let Some(Value::Int(n)) = x {
-            assert!(
-                n < i64::from(ITERATIONS),
-                "loop should have been interrupted before finishing, got X={n}"
-            );
-        }
+        // How far the loop got — the half of this test that reads no clock. A
+        // loop ignoring cancellation reports 2000. Parsed from text because
+        // `$(seq …)` binds the loop variable as a string; the `Value::Int` arm
+        // this replaces never matched, so it asserted nothing.
+        const MAX_REACHED: i64 = (ITERATIONS / 10) as i64;
+        let reached = match kernel.get_var("X").await {
+            Some(Value::Int(n)) => n,
+            Some(Value::String(s)) => s
+                .parse::<i64>()
+                .unwrap_or_else(|e| panic!("loop variable X should be numeric, got {s:?}: {e}")),
+            other => {
+                panic!("loop variable X should record the last iteration reached, got {other:?}")
+            }
+        };
+        assert!(
+            reached <= MAX_REACHED,
+            "cancellation should have stopped the loop within {MAX_REACHED} of {ITERATIONS} \
+             iterations, but it reached {reached} — the per-iteration checkpoint is not \
+             honoring the cancellation token"
+        );
     }
 
     #[tokio::test]
@@ -8661,18 +8702,57 @@ AFTER="yes"'"#)
         let kernel = Arc::new(Kernel::transient().expect("failed to create kernel"));
         kernel.execute("COUNT=0").await.expect("init failed");
 
-        schedule_cancel(&kernel, std::time::Duration::from_millis(10));
+        // Same swallowed cancel as the for-loop test, but this one HUNG
+        // rather than failing: `while true` has no iteration count to run out
+        // and there was no bound, so a dropped cancel burned a core until CI's
+        // job timeout. Fixed the same way, plus a bound — which does fire here,
+        // so each iteration yields to the runtime somewhere.
+        let bound = std::time::Duration::from_secs(10);
 
-        let result = kernel
-            .execute("while true; do COUNT=$((COUNT + 1)); done")
-            .await
-            .expect("execute failed");
+        // Counted, not latched: the checkpoint polls before the body, so a
+        // cancel released on the first poll can land before the body runs at
+        // all. The second poll puts one completed iteration between them.
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tripwire = Arc::clone(&polls);
+        let opts = ExecuteOptions::new().with_interrupt(Arc::new(move || {
+            tripwire.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
 
-        assert_eq!(result.code, 130);
+        {
+            let k = Arc::clone(&kernel);
+            let tripped = Arc::clone(&polls);
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + bound;
+                while tripped.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                k.cancel();
+            });
+        }
 
-        let count = kernel.get_var("COUNT").await;
-        if let Some(Value::Int(n)) = count {
-            assert!(n > 0, "loop should have run at least once");
+        let result = tokio::time::timeout(
+            bound,
+            kernel.execute_with_options("while true; do COUNT=$((COUNT + 1)); done", opts),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "while-loop did not return within {bound:?} — `while true` never ends on \
+                 its own, so the per-iteration cancellation checkpoint is not honoring the \
+                 token and this loop would have spun forever"
+            )
+        })
+        .expect("execute failed");
+
+        assert_eq!(result.code, 130, "cancelled execution should exit with code 130");
+
+        // A count above zero proves a *running* loop was interrupted, and it
+        // holds by construction: the cancel waits for the second poll. No upper
+        // bound — how far bare arithmetic gets is a function of host speed.
+        match kernel.get_var("COUNT").await {
+            Some(Value::Int(n)) => assert!(n > 0, "loop should have run at least once, got {n}"),
+            other => panic!("COUNT should be an integer set by the loop body, got {other:?}"),
         }
     }
 
