@@ -250,18 +250,13 @@ fn spaced_long_flag_values_parse() {
     parse("foo --a=1 --b=2").expect("spaced --key=value flags are valid");
 }
 
-/// The rescan corrects WHICH word is blamed; it must not jump to a
-/// different region of the line to do it.
+/// The rescan corrects WHICH word is blamed; it must not jump to a different
+/// region of the line to do it.
 ///
-/// This is the other half of the over-recognition hole. Above, the standing
-/// error is unrelated and `is_glued_args_error` keeps the scan from running
-/// at all. Here the standing error IS the paste message — the real paste is
-/// in the loop body — so the gate passes and the scan runs. `$a/b` in the
-/// loop head is grammar-legal (the control below parses it), but the flat
-/// token walk reaches it first. Without the `from_offset` gate it won the
-/// span and the error blamed an innocent word in a different clause, which
-/// is worse than shipped 0.16: that at least pointed inside the real word,
-/// at `/tmp/`.
+/// The standing error here IS the paste message, so the gate passes and the
+/// scan runs — and `$a/b` in the loop head is legal but reached first.
+/// Without the `from_offset` gate it won the span and blamed an innocent
+/// word in another clause.
 #[test]
 fn an_earlier_legal_adjacency_does_not_steal_the_span() {
     assert_eq!(
@@ -270,10 +265,8 @@ fn an_earlier_legal_adjacency_does_not_steal_the_span() {
     );
 }
 
-/// The control for the case above: the same loop head, with a body that has
-/// no paste in it, must parse. If this ever fails, the test above is
-/// asserting against a program that was rejected for some other reason and
-/// proves nothing about span selection.
+/// Control for the case above: if this ever fails, that test is asserting
+/// against a program rejected for some other reason and proves nothing.
 #[test]
 fn the_legal_loop_head_really_is_legal() {
     parse("for x in $a/b; do echo hi; done")
