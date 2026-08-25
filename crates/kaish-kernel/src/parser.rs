@@ -1311,8 +1311,12 @@ fn parse_tokens(
         // redirect target, `--flag = value` spacing — and the paste advice
         // is both wrong and less useful in their place. See
         // `is_glued_args_error` for why the check is sound.
+        // Re-derive from the grammar's own position forward: the scanner
+        // corrects WHICH word is blamed, and must not jump to a different
+        // region of the line to do it.
         if errs.iter().all(is_glued_args_error)
-            && let Err(specific) = validate_glued_args(&tokens)
+            && let Some(from_offset) = errs.iter().map(|e| e.span().start).min()
+            && let Err(specific) = validate_glued_args(&tokens, from_offset)
         {
             return specific;
         }
@@ -3736,7 +3740,10 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// one just leaves the grammar's own span in place. The scope stays
 /// "report the right span for a rejection that already happened," never
 /// "change what is rejected."
-fn validate_glued_args(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
+fn validate_glued_args(
+    tokens: &[(Token, Span)],
+    from_offset: usize,
+) -> Result<(), Vec<ParseError>> {
     let units = glue_candidate_units(tokens);
     for i in 0..units.len().saturating_sub(1) {
         if units[i].end != units[i + 1].start {
@@ -3750,12 +3757,22 @@ fn validate_glued_args(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> 
         while end_idx + 1 < units.len() && units[end_idx].end == units[end_idx + 1].start {
             end_idx += 1;
         }
+        // The scan walks the whole token stream, so it also finds adjacency
+        // in regions the grammar parsed happily — `for x in $a/b; do echo
+        // /tmp/$(echo x).txt; done` has a legal `$a/b` in the loop head and
+        // the real paste in the body. Take the first run at or after the
+        // grammar's own position so the earlier legal run cannot win.
+        if units[start_idx].start < from_offset {
+            continue;
+        }
         let span: Span = (units[start_idx].start..units[end_idx].end).into();
         return Err(vec![ParseError {
             span,
             message: GLUED_ARGS_MESSAGE.to_string(),
         }]);
     }
+    // No run at or after the grammar's position: say nothing and let its own
+    // span stand. Never worse than the message shipped in 0.16.0.
     Ok(())
 }
 
