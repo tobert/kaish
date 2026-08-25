@@ -264,29 +264,25 @@ pub struct ValidationIssue {
     pub suggestion: Option<String>,
     /// The command this issue concerns, when one is genuinely known.
     ///
-    /// `Some(name)` for an Error-severity issue a builtin's own
-    /// `Tool::validate` override raises about *itself* — a bad `grep`
-    /// regex, an invalid `sed`/`jq` expression, a zero `seq` increment, a
-    /// wrong `diff` operand count, .... These reach an embedder matching
-    /// `KernelError::Validation`, since kaish-kernel filters that variant's
-    /// issues to Error severity (see `docs/EMBEDDING.md`).
+    /// `Some(name)` when a name is on hand: a builtin's own `Tool::validate`
+    /// raising about itself, a schema-driven argument issue (the schema's
+    /// name), a wrapped command's refusal, `UndefinedCommand`'s unresolved
+    /// name, `scatter` without a gather, and a user tool's arity failure.
     ///
-    /// Also `Some(name)` for `UndefinedCommand`'s unresolved name — but that
-    /// issue is Warning severity, so it never reaches
-    /// `KernelError::Validation`; reading it means driving kaish-kernel's
-    /// `Validator` directly rather than going through `Kernel::execute`.
+    /// `None`, never a placeholder, when the issue is not about a command at
+    /// all — an assignment target, a bare `break`, an undefined variable, or
+    /// `MixedScriptName`, where the mis-spelled name is the argument.
     ///
-    /// `None`, never a placeholder, when an issue is not about a command at
-    /// all — an assignment target, a bare `break`, an undefined variable —
-    /// and also when a builtin's own `Tool::validate` raises an issue about
-    /// one of its *arguments* rather than about the command itself:
-    /// `MixedScriptName` fires from `export`/`read`/`unset`/`push`/
-    /// `scatter --as`'s own `validate()`, but the mis-spelled name is the
-    /// argument, not the command, so it stays absent there too.
+    /// Severity varies: `UndefinedCommand` is a Warning and so never reaches
+    /// `KernelError::Validation`, which kaish-kernel filters to Error.
+    /// Reading it means driving the `Validator` directly.
     ///
-    /// Route on `code` (this crate's own advice), then narrow by `command`
-    /// when the code can fire for more than one command; don't parse
-    /// `message` to recover a name this field already gives you.
+    /// One limit: schema-driven issues record the SCHEMA's name, which equals
+    /// the invoked name for every builtin (pinned by a registry test) but is
+    /// not enforced for a tool an embedder registers.
+    ///
+    /// Route on `code`, then narrow by `command`; don't parse `message` to
+    /// recover a name this field already gives you.
     pub command: Option<String>,
 }
 

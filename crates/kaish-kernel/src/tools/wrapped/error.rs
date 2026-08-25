@@ -227,6 +227,31 @@ impl WrappedError {
         2
     }
 
+    /// The wrapped command this refusal is about. Empty only for a path
+    /// failure that has not been through [`Self::attributed_to`] yet.
+    pub fn command(&self) -> &str {
+        match self {
+            WrappedError::UnknownVerb { command, .. }
+        | WrappedError::MissingVerb { command, .. }
+        | WrappedError::UnknownFlag { command, .. }
+        | WrappedError::ClusteredShort { command, .. }
+        | WrappedError::GluedShortValue { command, .. }
+        | WrappedError::MissingFlagValue { command, .. }
+        | WrappedError::UnexpectedFlagValue { command, .. }
+        | WrappedError::RepeatedFlag { command, .. }
+        | WrappedError::UnexpectedArgument { command, .. }
+        | WrappedError::UndeclaredPositional { command, .. }
+        | WrappedError::MissingRequiredFlag { command, .. }
+        | WrappedError::MissingRequiredPositional { command, .. }
+        | WrappedError::NotAnInteger { command, .. }
+        | WrappedError::NotInChoices { command, .. }
+        | WrappedError::PathOutsideRoot { command, .. }
+        | WrappedError::PathRootUnresolvable { command, .. }
+        | WrappedError::NulByte { command, .. }
+        | WrappedError::BinaryArgument { command, .. } => command,
+        }
+    }
+
     /// Fill in the command and positional a bare path failure belongs to.
     ///
     /// [`crate::tools::wrapped::path_is_under`]'s companion
