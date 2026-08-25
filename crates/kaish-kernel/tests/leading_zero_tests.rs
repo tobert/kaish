@@ -85,6 +85,56 @@ async fn an_ordinary_loop_count_still_parses() {
     assert_eq!(out, "done");
 }
 
+/// The message may reword a diagnosis and must never author one. `break` is
+/// also a bareword an argument list accepts, and `echo break 007` fails ON the
+/// numeral exactly like the statement does, so position in the token stream is
+/// not enough to tell them apart.
+#[tokio::test]
+async fn the_count_message_never_speaks_for_an_argument() {
+    for source in ["echo break 007", "echo continue 007"] {
+        let text = err_of(source).await;
+        assert!(
+            !text.contains("takes a loop count"),
+            "{source:?} is not a loop statement: {text:?}"
+        );
+    }
+}
+
+/// And it must not answer a real error elsewhere on the line with this one.
+#[tokio::test]
+async fn a_real_error_elsewhere_still_wins() {
+    let text = err_of("if true; then echo hi; done
+break 007").await;
+    assert!(text.contains("found 'done'"), "the grammar's own error must stand: {text:?}");
+    assert!(!text.contains("takes a loop count"), "must not mask it: {text:?}");
+}
+
+/// Every statement-start context the gate admits, so narrowing it cannot
+/// quietly stop diagnosing the case it exists for.
+#[tokio::test]
+async fn the_count_message_reaches_every_statement_position() {
+    for source in [
+        "for i in 1 2; do break 007; done",
+        "for i in 1 2; do echo a; break 007; done",
+        "while true; do
+break 007
+done",
+        "for i in 1 2; do if true; then break 007; fi; done",
+        "for i in 1 2; do true && break 007; done",
+        "for i in 1 2; do continue 007; done",
+    ] {
+        let text = err_of(source).await;
+        assert!(text.contains("takes a loop count"), "{source:?} must be diagnosed: {text:?}");
+    }
+}
+
+/// `break -022` is not fixed by writing `break 22`.
+#[tokio::test]
+async fn the_suggested_count_keeps_its_sign() {
+    let text = err_of("for i in 1 2; do break -022; done").await;
+    assert!(text.contains("write `break -22`"), "the sign must survive: {text:?}");
+}
+
 /// bash reads `010` as octal and answers 9; kaish reads no octal and would
 /// answer 11. Answering a different number than the shell the author learned
 /// is the outcome worth refusing.
@@ -156,6 +206,39 @@ async fn every_ordinary_slice_spelling_still_works() {
         assert_eq!(code, 0, "{source:?} must run: {err:?}");
         assert_eq!(out, expected, "{source:?}");
     }
+}
+
+/// A variable holding `010` is a number position when it reaches arithmetic,
+/// and parsing it decimal answers 10 where bash answers 8. The literal case
+/// was already refused; this is the same numeral arriving by another road.
+#[tokio::test]
+async fn arithmetic_refuses_a_leading_zero_that_arrives_in_a_variable() {
+    for (source, decimal) in
+        [("x=010; echo $((x))", "write `10`"), ("x=007; echo $((x + 1))", "write `7`")]
+    {
+        let text = err_of(source).await;
+        assert!(text.contains("(leading zero)"), "must name the cause: {text:?}");
+        assert!(text.contains(decimal), "must name the fix: {text:?}");
+    }
+    let (code, out, err) = run("x=10; echo $((x + 1))").await;
+    assert_eq!(code, 0, "an ordinary variable must still work: {err:?}");
+    assert_eq!(out, "11");
+}
+
+/// `${r[-0]}` read as index 0 while `r[-0]=v` was a parse error, and `${r[1.0]}`
+/// read as a key while the write refused. Neither is a leading-zero numeral —
+/// they are numerals whose source text does not round-trip — but they reach
+/// the subscript through the same token, so the two sides must classify alike.
+#[tokio::test]
+async fn read_and_write_classify_every_numeral_subscript_alike() {
+    let read = err_of("r={}; echo ${r[-0]}").await;
+    let write = err_of("r={}; r[-0]=v").await;
+    assert!(read.contains("integer index on a record"), "read: {read:?}");
+    assert!(write.contains("integer index on a record"), "write must agree: {write:?}");
+
+    let (code, out, err) = run("r={}; r[1.0]=v; echo ${r[1.0]}").await;
+    assert_eq!(code, 0, "a 1.0 key must round-trip: {err:?}");
+    assert_eq!(out, "v");
 }
 
 #[tokio::test]

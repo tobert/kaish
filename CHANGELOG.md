@@ -44,9 +44,16 @@ breaking entries are marked **BREAKING**.
   `$((010 + 1))`, and a list index name the number to write. kaish reads no
   octal, so arithmetic refuses instead of answering 11 where bash answers 9.
 
+- **Arithmetic refuses a leading zero however it arrives** — `$((010 + 1))`
+  and `x=010; $((x))` both name the decimal to write. Reading the text as
+  decimal answered 10 where bash answers 8.
+
 - **A record key like `"007"` could not be read back** — `${r[007]}` resolved
-  to index 7 and `r[007]=v` was a parse error. Read and write now name the
-  same text key.
+  to index 7 and `r[007]=v` was a parse error. Read and write now classify
+  every numeral subscript alike, including `[-0]` and `[1.0]`.
+
+- **A slice bound with a leading zero was silent** — `${xs[007:2]}` sliced
+  from 7, inverted the range, and returned an empty list with exit 0.
 
 - **`echo hi > -0` created a file named `0`** while `--plan` reported the
   target as `-0`. Redirect targets keep the source text, so a plan document

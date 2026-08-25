@@ -62,6 +62,14 @@ octal, so it refuses rather than answering a third number. Convert a base
 deliberately instead — `printf "%o"` and `printf "%x"` format one, and
 `xxd` dumps bytes.
 
+Arithmetic refuses the numeral however it arrives, so a variable holding the
+text is refused the same way the literal is:
+
+```sh
+x=010
+echo $((x))          # error — write `10`
+```
+
 A record key is text, so a leading zero is a key like any other and reads
 back under the name it was stored under:
 

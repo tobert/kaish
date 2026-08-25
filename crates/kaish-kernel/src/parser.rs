@@ -1303,7 +1303,8 @@ fn parse_tokens(
         // and a leading zero no longer produces one, so chumsky reports a
         // shape mismatch against the whole statement alternative set. Name
         // the leading zero instead.
-        if let Err(specific) = validate_leading_zero_counts(&tokens) {
+        let error_starts: Vec<usize> = errs.iter().map(|e| e.span().start).collect();
+        if let Err(specific) = validate_leading_zero_counts(&tokens, &error_starts) {
             return specific;
         }
         // `reject_glued_args` raises this from inside a `try_map` wrapping the
@@ -1629,6 +1630,11 @@ where
         // `r[007]=v` was a parse error while `${r[007]}` read fine. Both are
         // the same text key now.
         select! { Token::NumberIdent(s) => parse_subscript(&s) },
+        // Same split for a numeral whose source text does not round-trip:
+        // `r[-0]=v` and `r[1.0]=v` were parse errors while both read fine.
+        // Classifying from the raw text is what makes the two sides agree —
+        // it is the same string the read path hands `parse_subscript`.
+        select! { Token::NumericLiteral(d) => parse_subscript(&d.raw) },
     ));
 
     just(Token::LBracket)
@@ -3702,25 +3708,58 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// against every statement alternative — a long message that never mentions
 /// the zero.
 ///
-/// Runs only after the grammar has already failed, and only for a leading-zero
-/// numeral standing directly after `break`/`continue`, so it replaces a
-/// confusing message for a statement kaish rejects either way. It never makes
-/// a passing program fail.
-fn validate_leading_zero_counts(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
-    for pair in tokens.windows(2) {
+/// Runs only after the grammar has already failed, and only when the grammar's
+/// own error sits exactly on that numeral. Like [`validate_glued_args`], this
+/// may reword a diagnosis and must never author one: without the position gate
+/// it scanned the whole stream and would blame `echo break 007` (where `break`
+/// is an argv word the grammar rejected for its own reasons) or answer a real
+/// error elsewhere on the line with this message instead.
+fn validate_leading_zero_counts(
+    tokens: &[(Token, Span)],
+    error_starts: &[usize],
+) -> Result<(), Vec<ParseError>> {
+    for (i, pair) in tokens.windows(2).enumerate() {
         let keyword = match &pair[0].0 {
             Token::Break => "break",
             Token::Continue => "continue",
             _ => continue,
         };
+        // `break` is also a bareword an argument list accepts, and `echo break
+        // 007` fails ON the numeral just like the statement does. Only a
+        // `break` in statement position is the one this message describes.
+        let at_statement_start = match i.checked_sub(1).map(|prev| &tokens[prev].0) {
+            None => true,
+            Some(
+                Token::Newline
+                | Token::Semi
+                | Token::DoubleSemi
+                | Token::Do
+                | Token::Then
+                | Token::Else
+                | Token::LBrace
+                | Token::And
+                | Token::Or,
+            ) => true,
+            Some(_) => false,
+        };
+        if !at_statement_start {
+            continue;
+        }
         let Token::NumberIdent(word) = &pair[1].0 else {
             continue;
         };
         if !lexer::is_leading_zero_numeral(word) {
             continue;
         }
-        let count = word.trim_start_matches('-').trim_start_matches('0');
-        let count = if count.is_empty() { "1" } else { count };
+        // The grammar must have failed ON this numeral. Anywhere else and the
+        // verdict belongs to whatever the grammar was actually judging.
+        if !error_starts.contains(&pair[1].1.start) {
+            continue;
+        }
+        // Keep the sign: `break -022` is not fixed by writing `break 22`.
+        let sign = if word.starts_with('-') { "-" } else { "" };
+        let digits = word.trim_start_matches('-').trim_start_matches('0');
+        let count = format!("{sign}{}", if digits.is_empty() { "0" } else { digits });
         return Err(vec![ParseError {
             span: pair[1].1,
             message: format!(

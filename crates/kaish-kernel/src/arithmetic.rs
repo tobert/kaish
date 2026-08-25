@@ -35,6 +35,21 @@ pub fn eval_arithmetic(expr: &str, scope: &Scope) -> Result<i64> {
 }
 
 /// Simple recursive descent parser for arithmetic expressions.
+/// The decimal a leading-zero numeral was probably meant to be — `010` becomes
+/// `10`, `-007` becomes `-7`. `None` when the text is not one.
+///
+/// Arithmetic refuses these rather than reading them: kaish has no octal and
+/// bash does, so `010` is 8 there and would be 10 here. The suggestion keeps
+/// the sign, because `-007` is not fixed by writing `7`.
+fn leading_zero_decimal(text: &str) -> Option<String> {
+    if !crate::lexer::is_leading_zero_numeral(text) {
+        return None;
+    }
+    let sign = if text.starts_with('-') { "-" } else { "" };
+    let digits = text.trim_start_matches('-').trim_start_matches('0');
+    Some(format!("{sign}{}", if digits.is_empty() { "0" } else { digits }))
+}
+
 struct ArithParser<'a> {
     input: &'a str,
     pos: usize,
@@ -346,6 +361,12 @@ impl<'a> ArithParser<'a> {
         // Name is just the digits when called from `$1` or `${1}` parsing
         if let Ok(index) = name.parse::<usize>() {
             if let Some(pos_val) = self.scope.get_positional(index) {
+                if let Some(decimal) = leading_zero_decimal(pos_val) {
+                    anyhow::bail!(
+                        "${index} holds `{pos_val}`, which is text (leading zero) — kaish reads \
+                         no octal; write `{decimal}` for the decimal value"
+                    );
+                }
                 return pos_val.parse().with_context(|| {
                     format!("${} has non-numeric value: {:?}", index, pos_val)
                 });
@@ -438,7 +459,15 @@ impl<'a> ArithParser<'a> {
         match value {
             Value::Int(n) => Ok(*n),
             Value::String(s) => {
-                // Try to parse string as integer
+                // `x=007` stores the string; reading it back into arithmetic
+                // is a number position like any other, and parsing it decimal
+                // would answer 10 for `010` where bash answers 8.
+                if let Some(decimal) = leading_zero_decimal(s) {
+                    anyhow::bail!(
+                        "variable '{name}' holds `{s}`, which is text (leading zero) — kaish \
+                         reads no octal; write `{decimal}` for the decimal value"
+                    );
+                }
                 s.parse().with_context(|| format!(
                     "variable '{}' has non-numeric value: {:?}", name, s
                 ))
