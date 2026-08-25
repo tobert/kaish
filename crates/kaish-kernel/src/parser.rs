@@ -1289,31 +1289,16 @@ fn parse_tokens(
         if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
-        // `reject_glued_args` raises the same rejection from inside the
-        // grammar, but its span never survives: it is buried in a `try_map`
-        // wrapping a whole `.repeated()` argv, and chumsky's choice/alt
-        // bookkeeping (see `validate_cmd_subst_bodies`'s doc comment) hands
-        // our message an unrelated, shallower sibling's span — a
-        // `git show HEAD:training/v9/x.py` glue reported at `show`, not at
-        // `HEAD:training/v9/x.py`. Re-derive the paste directly from tokens,
-        // outside that machinery, and report the span from here.
+        // `reject_glued_args` raises this from inside a `try_map` wrapping the
+        // whole argv, where chumsky's alt bookkeeping swaps in a shallower
+        // sibling's span — `git show HEAD:x.py` reported at `show`. Re-derive
+        // the paste from the tokens instead and report the span from here.
         //
-        // "Re-derive", not "re-check": the token scan is an independent
-        // approximation of the argv grammar, and it neither sees exactly
-        // what `reject_glued_args` saw nor stays inside argv — it will find
-        // adjacency in regions the grammar parses happily. That is why the
-        // gate below is the load-bearing part and not a formality.
-        //
-        // Only when the grammar's surviving error IS that rejection. This
-        // corrects a span; it must never author a verdict. Every other
-        // `Rich::custom` in this parser names a different mistake and its
-        // own fix — an unquoted multi-word record value (GH #183), a
-        // redirect target, `--flag = value` spacing — and the paste advice
-        // is both wrong and less useful in their place. See
-        // `is_glued_args_error` for why the check is sound.
-        // Re-derive from the grammar's own position forward: the scanner
-        // corrects WHICH word is blamed, and must not jump to a different
-        // region of the line to do it.
+        // Only when the standing error IS that rejection: this corrects a span
+        // and must never author a verdict. The scan is an approximation of the
+        // argv grammar and finds adjacency the grammar accepts, so the gate is
+        // load-bearing. Scanning from the grammar's own position forward keeps
+        // it from blaming a legal run in an earlier clause.
         if errs.iter().all(is_glued_args_error)
             && let Some(from_offset) = errs.iter().map(|e| e.span().start).min()
             && let Err(specific) = validate_glued_args(&tokens, from_offset)
@@ -2192,29 +2177,17 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
     }
 }
 
-/// True for the argv-fragment `Arg` shapes eligible for the no-token-pasting
-/// glue check below: bareword/expr positionals AND long flags.
+/// True for the argv-fragment `Arg` shapes eligible for the glue check:
+/// bareword/expr positionals and long flags.
 ///
-/// `ShortFlag` is deliberately EXCLUDED: a single-char short flag glued
-/// straight to its value with no space (`cut -d,`, `grep -A$n`) is the
-/// getopt-style glued-value idiom the kernel binder (`consume_flag_positionals`
-/// / `bind_glued_short_value`) already supports and tests rely on — the flag
-/// char class covers alnum/dash so a purely-textual glued value (`-f1`,
-/// `-C3`) is already ONE lexer token, but a punctuation/subst value (`-d,`,
-/// `-d$(cmd)`) genuinely arrives as two adjacent `Arg`s and must NOT be
-/// rejected here. `--flag` has no such glued-value idiom (only the explicit
-/// `--flag=value` form, which fuses into `Named` before reaching this list),
-/// so a `LongFlag` glued to a following fragment is always a pasting
-/// accident, not a feature.
+/// `ShortFlag` is excluded: `cut -d,` and `grep -A$n` are the getopt glued-value
+/// idiom the kernel binder already supports, and a punctuation or substitution
+/// value genuinely arrives as two adjacent `Arg`s. `--flag` has no such idiom,
+/// so a `LongFlag` glued to a fragment is always an accident.
 ///
-/// `Named`/`WordAssign` ARE candidates, despite fusing a span-adjacent
-/// `--key=value`/`key=value` triple into one `Arg` themselves. That fusion
-/// covers the boundaries *inside* the word, which `windows(2)` never compares;
-/// it says nothing about a fragment glued to the END of the value.
-/// `--a=1--b=2` and `--a=$V--b` are two args with a zero source gap between
-/// them, and that is pasting by any other name. Excluding them let those split
-/// silently into separate operands — loudly wrong pre-`--` only because clap
-/// then rejected `-a` as an unknown flag, and wholly silent after `--`.
+/// `Named`/`WordAssign` ARE candidates: their own fusion covers the boundaries
+/// inside the word, not a fragment glued to the END of the value, and
+/// `--a=1--b=2` is pasting by any other name.
 fn is_glue_candidate(arg: &Arg) -> bool {
     matches!(
         arg,
@@ -2262,18 +2235,11 @@ const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are 
 /// True when `e` is `reject_glued_args`'s own rejection and nothing else —
 /// the only case where [`validate_glued_args`] may restate the span.
 ///
-/// `RichReason` has exactly two shapes (chumsky 0.13). A `Custom` carrying
-/// any other message is a purpose-built diagnosis from one of this parser's
-/// other eleven `try_map` guards, and `RichReason::flat_merge` always
-/// prefers a `Custom` reason — so if any of them fired, its message is the
-/// one standing here and must reach the caller untouched. An
-/// `ExpectedFound` means the grammar never judged this a paste at all;
-/// inventing that verdict from the token stream would change what kaish
-/// rejects, not merely where it points.
-///
-/// This is why there is no list of constructs to skip. A new guard added
-/// anywhere in the grammar is protected the day it is written, with no
-/// edit here.
+/// Any other `Custom` is a purpose-built diagnosis, and `flat_merge` prefers
+/// `Custom`, so it is the message standing here and must reach the caller
+/// untouched. An `ExpectedFound` means the grammar never judged this a paste,
+/// and inventing that verdict would change what kaish rejects. No skip list is
+/// needed: a new guard is protected the day it is written.
 fn is_glued_args_error(e: &Rich<'_, Token, Span>) -> bool {
     matches!(e.reason(), RichReason::Custom(msg) if msg.as_str() == GLUED_ARGS_MESSAGE)
 }
@@ -3563,20 +3529,10 @@ fn validate_heredoc_bodies(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseErro
 /// True for a lexer token that becomes exactly one glue-candidate `Arg`
 /// (`Positional` or a bare `LongFlag`) on its own.
 ///
-/// Exhaustive over `Token`, with no wildcard arm, the same way
-/// `Token::category` is in `lexer.rs`. `Token` is `#[non_exhaustive]`, but
-/// this parser lives in the same crate, so an in-crate exhaustive match is
-/// allowed — and a new `Token` variant then becomes a compile error here
-/// that forces a decision, instead of a silently un-improved span.
-///
-/// The limit of that guarantee is worth stating plainly, because it is a
-/// real one: this enforces completeness against the `Token` ENUM, not
-/// against the GRAMMAR. If `primary_expr_parser` later grows a production
-/// built from a token already listed `false` below, nothing fails to
-/// compile and this scanner just keeps missing it — exactly the drift the
-/// exhaustive match looks like it prevents. `parser_custom_guard_count_is_pinned`
-/// pins a third axis again (diagnoses, not words). None of the three is a
-/// total solution; each closes one way for this code to rot quietly.
+/// Exhaustive over `Token` with no wildcard, so a new variant is a compile
+/// error here rather than a silently un-improved span. That is completeness
+/// against the ENUM, not the GRAMMAR: a new production built from a token
+/// already listed `false` compiles fine and this scanner keeps missing it.
 fn is_word_token(tok: &Token) -> bool {
     match tok {
         Token::True | Token::False | Token::EqEq | Token::NotEq | Token::Eq
@@ -3592,16 +3548,12 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::NumberIdent(_) | Token::DashNumWord(_) | Token::AtWord(_)
         | Token::Path(_) | Token::Ident(_) => true,
 
-        // Known gap, deliberately left open. These nine are the keywords
-        // `keyword_as_bareword` accepts in argument position, where they
-        // bind as `Expr::Literal` and so ARE glue candidates: `git checkout
-        // do:x` is a real paste this scanner does not see. It falls through
-        // to the grammar's own span (`checkout`) — no worse than before,
-        // but not fixed either. Closing it is small, and is just flipping
-        // these to `true`; it is not done here because it changes error
-        // text for inputs outside this change's scope and deserves its own
-        // probes. (`keyword_word`'s wider 19-token set is a different
-        // thing: assignment KEYS, `in=a` — see `is_assign_key_token`.)
+        // Known gap. These nine are keywords `keyword_as_bareword` accepts in
+        // argument position, so `git checkout do:x` is a real paste this
+        // scanner misses; it falls through to the grammar's own span. Flipping
+        // them to `true` closes it, but changes error text outside this
+        // change's scope. (`keyword_word`'s wider set is assignment KEYS — see
+        // `is_assign_key_token`.)
         Token::Done | Token::Fi | Token::Then | Token::Else | Token::Elif | Token::In
         | Token::Do | Token::Esac | Token::Set => false,
 
@@ -3646,13 +3598,10 @@ fn is_word_token(tok: &Token) -> bool {
 /// A key token `word_assign_arg_parser`/`long_flag_with_value` accept —
 /// `Ident` for `key=value`, `LongFlag` for `--key=value`.
 ///
-/// The `LongFlag` half is what fuses `--key=value` into ONE unit. Without
-/// it a spaced `--a=1 --b=2` would scan as separate adjacent fragments and
-/// be flagged as a paste it is not.
-///
-/// `keyword_word`'s wider 19-token key set (`in=a`, `do=b`) is deliberately
-/// not reproduced: this scanner re-derives the common bareword, path, and
-/// flag shapes, not the whole grammar — see `validate_glued_args`.
+/// The `LongFlag` half fuses `--key=value` into ONE unit; without it a spaced
+/// `--a=1 --b=2` would scan as adjacent fragments and be flagged as a paste it
+/// is not. `keyword_word`'s wider key set is deliberately not reproduced: this
+/// scanner re-derives common shapes, not the whole grammar.
 fn is_assign_key_token(tok: &Token) -> bool {
     matches!(tok, Token::Ident(_) | Token::LongFlag(_))
 }
@@ -3674,18 +3623,14 @@ fn word_unit(tokens: &[(Token, Span)], i: usize) -> Option<(Span, usize)> {
     None
 }
 
-/// Walk `tokens` producing the same glue-candidate units
-/// `arg_before_double_dash_parser` would bind as `Arg`s — a single word
-/// token, a `key=value`/`--key=value` assignment (one unit, per
-/// `word_assign_arg_parser`'s and `long_flag_with_value`'s own `=`
-/// adjacency), or a balanced `$(...)`. A `ShortFlag`, keyword, or other
-/// token this scanner doesn't recognize as a word simply breaks the chain
-/// (never merges across it) — see `validate_glued_args`.
+/// Walk `tokens` producing the glue-candidate units
+/// `arg_before_double_dash_parser` would bind as `Arg`s: a word token, a
+/// `key=value`/`--key=value` assignment, or a balanced `$(...)`. Anything
+/// else breaks the chain and never merges across it.
 ///
-/// A redirect's target needs no special handling here. `redirect_parser`
-/// diagnoses a glued target itself, with its own wording, and that
-/// `Rich::custom` is the message left standing — so `is_glued_args_error`
-/// never lets this scanner run for those inputs at all.
+/// Redirect targets need no handling here — `redirect_parser` diagnoses a
+/// glued target in its own words, so `is_glued_args_error` keeps this
+/// scanner from running for them at all.
 fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
     let mut units = Vec::new();
     let mut i = 0;
@@ -3714,32 +3659,20 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
     units
 }
 
-/// Re-detect a genuine glued-argv paste directly from `tokens`, outside
-/// chumsky's `choice`/`try_map` bookkeeping — called only after
-/// [`parse_tokens`]'s main grammar pass has already failed, the same way
-/// and for the same reason as [`validate_cmd_subst_bodies`] (see its doc
-/// comment for the mechanism).
+/// Re-detect a glued-argv paste directly from `tokens`, after the main
+/// grammar pass has already failed — the same shape as
+/// [`validate_cmd_subst_bodies`], for the same reason.
 ///
-/// `reject_glued_args` raises the same rejection with its own
-/// `Rich::custom`, but that error's span is unusable: it is raised deep
-/// inside a `try_map` wrapping the whole argv `.repeated()`, and never
-/// reaches the caller intact. An unrelated, shallower failed alternative tried
-/// elsewhere in the grammar for the *same* statement — e.g. an early
-/// attempt to read `git show HEAD:training/v9/x.py` as something other
-/// than a plain command — can still win chumsky's furthest-error
-/// bookkeeping (`RichReason::flat_merge` always prefers a `Custom` reason,
-/// but `Rich::merge` always keeps `self`'s span) and end up reporting our
-/// message at ITS span: `show`, not `HEAD:training/v9/x.py`.
+/// `reject_glued_args` raises this rejection inside a `try_map` wrapping the
+/// whole argv, and its span never survives: `flat_merge` keeps our message
+/// while `Rich::merge` keeps a shallower sibling's span, so `git show
+/// HEAD:x.py` reports at `show`.
 ///
-/// Only reached when `is_glued_args_error` has already confirmed the
-/// grammar's own standing error is this exact rejection, so this function
-/// never has to know which other constructs to avoid — no construct it
-/// might collide with can reach it. It is conservative in the other
-/// direction too: it recognizes only the bareword, path, flag, and
-/// `$(...)` shapes `glue_candidate_units` classifies, and under-recognizing
-/// one just leaves the grammar's own span in place. The scope stays
-/// "report the right span for a rejection that already happened," never
-/// "change what is rejected."
+/// Reached only once `is_glued_args_error` confirms the standing error is
+/// this exact rejection, so it need not know what to avoid. Under-recognizing
+/// a shape just leaves the grammar's span in place. The scope is "report the
+/// right span for a rejection that already happened", never "change what is
+/// rejected".
 fn validate_glued_args(
     tokens: &[(Token, Span)],
     from_offset: usize,
