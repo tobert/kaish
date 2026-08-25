@@ -127,6 +127,37 @@ async fn a_record_key_that_is_a_leading_zero_numeral_round_trips() {
     assert_eq!(out, "nine", "the write and the read must name the same key");
 }
 
+/// A slice carries two number positions, and the leading zero was silent in
+/// both: `${xs[007:2]}` sliced from 7, inverted the range, and returned an
+/// empty list. An empty result is the one wrong answer a caller cannot tell
+/// from a correct one.
+#[tokio::test]
+async fn a_slice_bound_refuses_a_leading_zero() {
+    for (source, fix) in [
+        ("xs=[1 2 3]; echo ${xs[007:2]}", "${xs[7:2]}"),
+        ("xs=[1 2 3]; echo ${xs[0:007]}", "${xs[0:7]}"),
+    ] {
+        let text = err_of(source).await;
+        assert!(text.contains("(leading zero)"), "must name the cause: {text:?}");
+        assert!(text.contains(fix), "must name the fix: {text:?}");
+    }
+}
+
+/// The slice grammar is easy to break while refusing one spelling of it.
+#[tokio::test]
+async fn every_ordinary_slice_spelling_still_works() {
+    for (source, expected) in [
+        ("xs=[1 2 3]; echo ${xs[0:2]}", "[1,2]"),
+        ("xs=[1 2 3]; echo ${xs[:2]}", "[1,2]"),
+        ("xs=[1 2 3]; echo ${xs[1:]}", "[2,3]"),
+        ("xs=[1 2 3]; echo ${xs[-2:]}", "[2,3]"),
+    ] {
+        let (code, out, err) = run(source).await;
+        assert_eq!(code, 0, "{source:?} must run: {err:?}");
+        assert_eq!(out, expected, "{source:?}");
+    }
+}
+
 #[tokio::test]
 async fn an_ordinary_index_is_untouched() {
     let (code, out, err) = run("xs=[10 20 30]; echo ${xs[1]}").await;

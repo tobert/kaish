@@ -112,20 +112,42 @@ fn classify_index(json: &serde_json::Value, i: i64, path: &str) -> Result<Step, 
     Ok(Step::Index(idx as usize))
 }
 
+/// The same subscript with every leading-zero numeral trimmed — `007` becomes
+/// `7`, and the slice `007:2` becomes `7:2`. `None` when no part had one, so
+/// the caller keeps its ordinary message.
+///
+/// Splits on `:` because a slice carries two number positions and either one
+/// can hold the leading zero.
+fn without_leading_zeros(key: &str) -> Option<String> {
+    let mut changed = false;
+    let fixed = key
+        .split(':')
+        .map(|part| {
+            if !crate::lexer::is_leading_zero_numeral(part) {
+                return part.to_string();
+            }
+            changed = true;
+            let sign = if part.starts_with('-') { "-" } else { "" };
+            let digits = part.trim_start_matches('-').trim_start_matches('0');
+            format!("{sign}{}", if digits.is_empty() { "0" } else { digits })
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+    changed.then_some(fixed)
+}
+
 /// Classify a record key against an object. A bareword/string key on a list is
 /// an error; key *presence* is checked when the step is applied ([`descend`]),
 /// not here — the read/write split lives in that leaf policy.
 fn classify_key(json: &serde_json::Value, key: &str, path: &str) -> Result<Step, PathError> {
     match json {
         serde_json::Value::Object(_) => Ok(Step::Key(key.to_string())),
-        serde_json::Value::Array(_) if crate::lexer::is_leading_zero_numeral(key) => {
+        serde_json::Value::Array(_) if let Some(fix) = without_leading_zeros(key) => {
             // The author almost certainly meant an index. Name the leading
             // zero, or the message reads as a type confusion they never made.
-            let index = key.trim_start_matches('-').trim_start_matches('0');
-            let index = if index.is_empty() { "0" } else { index };
             Err(PathError::Shape(format!(
                 "${{{path}[{key}]}}: `{key}` is text (leading zero) and a list is indexed by \
-                 number — write ${{{path}[{index}]}}"
+                 number — write ${{{path}[{fix}]}}"
             )))
         }
         serde_json::Value::Array(_) => Err(PathError::Shape(format!(

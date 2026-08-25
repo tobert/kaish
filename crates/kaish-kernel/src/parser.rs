@@ -461,9 +461,15 @@ fn parse_subscript(inner: &str) -> VarSegment {
     // isn't a numeric slice falls through to a bareword key (`["a:b"]` covers
     // colon-bearing keys explicitly).
     if let Some((lhs, rhs)) = inner.split_once(':') {
+        // A slice bound is a number position, so a leading zero is text here
+        // too — without this `[007:2]` sliced from 7 and silently returned an
+        // empty list. Refusing the bound falls through to a bareword key,
+        // which `scope.rs` reports against the container.
         let bound = |s: &str| -> Option<Option<i64>> {
             if s.is_empty() {
                 Some(None)
+            } else if lexer::is_leading_zero_numeral(s) {
+                None
             } else {
                 s.parse::<i64>().ok().map(Some)
             }
