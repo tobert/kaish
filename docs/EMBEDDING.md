@@ -976,6 +976,11 @@ for planned in plan_program(src).map_err(|_errors| /* parse errors */ ())? {
 
 `Kernel::plan_program(source)` is the same read as a method on a kernel.
 
+Neither returns a version — they hand back statements, not a document. An
+embedder composing its own plan document reads `kaish_kernel::KAISH_VERSION`
+(with `KAISH_GIT_HASH` and `KAISH_BUILD_DATE` beside it) and writes the same
+three fields the CLI writes.
+
 **Judging against live state.** `free_variables` names what a statement reads,
 so `Kernel::get_var` closes the loop — plan, look up what it depends on, and
 decide with the values in hand:
@@ -1125,6 +1130,12 @@ crates.io tarball build, for instance), and `kaish_build_date`
 version reads it from the plan document instead of shelling out to
 `kaish --version` separately.
 
+**Read all three as optional.** A kaish that predates them emits a document
+without the keys at all, so a consumer whose type requires
+`kaish_version` fails to parse a document that is otherwise perfectly
+good. Default them instead, and treat a missing version the same way you
+treat one you do not recognize.
+
 **`body_offset` plus the body's length is the body's byte span in the source
 you passed.** That is the primitive for the inverse of classification: instead
 of reading the body, *exclude* it — classify the shell framing and route the
@@ -1197,6 +1208,11 @@ object" is a promise about a kaish that has `--plan`; an older one prints
 is indistinguishable from a malformed command if you branch on the exit code
 alone. Require **kaish 0.16 or newer** with `kaish -V`, and treat unparseable
 stdout as an unsupported binary rather than as a broken source.
+
+`kaish -V` answers only this question — is the binary new enough to have
+`--plan` at all. Once a document parses, its own `kaish_version` is the
+better answer for everything else, because it names the kaish that produced
+*that document* rather than whatever is on `PATH` now.
 
 **Keep the analysis an optimization, never a requirement.** A consumer that
 cannot reach a plan — no kaish on `PATH`, a stale one, a source that does not
