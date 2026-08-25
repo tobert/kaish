@@ -118,6 +118,16 @@ fn classify_index(json: &serde_json::Value, i: i64, path: &str) -> Result<Step, 
 fn classify_key(json: &serde_json::Value, key: &str, path: &str) -> Result<Step, PathError> {
     match json {
         serde_json::Value::Object(_) => Ok(Step::Key(key.to_string())),
+        serde_json::Value::Array(_) if crate::lexer::is_leading_zero_numeral(key) => {
+            // The author almost certainly meant an index. Name the leading
+            // zero, or the message reads as a type confusion they never made.
+            let index = key.trim_start_matches('-').trim_start_matches('0');
+            let index = if index.is_empty() { "0" } else { index };
+            Err(PathError::Shape(format!(
+                "${{{path}[{key}]}}: `{key}` is text (leading zero) and a list is indexed by \
+                 number — write ${{{path}[{index}]}}"
+            )))
+        }
         serde_json::Value::Array(_) => Err(PathError::Shape(format!(
             "${{{path}[{key}]}}: string key on a list — use an integer index"
         ))),

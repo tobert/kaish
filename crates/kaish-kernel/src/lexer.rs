@@ -3564,6 +3564,36 @@ fn has_invalid_leading_zero(raw: &str) -> bool {
     int_part.len() > 1 && int_part.starts_with('0')
 }
 
+/// True when a word is a numeral in every respect except its leading zero —
+/// `007`, `010`, `-022`, `007.5`. These lex as [`Token::NumberIdent`], the
+/// same shape `9lives` gets, because a leading zero makes a word text (see
+/// [`has_invalid_leading_zero`]).
+///
+/// Callers use this where kaish needs a number and got text, so the error can
+/// name the leading zero instead of reporting a shape mismatch: `break 007`,
+/// `$((010 + 1))`, a subscript on a list. A word that is not otherwise a
+/// numeral (`007abc`) is ordinary text and answers false — there is no
+/// number the author might have meant.
+pub(crate) fn is_leading_zero_numeral(word: &str) -> bool {
+    let unsigned = word.strip_prefix('-').unwrap_or(word);
+    let mut parts = unsigned.split('.');
+    let int_part = parts.next().unwrap_or("");
+    let frac_part = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    let digits_only = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits_only(int_part) {
+        return false;
+    }
+    if let Some(frac) = frac_part
+        && !digits_only(frac)
+    {
+        return false;
+    }
+    has_invalid_leading_zero(word)
+}
+
 /// Reclassify a plain `Int`/`Float` token from its own source text — see
 /// `has_invalid_leading_zero` (a leading zero makes it a string, not a
 /// number: `Token::NumberIdent`, the same shape a digit run with a trailing

@@ -472,8 +472,12 @@ fn parse_subscript(inner: &str) -> VarSegment {
             return VarSegment::Slice(start, end);
         }
     }
-    // Integer index: `[0]`, `[-1]`.
-    if let Ok(i) = inner.parse::<i64>() {
+    // Integer index: `[0]`, `[-1]`. A leading zero makes the word text, so
+    // `[007]` falls through to the bareword key below — on a record it finds
+    // the "007" key, and on a list it raises the loud error in `scope.rs`.
+    if !lexer::is_leading_zero_numeral(inner)
+        && let Ok(i) = inner.parse::<i64>()
+    {
         return VarSegment::Index(i);
     }
     // Bareword literal key: `[name]`, `[content-type]`.
@@ -1289,6 +1293,13 @@ fn parse_tokens(
         if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
+        // `break 007` / `continue 007`: the count grammar matches `Token::Int`
+        // and a leading zero no longer produces one, so chumsky reports a
+        // shape mismatch against the whole statement alternative set. Name
+        // the leading zero instead.
+        if let Err(specific) = validate_leading_zero_counts(&tokens) {
+            return specific;
+        }
         // `reject_glued_args` raises this from inside a `try_map` wrapping the
         // whole argv, where chumsky's alt bookkeeping swaps in a shallower
         // sibling's span — `git show HEAD:x.py` reported at `show`. Re-derive
@@ -1608,6 +1619,10 @@ where
         select! { Token::SingleString(s) => VarSegment::Key(s) },
         select! { Token::Int(n) => VarSegment::Index(n) },
         select! { Token::Ident(s) => parse_subscript(&s) },
+        // A leading-zero numeral lexes as `NumberIdent`, so without this arm
+        // `r[007]=v` was a parse error while `${r[007]}` read fine. Both are
+        // the same text key now.
+        select! { Token::NumberIdent(s) => parse_subscript(&s) },
     ));
 
     just(Token::LBracket)
@@ -3546,6 +3561,7 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::SingleString(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
         | Token::Positional(_) | Token::AllArgs | Token::ArgCount | Token::LastExitCode
         | Token::CurrentPid | Token::VarLength(_) | Token::Int(_) | Token::Float(_)
+        | Token::NumericLiteral(_)
         | Token::NumberIdent(_) | Token::DashNumWord(_) | Token::AtWord(_)
         | Token::Path(_) | Token::Ident(_) => true,
 
@@ -3674,6 +3690,42 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// a shape just leaves the grammar's span in place. The scope is "report the
 /// right span for a rejection that already happened", never "change what is
 /// rejected".
+/// `break`/`continue` take a loop count, and a count is a number. A leading
+/// zero makes the word text ([`lexer::is_leading_zero_numeral`]), so `break
+/// 007` no longer matches the count grammar and chumsky reports the miss
+/// against every statement alternative — a long message that never mentions
+/// the zero.
+///
+/// Runs only after the grammar has already failed, and only for a leading-zero
+/// numeral standing directly after `break`/`continue`, so it replaces a
+/// confusing message for a statement kaish rejects either way. It never makes
+/// a passing program fail.
+fn validate_leading_zero_counts(tokens: &[(Token, Span)]) -> Result<(), Vec<ParseError>> {
+    for pair in tokens.windows(2) {
+        let keyword = match &pair[0].0 {
+            Token::Break => "break",
+            Token::Continue => "continue",
+            _ => continue,
+        };
+        let Token::NumberIdent(word) = &pair[1].0 else {
+            continue;
+        };
+        if !lexer::is_leading_zero_numeral(word) {
+            continue;
+        }
+        let count = word.trim_start_matches('-').trim_start_matches('0');
+        let count = if count.is_empty() { "1" } else { count };
+        return Err(vec![ParseError {
+            span: pair[1].1,
+            message: format!(
+                "`{keyword}` takes a loop count and `{word}` is text (leading zero) — write \
+                 `{keyword} {count}`"
+            ),
+        }]);
+    }
+    Ok(())
+}
+
 fn validate_glued_args(
     tokens: &[(Token, Span)],
     from_offset: usize,

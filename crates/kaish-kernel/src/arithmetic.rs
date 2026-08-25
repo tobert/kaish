@@ -311,6 +311,17 @@ impl<'a> ArithParser<'a> {
             }
         }
         let num_str = &self.input[start..self.pos];
+        // kaish has no octal, and bash does: `$((010 + 1))` is 9 there and
+        // would be 11 here. Answering a different number than the shell the
+        // author learned is the worst outcome, so refuse the numeral.
+        if crate::lexer::is_leading_zero_numeral(num_str) {
+            let trimmed = num_str.trim_start_matches('0');
+            let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+            bail!(
+                "`{num_str}` is text (leading zero) and kaish reads no octal — write \
+                 `{trimmed}` for the decimal value"
+            );
+        }
         num_str.parse().context("invalid number in arithmetic expression")
     }
 

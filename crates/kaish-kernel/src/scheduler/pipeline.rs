@@ -245,6 +245,14 @@ async fn eval_redirect_target(
     ctx: &ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> Result<String, String> {
+    // A numeral whose source text does not round-trip through its own typed
+    // `Display` — `> -0` wrote a file named `0`, while `--plan` reported the
+    // target as `-0`. `plan_redirect_target` reads `raw` for exactly this, so
+    // read it here too or the plan document describes a write that never
+    // happens. A literal needs no evaluation, so there is nothing to skip.
+    if let Expr::NumericLiteral { raw, .. } = expr {
+        return Ok(raw.clone());
+    }
     let value = dispatcher
         .eval_expr(expr, ctx)
         .await
