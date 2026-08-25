@@ -8647,19 +8647,26 @@ AFTER="yes"'"#)
         // The timer was the bug, so the timer is gone. `interrupt` is polled at
         // the loop's checkpoint and only there (measured: zero polls for
         // `echo hi` or `X=1; sleep 0.01`, one per iteration for a for-loop),
-        // and its slot is installed *after* `reset_cancel()` has run. So a
-        // first poll proves execution is under way and a cancel can no longer
-        // be dropped. The tripwire never reports true itself —
+        // and its slot is installed *after* `reset_cancel()` has run. So a poll
+        // proves execution is under way and a cancel can no longer be dropped,
+        // and the second poll proves an iteration completed. The tripwire
+        // never reports true itself —
         // `Kernel::cancel()`, the embedder's real door, still does the
         // cancelling.
         const ITERATIONS: u32 = 2000;
         const PER_ITERATION_SLEEP_SECS: f64 = 0.05;
         let bound = std::time::Duration::from_secs(10);
 
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let tripwire = Arc::clone(&running);
+        // Counted, not latched. The checkpoint polls this closure BEFORE the
+        // body, so a cancel released on the first poll can land before the
+        // body has run even once — the loop then exits with the variable the
+        // assertion below reads never assigned, and the test fails having
+        // proved nothing. Waiting for the second poll puts one whole
+        // completed iteration between the two.
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tripwire = Arc::clone(&polls);
         let opts = ExecuteOptions::new().with_interrupt(Arc::new(move || {
-            tripwire.store(true, Ordering::SeqCst);
+            tripwire.fetch_add(1, Ordering::SeqCst);
             false
         }));
 
@@ -8667,10 +8674,10 @@ AFTER="yes"'"#)
         // while the current-thread test runtime is busy inside the loop.
         {
             let k = Arc::clone(&kernel);
-            let tripped = Arc::clone(&running);
+            let tripped = Arc::clone(&polls);
             std::thread::spawn(move || {
                 let deadline = std::time::Instant::now() + bound;
-                while !tripped.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                while tripped.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 // Cancel even if the tripwire never tripped, so a loop that
@@ -8743,19 +8750,25 @@ AFTER="yes"'"#)
         // bare arithmetic, so each iteration yields to the runtime somewhere.
         let bound = std::time::Duration::from_secs(10);
 
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let tripwire = Arc::clone(&running);
+        // Counted, not latched. The checkpoint polls this closure BEFORE the
+        // body, so a cancel released on the first poll can land before the
+        // body has run even once — the loop then exits with the variable the
+        // assertion below reads never assigned, and the test fails having
+        // proved nothing. Waiting for the second poll puts one whole
+        // completed iteration between the two.
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tripwire = Arc::clone(&polls);
         let opts = ExecuteOptions::new().with_interrupt(Arc::new(move || {
-            tripwire.store(true, Ordering::SeqCst);
+            tripwire.fetch_add(1, Ordering::SeqCst);
             false
         }));
 
         {
             let k = Arc::clone(&kernel);
-            let tripped = Arc::clone(&running);
+            let tripped = Arc::clone(&polls);
             std::thread::spawn(move || {
                 let deadline = std::time::Instant::now() + bound;
-                while !tripped.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                while tripped.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 k.cancel();
@@ -8783,6 +8796,9 @@ AFTER="yes"'"#)
         // which is exactly how the for-loop test above lost its own check. A
         // count above zero proves the body ran before the cancel landed, so a
         // *running* loop was interrupted rather than one that never started.
+        // That holds by construction, not by winning a race: the cancel is not
+        // released until the checkpoint's SECOND poll, and one whole iteration
+        // separates the two.
         // Deliberately no upper bound: the body is bare arithmetic with no
         // sleep, so how far it gets in the millisecond before the cancel
         // arrives is a function of host speed and is not worth asserting on.
