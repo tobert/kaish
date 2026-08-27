@@ -70,6 +70,7 @@ mod plan;
 mod printf;
 mod push;
 mod pwd;
+mod random;
 mod read;
 mod readlink;
 mod realpath;
@@ -325,6 +326,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     #[cfg(all(target_os = "linux", feature = "host"))]
     registry.register(kaish_tools_host::Ps);
     registry.register(pwd::Pwd);
+    registry.register(random::Random);
     registry.register(read::Read);
     registry.register(readlink::Readlink);
     registry.register(realpath::Realpath);

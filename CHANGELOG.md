@@ -16,6 +16,9 @@ breaking entries are marked **BREAKING**.
   discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
 
 ### Added
+- **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
+  chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
+
 - **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
   register an external program as a tool with a declared grammar. Verbs and flags
   are deny-by-default, refused with exit 2 before any spawn; the kernel renders
