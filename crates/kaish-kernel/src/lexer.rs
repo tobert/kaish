@@ -658,7 +658,7 @@ pub enum Token {
     /// See `docs/LANGUAGE.md`, "A bare number follows JSON rules".
     ///
     /// A leading zero (`007`) is a different case, reclassified to
-    /// `NumberIdent` — see [`has_invalid_leading_zero`].
+    /// `NumberIdent` — see `has_invalid_leading_zero`.
     ///
     /// Never produced by logos. `preserve_numeric_source_text` synthesizes it
     /// as the LAST step of `tokenize_impl`, after the fusion passes, which
