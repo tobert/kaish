@@ -42,8 +42,10 @@ breaking entries are marked **BREAKING**.
 
 - **Where kaish needs a number, a leading zero is an error** — `break 007`,
   `$((010 + 1))`, `[[ 010 -eq 10 ]]`, and a list index name the number to
-  write; kaish reads no octal. An integer past 64 bits names the limit and
-  the fix instead of "invalid number".
+  write; kaish reads no octal.
+
+- **An integer past 64 bits names the limit and the fix** instead of
+  "invalid number", in both a bare numeral and `$(( ))`.
 
 - **Arithmetic refuses a leading zero however it arrives** — `$((010 + 1))`
   and `x=010; $((x))` both name the decimal to write. Reading the text as
