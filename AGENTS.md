@@ -81,6 +81,14 @@ behind it:
   (`fromjson 1e3`). `printf %x` / `%o` format the other direction; `$(random --max N)`
   replaces `$RANDOM`.
 
+### Test a theory before building it
+
+A claim about what models or users will write is measurable. Before adding syntax, a
+spelling, or a shortcut on their behalf, hand a few cheap kaibo casts or subagents the
+proposed help text and a task list, and count what they produce. Keep one syntax until
+the count says otherwise. The same loop works for an error message: show the message,
+ask for the next command, and see whether it lands.
+
 ### Code style
 
 - Comments should be short and direct. Comments are not a space for narratives;
@@ -120,13 +128,6 @@ behind it:
     (`--all-targets` so test code is linted too — see the note below)
   CI enforces these (plus the sandbox and WASI legs) on the PR — run them
   locally first anyway; the feedback loop is minutes faster.
-- **One PR per hunk of work, medium-sized.** Coding is delegated to a subagent with a
-  written spec and named tests that must fail first; the orchestrator runs the gates
-  (a subagent told to run them stalls) and gets a kaibo review of the branch before
-  pushing. Verify every review claim against a built binary before acting on it.
-- **A claim about what models "habitually" write is testable.** Before adding a
-  spelling or a shortcut for their sake, give a few cheap casts the proposed help
-  text and a task list, and count. One syntax until the count says otherwise.
 
 `unwrap_used` is denied and `expect_used` warned workspace-wide, so the lints
 carry that rule and this guide does not repeat it. What the lints cannot tell
