@@ -21,6 +21,11 @@ breaking entries are marked **BREAKING**.
   are deny-by-default, refused with exit 2 before any spawn; the kernel renders
   argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
 
+- **Plan JSON carries build identity** — `kaish_version`, `kaish_git_hash`,
+  and `kaish_build_date` ride along on every `--plan`/`--plan-file`/`plan`
+  document, success or error, so a consumer windowing measurements by build
+  no longer shells out to `kaish --version` per call.
+
 - **`KernelBackend::path_access` and `Filesystem::path_access`** — the per-path
   read/write/execute query behind the file tests. Both are defaulted, so
   existing implementations keep compiling; not breaking.
