@@ -137,8 +137,13 @@ rather than parsing `Display` text:
   inventing a distinction the kernel doesn't make internally.
 - **`KernelError::Validation { issues, message }`** — the pre-execution
   validator rejected the program. `issues` is every error-severity
-  `ValidationIssue`, each carrying its `IssueCode`, message, and source span
-  — route on `code` (an enum), not on substring matches against `message`.
+  `ValidationIssue`, each carrying its `IssueCode`, message, source span, and
+  `command` — route on `code` (an enum), not on substring matches against
+  `message`. `command` names the command an issue concerns, `Some(name)`
+  when one is genuinely known (a builtin's own regex/schema failure) and
+  `None` when the issue isn't about a command at all (`break` outside a
+  loop); narrow by it once `code` alone isn't specific enough, rather than
+  parsing `message` to recover a name this field already gives you.
 - **`KernelError::Execution(anyhow::Error)`** — a statement began running and
   faulted: a builtin, the evaluator, an IO fault, or anything else the
   interpreter propagated. The original error chain is intact — `{:?}` and

@@ -59,13 +59,13 @@ impl Tool for Seq {
                 issues.push(ValidationIssue::error(
                     IssueCode::SeqZeroIncrement,
                     "seq: increment cannot be zero (would cause infinite loop)",
-                ));
+                ).with_command(self.name()));
             } else if let Some(Value::Float(f)) = args.positional.get(1) {
                 if *f == 0.0 {
                     issues.push(ValidationIssue::error(
                         IssueCode::SeqZeroIncrement,
                         "seq: increment cannot be zero (would cause infinite loop)",
-                    ));
+                    ).with_command(self.name()));
                 }
             } else if let Some(Value::String(s)) = args.positional.get(1)
                 && let Ok(n) = s.parse::<f64>()
@@ -73,7 +73,7 @@ impl Tool for Seq {
                         issues.push(ValidationIssue::error(
                             IssueCode::SeqZeroIncrement,
                             "seq: increment cannot be zero (would cause infinite loop)",
-                        ));
+                        ).with_command(self.name()));
                     }
         }
 

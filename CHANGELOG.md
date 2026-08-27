@@ -20,6 +20,12 @@ breaking entries are marked **BREAKING**.
   register an external program as a tool with a declared grammar. Verbs and flags
   are deny-by-default, refused with exit 2 before any spawn; the kernel renders
   argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
+- **`ValidationIssue::command`** — the command an issue concerns, when one is
+  genuinely known (`UndefinedCommand`'s name, a builtin's own regex/schema
+  failure), so an embedder can route on it instead of parsing `message`.
+  Absent, not a placeholder, for issues that aren't about a command at all
+  (a bad assignment target, `break` outside a loop). `#[non_exhaustive]`
+  already blocked struct-literal construction, so this is not breaking.
 
 - **Plan JSON carries build identity** — `kaish_version`, `kaish_git_hash`,
   and `kaish_build_date` ride along on every `--plan`/`--plan-file`/`plan`

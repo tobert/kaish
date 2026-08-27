@@ -132,7 +132,8 @@ impl Tool for Test {
                     IssueCode::TestCompoundOperator,
                     format!("test: '{op}' is not supported — {COMPOUND_HINT}"),
                 )
-                .with_suggestion("test EXPR1 && test EXPR2, or [[ EXPR1 && EXPR2 ]]"),
+                .with_suggestion("test EXPR1 && test EXPR2, or [[ EXPR1 && EXPR2 ]]")
+                .with_command(self.name()),
             ],
             None => Vec::new(),
         }

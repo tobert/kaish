@@ -262,6 +262,28 @@ pub struct ValidationIssue {
     pub span: Option<Span>,
     /// Optional suggestion for fixing the issue.
     pub suggestion: Option<String>,
+    /// The command this issue concerns, when one is genuinely known.
+    ///
+    /// `Some(name)` when a name is on hand: a builtin's own `Tool::validate`
+    /// raising about itself, a schema-driven argument issue (the schema's
+    /// name), a wrapped command's refusal, `UndefinedCommand`'s unresolved
+    /// name, `scatter` without a gather, and a user tool's arity failure.
+    ///
+    /// `None`, never a placeholder, when the issue is not about a command at
+    /// all — an assignment target, a bare `break`, an undefined variable, or
+    /// `MixedScriptName`, where the mis-spelled name is the argument.
+    ///
+    /// Severity varies: `UndefinedCommand` is a Warning and so never reaches
+    /// `KernelError::Validation`, which kaish-kernel filters to Error.
+    /// Reading it means driving the `Validator` directly.
+    ///
+    /// One limit: schema-driven issues record the SCHEMA's name, which equals
+    /// the invoked name for every builtin (pinned by a registry test) but is
+    /// not enforced for a tool an embedder registers.
+    ///
+    /// Route on `code`, then narrow by `command`; don't parse `message` to
+    /// recover a name this field already gives you.
+    pub command: Option<String>,
 }
 
 impl ValidationIssue {
@@ -273,6 +295,7 @@ impl ValidationIssue {
             message: message.into(),
             span: None,
             suggestion: None,
+            command: None,
         }
     }
 
@@ -284,6 +307,7 @@ impl ValidationIssue {
             message: message.into(),
             span: None,
             suggestion: None,
+            command: None,
         }
     }
 
@@ -296,6 +320,16 @@ impl ValidationIssue {
     /// Add a suggestion to this issue.
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// Record the command this issue concerns.
+    ///
+    /// Call this only where the name is genuinely known at the construction
+    /// site — the tool being validated, or the unresolved name itself for
+    /// `UndefinedCommand`. Leave it unset rather than guess.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
         self
     }
 
@@ -389,6 +423,22 @@ mod tests {
         assert!(formatted.contains("E001"));
         assert!(formatted.contains("command 'foo' not found"));
         assert!(formatted.contains("did you mean 'for'?"));
+    }
+
+    #[test]
+    fn command_absent_by_default() {
+        let error = ValidationIssue::error(IssueCode::BreakOutsideLoop, "break outside a loop");
+        assert_eq!(error.command, None);
+
+        let warning = ValidationIssue::warning(IssueCode::PossiblyUndefinedVariable, "maybe undefined");
+        assert_eq!(warning.command, None);
+    }
+
+    #[test]
+    fn with_command_records_the_name() {
+        let issue = ValidationIssue::error(IssueCode::SeqZeroIncrement, "seq: increment cannot be zero")
+            .with_command("seq");
+        assert_eq!(issue.command.as_deref(), Some("seq"));
     }
 
     #[test]

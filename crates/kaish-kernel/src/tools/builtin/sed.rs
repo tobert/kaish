@@ -130,7 +130,8 @@ impl Tool for Sed {
                         "commands: s/pat/rep/[gipN], y/abc/xyz/, d, p, q, a/i/c TEXT; \
                          chain with ; or -e; addresses: N, $, /re/, N,M; regex is ERE \
                          (egrep-style; GNU BRE \\| \\(…\\) \\{N,M\\} also accepted)",
-                    ),
+                    )
+                    .with_command(self.name()),
                 );
             }
         }
