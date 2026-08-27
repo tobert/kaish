@@ -409,8 +409,6 @@ impl<'a> Tokenizer<'a> {
         Ok(out)
     }
 
-    /// After consuming `+`/`-`, refuse `++`/`--`/`+=`/`-=` outright — kaish
-    /// has no assignment or increment inside `$(( ))`.
     /// The identifier that ends immediately before `op_start_byte` — the
     /// `x` in `x++`/`x += 2`/`x = 2`, read from the token already emitted
     /// (the operator has not been pushed onto `out` yet).
@@ -747,15 +745,9 @@ impl<'a> Tokenizer<'a> {
             }
             Some('(') => {
                 self.advance(); // consume '('
-                // A character-level scan, not a re-tokenize of the
-                // remainder: text after this substitution's own `)` is
-                // ARITHMETIC syntax (`+`, `**`, …), which kaish's general
-                // lexer does not tokenize at all outside `$(( ))` — handing
-                // it a remainder like "echo 1) + 2" made `lexer::tokenize`
-                // fail on the `+` before the close was ever found. Quotes
-                // are tracked (a literal `(`/`)` inside one does not count),
-                // matching the risk `extract_arithmetic` already accepts
-                // for `$((`'s own scan; a `\`-escaped quote is honored.
+                // Character-level, quote-aware scan — re-tokenizing the
+                // remainder chokes on arithmetic syntax the general lexer
+                // doesn't know outside `$(( ))`.
                 let cmd_start = self.pos;
                 let mut depth = 0i32;
                 let closed = loop {
@@ -1278,12 +1270,7 @@ pub(crate) fn apply_binary(op: BinOp, l: i64, r: i64) -> Result<i64, ArithError>
             if r == 0 {
                 return Err(ArithError::new(format!("`{l} % 0` divides by zero"), 0..0));
             }
-            // `i64::checked_rem` returns `None` for `MIN % -1` too — it is
-            // defined in terms of the division, which overflows, even
-            // though the remainder itself (0, any divisor of ±1 divides
-            // evenly) always fits. Division by ±1 never has a remainder,
-            // for any `l`, so this is a real answer, not a special case
-            // bolted onto an edge — checked_rem is just wrong here.
+            // checked_rem returns None for MIN % -1; the answer is 0.
             if r == -1 {
                 return Ok(0);
             }

@@ -346,9 +346,11 @@ impl<'a> Collected<'a> {
     /// them in this file. Parses the text with the real arithmetic parser
     /// rather than scanning for identifier-shaped substrings — the old
     /// scan read `ff` out of `16#ff` and `xff` out of `0xff` as if they
-    /// were variables. A syntax error inside the text reads nothing: the
-    /// statement's own parse already failed loudly if this text was
-    /// invalid, so a plan never reaches an unparseable arithmetic body.
+    /// were variables. The shell parser and validator both defer
+    /// arithmetic to runtime — an unparsable body is syntactically valid
+    /// shell — so a syntax error here reads no variables rather than
+    /// failing the plan; the statement itself still fails loudly when it
+    /// runs.
     fn read_arithmetic(&mut self, expr: &str) {
         if let Ok(parsed) = crate::arithmetic::parse(expr) {
             self.read_arith_expr(&parsed);

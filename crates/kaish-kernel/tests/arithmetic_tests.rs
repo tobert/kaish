@@ -234,6 +234,10 @@ async fn coercion_list_record_bytes() {
     assert!(text.contains("list"), "{text:?}");
     let text = err_of("x={a: 1}; echo $((x))").await;
     assert!(text.contains("record"), "{text:?}");
+    // `head -c` off the synthetic /dev/urandom produces a real Value::Bytes
+    // with no localfs/subprocess feature needed.
+    let text = err_of("x=$(head -c 4 /dev/urandom); echo $((x))").await;
+    assert!(text.contains("bytes"), "{text:?}");
 }
 
 // ── Precedence ───────────────────────────────────────────────────────────
@@ -369,6 +373,14 @@ async fn bare_arith_command_exit_codes() {
     let (code, out, err) = run("(( 1/0 ))").await;
     assert_eq!(code, 2, "out={out:?} err={err:?}");
     assert!(err.contains("divides by zero"), "{err:?}");
+}
+
+/// The bare `(( ))` command form also needs the async evaluator for a
+/// `$(...)` operand, not just `$(( ))` used as a value.
+#[tokio::test]
+async fn bare_arith_command_runs_a_command_substitution() {
+    let (code, _, _) = run("(( $(echo 3) > 2 ))").await;
+    assert_eq!(code, 0);
 }
 
 #[tokio::test]

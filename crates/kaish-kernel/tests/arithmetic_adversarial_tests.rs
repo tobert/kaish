@@ -299,6 +299,22 @@ async fn power_overflow_names_the_limit() {
 }
 
 #[tokio::test]
+async fn power_special_cases() {
+    ok("echo $((0 ** 0))", "1").await;
+    ok("echo $((0 ** 5))", "0").await;
+    ok("echo $((1 ** 999))", "1").await;
+    ok("echo $(((-1) ** 3))", "-1").await;
+    // Unary binds tighter than `**` (same rule as `-2 ** 2` = 4), so this
+    // parses identically to the parenthesized form above.
+    ok("echo $((-1 ** 3))", "-1").await;
+}
+
+#[tokio::test]
+async fn a_huge_exponent_overflows_before_computing_anything() {
+    errs("echo $((2 ** 4294967296))", "64-bit").await;
+}
+
+#[tokio::test]
 async fn shift_count_out_of_range_both_directions() {
     assert!(!err_of("echo $((1 << -1))").await.is_empty());
     assert!(!err_of("echo $((1 << 64))").await.is_empty());
