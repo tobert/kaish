@@ -63,6 +63,11 @@ octal, so it refuses rather than answering a third number. Convert a base
 deliberately instead — `printf "%o"` and `printf "%x"` format one, and
 `xxd` dumps bytes.
 
+A bare integer must also fit in 64 bits (`-9223372036854775808` to
+`9223372036854775807`); a longer numeral is an error naming the limit, and
+quoting it keeps the text: `echo 9223372036854775808` errors, `echo
+"9223372036854775808"` prints the digits.
+
 Arithmetic refuses the numeral however it arrives, so a variable holding the
 text is refused the same way the literal is:
 

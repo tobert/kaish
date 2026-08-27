@@ -88,6 +88,11 @@ pub enum LexerError {
     UnterminatedVarRef,
     InvalidEscape,
     InvalidNumber,
+    /// An integer numeral parsed but did not fit in `i64`. The regex behind
+    /// `lex_int`/`parse_int` admits only `-?[0-9]+`, so overflow is the only
+    /// way that parse fails — this is a distinct variant so the message can
+    /// name the limit instead of just saying "invalid".
+    IntegerOutOfRange,
     InvalidFloatNoLeading,
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
@@ -144,6 +149,11 @@ impl fmt::Display for LexerError {
             }
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
+            LexerError::IntegerOutOfRange => write!(
+                f,
+                "does not fit in a 64-bit integer (-9223372036854775808..9223372036854775807); \
+                 quote it to keep the text"
+            ),
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
@@ -1082,7 +1092,7 @@ fn lex_var_length(lex: &mut logos::Lexer<Token>) -> String {
 
 /// Lex an integer literal.
 fn lex_int(lex: &mut logos::Lexer<Token>) -> Result<i64, LexerError> {
-    lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
+    lex.slice().parse().map_err(|_| LexerError::IntegerOutOfRange)
 }
 
 /// Lex a float literal.
@@ -3749,7 +3759,7 @@ pub fn parse_var_ref(source: &str) -> Result<Vec<String>, LexerError> {
 
 /// Parse an integer literal.
 pub fn parse_int(source: &str) -> Result<i64, LexerError> {
-    source.parse().map_err(|_| LexerError::InvalidNumber)
+    source.parse().map_err(|_| LexerError::IntegerOutOfRange)
 }
 
 /// Parse a float literal.

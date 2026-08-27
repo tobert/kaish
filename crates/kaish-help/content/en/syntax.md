@@ -33,6 +33,10 @@ comparison, and a list index. kaish reads no octal, so `$((010 + 1))` is
 an error rather than 9 (bash's answer) or 11 (the decimal one). A record
 key is text, so `${r[007]}` reads the `"007"` key.
 
+A bare integer must fit in 64 bits (`-9223372036854775808` to
+`9223372036854775807`); a longer numeral is an error naming the limit —
+quote it to keep the text.
+
 ## Expansion
 
 ```sh
