@@ -167,10 +167,16 @@ mod tests {
     }
 
     #[test]
-    fn map_draw_is_deterministic() {
-        let a = map_draw_to_range(0x1234_5678_9abc_def0, -100, 100);
-        let b = map_draw_to_range(0x1234_5678_9abc_def0, -100, 100);
-        assert_eq!(a, b);
+    fn map_draw_accepts_and_maps_a_known_draw() {
+        // width 201, hi 14 (verified independently against the algorithm,
+        // not re-derived from this code): min + hi = -86.
+        assert_eq!(map_draw_to_range(0x1234_5678_9abc_def0, -100, 100), Some(-86));
+    }
+
+    #[test]
+    fn map_draw_rejects_a_known_biased_draw() {
+        // width 7, threshold 2: draw 0 has lo 0 < 2, so it must reject.
+        assert_eq!(map_draw_to_range(0, 0, 6), None);
     }
 
     #[test]
@@ -196,6 +202,12 @@ mod tests {
             let v = map_draw_to_range(draw, i64::MIN, i64::MAX);
             assert!(v.is_some(), "the full span must never reject a draw");
         }
+    }
+
+    #[test]
+    fn map_draw_full_i64_span_pins_boundary_values() {
+        assert_eq!(map_draw_to_range(0, i64::MIN, i64::MAX), Some(i64::MIN));
+        assert_eq!(map_draw_to_range(u64::MAX, i64::MIN, i64::MAX), Some(i64::MAX));
     }
 
     #[test]
