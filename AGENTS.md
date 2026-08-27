@@ -58,6 +58,28 @@ cargo insta review                       # Interactive review of pending snapsho
 - Never discard errors.
    - If an error is impossible in practice, the program must still panic if it occurs.
    - When an error is deliberately ignored, a comment must say why.
+- No silent fallback. A parse that yields a default on failure (`parse().unwrap_or(0)`,
+  `as i64` on a float) is a bug: `printf '%d' 0xff` printing `0` is the shape to refuse.
+  Return an error that names the value and the fix.
+
+### Number rules
+
+`$(( ))` is where kaish reads a number in another base and does checked 64-bit integer
+arithmetic. `docs/LANGUAGE.md`, "Arithmetic" is the contract; these are the decisions
+behind it:
+
+- Base spellings are bash's: `0xff` and `base#digits` (base 2 to 36). `0b101` and
+  `0o17` are errors that name `2#101` and `8#17`. Add a spelling only after a model
+  panel shows models writing it.
+- A leading zero is text (`007`, `0644`). Where kaish needs a number — `$(( ))`,
+  `[[ -eq ]]`, `test`, a loop count, a list index — it is an error naming `8#10`,
+  `10`, or `10#$x`. kaish never answers octal or a third number.
+- An integer literal must fit in 64 bits; overflow, division by zero, an unset
+  variable, an empty `$(( ))`, and assignment inside `$(( ))` are errors, never
+  wraps or zeros. A string is a value, never an expression.
+- `fromjson` parses JSON and nothing else (it is the string-to-number coercion:
+  `fromjson 1e3`). No `cast` builtin, no `--base` flag. `printf %x` / `%o` format
+  the other direction; `$(random --max N)` replaces `$RANDOM`.
 
 ### Code style
 
@@ -98,6 +120,13 @@ cargo insta review                       # Interactive review of pending snapsho
     (`--all-targets` so test code is linted too — see the note below)
   CI enforces these (plus the sandbox and WASI legs) on the PR — run them
   locally first anyway; the feedback loop is minutes faster.
+- **One PR per hunk of work, medium-sized.** Coding is delegated to a subagent with a
+  written spec and named tests that must fail first; the orchestrator runs the gates
+  (a subagent told to run them stalls) and gets a kaibo review of the branch before
+  pushing. Verify every review claim against a built binary before acting on it.
+- **A claim about what models "habitually" write is testable.** Before adding a
+  spelling or a shortcut for their sake, give a few cheap casts the proposed help
+  text and a task list, and count. One syntax until the count says otherwise.
 
 `unwrap_used` is denied and `expect_used` warned workspace-wide, so the lints
 carry that rule and this guide does not repeat it. What the lints cannot tell
@@ -113,6 +142,10 @@ Commit and pull request bodies should usually summarize the decisions behind the
 change, **drawn from the conversation with the user**. The commit message is where
 the narrative of agent and user can be persisted. A useful commit message will
 remind us how we got to the code it contains. The code can speak for itself.
+
+Write it as a clinical engineering narrative: the problem, the evidence, the decision,
+the rule now in force. Design stories, plans, review transcripts, and model-panel
+results live in exomemory, not in the repo, and a commit never references them.
 
 ## Architecture
 
@@ -231,6 +264,11 @@ Lead with consequences, name conditions, and suggest next steps when they are kn
 Errors that face users, agents, and models must not leak internals. Internal code names
 and references will be unresolvable and should only be exposed for assertions and errors
 that indicate a real problem in kaish.
+
+An error is feedback, not a problem. A model that reads `` write `10#$m` `` gets it right
+next turn; a silent coercion teaches nothing. When the choice is between degrading quietly
+and refusing with the fix named, refuse. Keep the text clinical: the value, the rule in
+a few words, the fix.
 
 ### Published builtin text
 
