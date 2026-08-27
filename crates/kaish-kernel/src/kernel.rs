@@ -5134,11 +5134,21 @@ impl Kernel {
                         }
                     };
                     match resolved {
+                        // Stays in TEXT mode when the default is itself a
+                        // single expansion — see the sync twin,
+                        // `expansion_text_sync`, for why.
                         Some(Value::Null) | None => {
                             let default_expr = crate::arithmetic::parse(default)
                                 .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
-                            let n = self.eval_arith_expr_async(&default_expr).await?;
-                            Ok(n.to_string())
+                            match default_expr {
+                                crate::arithmetic::ArithExpr::Expansion(e) => {
+                                    self.eval_arith_expansion_text_async(&e).await
+                                }
+                                default_expr => {
+                                    let n = self.eval_arith_expr_async(&default_expr).await?;
+                                    Ok(n.to_string())
+                                }
+                            }
                         }
                         Some(value) => Ok(value_to_string(&value)),
                     }

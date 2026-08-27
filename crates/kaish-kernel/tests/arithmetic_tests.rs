@@ -172,6 +172,22 @@ async fn coercion_int_bool_float() {
     ok("x=$(fromjson 1e10); echo $((x))", "10000000000").await;
 }
 
+/// Round-5 review: `i64::MAX as f64` rounds up to 2^63 (i64::MAX has no
+/// exact f64 representation this close to the limit), so a strict `>`
+/// against that rounded bound let a Float holding exactly 2^63 through,
+/// and the saturating cast then silently answered i64::MAX.
+#[tokio::test]
+async fn float_at_the_64_bit_boundary() {
+    let text = err_of("x=$(fromjson 9223372036854775808.0); echo $((x))").await;
+    assert!(text.contains("64-bit"), "{text:?}");
+    ok(
+        "x=$(fromjson -9223372036854775808.0); echo $((x))",
+        "-9223372036854775808",
+    )
+    .await;
+    ok("x=$(fromjson -0.0); echo $((x))", "0").await;
+}
+
 #[tokio::test]
 async fn coercion_float_errors() {
     for source in ["x=2.7; echo $((x))", "x=$(fromjson 1e20); echo $((x))"] {
@@ -296,6 +312,20 @@ async fn based_expansion_from_a_variable() {
 #[tokio::test]
 async fn based_expansion_from_a_command() {
     ok(r#"echo $((10#$(printf 08)))"#, "8").await;
+}
+
+/// Round-5 review: `${x:-$(cmd)}` took the sync fast path and failed with
+/// an internal "needs the async evaluator" message — `contains_command_subst`
+/// never looked inside a default's text for a `$(...)`.
+#[tokio::test]
+async fn a_default_may_hold_a_command_substitution() {
+    ok("echo $(( ${x:-$(echo 5)} + 1 ))", "6").await;
+    ok("x=3; echo $(( ${x:-$(echo 5)} + 1 ))", "4").await;
+    // A based-expansion's default stays in TEXT mode (like `10#$var`
+    // already does), not the arithmetic operand's leading-zero refusal —
+    // `08` from the fallback command reads as decimal, same as if `m`
+    // held it directly.
+    ok(r#"echo $((10#${m:-$(echo 08)}))"#, "8").await;
 }
 
 // ── Nesting ───────────────────────────────────────────────────────────────

@@ -138,8 +138,15 @@ impl ArithExpr {
             match e {
                 Expansion::CommandSubst(_) => true,
                 Expansion::Nested(inner) => inner.contains_command_subst(),
-                Expansion::BracedDefault { .. }
-                | Expansion::Var(_)
+                // The default is unparsed text at this point (parsing
+                // happens only if it is actually reached, at eval time) —
+                // parse it here just to answer the question. A parse
+                // failure changes nothing: eval will hit the identical
+                // parse error on either path.
+                Expansion::BracedDefault { default, .. } => parse(default)
+                    .map(|parsed| parsed.contains_command_subst())
+                    .unwrap_or(false),
+                Expansion::Var(_)
                 | Expansion::BracedPath { .. }
                 | Expansion::LastExitCode
                 | Expansion::CurrentPid => false,
@@ -1445,7 +1452,15 @@ pub(crate) fn value_to_arith(value: &Value, name: &str) -> Result<i64, ArithErro
         Value::Float(f) => {
             if !f.is_finite() || f.fract() != 0.0 {
                 Err(ArithError::new(format!("`{name}` holds `{f}`; arithmetic is integer-only"), 0..0))
-            } else if *f < i64::MIN as f64 || *f > i64::MAX as f64 {
+            // The upper bound is the literal 2^63, not `i64::MAX as f64`:
+            // i64::MAX (2^63 - 1) has no exact f64 representation at this
+            // magnitude, so casting it to f64 ALSO rounds up to 2^63 — a
+            // strict `>` against that rounded value let `f == 2^63`
+            // through, and the saturating `as i64` below silently
+            // returned i64::MAX. A float this large cannot distinguish
+            // i64::MAX from one past it, so `>=` refuses the whole
+            // ambiguous boundary instead of guessing.
+            } else if *f < i64::MIN as f64 || *f >= 9_223_372_036_854_775_808.0 {
                 Err(ArithError::new(format!("`{name}` holds `{f}`, outside the 64-bit range"), 0..0))
             } else {
                 Ok(*f as i64)
@@ -1603,8 +1618,16 @@ pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Res
 // is expected not to call this when `contains_command_subst()` is true.
 // ═══════════════════════════════════════════════════════════════════
 
+/// `contains_command_subst()` routes a tree holding this to the async
+/// walker before eval_sync ever runs, so this is reachable only when a
+/// caller invokes the sync evaluator directly without that check — the
+/// message matches `EvalError::NoExecutor`'s wording for the same
+/// situation elsewhere in the interpreter, not an internal name.
 fn needs_async(what: &str) -> ArithError {
-    ArithError::new(format!("`{what}` needs the async evaluator"), 0..0)
+    ArithError::new(
+        format!("`{what}` must be resolved by the async evaluator before sync evaluation"),
+        0..0,
+    )
 }
 
 fn resolve_expansion_sync(e: &Expansion, scope: &Scope) -> Result<i64, ArithError> {
@@ -1661,10 +1684,16 @@ pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String
                 braced_path_value(scope, root, brackets).ok()
             };
             match resolved {
-                Some(Value::Null) | None => {
-                    let default_expr = parse(default)?;
-                    Ok(eval_sync(&default_expr, scope)?.to_string())
-                }
+                // A default that is itself a single expansion (`$(cmd)`,
+                // `$var`, …) stays in TEXT mode — `10#${m:-$(date +%m)}`
+                // needs the same "read raw digits" treatment `10#$m` gets,
+                // not the leading-zero refusal a full arithmetic operand
+                // would apply. A default with real operators (`1 + 2`) is
+                // genuinely an expression and is evaluated as one.
+                Some(Value::Null) | None => match parse(default)? {
+                    ArithExpr::Expansion(e) => expansion_text_sync(&e, scope),
+                    default_expr => Ok(eval_sync(&default_expr, scope)?.to_string()),
+                },
                 Some(v) => Ok(value_to_string(&v)),
             }
         }
@@ -1972,6 +2001,25 @@ mod tests {
     #[test]
     fn integral_float_coerces() {
         assert_eq!(eval_with("x + 1", |s| s.set("x", Value::Float(100.0))), 101);
+    }
+
+    #[test]
+    fn float_at_2_63_is_out_of_range() {
+        // i64::MAX has no exact f64 representation and rounds UP to 2^63
+        // when cast — the same rounding that makes 2^63 itself look like
+        // it fits if the bound is compared as `i64::MAX as f64`.
+        let msg = err_with("x", |s| s.set("x", Value::Float(9223372036854775808.0)));
+        assert!(msg.contains("64-bit"), "{msg}");
+    }
+
+    #[test]
+    fn float_at_min_still_converts() {
+        assert_eq!(eval_with("x", |s| s.set("x", Value::Float(-9223372036854775808.0))), i64::MIN);
+    }
+
+    #[test]
+    fn negative_zero_float_converts_to_zero() {
+        assert_eq!(eval_with("x", |s| s.set("x", Value::Float(-0.0))), 0);
     }
 
     #[test]
