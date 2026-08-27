@@ -312,12 +312,17 @@ async fn numeric_comparison_refuses_a_leading_zero_rather_than_reading_decimal()
         "[[ 10 -lt 0100 ]]",
         "x=010; [[ $x -eq 10 ]]",
         "x=-007; test $x -eq -7",
+        r#"[[ "01" -eq "1" ]]"#,
+        r#"X="01"; [[ "$X" -eq 1 ]]"#,
     ] {
         let text = err_of(source).await;
         assert!(text.contains("(leading zero)"), "{source:?} must name the cause: {text:?}");
         assert!(text.contains("no octal"), "{source:?} must say kaish reads no octal: {text:?}");
         assert!(
-            text.contains("write `10`") || text.contains("write `100`") || text.contains("write `-7`"),
+            text.contains("write `10`")
+                || text.contains("write `100`")
+                || text.contains("write `-7`")
+                || text.contains("write `1`"),
             "{source:?} must name the fix: {text:?}"
         );
     }

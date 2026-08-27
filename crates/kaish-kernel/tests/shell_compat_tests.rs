@@ -774,11 +774,11 @@ shell_compat! {
     eq: "ok",
 }
 
-shell_compat! {
-    name: numeric_eq_leading_zero_string,
-    script: r#"[[ "01" -eq "1" ]] && echo ok || echo nope"#,
-    eq: "ok",
-}
+// bash reads "01" as octal 01 (= 1) and calls the two sides equal; kaish
+// refuses a leading-zero numeral in a number position instead, which the
+// `shell_compat!` macro cannot express (it `.expect()`s the kaish side to
+// succeed). The refusal is pinned in `leading_zero_tests.rs`,
+// `numeric_comparison_refuses_a_leading_zero_rather_than_reading_decimal`.
 
 shell_compat! {
     name: numeric_ne_quoted_strings,
@@ -806,12 +806,6 @@ shell_compat! {
     name: string_eq_quoted_vs_int_literal_agree,
     script: r#"X="1"; [[ "$X" == 1 ]] && [[ "$X" == "1" ]] && echo agree || echo split"#,
     eq: "agree",
-}
-
-shell_compat! {
-    name: numeric_eq_handles_what_string_eq_does_not,
-    script: r#"X="01"; [[ "$X" -eq 1 ]] && echo numeric || echo lex"#,
-    eq: "numeric",
 }
 
 shell_compat! {
