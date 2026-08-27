@@ -244,7 +244,7 @@ an `awk` that never surprises.
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
-| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, random, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | `:`, assert, false, test, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-last, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version, kaish-vfs |
