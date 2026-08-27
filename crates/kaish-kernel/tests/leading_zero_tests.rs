@@ -298,3 +298,62 @@ async fn a_redirect_target_writes_the_file_the_plan_names() {
         );
     }
 }
+
+// ── A comparison operand is a number position too ──────────────────────────
+
+/// `[[ 010 -eq 10 ]]` was true: the string parsed as decimal 10, the number
+/// arithmetic refuses to answer. bash answers 8 here (octal), so this is the
+/// same three-answers case as `$((010))`, and it takes the same refusal.
+#[tokio::test]
+async fn numeric_comparison_refuses_a_leading_zero_rather_than_reading_decimal() {
+    for source in [
+        "[[ 010 -eq 10 ]]",
+        "test 010 -eq 10",
+        "[[ 10 -lt 0100 ]]",
+        "x=010; [[ $x -eq 10 ]]",
+        "x=-007; test $x -eq -7",
+    ] {
+        let text = err_of(source).await;
+        assert!(text.contains("(leading zero)"), "{source:?} must name the cause: {text:?}");
+        assert!(text.contains("no octal"), "{source:?} must say kaish reads no octal: {text:?}");
+        assert!(
+            text.contains("write `10`") || text.contains("write `100`") || text.contains("write `-7`"),
+            "{source:?} must name the fix: {text:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_numeric_comparison_is_untouched() {
+    for source in [
+        "[[ 10 -eq 10 ]]",
+        "[[ 0 -eq 0 ]]",
+        "[[ -0 -eq 0 ]]",
+        "[[ 0.5 -gt 0 ]]",
+        "[[ 0.10 -lt 1 ]]",
+        "test 100 -gt 10",
+        "x=$(fromjson 10); [[ $x -eq 10 ]]",
+    ] {
+        let (code, _, err) = run(source).await;
+        assert_eq!(code, 0, "{source:?} must be true: {err:?}");
+    }
+}
+
+// ── A numeral kaish cannot hold names the limit and the fix ────────────────
+
+/// One past `i64::MAX` was "invalid number" with nothing to do about it. The
+/// numeral is a valid JSON number, so the error names the limit kaish adds and
+/// the quoting that keeps the text.
+#[tokio::test]
+async fn an_integer_past_64_bits_names_the_limit_and_the_fix() {
+    for source in ["echo 9223372036854775808", "echo -9223372036854775809", "x=18446744073709551616"] {
+        let text = err_of(source).await;
+        assert!(text.contains("64-bit"), "{source:?} must name the limit: {text:?}");
+        assert!(text.contains("quote"), "{source:?} must name the fix: {text:?}");
+        assert!(!text.contains("invalid number"), "{source:?} must not say only 'invalid': {text:?}");
+    }
+    let (code, out, _) = run("echo \"18446744073709551616\"").await;
+    assert_eq!((code, out.as_str()), (0, "18446744073709551616"), "the quoted form is the fix");
+    let (code, out, _) = run("echo 9223372036854775807 -9223372036854775808").await;
+    assert_eq!((code, out.as_str()), (0, "9223372036854775807 -9223372036854775808"));
+}

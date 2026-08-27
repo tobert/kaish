@@ -1194,6 +1194,16 @@ fn value_to_num(value: &Value) -> EvalResult<Num> {
         Value::Float(f) => Ok(Num::Float(*f)),
         Value::String(s) => {
             let t = s.trim();
+            // Same refusal as `$((010))`: a leading zero is text, not decimal 10 or octal 8.
+            if let Some(decimal) = arithmetic::leading_zero_decimal(t) {
+                return Err(EvalError::TypeError {
+                    expected: "a number",
+                    got: format!(
+                        "`{t}`, which is text (leading zero) — kaish reads no octal; write \
+                         `{decimal}` for the decimal value"
+                    ),
+                });
+            }
             if let Ok(n) = t.parse::<i64>() {
                 Ok(Num::Int(n))
             } else if let Ok(f) = t.parse::<f64>() {

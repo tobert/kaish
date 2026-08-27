@@ -323,10 +323,10 @@ or a plan. Once the number moves through a variable, arithmetic, or
 Quote a number to keep it a string on purpose.
 
 Where kaish needs a number, a leading zero is an error that names the
-number to write: a `break`/`continue` count, arithmetic, and a list index.
-kaish reads no octal, so `$((010 + 1))` is an error rather than 9 (bash's
-answer) or 11 (the decimal one). A record key is text, so `${r[007]}` reads
-the `"007"` key."#,
+number to write: a `break`/`continue` count, arithmetic, a numeric
+comparison, and a list index. kaish reads no octal, so `$((010 + 1))` is
+an error rather than 9 (bash's answer) or 11 (the decimal one). A record
+key is text, so `${r[007]}` reads the `"007"` key."#,
     ),
     syntax_section(
         "expansion",

@@ -41,8 +41,9 @@ breaking entries are marked **BREAKING**.
   `1.0` are unaffected; they stay numbers.
 
 - **Where kaish needs a number, a leading zero is an error** — `break 007`,
-  `$((010 + 1))`, and a list index name the number to write. kaish reads no
-  octal, so arithmetic refuses instead of answering 11 where bash answers 9.
+  `$((010 + 1))`, `[[ 010 -eq 10 ]]`, and a list index name the number to
+  write. kaish reads no octal, so arithmetic refuses instead of answering 11
+  where bash answers 9.
 
 - **Arithmetic refuses a leading zero however it arrives** — `$((010 + 1))`
   and `x=010; $((x))` both name the decimal to write. Reading the text as

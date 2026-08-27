@@ -39,7 +39,7 @@ pub fn eval_arithmetic(expr: &str, scope: &Scope) -> Result<i64> {
 /// `10`, `-007` becomes `-7`. `None` when the text is not one.
 ///
 /// The suggestion keeps the sign: `-007` is not fixed by writing `7`.
-fn leading_zero_decimal(text: &str) -> Option<String> {
+pub(crate) fn leading_zero_decimal(text: &str) -> Option<String> {
     if !crate::lexer::is_leading_zero_numeral(text) {
         return None;
     }
