@@ -224,6 +224,31 @@ async fn validation_issue_about_a_command_carries_its_name() {
     );
 }
 
+/// `0.0`, `-0`, and `0.00` all spell zero without matching a canonical
+/// `Value::Int`/`Value::Float` `Display` round-trip — the lexer keeps the
+/// source text, so validation sees `Expr::NumericLiteral`, not the plain
+/// `Expr::Literal` the canonical `seq 1 0 10` above produces. Every
+/// spelling of zero must be caught before execution, the same as the
+/// canonical one.
+#[rstest]
+#[case("seq 1 0.0 10")]
+#[case("seq 1 -0 10")]
+#[case("seq 1 0.00 10")]
+#[tokio::test]
+async fn seq_zero_increment_is_caught_at_every_spelling(#[case] script: &str) {
+    let kernel = make_kernel();
+    let err = kernel.execute(script).await.expect_err(&format!("`{script}` must be rejected"));
+
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("`{script}` must be KernelError::Validation, not {err:?}");
+    };
+
+    assert!(
+        issues.iter().any(|i| i.code == kaish_kernel::validator::IssueCode::SeqZeroIncrement),
+        "`{script}` must raise SeqZeroIncrement: {issues:?}"
+    );
+}
+
 /// A validation issue that is not about any command — `break` outside a
 /// loop is a language-level statement, not a command invocation — reports
 /// the command as genuinely absent, never an empty string or a guess.

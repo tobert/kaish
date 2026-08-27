@@ -1178,6 +1178,13 @@ fn bind_value_or_flag(
 fn expr_to_placeholder(expr: &Expr) -> Value {
     match expr {
         Expr::Literal(val) => val.clone(),
+        // A numeral whose source text doesn't round-trip through `Display`
+        // (`0.0`, `-0`, `007`) lexes as `NumericLiteral`, not `Literal` — the
+        // same split `kernel.rs`'s runtime binder reads. Without this arm a
+        // `Tool::validate` that matches `Value::Int`/`Value::Float` never
+        // sees the value at all; it gets the `<dynamic>` placeholder below
+        // and the check silently never fires (missed `seq 1 0.0 10`).
+        Expr::NumericLiteral { value, .. } => value.clone(),
         Expr::Interpolated(parts) if parts.len() == 1 => {
             if let StringPart::Literal(s) = &parts[0] {
                 Value::String(s.clone())
