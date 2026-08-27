@@ -77,9 +77,9 @@ behind it:
 - An integer literal must fit in 64 bits; overflow, division by zero, an unset
   variable, an empty `$(( ))`, and assignment inside `$(( ))` are errors, never
   wraps or zeros. A string is a value, never an expression.
-- `fromjson` parses JSON and nothing else (it is the string-to-number coercion:
-  `fromjson 1e3`). No `cast` builtin, no `--base` flag. `printf %x` / `%o` format
-  the other direction; `$(random --max N)` replaces `$RANDOM`.
+- `fromjson` parses JSON and nothing else; it is also the string-to-number coercion
+  (`fromjson 1e3`). `printf %x` / `%o` format the other direction; `$(random --max N)`
+  replaces `$RANDOM`.
 
 ### Code style
 
