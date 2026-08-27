@@ -1191,15 +1191,19 @@ fn compare_values(left: &Value, right: &Value) -> EvalResult<std::cmp::Ordering>
     }
 }
 
-/// Coerce a value to a number for arithmetic test ops (`-eq`/`-gt`/…).
-///
-/// `String` operands are parsed as `i64` then `f64` (matching POSIX `[[ ]]`
-/// arithmetic context). Non-numeric strings and non-numeric types error.
+/// An integer or float result from `value_to_num`.
 enum Num {
     Int(i64),
     Float(f64),
 }
 
+/// Coerce a value to a number for arithmetic test ops (`-eq`/`-gt`/…).
+///
+/// A `String` operand: a leading zero refuses; then `i64`; then `f64`, but
+/// only for a float spelling (`.`/`e`/`E`) and only when the result is
+/// finite. An all-digit string that overflows `i64` names the 64-bit
+/// limit rather than falling through to `f64`. Other strings and
+/// non-numeric types error.
 fn value_to_num(value: &Value) -> EvalResult<Num> {
     match value {
         Value::Int(n) => Ok(Num::Int(*n)),

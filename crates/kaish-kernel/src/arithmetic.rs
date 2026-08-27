@@ -34,7 +34,6 @@ pub fn eval_arithmetic(expr: &str, scope: &Scope) -> Result<i64> {
     Ok(result)
 }
 
-/// Simple recursive descent parser for arithmetic expressions.
 /// The decimal a leading-zero numeral was probably meant to be — `010` becomes
 /// `10`, `-007` becomes `-7`. `None` when the text is not one.
 ///
@@ -48,6 +47,7 @@ pub(crate) fn leading_zero_decimal(text: &str) -> Option<String> {
     Some(format!("{sign}{}", if digits.is_empty() { "0" } else { digits }))
 }
 
+/// Simple recursive descent parser for arithmetic expressions.
 struct ArithParser<'a> {
     input: &'a str,
     pos: usize,
