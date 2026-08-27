@@ -38,9 +38,7 @@ pub fn eval_arithmetic(expr: &str, scope: &Scope) -> Result<i64> {
 /// The decimal a leading-zero numeral was probably meant to be — `010` becomes
 /// `10`, `-007` becomes `-7`. `None` when the text is not one.
 ///
-/// Arithmetic refuses these rather than reading them: kaish has no octal and
-/// bash does, so `010` is 8 there and would be 10 here. The suggestion keeps
-/// the sign, because `-007` is not fixed by writing `7`.
+/// The suggestion keeps the sign: `-007` is not fixed by writing `7`.
 fn leading_zero_decimal(text: &str) -> Option<String> {
     if !crate::lexer::is_leading_zero_numeral(text) {
         return None;
@@ -326,9 +324,8 @@ impl<'a> ArithParser<'a> {
             }
         }
         let num_str = &self.input[start..self.pos];
-        // kaish has no octal, and bash does: `$((010 + 1))` is 9 there and
-        // would be 11 here. Answering a different number than the shell the
-        // author learned is the worst outcome, so refuse the numeral.
+        // bash reads `010` as octal and answers 9; decimal would answer 11.
+        // Refuse rather than answer a third number.
         if crate::lexer::is_leading_zero_numeral(num_str) {
             let trimmed = num_str.trim_start_matches('0');
             let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
@@ -459,9 +456,8 @@ impl<'a> ArithParser<'a> {
         match value {
             Value::Int(n) => Ok(*n),
             Value::String(s) => {
-                // `x=007` stores the string; reading it back into arithmetic
-                // is a number position like any other, and parsing it decimal
-                // would answer 10 for `010` where bash answers 8.
+                // `x=007` stores the string, and reading it back is a number
+                // position like any other.
                 if let Some(decimal) = leading_zero_decimal(s) {
                     anyhow::bail!(
                         "variable '{name}' holds `{s}`, which is text (leading zero) — kaish \

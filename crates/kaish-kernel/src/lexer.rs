@@ -650,28 +650,19 @@ pub enum Token {
     #[regex(r"-?[0-9]+\.[0-9]+", lex_float)]
     Float(f64),
 
-    /// A plain `Int`/`Float` whose own `Display` does not reproduce the
-    /// source text it was lexed from — a negative zero (`-0`, `-0.0`; an
-    /// `i64`/`f64` has no distinct negative-zero spelling once parsed back
-    /// out for `Int`, and `f64::to_string` drops the trailing `.0` for
-    /// `Float`), or a non-canonical trailing fraction digit (`0.10`,
-    /// `1.0`). Carries both the typed value (so arithmetic, comparisons,
-    /// and `--json` still see a real `Int`/`Float`) and the verbatim
-    /// source text (so argv/plan rendering can reproduce exactly what was
-    /// typed).
+    /// A plain `Int`/`Float` whose own `Display` does not reproduce the source
+    /// text it was lexed from — a negative zero (`-0`, `-0.0`) or a
+    /// non-canonical trailing fraction digit (`0.10`, `1.0`). Carries the
+    /// typed value, so arithmetic and `--json` still see a real number, and
+    /// the verbatim text, so argv and plan rendering reproduce what was typed.
+    /// See `docs/LANGUAGE.md`, "A bare number follows JSON rules".
     ///
-    /// A leading zero (`007`, `010`) is a DIFFERENT case, reclassified to
-    /// `NumberIdent` instead — see `has_invalid_leading_zero`. It is not a
-    /// valid JSON number, and kaish's own `fromjson` already refuses it, so
-    /// it is not a number here either: a string, not a mistyped `Int`.
+    /// A leading zero (`007`) is a different case, reclassified to
+    /// `NumberIdent` — see [`has_invalid_leading_zero`].
     ///
-    /// Never produced directly by logos — `tokenize_impl`'s
-    /// `preserve_numeric_source_text` pass synthesizes it from a plain
-    /// `Int`/`Float` token as the LAST step, after the fusion passes run, so
-    /// `is_colon_mergeable`/`is_glob_mergeable` (which match `Int`/`Float`
-    /// directly) see the ordinary token during fusion and this variant only
-    /// ever reaches the parser. The common case (`-1`, `42`, `3.14`) is
-    /// untouched and pays nothing.
+    /// Never produced by logos. `preserve_numeric_source_text` synthesizes it
+    /// as the LAST step of `tokenize_impl`, after the fusion passes, which
+    /// match `Int`/`Float` directly. The common case pays nothing.
     NumericLiteral(NumericLiteralData),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3548,16 +3539,12 @@ fn tokenize_impl(
     ))
 }
 
-/// True when a numeral's own integer part is not a valid JSON number (RFC
-/// 8259: `int = zero / (digit1-9 *DIGIT)`) — more than one digit and a
-/// leading `0`: `007`, `010`, `-022`, and (since JSON's `int` production is
-/// shared by the float grammar) the integer part of `007.5`. A lone `0`
-/// (`0`, `-0`, `0.5`) is the `zero` alternative and is fine.
+/// True when a numeral's integer part is not a valid JSON number (RFC 8259:
+/// `int = zero / (digit1-9 *DIGIT)`) — more than one digit and a leading `0`:
+/// `007`, `010`, `-022`, and the integer part of `007.5`. A lone `0` (`0`,
+/// `-0`, `0.5`) is the `zero` alternative and is fine.
 ///
-/// `fromjson` already refuses these (`fromjson '007'` is a parse error);
-/// before this pass the lexer disagreed and typed them as `Int(7)`. Nobody
-/// writing `007` expects the number 7, so the lexer now agrees: not a
-/// number, a string.
+/// `fromjson '007'` is already a parse error; the lexer now agrees.
 fn has_invalid_leading_zero(raw: &str) -> bool {
     let unsigned = raw.strip_prefix('-').unwrap_or(raw);
     let int_part = unsigned.split('.').next().unwrap_or(unsigned);
@@ -3565,15 +3552,12 @@ fn has_invalid_leading_zero(raw: &str) -> bool {
 }
 
 /// True when a word is a numeral in every respect except its leading zero —
-/// `007`, `010`, `-022`, `007.5`. These lex as [`Token::NumberIdent`], the
-/// same shape `9lives` gets, because a leading zero makes a word text (see
-/// [`has_invalid_leading_zero`]).
+/// `007`, `010`, `-022`, `007.5`. These lex as [`Token::NumberIdent`].
 ///
 /// Callers use this where kaish needs a number and got text, so the error can
-/// name the leading zero instead of reporting a shape mismatch: `break 007`,
-/// `$((010 + 1))`, a subscript on a list. A word that is not otherwise a
-/// numeral (`007abc`) is ordinary text and answers false — there is no
-/// number the author might have meant.
+/// name the leading zero rather than report a shape mismatch. A word that is
+/// not otherwise a numeral (`007abc`) answers false: there is no number the
+/// author might have meant.
 pub(crate) fn is_leading_zero_numeral(word: &str) -> bool {
     let unsigned = word.strip_prefix('-').unwrap_or(word);
     let mut parts = unsigned.split('.');
@@ -3594,22 +3578,15 @@ pub(crate) fn is_leading_zero_numeral(word: &str) -> bool {
     has_invalid_leading_zero(word)
 }
 
-/// Reclassify a plain `Int`/`Float` token from its own source text — see
-/// `has_invalid_leading_zero` (a leading zero makes it a string, not a
-/// number: `Token::NumberIdent`, the same shape a digit run with a trailing
-/// letter already gets) and `Token::NumericLiteral`'s doc comment (a numeral
-/// whose source text does not round-trip through its own typed `Display`:
-/// negative zero, a non-canonical trailing fraction digit). The common case
-/// (`-1`, `42`, `3.14`) pays one string comparison and stays a plain
-/// `Int`/`Float`.
+/// Reclassify a plain `Int`/`Float` token from its own source text, into
+/// [`Token::NumberIdent`] or [`Token::NumericLiteral`]. The common case
+/// (`-1`, `42`, `3.14`) pays one string comparison and stays unchanged.
 ///
-/// Runs as the LAST step of `tokenize_impl`, after every fusion pass — those
-/// passes (`is_colon_mergeable`, `is_glob_mergeable`) match `Int`/`Float`
-/// directly, so a numeral must still present its ordinary shape while fusion
-/// decisions are made — a leading zero fused into a larger word (`a:007`,
-/// `007*`) is not a standalone numeral and never reaches this pass at all.
-/// Spans are already original-source coordinates by this point, so
-/// `source[span]` is the exact word the author typed.
+/// Runs as the LAST step of `tokenize_impl`, after every fusion pass:
+/// `is_colon_mergeable` and `is_glob_mergeable` match `Int`/`Float` directly,
+/// so a numeral must still present its ordinary shape while fusion decides.
+/// Spans are original-source coordinates by now, so `source[span]` is the
+/// exact word the author typed.
 fn preserve_numeric_source_text(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
     tokens
         .into_iter()

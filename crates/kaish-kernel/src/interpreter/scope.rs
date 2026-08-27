@@ -116,8 +116,7 @@ fn classify_index(json: &serde_json::Value, i: i64, path: &str) -> Result<Step, 
 /// `7`, and the slice `007:2` becomes `7:2`. `None` when no part had one, so
 /// the caller keeps its ordinary message.
 ///
-/// Splits on `:` because a slice carries two number positions and either one
-/// can hold the leading zero.
+/// Splits on `:`: a slice carries two number positions.
 fn without_leading_zeros(key: &str) -> Option<String> {
     let mut changed = false;
     let fixed = key
@@ -143,8 +142,8 @@ fn classify_key(json: &serde_json::Value, key: &str, path: &str) -> Result<Step,
     match json {
         serde_json::Value::Object(_) => Ok(Step::Key(key.to_string())),
         serde_json::Value::Array(_) if let Some(fix) = without_leading_zeros(key) => {
-            // The author almost certainly meant an index. Name the leading
-            // zero, or the message reads as a type confusion they never made.
+            // Name the leading zero, or the message reads as a type confusion
+            // the author never made.
             Err(PathError::Shape(format!(
                 "${{{path}[{key}]}}: `{key}` is text (leading zero) and a list is indexed by \
                  number — write ${{{path}[{fix}]}}"

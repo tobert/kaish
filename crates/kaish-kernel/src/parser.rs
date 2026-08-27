@@ -461,10 +461,9 @@ fn parse_subscript(inner: &str) -> VarSegment {
     // isn't a numeric slice falls through to a bareword key (`["a:b"]` covers
     // colon-bearing keys explicitly).
     if let Some((lhs, rhs)) = inner.split_once(':') {
-        // A slice bound is a number position, so a leading zero is text here
-        // too — without this `[007:2]` sliced from 7 and silently returned an
-        // empty list. Refusing the bound falls through to a bareword key,
-        // which `scope.rs` reports against the container.
+        // A slice bound is a number position: `[007:2]` sliced from 7 and
+        // silently returned an empty list. Refusing it falls through to a
+        // bareword key, which `scope.rs` reports against the container.
         let bound = |s: &str| -> Option<Option<i64>> {
             if s.is_empty() {
                 Some(None)
@@ -478,9 +477,8 @@ fn parse_subscript(inner: &str) -> VarSegment {
             return VarSegment::Slice(start, end);
         }
     }
-    // Integer index: `[0]`, `[-1]`. A leading zero makes the word text, so
-    // `[007]` falls through to the bareword key below — on a record it finds
-    // the "007" key, and on a list it raises the loud error in `scope.rs`.
+    // Integer index: `[0]`, `[-1]`. `[007]` is text and falls through to the
+    // bareword key below.
     if !lexer::is_leading_zero_numeral(inner)
         && let Ok(i) = inner.parse::<i64>()
     {
@@ -1299,10 +1297,8 @@ fn parse_tokens(
         if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
-        // `break 007` / `continue 007`: the count grammar matches `Token::Int`
-        // and a leading zero no longer produces one, so chumsky reports a
-        // shape mismatch against the whole statement alternative set. Name
-        // the leading zero instead.
+        // The count grammar matches `Token::Int`, which `break 007` no longer
+        // produces, so chumsky blames the whole statement alternative set.
         let error_starts: Vec<usize> = errs.iter().map(|e| e.span().start).collect();
         if let Err(specific) = validate_leading_zero_counts(&tokens, &error_starts) {
             return specific;
@@ -1626,14 +1622,12 @@ where
         select! { Token::SingleString(s) => VarSegment::Key(s) },
         select! { Token::Int(n) => VarSegment::Index(n) },
         select! { Token::Ident(s) => parse_subscript(&s) },
-        // A leading-zero numeral lexes as `NumberIdent`, so without this arm
-        // `r[007]=v` was a parse error while `${r[007]}` read fine. Both are
-        // the same text key now.
+        // Without this arm `r[007]=v` was a parse error while `${r[007]}`
+        // read fine. Both are the same text key now.
         select! { Token::NumberIdent(s) => parse_subscript(&s) },
-        // Same split for a numeral whose source text does not round-trip:
-        // `r[-0]=v` and `r[1.0]=v` were parse errors while both read fine.
-        // Classifying from the raw text is what makes the two sides agree —
-        // it is the same string the read path hands `parse_subscript`.
+        // Same split for `r[-0]=v` and `r[1.0]=v`. Classifying from the raw
+        // text is what makes read and write agree: it is the same string the
+        // read path hands `parse_subscript`.
         select! { Token::NumericLiteral(d) => parse_subscript(&d.raw) },
     ));
 
@@ -3702,11 +3696,9 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// a shape just leaves the grammar's span in place. The scope is "report the
 /// right span for a rejection that already happened", never "change what is
 /// rejected".
-/// `break`/`continue` take a loop count, and a count is a number. A leading
-/// zero makes the word text ([`lexer::is_leading_zero_numeral`]), so `break
-/// 007` no longer matches the count grammar and chumsky reports the miss
-/// against every statement alternative — a long message that never mentions
-/// the zero.
+/// `break 007` no longer matches the count grammar, so chumsky reports the
+/// miss against every statement alternative — a long message that never
+/// mentions the zero.
 ///
 /// Runs only after the grammar has already failed, and only when the grammar's
 /// own error sits exactly on that numeral. Like [`validate_glued_args`], this

@@ -472,31 +472,22 @@ pub struct ToolArgs {
     /// Positional arguments in order.
     pub positional: Vec<Value>,
     /// Verbatim source text for a `positional` entry whose typed `Display`
-    /// would not reproduce it — a negative zero or a non-canonical trailing
-    /// fraction digit (`-0`, `0.10`, `1.0`; see `lexer::Token::NumericLiteral`
-    /// in kaish-kernel). Keyed by index into `positional`; absent at every
-    /// index holding an ordinary value, so this stays empty for the common
-    /// case and costs nothing there.
+    /// would not reproduce it — `-0`, `0.10`, `1.0`. Keyed by index into
+    /// `positional`, and empty for the common case.
     ///
-    /// This exists because most builtins read a positional's real value
-    /// straight off `positional`, never off the clap-parsed struct (see
-    /// `value_to_argv_token`'s doc comment) — a plain `Value::Int`/`Float`
-    /// genuinely cannot carry back the source text once typed. A builtin
-    /// that echoes a positional's text verbatim (`echo`) should check this
-    /// first: `args.positional_raw.get(&i)`.
+    /// Most builtins read a positional straight off `positional`, never off
+    /// the clap-parsed struct, and a plain `Value::Int` cannot carry the
+    /// source text once typed. A builtin echoing a positional's text verbatim
+    /// should call [`positional_text`](Self::positional_text).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub positional_raw: BTreeMap<usize, String>,
     /// Named arguments by key.
     pub named: BTreeMap<String, Value>,
-    /// Verbatim source text for a `named` entry whose typed `Display` would
-    /// not reproduce it — same idea as `positional_raw`, keyed by the same
-    /// key. Unlike a positional, a named value is normally read off the
-    /// clap-parsed struct (`parsed.count`, …) rather than `named` directly,
+    /// Same idea as [`positional_raw`](Self::positional_raw), keyed by the
+    /// named key. A named value is normally read off the clap-parsed struct,
     /// so `to_argv`/`to_argv_excluding` consult this when rendering
-    /// `--key=value`, and the fix reaches the clap field the usual way.
-    /// Only ever populated for a single (non-repeated) value — a repeatable
-    /// flag's accumulated `Value::Json(Array(Array(...)))` is not a bare
-    /// numeral literal in the first place.
+    /// `--key=value` and the source text reaches the clap field that way.
+    /// Only populated for a single, non-repeated value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub named_raw: BTreeMap<String, String>,
     /// Boolean flags (e.g., -l, --force).
@@ -525,17 +516,14 @@ impl ToolArgs {
         Self::default()
     }
 
-    /// The display text for positional `index`: its verbatim source text
-    /// from `positional_raw` when the literal there was a non-canonical
-    /// numeral, otherwise `value_to_argv_token` on the typed value. `None`
-    /// when `index` is out of range.
+    /// The display text for positional `index`: its
+    /// [`positional_raw`](Self::positional_raw) entry when there is one,
+    /// otherwise `value_to_argv_token` on the typed value. `None` when
+    /// `index` is out of range.
     ///
-    /// A builtin that prints a positional's text as-is (`echo`) should call
-    /// this instead of stringifying `positional[index]` itself — that is
-    /// exactly the gap this method closes. A builtin that needs the typed
-    /// value (arithmetic, a numeric comparison) should keep reading
-    /// `positional[index]` directly; `value` there is unaffected by this
-    /// field and stays a real `Int`/`Float`.
+    /// A builtin printing a positional's text as-is should call this rather
+    /// than stringify `positional[index]` itself. A builtin needing the typed
+    /// value should keep reading `positional[index]`, which is unaffected.
     pub fn positional_text(&self, index: usize) -> Option<String> {
         if let Some(raw) = self.positional_raw.get(&index) {
             return Some(raw.clone());
@@ -1037,10 +1025,8 @@ mod to_argv_tests {
         assert_eq!(args.to_argv().unwrap(), vec!["--", "hello", "world"]);
     }
 
-    // ─────────────────── positional_raw / named_raw / words_raw ───────────────────
-    // A non-canonical numeral (`-0`) is still typed as `Value::Int(0)` — that's
-    // the mathematically correct value — but its own `Display` cannot get back
-    // to `-0`. `*_raw` is where the source text that `Value` alone lost lives.
+    // `-0` is correctly typed as `Value::Int(0)`, but that value's `Display`
+    // cannot get back to `-0`. `*_raw` holds the text `Value` alone lost.
 
     #[test]
     fn positional_raw_overrides_the_typed_value_in_to_argv() {

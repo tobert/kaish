@@ -3479,8 +3479,7 @@ impl Kernel {
             Expr::Literal(Value::Float(f)) => f.to_string(),
             Expr::Literal(Value::Bool(b)) => b.to_string(),
             Expr::Literal(Value::Null) => "null".to_string(),
-            // A numeral whose own `Display` would drop a leading zero or a
-            // negative zero: show the source text, not the typed value.
+            // Show the source text, not the typed value.
             Expr::NumericLiteral { raw, .. } => raw.clone(),
             Expr::VarRef(path) => {
                 let mut name = String::new();
@@ -3917,15 +3916,9 @@ impl Kernel {
                             continue;
                         }
                     }
-                    // A numeral whose typed `Display` would not reproduce its
-                    // source (`-0`, `1.0`) goes to the external process as
-                    // the exact word it was written as — the same rule
-                    // `ast::plan::render_expr` applies, so the argv that
-                    // executes matches the argv a plan showed. (A leading
-                    // zero like `007` is a plain string by now, handled by
-                    // the ordinary `Value::String` path below.) Skips
-                    // `eval_expr_async`/text-sink entirely: there is no
-                    // `Value` that could reproduce `raw` anyway.
+                    // The exact word the author typed reaches the external
+                    // process, matching what `ast::plan::render_expr` showed.
+                    // Skips `eval_expr_async`: no `Value` reproduces `raw`.
                     if let Expr::NumericLiteral { raw, .. } = expr {
                         argv.push(raw.clone());
                         continue;
@@ -4069,8 +4062,8 @@ impl Kernel {
                 Ok(Value::Bool(!is_truthy(&value)))
             }
             Expr::Literal(value) => Ok(value.clone()),
-            // Typed evaluation only ever needs `value`; `raw` is for
-            // argv/plan text-sink positions that read the `Expr` directly.
+            // Typed evaluation only needs `value`; `raw` is for argv and
+            // plan text sinks that read the `Expr` directly.
             Expr::NumericLiteral { value, .. } => Ok(value.clone()),
             Expr::VarRef(path) => {
                 let scope = self.scope.read().await;
@@ -4683,10 +4676,8 @@ impl Kernel {
             let saved = scope.save_positional();
 
             // Set up new positional parameters ($0 = function name, $1, $2, ... = args)
-            // A non-canonical numeral (`-0`, `0.10`) uses its own source
-            // text: `$1` is a text sink like any argv word, and `value_to_string`
-            // on a plain `Value::Int`/`Float` can't reproduce it — see
-            // `ToolArgs::positional_raw`.
+            // `$1` is a text sink like any argv word, and `value_to_string`
+            // cannot reproduce the source text — see `ToolArgs::positional_raw`.
             let positional_args: Vec<String> = tool_args.positional
                 .iter()
                 .enumerate()
@@ -5161,8 +5152,7 @@ impl Kernel {
             }
 
             // Set up positional parameters ($0 = script name, $1, $2, ... = args)
-            // Same non-canonical-numeral fidelity as the function-call site
-            // above — see `ToolArgs::positional_raw`.
+            // Same source-text fidelity as the function-call site above.
             let positional_args: Vec<String> = tool_args.positional
                 .iter()
                 .enumerate()
@@ -6248,10 +6238,8 @@ pub(crate) async fn bind_tool_args(
                             // Nothing evaluated means no word, matching the
                             // typed path's `if let Some(value)`.
                             if let Some(value) = source.eval(expr).await? {
-                                // A non-canonical numeral (`-0`, `0.10`) keeps
-                                // its source text alongside the typed push —
-                                // see `ToolArgs::words_raw`. Recorded at the
-                                // index the push below lands at.
+                                // Recorded at the index the push below lands
+                                // at — see `ToolArgs::words_raw`.
                                 if let Expr::NumericLiteral { raw, .. } = expr {
                                     tool_args.words_raw.insert(words.len(), raw.clone());
                                 }
@@ -6289,12 +6277,9 @@ pub(crate) async fn bind_tool_args(
                     }
                     // Loud on binary (GH #116): reassembling `--k=$BIN` as text
                     // hands the tool a placeholder that looks like data. A bare
-                    // binary word is fine — it stays typed. A non-canonical
-                    // numeral (`-0`, `0.10`) uses its own source text instead
-                    // of re-stringifying the typed value, same reasoning as
-                    // `kernel.rs::build_args_flat`'s `Arg::Named` arm — the
-                    // whole word is composed here, so there is no later
-                    // render step a `words_raw` entry could reach.
+                    // binary word is fine — it stays typed. The whole word is
+                    // composed here, so no later render step could reach a
+                    // `words_raw` entry.
                     let val_str = if let Expr::NumericLiteral { raw, .. } = value {
                         raw.clone()
                     } else {
@@ -6379,11 +6364,8 @@ pub(crate) async fn bind_tool_args(
                             )
                         })?;
                         let value = apply_tilde_expansion(value, home.as_deref());
-                        // A non-canonical numeral (`-0`, `0.10`) keeps its
-                        // source text alongside the typed push — see
-                        // `ToolArgs::positional_raw`. `test`'s numeric
-                        // operators still get the real `value`; a text
-                        // consumer gets `raw` instead.
+                        // `test`'s numeric operators still get the real
+                        // `value`; a text consumer gets `raw`.
                         if let Expr::NumericLiteral { raw, .. } = expr {
                             tool_args
                                 .positional_raw
@@ -6405,9 +6387,8 @@ pub(crate) async fn bind_tool_args(
                     let val = apply_tilde_expansion(val, home.as_deref());
                     // Loud on binary (GH #116): `test --k=$BIN` must not
                     // silently reassemble the placeholder into the raw-argv
-                    // positional stream `test` binds against. A non-canonical
-                    // numeral uses its own source text instead, same as the
-                    // Verbatim binder's `Arg::Named` arm above.
+                    // positional stream `test` binds against. Source text
+                    // wins, as in the Verbatim binder's `Arg::Named` arm.
                     let val_str = if let Expr::NumericLiteral { raw, .. } = value {
                         raw.clone()
                     } else {
@@ -6517,14 +6498,9 @@ pub(crate) async fn bind_tool_args(
                     }
                     if let Some(value) = source.eval(expr).await? {
                         let value = apply_tilde_expansion(value, home.as_deref());
-                        // A non-canonical numeral (`-0`, `0.10`) keeps its
-                        // source text alongside the typed push — see
-                        // `ToolArgs::positional_raw`. This is the path
-                        // `echo` reads: it takes `args.positional` directly
-                        // (never the clap-parsed field, a validation-only
-                        // sink — see `value_to_argv_token`'s doc comment),
-                        // so a plain `Value::Int`/`Float` here could never
-                        // have reproduced `-0` on its own.
+                        // The path `echo` reads: it takes `args.positional`
+                        // directly, never the clap-parsed field, so a plain
+                        // `Value::Int` here could not reproduce `-0`.
                         if let Expr::NumericLiteral { raw, .. } = expr {
                             tool_args
                                 .positional_raw
@@ -6604,10 +6580,9 @@ pub(crate) async fn bind_tool_args(
                         }
                         // Value::Bool(false): absent == false, nothing to insert.
                     } else {
-                        // A non-canonical numeral (`-0`, `0.10`) keeps its
-                        // source text — see `ToolArgs::named_raw`. A named
-                        // value is normally read off the clap-parsed field,
-                        // built from `to_argv()`, so this reaches it there.
+                        // A named value is normally read off the clap-parsed
+                        // field, built from `to_argv()` — see
+                        // `ToolArgs::named_raw`.
                         if let Expr::NumericLiteral { raw, .. } = value {
                             tool_args.named_raw.insert(key.clone(), raw.clone());
                         }
@@ -6640,9 +6615,8 @@ pub(crate) async fn bind_tool_args(
                         // Matches bash: `cat foo=bar` opens a file named `foo=bar`.
                         // Loud on binary (GH #116): `cat foo=$BIN`/`dd if=$BIN`
                         // must not silently become a path/operand literally named
-                        // `foo=[binary: N bytes]`. A non-canonical numeral uses
-                        // its own source text instead of re-stringifying the
-                        // typed value, same as every other composed-string arm.
+                        // `foo=[binary: N bytes]`. Source text wins, as in
+                        // every other composed-string arm.
                         let val_str = if let Expr::NumericLiteral { raw, .. } = value {
                             raw.clone()
                         } else {
@@ -6899,14 +6873,11 @@ pub(crate) async fn bind_tool_args(
             tool_args.positional.len()
         };
 
-        // `positional_raw` is keyed by index into `positional`, and this
-        // block redistributes/reindexes `positional` — a value moving to
-        // `named` or to a new position in `remaining` must carry its raw
-        // text (if any) along, or `positional_raw` would point at the
-        // wrong entry afterward, mislabeling some OTHER positional's text
-        // as this one's. `old_raw` is keyed by the pre-drain index; both
-        // destinations below insert under the index/key the value actually
-        // lands at.
+        // This block reindexes `positional`, and `positional_raw` is keyed
+        // by index — a value that moves must carry its raw text along or the
+        // map mislabels some other positional's text as this one's.
+        // `old_raw` is keyed by the pre-drain index; both destinations insert
+        // under the index the value actually lands at.
         let old_raw = std::mem::take(&mut tool_args.positional_raw);
         let mut remaining = Vec::new();
         let mut remaining_raw: std::collections::BTreeMap<usize, String> =

@@ -181,10 +181,8 @@ impl<'a> Evaluator<'a> {
             // condition holds no command substitution.
             Expr::Not(inner) => Ok(Value::Bool(!is_truthy(&self.eval(inner)?))),
             Expr::Literal(value) => self.eval_literal(value),
-            // Typed evaluation only ever needs `value` — arithmetic and
-            // comparisons see the real `Int`/`Float`. `raw` exists for
-            // argv/plan text-sink positions, which read the `Expr` directly
-            // rather than going through `eval`.
+            // Typed evaluation only needs `value`. `raw` is for argv and plan
+            // text sinks, which read the `Expr` directly.
             Expr::NumericLiteral { value, .. } => self.eval_literal(value),
             Expr::VarRef(path) => self.eval_var_ref(path),
             Expr::Interpolated(parts) => self.eval_interpolated(parts),

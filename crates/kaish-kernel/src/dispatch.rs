@@ -316,12 +316,8 @@ impl BackendDispatcher {
                     Expr::Literal(Value::String(s)) => argv.push(s.clone()),
                     Expr::Literal(Value::Int(i)) => argv.push(i.to_string()),
                     Expr::Literal(Value::Float(f)) => argv.push(f.to_string()),
-                    // A numeral whose source text does not round-trip
-                    // through its typed `Display` (`-0`, `1.0`) — kept in
-                    // sync with kernel.rs::build_args_flat, which pushes
-                    // `raw` directly for the same reason. A leading zero
-                    // (`007`) is a plain `Literal(String)` by now, handled
-                    // above like any other bareword.
+                    // Kept in sync with kernel.rs::build_args_flat, which
+                    // pushes `raw` for the same reason.
                     Expr::NumericLiteral { raw, .. } => argv.push(raw.clone()),
                     Expr::VarRef(path) => {
                         if let Ok(v) = ctx.scope.resolve_path(path) {
