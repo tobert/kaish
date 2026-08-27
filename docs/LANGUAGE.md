@@ -59,9 +59,10 @@ echo ${xs[007]}      # error — a list is indexed by number; write ${xs[7]}
 
 `$((010 + 1))` is the case worth stating plainly: bash reads `010` as octal
 and answers 9, and reading it as decimal would answer 11. kaish reads no
-octal, so it refuses rather than answering a third number. Convert a base
-deliberately instead — `printf "%o"` and `printf "%x"` format one, and
-`xxd` dumps bytes.
+octal, so it refuses rather than answering a third number. Name the base
+instead: `$((8#10))` is 8 and `$((10#$x))` reads text with a leading zero as
+decimal (see "Arithmetic"); `printf "%o"` and `printf "%x"` format the other
+way.
 
 A bare integer must also fit in 64 bits (`-9223372036854775808` to
 `9223372036854775807`); a longer numeral is an error naming the limit, and
@@ -73,7 +74,7 @@ text is refused the same way the literal is:
 
 ```sh
 x=010
-echo $((x))          # error — write `10`
+echo $((x))          # error — write `10#$x` for decimal or `8#$x` for octal
 ```
 
 A record key is text, so a leading zero is a key like any other and reads
@@ -994,40 +995,123 @@ for line in $(cat file); do echo $line; done
 
 ## Arithmetic
 
-Arithmetic expansion is **integer-only**. Floats exist as a data type (for JSON interop) but `$(( ))` operates on integers.
+`$(( ))` has two jobs: it reads a number written in another base, and it does
+checked 64-bit integer arithmetic.
 
 ```sh
-# Arithmetic expansion with $((expression))
-X=$((5 + 3))                    # X = 8
-Y=$((X * 2))                    # Y = 16
-Z=$((10 / 3))                   # Z = 3 (integer division)
-
-# Supported operators (by precedence, highest first)
-result=$((-5))                  # unary minus: -5
-result=$((10 % 3))              # modulo: 1
-result=$((5 * 4 / 2))           # multiply, divide: 10
-result=$((10 - 3 + 2))          # add, subtract: 9
-result=$(((2 + 3) * 4))         # parentheses: 20
-
-# Comparison operators (return 1 for true, 0 for false)
-echo $((5 > 3))                 # 1
-echo $((3 >= 3))                # 1
-echo $((5 == 5))                # 1
-echo $((5 != 3))                # 1
-echo $((3 < 5))                 # 1
-echo $((3 <= 3))                # 1
-
-# Comparisons have lowest precedence (arithmetic first)
-echo $(( (2 + 3) > 4 ))         # 1 (5 > 4)
-echo $((10 / 2 == 5))           # 1 (5 == 5)
-
-# Variables in arithmetic
-A=10
-B=3
-echo $((A + B))                 # 13
-echo $((A * B + 1))             # 31
-echo $((A > B))                 # 1
+echo $((5 + 3 * 2))          # 11
+echo $((10 / 3))             # 3     division drops the fraction, toward zero
+echo $((-7 % 3))             # -1    remainder takes the sign of the left side
+echo $((2 ** 10))            # 1024
+x=$((x + 1))                 # the counter idiom; assignment stays outside
 ```
+
+A result outside `-9223372036854775808..9223372036854775807` is an error,
+never a wrapped number. Division by zero is an error.
+
+### Read another base
+
+```sh
+echo $((0xff))               # 255   hex, bash spelling; 0XFF works too
+echo $((16#ff))              # 255   base#digits, base 2 to 36
+echo $((8#17))               # 15    octal
+echo $((2#1011))             # 11    binary
+echo $((36#z))               # 35    digits a-z are case-insensitive
+echo $((-0xff))              # -255  the sign is an operator, before the number
+```
+
+A leading zero is not octal. `$((010))` is an error that names both fixes:
+write `8#10` for octal (8) or `10` for decimal. `0b101` and `0o17` are not
+kaish spellings; the error names `2#101` and `8#17`. `printf '%x'` and
+`printf '%o'` format a number the other way.
+
+The digits after `base#` may come from a variable or a command. This is the
+fix for text with a leading zero, such as a month from `date`:
+
+```sh
+m=$(date +%m)                # "08" — text, a leading zero
+echo $((10#$m % 12 + 1))     # 9     read as decimal; next month
+echo $((8#$mode))            # a mode like 755 read as octal
+echo $((2#$bits))            # a string of binary digits
+```
+
+### Variables and expansions
+
+A variable name may omit the `$`. An integer works directly; `true` is 1 and
+`false` is 0; a string holding one number in any spelling above is read as
+that number.
+
+```sh
+count=4
+echo $((count + 1))          # 5
+echo $(($count + 1))         # 5
+mask="0xff"
+echo $((mask & 16#0f))       # 15
+echo $(( $(wc -l < f) * 2 )) # a command that prints one integer is an operand
+echo $(( ${limit:-0} + 1 ))  # a parameter default works inside
+```
+
+An unset or null variable is an error naming the variable — write
+`${name:-0}` when zero is the right default. A float (`2.7`), a list, a
+record, or text that is not one number is an error naming the variable.
+`$RANDOM` and `$SECONDS` have no value in kaish; the error names the
+replacement. A string is a value, never an expression: `x="1 + 2"; $((x))`
+is an error — write the expression inside `$(( ))`.
+
+### Operators
+
+Highest precedence first. Shared operators follow C and bash; `**` follows
+bash: unary operators bind before it, and it groups to the right.
+
+| operators | meaning |
+|---|---|
+| `+` `-` `!` `~` (unary) | sign, logical not, bitwise not |
+| `**` | power; the exponent must be 0 or greater |
+| `*` `/` `%` | multiply, divide, remainder |
+| `+` `-` | add, subtract |
+| `<<` `>>` | shift; count 0 to 63; `>>` keeps the sign |
+| `<` `<=` `>` `>=` | compare |
+| `==` `!=` | compare for equality |
+| `&` | bitwise and |
+| `^` | bitwise xor |
+| `\|` | bitwise or |
+| `&&` | logical and, short-circuit |
+| `\|\|` | logical or, short-circuit |
+| `? :` | choose one value |
+
+```sh
+echo $((2 ** 3 ** 2))        # 512   (2 ** (3 ** 2))
+echo $((-2 ** 2))            # 4     ((-2) ** 2), as in bash
+echo $((1 << 2 + 1))         # 8     + binds tighter than <<, as in C
+echo $((5 & 3 == 3))         # 1     == binds tighter than &, as in C
+echo $((5 > 3))              # 1     comparisons return 1 or 0
+echo $((a > b ? a : b))      # the larger of a and b
+echo $(( (flags & 8) != 0 )) # 1 if bit 3 is set
+```
+
+Zero is false and every other value is true. `&&`, `||`, and `? :` evaluate
+only the side they need; a `$(cmd)` on the skipped side does not run.
+
+### Arithmetic as a condition
+
+`(( expr ))` on its own is a command: it succeeds when the value is nonzero.
+
+```sh
+i=1
+while (( i <= 5 )); do echo $i; i=$((i + 1)); done
+if (( n % 2 == 0 )); then echo even; else echo odd; fi
+```
+
+### Not supported, and what to write
+
+| written | error names |
+|---|---|
+| `$((x++))`, `$((x += 1))`, `$((x = 5))` | `x=$((x + 1))`, `x=5` — assignment stays outside |
+| `$((a, b))` | one expression per `$(( ))` |
+| `$((1.5))`, `$((1e3))` | arithmetic is integer-only; `jq` and `awk` do float math |
+| `$((1 <<< 2))` | `<<` — `<<<` is a here-string |
+| `$(( ))` | a number or an expression |
+| `$((0x))`, `$((16#))` | digits after the prefix |
 
 ## Shell Options
 
@@ -1493,7 +1577,7 @@ The table below records which lint shaped which design decision.
 | **Floats** | Integer only | Native `3.14` | JSON interop |
 | **Booleans** | Exit codes | Native `true`/`false` | JSON interop, clearer conditions |
 | **Typed params** | None | `name:string` | Tool definitions with validation |
-| **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
+| **Arithmetic** | `$(( ))` | `$((expr))`, `(( expr ))` | Checked 64-bit integers, bases via `0x`/`base#`, C precedence, no assignment inside |
 | **Scatter/gather** | None | `散/集` | Built-in parallelism *(experimental)* |
 | **VFS** | None | `/tmp/`, `/v/` | Unified resource access |
 | **Pre-validation** | None | `kaish-validate` builtin | Catch errors before execution |
