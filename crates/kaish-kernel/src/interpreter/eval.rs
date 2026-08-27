@@ -181,6 +181,9 @@ impl<'a> Evaluator<'a> {
             // condition holds no command substitution.
             Expr::Not(inner) => Ok(Value::Bool(!is_truthy(&self.eval(inner)?))),
             Expr::Literal(value) => self.eval_literal(value),
+            // Typed evaluation only needs `value`. `raw` is for argv and plan
+            // text sinks, which read the `Expr` directly.
+            Expr::NumericLiteral { value, .. } => self.eval_literal(value),
             Expr::VarRef(path) => self.eval_var_ref(path),
             Expr::Interpolated(parts) => self.eval_interpolated(parts),
             Expr::HereDocBody { parts, strip_tabs } => {
@@ -600,7 +603,6 @@ impl<'a> Evaluator<'a> {
 
 }
 
-/// Convert a Value to its string representation for interpolation.
 /// Coerce a Value into an exit code (i64) for `return`/`exit`.
 ///
 /// Bash semantics: `return $(echo 42)` works because the captured text "42"
@@ -614,13 +616,25 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
         Value::String(s) => {
             let trimmed = s.trim();
             trimmed.parse::<i64>().map_err(|_| {
-                anyhow::anyhow!("numeric argument required: {:?}", s)
+                if is_i64_overflow_shape(trimmed) {
+                    anyhow::anyhow!("`{trimmed}`, which {}", crate::lexer::INTEGER_OUT_OF_RANGE)
+                } else {
+                    anyhow::anyhow!("numeric argument required: {:?}", s)
+                }
             })
         }
         Value::Null | Value::Json(_) | Value::Bytes(_) => {
             anyhow::bail!("numeric argument required (got {:?})", value)
         }
     }
+}
+
+/// True for a string shaped like `-?[0-9]+` — the only shape whose `i64`
+/// parse can fail exclusively by overflow. Shared by `value_to_exit_code`
+/// and `value_to_num` so both name the same 64-bit limit the same way.
+fn is_i64_overflow_shape(t: &str) -> bool {
+    let digits = t.strip_prefix('-').unwrap_or(t);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Length of a value for `${#…}`: element count for a list, key count for a
@@ -778,6 +792,7 @@ pub fn scalar_test_operand_error(op_symbol: &str, value: &Value) -> Option<Strin
     }
 }
 
+/// Convert a Value to its string representation for interpolation.
 pub fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -1176,25 +1191,63 @@ fn compare_values(left: &Value, right: &Value) -> EvalResult<std::cmp::Ordering>
     }
 }
 
-/// Coerce a value to a number for arithmetic test ops (`-eq`/`-gt`/…).
-///
-/// `String` operands are parsed as `i64` then `f64` (matching POSIX `[[ ]]`
-/// arithmetic context). Non-numeric strings and non-numeric types error.
+/// An integer or float result from `value_to_num`.
 enum Num {
     Int(i64),
     Float(f64),
 }
 
+/// Coerce a value to a number for arithmetic test ops (`-eq`/`-gt`/…).
+///
+/// A `String` operand: a leading zero refuses; then `i64`; then `f64`, but
+/// only for a float spelling (`.`/`e`/`E`) and only when the result is
+/// finite. An all-digit string that overflows `i64` names the 64-bit
+/// limit rather than falling through to `f64`. Other strings and
+/// non-numeric types error.
 fn value_to_num(value: &Value) -> EvalResult<Num> {
     match value {
         Value::Int(n) => Ok(Num::Int(*n)),
         Value::Float(f) => Ok(Num::Float(*f)),
         Value::String(s) => {
             let t = s.trim();
+            // Same refusal as `$((010))`: a leading zero is text, not decimal 10 or octal 8.
+            if let Some(decimal) = arithmetic::leading_zero_decimal(t) {
+                return Err(EvalError::TypeError {
+                    expected: "a number",
+                    got: format!(
+                        "`{t}`, which is text (leading zero) — kaish reads no octal; write \
+                         `{decimal}` for the decimal value"
+                    ),
+                });
+            }
             if let Ok(n) = t.parse::<i64>() {
-                Ok(Num::Int(n))
-            } else if let Ok(f) = t.parse::<f64>() {
-                Ok(Num::Float(f))
+                return Ok(Num::Int(n));
+            }
+            // A float spelling (`1.5`, `1e3`) falls to f64 as before. An
+            // integer-shaped string that only failed above by overflow must
+            // not silently round through f64 — both sides of a comparison
+            // past i64::MAX round to the same f64, so `9223372036854775808
+            // -eq 9223372036854775807` would answer true.
+            let looks_like_float = t.contains(['.', 'e', 'E']);
+            if looks_like_float
+                && let Ok(f) = t.parse::<f64>()
+            {
+                // kaish numbers are JSON numbers, and JSON has no infinity —
+                // `1e309` parses to f64::INFINITY without an Err, so a
+                // magnitude past the f64 range needs its own check here.
+                if !f.is_finite() {
+                    return Err(EvalError::TypeError {
+                        expected: "a number",
+                        got: format!("`{t}`, which is outside the 64-bit float range"),
+                    });
+                }
+                return Ok(Num::Float(f));
+            }
+            if is_i64_overflow_shape(t) {
+                Err(EvalError::TypeError {
+                    expected: "a number",
+                    got: format!("`{t}`, which {}", crate::lexer::INTEGER_OUT_OF_RANGE),
+                })
             } else {
                 Err(EvalError::TypeError {
                     expected: "numeric operand",

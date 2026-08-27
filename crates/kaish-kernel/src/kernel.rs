@@ -3479,6 +3479,8 @@ impl Kernel {
             Expr::Literal(Value::Float(f)) => f.to_string(),
             Expr::Literal(Value::Bool(b)) => b.to_string(),
             Expr::Literal(Value::Null) => "null".to_string(),
+            // Show the source text, not the typed value.
+            Expr::NumericLiteral { raw, .. } => raw.clone(),
             Expr::VarRef(path) => {
                 let mut name = String::new();
                 for (i, seg) in path.segments.iter().enumerate() {
@@ -3914,6 +3916,13 @@ impl Kernel {
                             continue;
                         }
                     }
+                    // The exact word the author typed reaches the external
+                    // process, matching what `ast::plan::render_expr` showed.
+                    // Skips `eval_expr_async`: no `Value` reproduces `raw`.
+                    if let Expr::NumericLiteral { raw, .. } = expr {
+                        argv.push(raw.clone());
+                        continue;
+                    }
                     let value = self.eval_expr_async(expr).await?;
                     // Decision D: a bare collection can't cross the external
                     // process boundary as an argv element — refuse rather than
@@ -3929,6 +3938,10 @@ impl Kernel {
                     argv.push(value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}"))?);
                 }
                 Arg::Named { key, value } => {
+                    if let Expr::NumericLiteral { raw, .. } = value {
+                        argv.push(format!("--{key}={raw}"));
+                        continue;
+                    }
                     let val = self.eval_expr_async(value).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
@@ -3938,6 +3951,10 @@ impl Kernel {
                     argv.push(format!("--{key}={val_str}"));
                 }
                 Arg::WordAssign { key, value } => {
+                    if let Expr::NumericLiteral { raw, .. } = value {
+                        argv.push(format!("{key}={raw}"));
+                        continue;
+                    }
                     let val = self.eval_expr_async(value).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
@@ -4045,6 +4062,9 @@ impl Kernel {
                 Ok(Value::Bool(!is_truthy(&value)))
             }
             Expr::Literal(value) => Ok(value.clone()),
+            // Typed evaluation only needs `value`; `raw` is for argv and
+            // plan text sinks that read the `Expr` directly.
+            Expr::NumericLiteral { value, .. } => Ok(value.clone()),
             Expr::VarRef(path) => {
                 let scope = self.scope.read().await;
                 match scope.resolve_path(path) {
@@ -4668,9 +4688,18 @@ impl Kernel {
             let saved = scope.save_positional();
 
             // Set up new positional parameters ($0 = function name, $1, $2, ... = args)
+            // `$1` is a text sink like any argv word, and `value_to_string`
+            // cannot reproduce the source text — see `ToolArgs::positional_raw`.
             let positional_args: Vec<String> = tool_args.positional
                 .iter()
-                .map(value_to_string)
+                .enumerate()
+                .map(|(i, v)| {
+                    tool_args
+                        .positional_raw
+                        .get(&i)
+                        .cloned()
+                        .unwrap_or_else(|| value_to_string(v))
+                })
                 .collect();
             scope.set_positional(&def.name, positional_args);
 
@@ -5135,9 +5164,17 @@ impl Kernel {
             }
 
             // Set up positional parameters ($0 = script name, $1, $2, ... = args)
+            // Same source-text fidelity as the function-call site above.
             let positional_args: Vec<String> = tool_args.positional
                 .iter()
-                .map(value_to_string)
+                .enumerate()
+                .map(|(i, v)| {
+                    tool_args
+                        .positional_raw
+                        .get(&i)
+                        .cloned()
+                        .unwrap_or_else(|| value_to_string(v))
+                })
                 .collect();
             isolated_scope.set_positional(name, positional_args);
 
@@ -6213,6 +6250,11 @@ pub(crate) async fn bind_tool_args(
                             // Nothing evaluated means no word, matching the
                             // typed path's `if let Some(value)`.
                             if let Some(value) = source.eval(expr).await? {
+                                // Recorded at the index the push below lands
+                                // at — see `ToolArgs::words_raw`.
+                                if let Expr::NumericLiteral { raw, .. } = expr {
+                                    tool_args.words_raw.insert(words.len(), raw.clone());
+                                }
                                 words.push(apply_tilde_expansion(value, home.as_deref()));
                             }
                         }
@@ -6247,12 +6289,18 @@ pub(crate) async fn bind_tool_args(
                     }
                     // Loud on binary (GH #116): reassembling `--k=$BIN` as text
                     // hands the tool a placeholder that looks like data. A bare
-                    // binary word is fine — it stays typed.
-                    let val_str = crate::interpreter::value_to_text_sink_named(
-                        &val,
-                        "a --key=value argument",
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // binary word is fine — it stays typed. The whole word is
+                    // composed here, so no later render step could reach a
+                    // `words_raw` entry.
+                    let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                        raw.clone()
+                    } else {
+                        crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a --key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                    };
                     words.push(Value::String(format!("--{key}={val_str}")));
                 }
                 Arg::WordAssign { key, value } => {
@@ -6260,11 +6308,15 @@ pub(crate) async fn bind_tool_args(
                         anyhow::anyhow!("verbatim key=value could not be evaluated in this context")
                     })?;
                     let val = apply_tilde_expansion(val, home.as_deref());
-                    let val_str = crate::interpreter::value_to_text_sink_named(
-                        &val,
-                        "a key=value argument",
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                        raw.clone()
+                    } else {
+                        crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                    };
                     words.push(Value::String(format!("{key}={val_str}")));
                 }
                 Arg::DoubleDash => {
@@ -6309,6 +6361,11 @@ pub(crate) async fn bind_tool_args(
                                     )
                                 })?;
                                 let value = apply_tilde_expansion(value, home.as_deref());
+                                if let Expr::NumericLiteral { raw, .. } = expr {
+                                    tool_args
+                                        .positional_raw
+                                        .insert(tool_args.positional.len(), raw.clone());
+                                }
                                 tool_args.positional.push(value);
                             }
                         }
@@ -6319,6 +6376,13 @@ pub(crate) async fn bind_tool_args(
                             )
                         })?;
                         let value = apply_tilde_expansion(value, home.as_deref());
+                        // `test`'s numeric operators still get the real
+                        // `value`; a text consumer gets `raw`.
+                        if let Expr::NumericLiteral { raw, .. } = expr {
+                            tool_args
+                                .positional_raw
+                                .insert(tool_args.positional.len(), raw.clone());
+                        }
                         tool_args.positional.push(value);
                     }
                 }
@@ -6335,12 +6399,17 @@ pub(crate) async fn bind_tool_args(
                     let val = apply_tilde_expansion(val, home.as_deref());
                     // Loud on binary (GH #116): `test --k=$BIN` must not
                     // silently reassemble the placeholder into the raw-argv
-                    // positional stream `test` binds against.
-                    let val_str = crate::interpreter::value_to_text_sink_named(
-                        &val,
-                        "a --key=value argument",
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // positional stream `test` binds against. Source text
+                    // wins, as in the Verbatim binder's `Arg::Named` arm.
+                    let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                        raw.clone()
+                    } else {
+                        crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a --key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                    };
                     tool_args
                         .positional
                         .push(Value::String(format!("--{key}={val_str}")));
@@ -6352,11 +6421,15 @@ pub(crate) async fn bind_tool_args(
                     let val = apply_tilde_expansion(val, home.as_deref());
                     // Loud on binary (GH #116): same reasoning as the Named
                     // arm above, for the bare `key=value` raw-argv form.
-                    let val_str = crate::interpreter::value_to_text_sink_named(
-                        &val,
-                        "a key=value argument",
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                        raw.clone()
+                    } else {
+                        crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                    };
                     tool_args
                         .positional
                         .push(Value::String(format!("{key}={val_str}")));
@@ -6437,6 +6510,14 @@ pub(crate) async fn bind_tool_args(
                     }
                     if let Some(value) = source.eval(expr).await? {
                         let value = apply_tilde_expansion(value, home.as_deref());
+                        // The path `echo` reads: it takes `args.positional`
+                        // directly, never the clap-parsed field, so a plain
+                        // `Value::Int` here could not reproduce `-0`.
+                        if let Expr::NumericLiteral { raw, .. } = expr {
+                            tool_args
+                                .positional_raw
+                                .insert(tool_args.positional.len(), raw.clone());
+                        }
                         tool_args.positional.push(value);
                     }
                 }
@@ -6448,11 +6529,15 @@ pub(crate) async fn bind_tool_args(
                     // `--key=value`, the same collapse the `WordAssign` arm
                     // below does for `A=1` (GH #189). The value still expands.
                     if past_double_dash {
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a --key=value operand after `--`",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                            raw.clone()
+                        } else {
+                            crate::interpreter::value_to_text_sink_named(
+                                &val,
+                                "a --key=value operand after `--`",
+                            )
+                            .map_err(|e| anyhow::anyhow!("{e}"))?
+                        };
                         tool_args
                             .positional
                             .push(Value::String(format!("--{key}={val_str}")));
@@ -6507,6 +6592,12 @@ pub(crate) async fn bind_tool_args(
                         }
                         // Value::Bool(false): absent == false, nothing to insert.
                     } else {
+                        // A named value is normally read off the clap-parsed
+                        // field, built from `to_argv()` — see
+                        // `ToolArgs::named_raw`.
+                        if let Expr::NumericLiteral { raw, .. } = value {
+                            tool_args.named_raw.insert(key.clone(), raw.clone());
+                        }
                         tool_args.named.insert(key.clone(), val);
                     }
                 }
@@ -6527,18 +6618,26 @@ pub(crate) async fn bind_tool_args(
                     // named-assignment path `past_double_dash` exists to
                     // suppress for flags right above this arm.
                     if accepts_word_assign && !past_double_dash {
+                        if let Expr::NumericLiteral { raw, .. } = value {
+                            tool_args.named_raw.insert(key.clone(), raw.clone());
+                        }
                         tool_args.named.insert(key.clone(), val);
                     } else {
                         // Stringify "key=value" and pass as a positional.
                         // Matches bash: `cat foo=bar` opens a file named `foo=bar`.
                         // Loud on binary (GH #116): `cat foo=$BIN`/`dd if=$BIN`
                         // must not silently become a path/operand literally named
-                        // `foo=[binary: N bytes]`.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        // `foo=[binary: N bytes]`. Source text wins, as in
+                        // every other composed-string arm.
+                        let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                            raw.clone()
+                        } else {
+                            crate::interpreter::value_to_text_sink_named(
+                                &val,
+                                "a key=value argument",
+                            )
+                            .map_err(|e| anyhow::anyhow!("{e}"))?
+                        };
                         tool_args.positional.push(Value::String(format!("{key}={val_str}")));
                     }
                 }
@@ -6786,7 +6885,15 @@ pub(crate) async fn bind_tool_args(
             tool_args.positional.len()
         };
 
+        // This block reindexes `positional`, and `positional_raw` is keyed
+        // by index — a value that moves must carry its raw text along or the
+        // map mislabels some other positional's text as this one's.
+        // `old_raw` is keyed by the pre-drain index; both destinations insert
+        // under the index the value actually lands at.
+        let old_raw = std::mem::take(&mut tool_args.positional_raw);
         let mut remaining = Vec::new();
+        let mut remaining_raw: std::collections::BTreeMap<usize, String> =
+            std::collections::BTreeMap::new();
         let mut positional_iter = tool_args.positional.drain(..).enumerate();
 
         for param in &schema.params {
@@ -6799,10 +6906,16 @@ pub(crate) async fn bind_tool_args(
             loop {
                 match positional_iter.next() {
                     Some((idx, val)) if idx < pre_dash_count => {
+                        if let Some(raw) = old_raw.get(&idx) {
+                            tool_args.named_raw.insert(param.name.clone(), raw.clone());
+                        }
                         tool_args.named.insert(param.name.clone(), val);
                         break;
                     }
-                    Some((_, val)) => {
+                    Some((idx, val)) => {
+                        if let Some(raw) = old_raw.get(&idx) {
+                            remaining_raw.insert(remaining.len(), raw.clone());
+                        }
                         remaining.push(val);
                     }
                     None => break,
@@ -6810,8 +6923,14 @@ pub(crate) async fn bind_tool_args(
             }
         }
 
-        remaining.extend(positional_iter.map(|(_, v)| v));
+        for (idx, val) in positional_iter {
+            if let Some(raw) = old_raw.get(&idx) {
+                remaining_raw.insert(remaining.len(), raw.clone());
+            }
+            remaining.push(val);
+        }
         tool_args.positional = remaining;
+        tool_args.positional_raw = remaining_raw;
     }
 
     Ok(tool_args)

@@ -38,6 +38,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use kaish_types::clock::system_now;
+use kaish_types::Value;
 
 /// Global counter for generating unique markers across all tokenize calls.
 static MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -87,6 +88,11 @@ pub enum LexerError {
     UnterminatedVarRef,
     InvalidEscape,
     InvalidNumber,
+    /// An integer numeral parsed but did not fit in `i64`. The regex behind
+    /// `lex_int`/`parse_int` admits only `-?[0-9]+`, so overflow is the only
+    /// way that parse fails — this is a distinct variant so the message can
+    /// name the limit instead of just saying "invalid".
+    IntegerOutOfRange,
     InvalidFloatNoLeading,
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
@@ -129,6 +135,12 @@ pub enum LexerError {
     HashInsideWord,
 }
 
+/// Message for a numeral outside i64 range. Shared with `arithmetic::parse_number`
+/// so the lexer and `$(( ))` name the same limit in the same words.
+pub(crate) const INTEGER_OUT_OF_RANGE: &str =
+    "does not fit in a 64-bit integer (-9223372036854775808..9223372036854775807); \
+     quote it to keep the text";
+
 impl fmt::Display for LexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -143,6 +155,7 @@ impl fmt::Display for LexerError {
             }
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
+            LexerError::IntegerOutOfRange => write!(f, "{INTEGER_OUT_OF_RANGE}"),
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),
@@ -215,6 +228,15 @@ pub struct HereDocData {
     pub literal: bool,
     pub strip_tabs: bool,
     pub body_start_offset: usize,
+}
+
+/// A numeral's typed value and its verbatim source text — see
+/// `Token::NumericLiteral`. Logos requires a single-field variant payload,
+/// hence the wrapper struct (the same shape as `HereDocData`, above).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NumericLiteralData {
+    pub value: Value,
+    pub raw: String,
 }
 
 /// A word is anything that is not whitespace and not an operator, so the
@@ -640,6 +662,21 @@ pub enum Token {
     #[regex(r"-?[0-9]+\.[0-9]+", lex_float)]
     Float(f64),
 
+    /// A plain `Int`/`Float` whose own `Display` does not reproduce the source
+    /// text it was lexed from — a negative zero (`-0`, `-0.0`) or a
+    /// non-canonical trailing fraction digit (`0.10`, `1.0`). Carries the
+    /// typed value, so arithmetic and `--json` still see a real number, and
+    /// the verbatim text, so argv and plan rendering reproduce what was typed.
+    /// See `docs/LANGUAGE.md`, "A bare number follows JSON rules".
+    ///
+    /// A leading zero (`007`) is a different case, reclassified to
+    /// `NumberIdent` — see `has_invalid_leading_zero`.
+    ///
+    /// Never produced by logos. `preserve_numeric_source_text` synthesizes it
+    /// as the LAST step of `tokenize_impl`, after the fusion passes, which
+    /// match `Int`/`Float` directly. The common case pays nothing.
+    NumericLiteral(NumericLiteralData),
+
     // ═══════════════════════════════════════════════════════════════════
     // Invalid patterns (caught before valid tokens for better errors)
     // ═══════════════════════════════════════════════════════════════════
@@ -830,7 +867,9 @@ impl Token {
             Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) => TokenCategory::String,
 
             // Numbers
-            Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) => TokenCategory::Number,
+            Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) | Token::NumericLiteral(_) => {
+                TokenCategory::Number
+            }
 
             // Variables
             Token::VarRef(_)
@@ -1055,7 +1094,16 @@ fn lex_var_length(lex: &mut logos::Lexer<Token>) -> String {
 
 /// Lex an integer literal.
 fn lex_int(lex: &mut logos::Lexer<Token>) -> Result<i64, LexerError> {
-    lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
+    let slice = lex.slice();
+    // A leading-zero numeral is text, not a number, whether or not its
+    // digits fit in i64 — `09223372036854775808` is text (leading zero)
+    // before it is ever an overflow. `preserve_numeric_source_text` reads
+    // the source span, not this value, to reclassify the token into
+    // `NumberIdent`, so any placeholder here is discarded.
+    if has_invalid_leading_zero(slice) {
+        return Ok(0);
+    }
+    slice.parse().map_err(|_| LexerError::IntegerOutOfRange)
 }
 
 /// Lex a float literal.
@@ -1305,6 +1353,7 @@ impl fmt::Display for Token {
             Token::VarLength(v) => write!(f, "${{#{}}}", v),
             Token::Int(n) => write!(f, "INT({})", n),
             Token::Float(n) => write!(f, "FLOAT({})", n),
+            Token::NumericLiteral(d) => write!(f, "NUMERICLITERAL({:?}, raw={:?})", d.value, d.raw),
             Token::Path(s) => write!(f, "PATH({})", s),
             Token::Ident(s) => write!(f, "IDENT({})", s),
             Token::NumberIdent(s) => write!(f, "NUMIDENT({})", s),
@@ -1392,6 +1441,7 @@ impl Token {
                 | Token::Arithmetic(_)
                 | Token::Int(_)
                 | Token::Float(_)
+                | Token::NumericLiteral(_)
                 | Token::True
                 | Token::False
                 | Token::VarRef(_)
@@ -3501,10 +3551,88 @@ fn tokenize_impl(
         })
         .collect();
 
-    Ok(merge_glob_adjacent(
-        merge_colon_adjacent(merge_flag_metachar_adjacent(mapped), source),
+    Ok(preserve_numeric_source_text(
+        merge_glob_adjacent(
+            merge_colon_adjacent(merge_flag_metachar_adjacent(mapped), source),
+            source,
+        ),
         source,
     ))
+}
+
+/// True when a numeral's integer part is not a valid JSON number (RFC 8259:
+/// `int = zero / (digit1-9 *DIGIT)`) — more than one digit and a leading `0`:
+/// `007`, `010`, `-022`, and the integer part of `007.5`. A lone `0` (`0`,
+/// `-0`, `0.5`) is the `zero` alternative and is fine.
+///
+/// `fromjson '007'` is already a parse error; the lexer now agrees.
+fn has_invalid_leading_zero(raw: &str) -> bool {
+    let unsigned = raw.strip_prefix('-').unwrap_or(raw);
+    let int_part = unsigned.split('.').next().unwrap_or(unsigned);
+    int_part.len() > 1 && int_part.starts_with('0')
+}
+
+/// True when a word is a numeral in every respect except its leading zero —
+/// `007`, `010`, `-022`, `007.5`. These lex as [`Token::NumberIdent`].
+///
+/// Callers use this where kaish needs a number and got text, so the error can
+/// name the leading zero rather than report a shape mismatch. A word that is
+/// not otherwise a numeral (`007abc`) answers false: there is no number the
+/// author might have meant.
+pub(crate) fn is_leading_zero_numeral(word: &str) -> bool {
+    let unsigned = word.strip_prefix('-').unwrap_or(word);
+    let mut parts = unsigned.split('.');
+    let int_part = parts.next().unwrap_or("");
+    let frac_part = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    let digits_only = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits_only(int_part) {
+        return false;
+    }
+    if let Some(frac) = frac_part
+        && !digits_only(frac)
+    {
+        return false;
+    }
+    has_invalid_leading_zero(word)
+}
+
+/// Reclassify a plain `Int`/`Float` token from its own source text, into
+/// [`Token::NumberIdent`] or [`Token::NumericLiteral`]. The common case
+/// (`-1`, `42`, `3.14`) pays one string comparison and stays unchanged.
+///
+/// Runs as the LAST step of `tokenize_impl`, after every fusion pass:
+/// `is_colon_mergeable` matches `Int` and `Float` directly and
+/// `is_glob_mergeable` matches `Int`, so a numeral must still present its
+/// ordinary shape while fusion decides.
+/// Spans are original-source coordinates by now, so `source[span]` is the
+/// exact word the author typed.
+fn preserve_numeric_source_text(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
+    tokens
+        .into_iter()
+        .map(|t| {
+            let (value, canonical): (Value, String) = match &t.token {
+                Token::Int(n) => (Value::Int(*n), n.to_string()),
+                Token::Float(n) => (Value::Float(*n), n.to_string()),
+                _ => return t,
+            };
+            let Some(raw) = source.get(t.span.start..t.span.end) else {
+                return t;
+            };
+            if has_invalid_leading_zero(raw) {
+                return Spanned::new(Token::NumberIdent(raw.to_string()), t.span);
+            }
+            if raw == canonical {
+                return t;
+            }
+            Spanned::new(
+                Token::NumericLiteral(NumericLiteralData { value, raw: raw.to_string() }),
+                t.span,
+            )
+        })
+        .collect()
 }
 
 /// Extract the string content from a string token (removes quotes, processes escapes).
@@ -3642,7 +3770,7 @@ pub fn parse_var_ref(source: &str) -> Result<Vec<String>, LexerError> {
 
 /// Parse an integer literal.
 pub fn parse_int(source: &str) -> Result<i64, LexerError> {
-    source.parse().map_err(|_| LexerError::InvalidNumber)
+    source.parse().map_err(|_| LexerError::IntegerOutOfRange)
 }
 
 /// Parse a float literal.

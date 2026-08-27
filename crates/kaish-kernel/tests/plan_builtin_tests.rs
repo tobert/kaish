@@ -179,3 +179,115 @@ async fn an_empty_plan_stays_empty_under_the_kernel_json_rule() {
     assert_eq!(code, 0, "an empty statement is not an error");
     assert_eq!(out, "", "an empty success stays empty under --json");
 }
+
+/// A numeral argv word must round-trip its exact source text: `Plan.rendered`
+/// and `PlannedCommand::args` are lexed into a typed `Int`/`Float` and were
+/// re-serialized from the *value*, not the source. `i64`/`f64` have no
+/// negative zero (`-0` → `0`) or memory of leading zeros (`007` → `7`) or
+/// non-canonical trailing fraction digits (`1.0` → `1`), so every one of
+/// these silently rewrote the word it was given.
+///
+/// `xargs -0 rm -f` is the case that matters: `-0` planned (and executed) as
+/// a bare `0`, turning `xargs`'s idiomatic null-delimiter flag into a
+/// positional argument with no error.
+#[tokio::test]
+async fn noncanonical_numeric_argv_words_round_trip_in_rendered() {
+    let cases: &[(&str, &str)] = &[
+        ("echo -0", "echo -0"),
+        ("echo -00", "echo -00"),
+        ("echo -0.0", "echo -0.0"),
+        ("echo -0.00", "echo -0.00"),
+        ("echo 00", "echo 00"),
+        ("echo 007", "echo 007"),
+        ("echo 010", "echo 010"),
+        ("echo 0.10", "echo 0.10"),
+        ("echo 1.0", "echo 1.0"),
+        ("xargs -0 rm -f", "xargs -0 rm -f"),
+    ];
+    for (source, expected) in cases {
+        let doc = plan_json(&format!("plan '{source}' --json")).await;
+        assert_eq!(
+            doc["statements"][0]["plan"]["rendered"], *expected,
+            "rendered must reproduce the source word exactly for {source:?}: {doc}"
+        );
+    }
+}
+
+/// The same fidelity, checked on the structured `args[].plain` field —
+/// `Plan.rendered` is a flat string a classifier might not re-split, but
+/// `PlannedCommand::args` is what a hook is meant to read argument-by-argument.
+#[tokio::test]
+async fn noncanonical_numeric_argv_words_round_trip_in_args_plain() {
+    let doc = plan_json("plan 'xargs -0 rm -f' --json").await;
+    let args: Vec<&str> = doc["statements"][0]["plan"]["commands"][0]["args"]
+        .as_array()
+        .expect("args")
+        .iter()
+        .map(|a| a["plain"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        args,
+        vec!["-0", "rm", "-f"],
+        "xargs -0 must survive as its own argv word, not become a bare 0: {doc}"
+    );
+}
+
+/// Canonical numerals — the common case — must stay exactly as correct as
+/// they were before: this class of fix must not touch a numeral whose
+/// `Display` already reproduces the source.
+#[tokio::test]
+async fn canonical_numeric_argv_words_are_unaffected() {
+    let cases: &[(&str, &str)] = &[
+        ("echo -1", "echo -1"),
+        ("echo -5", "echo -5"),
+        ("echo -0.5", "echo -0.5"),
+        ("echo +0", "echo +0"),
+        ("echo +1", "echo +1"),
+    ];
+    for (source, expected) in cases {
+        let doc = plan_json(&format!("plan '{source}' --json")).await;
+        assert_eq!(
+            doc["statements"][0]["plan"]["rendered"], *expected,
+            "a canonical numeral must round-trip too: {source:?}: {doc}"
+        );
+    }
+}
+
+/// A leading-zero numeral (`007`, `010`) is not a valid JSON number (RFC
+/// 8259's `int = zero / (digit1-9 *DIGIT)` excludes it), and kaish's own
+/// `fromjson` already refuses it (`fromjson '007'` is a parse error) — the
+/// lexer used to disagree, typing it `Int(7)`. Nobody writing `007` expects
+/// the number 7, so it types as a string instead. `typeof` observes the
+/// TYPE directly, which a rendered-text check cannot: `007` already
+/// rendered as `007` once the source-text fix landed, whether it was typed
+/// `Int` or `String` underneath — this test is the one that would fail if
+/// the type were still `Int` even though the text looked right.
+#[tokio::test]
+async fn leading_zero_numeral_types_as_string_not_number() {
+    for c in ["00", "007", "010", "-022", "007.5", "-00.5"] {
+        let (code, out, err) = run(&format!("typeof {c}")).await;
+        assert_eq!(code, 0, "typeof should succeed for {c:?}: {err}");
+        assert_eq!(
+            out.trim(),
+            "string",
+            "{c:?} has a leading zero, not a valid JSON number, so it must type as a string: got {out:?}"
+        );
+    }
+}
+
+/// A numeral without a leading-zero problem — including the `-0`/`0.10`
+/// class Ruling 1 keeps typed but re-spells at render time — must still
+/// type as `number`. Ruling 2 narrows what counts as a numeral; it must not
+/// widen what counts as a string.
+#[tokio::test]
+async fn non_leading_zero_numeral_still_types_as_number() {
+    for c in ["0", "7", "123", "-1", "3.14", "-0", "-0.0", "0.10", "1.0"] {
+        let (code, out, err) = run(&format!("typeof {c}")).await;
+        assert_eq!(code, 0, "typeof should succeed for {c:?}: {err}");
+        assert_eq!(
+            out.trim(),
+            "number",
+            "{c:?} is a valid JSON number and must keep typing as one: got {out:?}"
+        );
+    }
+}

@@ -461,9 +461,14 @@ fn parse_subscript(inner: &str) -> VarSegment {
     // isn't a numeric slice falls through to a bareword key (`["a:b"]` covers
     // colon-bearing keys explicitly).
     if let Some((lhs, rhs)) = inner.split_once(':') {
+        // A slice bound is a number position: `[007:2]` sliced from 7 and
+        // silently returned an empty list. Refusing it falls through to a
+        // bareword key, which `scope.rs` reports against the container.
         let bound = |s: &str| -> Option<Option<i64>> {
             if s.is_empty() {
                 Some(None)
+            } else if lexer::is_leading_zero_numeral(s) {
+                None
             } else {
                 s.parse::<i64>().ok().map(Some)
             }
@@ -472,8 +477,11 @@ fn parse_subscript(inner: &str) -> VarSegment {
             return VarSegment::Slice(start, end);
         }
     }
-    // Integer index: `[0]`, `[-1]`.
-    if let Ok(i) = inner.parse::<i64>() {
+    // Integer index: `[0]`, `[-1]`. `[007]` is text and falls through to the
+    // bareword key below.
+    if !lexer::is_leading_zero_numeral(inner)
+        && let Ok(i) = inner.parse::<i64>()
+    {
         return VarSegment::Index(i);
     }
     // Bareword literal key: `[name]`, `[content-type]`.
@@ -1289,6 +1297,12 @@ fn parse_tokens(
         if let Err(specific) = validate_heredoc_bodies(&tokens) {
             return specific;
         }
+        // The count grammar matches `Token::Int`, which `break 007` no longer
+        // produces, so chumsky blames the whole statement alternative set.
+        let error_starts: Vec<usize> = errs.iter().map(|e| e.span().start).collect();
+        if let Err(specific) = validate_leading_zero_counts(&tokens, &error_starts) {
+            return specific;
+        }
         // `reject_glued_args` raises this from inside a `try_map` wrapping the
         // whole argv, where chumsky's alt bookkeeping swaps in a shallower
         // sibling's span — `git show HEAD:x.py` reported at `show`. Re-derive
@@ -1373,18 +1387,28 @@ where
     recursive(|stmt| {
         let terminator = choice((just(Token::Newline), just(Token::Semi))).repeated();
 
+        // A loop count is an integer. `NumericLiteral` is here because `-0` is
+        // one — a valid count whose source text does not round-trip, so it
+        // lexes as that variant rather than `Int` and would otherwise stop
+        // parsing.
+        let loop_count = select! {
+            Token::Int(n) => n as usize,
+            Token::NumericLiteral(data) if matches!(data.value, Value::Int(_)) => {
+                match data.value {
+                    Value::Int(n) => n as usize,
+                    _ => unreachable!("guarded by the select! pattern above"),
+                }
+            },
+        };
+
         // break [N] - break out of N levels of loops (default 1)
         let break_stmt = just(Token::Break)
-            .ignore_then(
-                select! { Token::Int(n) => n as usize }.or_not()
-            )
+            .ignore_then(loop_count.or_not())
             .map(Stmt::Break);
 
         // continue [N] - continue to next iteration, skipping N levels (default 1)
         let continue_stmt = just(Token::Continue)
-            .ignore_then(
-                select! { Token::Int(n) => n as usize }.or_not()
-            )
+            .ignore_then(loop_count.or_not())
             .map(Stmt::Continue);
 
         // return [expr] - return from a tool
@@ -1608,6 +1632,13 @@ where
         select! { Token::SingleString(s) => VarSegment::Key(s) },
         select! { Token::Int(n) => VarSegment::Index(n) },
         select! { Token::Ident(s) => parse_subscript(&s) },
+        // Without this arm `r[007]=v` was a parse error while `${r[007]}`
+        // read fine. Both are the same text key now.
+        select! { Token::NumberIdent(s) => parse_subscript(&s) },
+        // Same split for `r[-0]=v` and `r[1.0]=v`. Classifying from the raw
+        // text is what makes read and write agree: it is the same string the
+        // read path hands `parse_subscript`.
+        select! { Token::NumericLiteral(d) => parse_subscript(&d.raw) },
     ));
 
     just(Token::LBracket)
@@ -3117,6 +3148,7 @@ where
         var_expr_parser(),
         interpolated_string_parser(),
         literal_parser().map(Expr::Literal),
+        numeric_literal_parser(),
         // Glob patterns before ident (GlobWord is more specific)
         glob_pattern,
         // Bare identifiers become string literals (shell barewords)
@@ -3545,6 +3577,7 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::SingleString(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
         | Token::Positional(_) | Token::AllArgs | Token::ArgCount | Token::LastExitCode
         | Token::CurrentPid | Token::VarLength(_) | Token::Int(_) | Token::Float(_)
+        | Token::NumericLiteral(_)
         | Token::NumberIdent(_) | Token::DashNumWord(_) | Token::AtWord(_)
         | Token::Path(_) | Token::Ident(_) => true,
 
@@ -3673,6 +3706,82 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 /// a shape just leaves the grammar's span in place. The scope is "report the
 /// right span for a rejection that already happened", never "change what is
 /// rejected".
+/// `break 007` no longer matches the count grammar, so chumsky reports the
+/// miss against every statement alternative — a long message that never
+/// mentions the zero.
+///
+/// Runs only after the grammar has already failed, and only when the grammar's
+/// own error sits exactly on that numeral. Like [`validate_glued_args`], this
+/// may reword a diagnosis and must never author one: without the position gate
+/// it scanned the whole stream and would blame `echo break 007` (where `break`
+/// is an argv word the grammar rejected for its own reasons) or answer a real
+/// error elsewhere on the line with this message instead.
+fn validate_leading_zero_counts(
+    tokens: &[(Token, Span)],
+    error_starts: &[usize],
+) -> Result<(), Vec<ParseError>> {
+    for (i, pair) in tokens.windows(2).enumerate() {
+        let keyword = match &pair[0].0 {
+            Token::Break => "break",
+            Token::Continue => "continue",
+            _ => continue,
+        };
+        // `break` is also a bareword an argument list accepts, and `echo break
+        // 007` fails ON the numeral just like the statement does. Only a
+        // `break` in statement position is the one this message describes.
+        let at_statement_start = match i.checked_sub(1).map(|prev| &tokens[prev].0) {
+            None => true,
+            Some(
+                Token::Newline
+                | Token::Semi
+                | Token::DoubleSemi
+                | Token::Do
+                | Token::Then
+                | Token::Else
+                | Token::LBrace
+                | Token::And
+                | Token::Or,
+            ) => true,
+            Some(_) => false,
+        };
+        if !at_statement_start {
+            continue;
+        }
+        let Token::NumberIdent(word) = &pair[1].0 else {
+            continue;
+        };
+        if !lexer::is_leading_zero_numeral(word) {
+            continue;
+        }
+        // The grammar must have failed ON this numeral. Anywhere else and the
+        // verdict belongs to whatever the grammar was actually judging.
+        if !error_starts.contains(&pair[1].1.start) {
+            continue;
+        }
+        // Keep the sign: `break -022` is not fixed by writing `break 22`.
+        let sign = if word.starts_with('-') { "-" } else { "" };
+        let digits = word.trim_start_matches('-').trim_start_matches('0');
+        let count = format!("{sign}{}", if digits.is_empty() { "0" } else { digits });
+        // The count grammar takes only a whole number — `007.5` trims to
+        // `7.5`, which is itself a parse error, so the fix cannot be the
+        // trimmed value. Name the integer part instead.
+        let message = if let Some((int_part, _)) = count.split_once('.') {
+            let int_part = if int_part.is_empty() || int_part == "-" { "0" } else { int_part };
+            format!(
+                "`{keyword}` takes a whole-number loop count and `{word}` is text (leading \
+                 zero) — write a whole number such as `{keyword} {int_part}`"
+            )
+        } else {
+            format!(
+                "`{keyword}` takes a loop count and `{word}` is text (leading zero) — write \
+                 `{keyword} {count}`"
+            )
+        };
+        return Err(vec![ParseError { span: pair[1].1, message }]);
+    }
+    Ok(())
+}
+
 fn validate_glued_args(
     tokens: &[(Token, Span)],
     from_offset: usize,
@@ -3806,6 +3915,23 @@ where
     ))
     .labelled("literal")
     .boxed()
+}
+
+/// A numeral whose source text does not round-trip through its own typed
+/// `Display` — a negative zero, a leading zero, or a non-canonical trailing
+/// fraction digit. See `lexer::Token::NumericLiteral`. Kept separate from
+/// `literal_parser` because it produces `Expr::NumericLiteral` directly
+/// (carrying `raw` alongside `value`), not a bare `Value` for `Expr::Literal`
+/// to wrap.
+fn numeric_literal_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! {
+        Token::NumericLiteral(d) => Expr::NumericLiteral { value: d.value, raw: d.raw },
+    }
+    .labelled("literal")
 }
 
 /// Identifier parser.

@@ -393,6 +393,17 @@ pub enum Expr {
     /// Record literal: `{name: amy, role: maintainer}`, `{port:8080}` (colon
     /// may be spaced or unspaced). Value-position only, same as `ListLiteral`.
     RecordLiteral(Vec<RecordEntry>),
+    /// A numeral whose own `Display` does not reproduce the source text it
+    /// was written as — `-0`, `0.10`, `1.0`. `value` is the typed value:
+    /// arithmetic, comparisons, `set x = -0`, and `--json` all see a real
+    /// `Int`/`Float`. `raw` is the exact source text, used by argv and plan
+    /// rendering, so `xargs -0 rm -f` keeps its `-0`.
+    ///
+    /// A canonical numeral (`-1`, `42`) stays a plain `Literal`, and a leading
+    /// zero (`007`) is a `Literal(String)` — see `lexer::Token::NumericLiteral`,
+    /// which this mirrors, and `docs/LANGUAGE.md`, "A bare number follows JSON
+    /// rules".
+    NumericLiteral { value: Value, raw: String },
 }
 
 /// One element of a list literal.

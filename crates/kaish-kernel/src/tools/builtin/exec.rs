@@ -131,9 +131,15 @@ impl Tool for Exec {
         // `[binary: N bytes]` placeholder) — exec's argv crosses the same
         // process boundary as any other external command's.
         let mut argv: Vec<String> = Vec::with_capacity(args.positional.len().saturating_sub(1));
-        for v in args.positional.iter().skip(1) {
+        for (i, v) in args.positional.iter().enumerate().skip(1) {
             if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", v) {
                 return ExecResult::failure(1, format!("exec: {msg}"));
+            }
+            // `exec /bin/echo -0` must reach the process as the same argv
+            // `/bin/echo -0` does, so the source text wins here too.
+            if let Some(raw) = args.positional_raw.get(&i) {
+                argv.push(raw.clone());
+                continue;
             }
             match crate::interpreter::value_to_text_sink(v) {
                 Ok(s) => argv.push(s),

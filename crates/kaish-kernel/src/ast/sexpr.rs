@@ -272,6 +272,9 @@ pub fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::Not(inner) => format!("(not {})", format_expr(inner)),
         Expr::Literal(value) => format_value(value),
+        Expr::NumericLiteral { value, raw } => {
+            format!("(numeric-literal {} raw={:?})", format_value(value), raw)
+        }
         Expr::VarRef(path) => format!("(varref {})", format_varpath(path)),
         Expr::Interpolated(parts) => {
             let parts_str: Vec<String> = parts

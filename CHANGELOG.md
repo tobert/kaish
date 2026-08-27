@@ -44,6 +44,41 @@ breaking entries are marked **BREAKING**.
   parameter's aliases. `help kj` and every wrapped command showed "No
   parameters." before.
 
+- **A numeral argv word like `-0` or `007` lost its sign or leading zeros**
+  when re-serialized from its typed value; `xargs -0 rm -f` ran as
+  `xargs 0 rm -f`. External-command argv and `plan`/`--plan` now keep the
+  source text exactly.
+
+- **`007` is now the string `007`, not the number 7** — a leading zero is
+  not a JSON number, and `fromjson` already refused it. `-0`, `0.10`, and
+  `1.0` are unaffected; they stay numbers.
+
+- **Where kaish needs a number, a leading zero is an error** — `break 007`,
+  `$((010 + 1))`, `[[ 010 -eq 10 ]]`, and a list index name the number to
+  write; kaish reads no octal.
+
+- **An integer past 64 bits names the limit and the fix** instead of
+  "invalid number", in both a bare numeral and `$(( ))`.
+
+- **Arithmetic refuses a leading zero however it arrives** — `$((010 + 1))`
+  and `x=010; $((x))` both name the decimal to write. Reading the text as
+  decimal answered 10 where bash answers 8.
+
+- **A record key like `"007"` could not be read back** — `${r[007]}` resolved
+  to index 7 and `r[007]=v` was a parse error. Read and write now classify
+  every numeral subscript alike, including `[-0]` and `[1.0]`.
+
+- **A slice bound with a leading zero was silent** — `${xs[007:2]}` sliced
+  from 7, inverted the range, and returned an empty list with exit 0.
+
+- **`echo hi > -0` created a file named `0`** while `--plan` reported the
+  target as `-0`. Redirect targets keep the source text, so a plan document
+  and the run it describes agree.
+
+- **A builtin's argv lost a numeral's exact text too** — `echo -0` printed
+  `0`, `echo 0.10` printed `0.1`. `echo`, function calls, and script
+  `$1`/`$2` now keep the source word, matching the external-command fix
+  above.
 - **File tests on virtual and real paths** — `-w` claimed read-only mounts and
   root-owned files were writable, and `-x` denied that a memory-backed
   directory is searchable. `-w`/`-r`/`-x` now answer from the owning mount plus

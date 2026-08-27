@@ -27,6 +27,63 @@ echo "${NAME} more text"
 
 **Why lowercase only?** `true` and `false` are the boolean literals. `TRUE`, `Yes`, `yes`, `on`, and `1` are ordinary values — `x=TRUE` binds the string `"TRUE"` and `x=1` binds the number `1`, neither a boolean. Check with `typeof` when it matters.
 
+### A bare number follows JSON rules
+
+```sh
+echo 007        # the string 007 — a leading zero is not a JSON number
+chmod 0644 f    # the string 0644 — a mode keeps every digit you typed
+echo -0         # the number 0 — valid JSON; -0 and 0 are the same number
+echo "-0"       # the string -0 — quote it to keep those two characters
+break 7         # a loop count is a number — `break 007` is an error
+```
+
+`007`, `010`, and `00` are strings: nobody writes `007` expecting the number
+7, and `fromjson '007'` already refused it as invalid JSON — the bare word
+now agrees. `-0`, `0.10`, and `1.0` are numbers, and kaish prints back the
+word you typed (`-0`, not `0`) wherever that word crosses into argv or a
+plan. Once the number moves — through a variable, `--json`, arithmetic — it
+is a plain typed number again and prints its canonical form: `x=-0; echo
+$x` prints `0`. Quote a number (`"-0"`) to keep it a string on purpose.
+
+Where kaish needs a number, a leading zero is an error, and the error names
+the number to write. That covers a `break`/`continue` count, arithmetic, a
+numeric comparison, and a list index:
+
+```sh
+break 007            # error — write `break 7`
+echo $((010 + 1))    # error — kaish reads no octal; write `10`
+[[ 010 -eq 10 ]]     # error — write `10`
+xs=[10 20]
+echo ${xs[007]}      # error — a list is indexed by number; write ${xs[7]}
+```
+
+`$((010 + 1))` is the case worth stating plainly: bash reads `010` as octal
+and answers 9, and reading it as decimal would answer 11. kaish reads no
+octal, so it refuses rather than answering a third number. Convert a base
+deliberately instead — `printf "%o"` and `printf "%x"` format one, and
+`xxd` dumps bytes.
+
+A bare integer must also fit in 64 bits (`-9223372036854775808` to
+`9223372036854775807`); a longer numeral is an error naming the limit, and
+quoting it keeps the text: `echo 9223372036854775808` errors, `echo
+"9223372036854775808"` prints the digits.
+
+Arithmetic refuses the numeral however it arrives, so a variable holding the
+text is refused the same way the literal is:
+
+```sh
+x=010
+echo $((x))          # error — write `10`
+```
+
+A record key is text, so a leading zero is a key like any other and reads
+back under the name it was stored under:
+
+```sh
+r={"007":9}
+echo ${r[007]}       # 9
+```
+
 ### Inline environment prefix — `NAME=value command`
 
 One or more assignments placed *before* a command scope those variables to that

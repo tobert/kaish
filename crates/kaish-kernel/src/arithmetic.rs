@@ -34,6 +34,19 @@ pub fn eval_arithmetic(expr: &str, scope: &Scope) -> Result<i64> {
     Ok(result)
 }
 
+/// The decimal a leading-zero numeral was probably meant to be — `010` becomes
+/// `10`, `-007` becomes `-7`. `None` when the text is not one.
+///
+/// The suggestion keeps the sign: `-007` is not fixed by writing `7`.
+pub(crate) fn leading_zero_decimal(text: &str) -> Option<String> {
+    if !crate::lexer::is_leading_zero_numeral(text) {
+        return None;
+    }
+    let sign = if text.starts_with('-') { "-" } else { "" };
+    let digits = text.trim_start_matches('-').trim_start_matches('0');
+    Some(format!("{sign}{}", if digits.is_empty() { "0" } else { digits }))
+}
+
 /// Simple recursive descent parser for arithmetic expressions.
 struct ArithParser<'a> {
     input: &'a str,
@@ -311,7 +324,19 @@ impl<'a> ArithParser<'a> {
             }
         }
         let num_str = &self.input[start..self.pos];
-        num_str.parse().context("invalid number in arithmetic expression")
+        // bash reads `010` as octal and answers 9; decimal would answer 11.
+        // Refuse rather than answer a third number.
+        if crate::lexer::is_leading_zero_numeral(num_str) {
+            let trimmed = num_str.trim_start_matches('0');
+            let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+            bail!(
+                "`{num_str}` is text (leading zero) and kaish reads no octal — write \
+                 `{trimmed}` for the decimal value"
+            );
+        }
+        // The loop above admits only `[0-9]+`, so overflow is the only way
+        // this parse fails — same limit the lexer names, same words.
+        num_str.parse().context(crate::lexer::INTEGER_OUT_OF_RANGE)
     }
 
     fn parse_identifier(&mut self) -> Result<String> {
@@ -335,6 +360,12 @@ impl<'a> ArithParser<'a> {
         // Name is just the digits when called from `$1` or `${1}` parsing
         if let Ok(index) = name.parse::<usize>() {
             if let Some(pos_val) = self.scope.get_positional(index) {
+                if let Some(decimal) = leading_zero_decimal(pos_val) {
+                    anyhow::bail!(
+                        "${index} holds `{pos_val}`, which is text (leading zero) — kaish reads \
+                         no octal; write `{decimal}` for the decimal value"
+                    );
+                }
                 return pos_val.parse().with_context(|| {
                     format!("${} has non-numeric value: {:?}", index, pos_val)
                 });
@@ -427,7 +458,14 @@ impl<'a> ArithParser<'a> {
         match value {
             Value::Int(n) => Ok(*n),
             Value::String(s) => {
-                // Try to parse string as integer
+                // `x=007` stores the string, and reading it back is a number
+                // position like any other.
+                if let Some(decimal) = leading_zero_decimal(s) {
+                    anyhow::bail!(
+                        "variable '{name}' holds `{s}`, which is text (leading zero) — kaish \
+                         reads no octal; write `{decimal}` for the decimal value"
+                    );
+                }
                 s.parse().with_context(|| format!(
                     "variable '{}' has non-numeric value: {:?}", name, s
                 ))

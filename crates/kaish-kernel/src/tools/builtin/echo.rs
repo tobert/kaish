@@ -55,7 +55,15 @@ impl Tool for Echo {
         // should be is silent corruption. (Path-coercing builtins like `mkdir`
         // and env export remain deferred — the binary-at-text-sinks cluster.)
         let mut words = Vec::with_capacity(args.positional.len());
-        for value in &args.positional {
+        for (i, value) in args.positional.iter().enumerate() {
+            // A non-canonical numeral (`-0`, `0.10`, `1.0`) keeps its own
+            // source text: `Value::Int`/`Float` has no way to reproduce it
+            // once typed (no negative zero, no trailing `.0`) — see
+            // `ToolArgs::positional_raw`.
+            if let Some(raw) = args.positional_raw.get(&i) {
+                words.push(raw.clone());
+                continue;
+            }
             match crate::interpreter::value_to_text_sink(value) {
                 Ok(s) => words.push(s),
                 Err(e) => return ExecResult::failure(1, format!("echo: {e}")),
