@@ -96,56 +96,24 @@ pub trait Filesystem: Send + Sync {
 
     /// What the kernel can do with one path on this filesystem.
     ///
-    /// This is the query behind `test -w`, `test -r`, and `test -x`. It
-    /// exists because neither [`Filesystem::read_only`] nor
-    /// `DirEntry.permissions` answers "can this path be written" on its own:
-    /// `MemoryFs` (writable) and `JobFs` (read-only) both report
+    /// The query behind `test -r`, `test -w`, and `test -x`. Neither
+    /// [`Filesystem::read_only`] nor `DirEntry.permissions` answers on its
+    /// own — `MemoryFs` (writable) and `JobFs` (read-only) both report
     /// `permissions: None`, and a `LocalFs::read_only` wrapper over an
-    /// OS-writable directory reports mode bits with the write bit set.
-    /// [`PathAccess::resolve`] is the only place the two combine.
+    /// OS-writable directory reports the write bit set. [`PathAccess::resolve`]
+    /// is where the two combine.
     ///
-    /// The default asks `stat` for the mode and this filesystem for the
-    /// read-only state, which is right for any filesystem that is uniformly
-    /// read-only or uniformly writable. `VfsRouter` overrides it to ask the
-    /// mount that owns the path.
+    /// The default is right for a filesystem that is uniformly read-only or
+    /// uniformly writable. `VfsRouter` overrides it to ask the mount that owns
+    /// the path.
     ///
-    /// `OverlayFs` keeps the default, and inherits one known inaccuracy from
-    /// it: reads resolve against whichever layer holds the path, but writes
-    /// always land in the upper and `OverlayFs::write` never consults the
-    /// lower's mode. So a lower file whose mode clears `0o222` reports
-    /// unwritable while copy-up would in fact write it. That answer is
-    /// unchanged from before this query existed, and correcting it means
-    /// deciding what mode a path that does not exist in the upper yet should
-    /// be judged by — a question with no answer in the code today.
+    /// A backend that can be written must report a mode; an absent one is read
+    /// as read-only, and nothing checks that for you. See `docs/EMBEDDING.md`,
+    /// "Reporting file permissions".
     ///
-    /// # If you are adding a backend, report a mode
-    ///
-    /// Report real modes from `stat` and `list` unless your backend is
-    /// read-only. Absent modes are not a neutral default here; they are read
-    /// as a statement.
-    ///
-    /// Who answers from what today:
-    ///
-    /// | Backend | Modes |
-    /// |---|---|
-    /// | `LocalFs` | The OS's effective-access answer on Unix (see its `path_access`); synthesized from `Permissions::readonly()` on a non-Unix target that enables `localfs` |
-    /// | `MemoryFs` | Constants: dir `0o777`, file `0o666`, symlink `0o777` |
-    /// | `DevFs` | Constants: device `0o666`, the `/dev` directory `0o555` |
-    /// | `OverlayFs` | Whichever layer holds the path |
-    /// | `VfsRouter` | The owning mount; `0o555` for directories it synthesizes |
-    /// | `BuiltinFs`, `JobFs` | **None** — and both are read-only |
-    ///
-    /// That last row is load-bearing. `PathAccess::resolve` treats an absent
-    /// mode as not writable, and that is correct **only** because every
-    /// backend still reporting `None` is read-only. A writable backend that
-    /// reports `None` will have every one of its paths called unwritable —
-    /// `test -w` says no, and the write that follows succeeds anyway.
-    ///
-    /// Nothing catches that for you. There is no assertion tying
-    /// `read_only() == false` to reporting a mode, and the failure is a wrong
-    /// answer rather than an error, so the tests you write for your backend
-    /// will pass. If you add a writable backend, either report a mode or come
-    /// change `resolve` and this table together.
+    /// `OverlayFs` keeps the default and inherits its one inaccuracy: writes
+    /// always land in the upper, so a lower file whose mode clears `0o222`
+    /// reports unwritable while copy-up would write it.
     ///
     /// Errors exactly as `stat` does: a path that does not exist is an error,
     /// not a `PathAccess` of all-false.

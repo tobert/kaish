@@ -199,41 +199,23 @@ impl LocalFs {
     /// platform exposes.
     ///
     /// Reached on a non-Unix target that enables `localfs` — Windows in
-    /// practice. **Not** WASI: `mod local` is gated on `localfs`, `localfs`
-    /// pulls `tokio/fs`, and wasm rejects that feature, so `wasm32-wasip1`
-    /// never compiles `LocalFs` at all. (An earlier version of this comment
-    /// claimed the WASI build depended on this arm. It does not; the claim
-    /// was checked and removed rather than left to mislead.)
+    /// practice. Not WASI: `localfs` pulls `tokio/fs`, which wasm rejects, so
+    /// `wasm32-wasip1` never compiles `LocalFs` at all.
     ///
-    /// CI is Linux-only, so nothing here exercises this. That is the reason
-    /// `synthesized_mode` is split out as a pure function with a test that
-    /// runs everywhere.
-    ///
-    /// `LocalFs` is writable, so returning `None` would put it in the same
-    /// position `MemoryFs` was in: a writable backend reporting an absent
-    /// mode, which `PathAccess::resolve` reads as read-only — every file test
-    /// answering "not writable". There is exactly one bit to work from,
-    /// `Permissions::readonly()`, so that is what the mode carries.
-    ///
-    /// The `x` bit is never set. Executability is not a permission on these
-    /// platforms (it is decided by the file extension), so claiming it would
-    /// be a fabrication; `-x` answered false here before this and still does.
+    /// `LocalFs` is writable, so returning `None` would make every file test
+    /// answer "not writable" (`PathAccess::resolve` reads an absent mode as
+    /// read-only). `Permissions::readonly()` is the only bit to work from.
+    /// The `x` bit is never set: executability is decided by file extension
+    /// on these platforms, so claiming it would be a fabrication.
     #[cfg(not(unix))]
     fn extract_permissions(meta: &std::fs::Metadata) -> Option<u32> {
         Some(Self::synthesized_mode(meta.is_dir(), meta.permissions().readonly()))
     }
 
-    /// The mode [`extract_permissions`](Self::extract_permissions) reports on
-    /// a platform with no Unix mode bits. Split out from the `cfg` so it can
-    /// be tested on every platform, including the Unix ones that never call
-    /// it.
     /// Ask the OS whether this process may read, write, and execute `full`.
     ///
     /// `faccessat(AT_FDCWD, full, ..., AT_EACCESS)` — an access check against
-    /// the effective uid/gid, the same primitive `bash`'s `test -w` uses. The
-    /// three questions are asked separately because the kernel answers them
-    /// separately.
-    ///
+    /// the effective uid/gid, the same primitive `bash`'s `test -w` uses.
     /// rustix rather than `libc` because `unsafe_code` is denied
     /// workspace-wide.
     #[cfg(unix)]
@@ -251,8 +233,9 @@ impl LocalFs {
         }
     }
 
-    // Only the non-Unix `extract_permissions` calls this; the tests call it
-    // on every platform, which is the reason it is split out at all.
+    /// The mode [`extract_permissions`](Self::extract_permissions) reports on
+    /// a platform with no Unix mode bits. Split out from the `cfg` so it can
+    /// be tested everywhere, including the Unix targets that never call it.
     #[cfg_attr(unix, allow(dead_code))]
     pub(crate) fn synthesized_mode(is_dir: bool, readonly: bool) -> u32 {
         match (is_dir, readonly) {
@@ -593,27 +576,17 @@ impl Filesystem for LocalFs {
         fs::rename(&from_path, &to_path).await
     }
 
-    /// Answers from the OS, not from the mode bits — the one backend that
-    /// can, and therefore the one backend that does not use
-    /// [`PathAccess::resolve`].
+    /// Answers from the OS, not from mode bits — the one backend that can,
+    /// and so the one backend that does not use [`PathAccess::resolve`].
     ///
-    /// `resolve` reads `0o222` and friends, which say whether *some*
-    /// principal may write. That is the wrong question for a real file: a
-    /// root-owned `0o644` file has the bit set for a kaish running as an
-    /// ordinary user who cannot write a byte of it, and `test -w` would have
-    /// said yes. Every other backend in this crate models modes we chose
-    /// ourselves, where the bits are the whole truth and `resolve` is right;
-    /// only `LocalFs` has paths with an OS identity to check against, so only
-    /// `LocalFs` can ask the real question.
+    /// Mode bits say whether *some* principal may write. A root-owned `0o644`
+    /// file has the bit set for a kaish running as an ordinary user who cannot
+    /// write a byte, and `test -w` would have said yes. Every other backend
+    /// models modes we chose ourselves, where the bits are the whole truth.
     ///
-    /// The read-only wrapper is still ANDed in by `from_effective_access`.
-    /// The OS cannot know about it — it is a kaish-level restriction over an
-    /// OS-writable directory — so the kernel granting write does not settle
-    /// the answer.
-    ///
-    /// On non-Unix the OS has no effective-uid model to ask, so this falls
-    /// through to the trait default over the synthesized mode; see
-    /// `synthesized_mode`.
+    /// `from_effective_access` still ANDs in the read-only wrapper, which the
+    /// OS cannot see. On non-Unix this falls through to the trait default over
+    /// [`synthesized_mode`](Self::synthesized_mode).
     #[cfg(unix)]
     async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
         let full = self.resolve(path)?;
@@ -798,10 +771,9 @@ mod tests {
         cleanup(&dir).await;
     }
 
-    // The non-Unix mode synthesis, exercised on every platform. Without it
-    // `LocalFs` would be a writable backend reporting an absent mode on
-    // Windows — the same hole MemoryFs had — and `test -w` would answer NO
-    // about every file there.
+    // Without this, `LocalFs` on Windows would be a writable backend
+    // reporting an absent mode, and `test -w` would answer NO about every
+    // file there.
     #[test]
     fn synthesized_mode_keeps_writability_and_never_claims_exec() {
         assert_eq!(LocalFs::synthesized_mode(false, false) & 0o222, 0o222);

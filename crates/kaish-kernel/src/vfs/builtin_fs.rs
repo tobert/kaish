@@ -1,23 +1,17 @@
 //! BuiltinFs — read-only VFS that lists builtins as file entries under `/v/bin/`.
 //!
-//! **The entries are not executable, and nothing here ever executes.** This
-//! comment used to say "executable entries", which was a claim the code has
-//! never made good on: `stat` reports no mode, so `test -x /v/bin/grep`
-//! answers NO, and `real_path` returns `None`, so there is no path for
-//! exec(2) to open. `read` returns a line that opens with `#!`, which makes
-//! the entry *look* executable and is the likeliest reason the claim went
-//! unnoticed.
+//! The entries are not executable and nothing here ever executes. `stat`
+//! reports no mode, so `test -x /v/bin/grep` answers NO, and `real_path`
+//! returns `None`, so there is no path for exec(2) to open. `read` returns a
+//! line opening with `#!`, which makes an entry look executable.
 //!
-//! Running a builtin goes by name through the `ToolRegistry`; it never routes
-//! through this filesystem. `/v/bin` is an inventory an agent can list and
-//! read, not a directory of programs.
+//! Running a builtin goes by name through the `ToolRegistry` and never routes
+//! through this filesystem. `/v/bin` is an inventory to list and read, not a
+//! directory of programs. Reporting `0o111` would flip `test -x /v/bin/*` from
+//! NO to YES — a behavior change that wants its own decision.
 //!
-//! For the original claim to hold, `stat` and `list` would have to report a
-//! mode with the `0o111` bits set. That is a deliberate non-change: it would
-//! flip `test -x /v/bin/*` from NO to YES, which is a behavior change that
-//! wants its own decision. Note also that `read_only()` below is `true`, and
-//! the closed `-w` default depends on that staying true — see
-//! `Filesystem::path_access`.
+//! `read_only()` is `true`, and the closed `-w` default depends on it staying
+//! true — see `Filesystem::path_access`.
 
 use std::io;
 use std::path::{Path, PathBuf};
