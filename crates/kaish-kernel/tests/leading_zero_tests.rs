@@ -392,3 +392,21 @@ async fn arithmetic_overflow_literal_names_the_64_bit_limit() {
     let text = err_of("echo $((9223372036854775807 + 1))").await;
     assert!(text.contains("overflow"), "addition overflow must still say overflow: {text:?}");
 }
+
+// ── `-0` keeps source text at argv, canonicalizes once it moves ────────────
+
+/// `-0` is a valid JSON number, not a leading-zero refusal (`has_invalid_
+/// leading_zero` only fires past one digit). `docs/LANGUAGE.md` documents
+/// this split — argv keeps the typed word, a variable canonicalizes — but
+/// it had no test pinning either half.
+#[tokio::test]
+async fn negative_zero_keeps_source_text_at_argv_and_canonicalizes_through_a_variable() {
+    let (code, out, err) = run("echo -0").await;
+    assert_eq!((code, out.as_str()), (0, "-0"), "argv keeps the typed word: {err:?}");
+
+    let (code, out, err) = run("x=-0; echo $x").await;
+    assert_eq!((code, out.as_str()), (0, "0"), "a variable prints the canonical form: {err:?}");
+
+    let (code, out, err) = run("x=-0; typeof $x").await;
+    assert_eq!((code, out.as_str()), (0, "number"), "-0 is a number, not text: {err:?}");
+}
