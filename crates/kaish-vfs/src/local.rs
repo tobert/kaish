@@ -586,7 +586,7 @@ impl Filesystem for LocalFs {
     ///
     /// `from_effective_access` still ANDs in the read-only wrapper, which the
     /// OS cannot see. On non-Unix this falls through to the trait default over
-    /// [`synthesized_mode`](Self::synthesized_mode).
+    /// `synthesized_mode`.
     #[cfg(unix)]
     async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
         let full = self.resolve(path)?;
