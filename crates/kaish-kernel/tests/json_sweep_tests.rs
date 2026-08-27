@@ -178,6 +178,8 @@ const CASES: &[Case] = &[
     // push mutates in place and is silent on success, like unset.
     Case { name: "push", setup: &["xs=[a b]"], cmd: "push xs c --json", expect: Expect::Empty },
     Case { name: "pwd", setup: &[], cmd: "pwd --json", expect: Expect::String },
+    // Fixed min==max range so the draw is deterministic.
+    Case { name: "random", setup: &[], cmd: "random --min 3 --max 3 --json", expect: Expect::Number },
     Case { name: "read", setup: &[], cmd: "echo hi | read X --json", expect: Expect::Empty },
     Case { name: "readlink", setup: &["ln -s tmp/data.json link.json"], cmd: "readlink link.json --json", expect: Expect::String },
     Case { name: "realpath", setup: &[], cmd: "realpath tmp/data.json --json", expect: Expect::String },
