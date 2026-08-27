@@ -1387,18 +1387,28 @@ where
     recursive(|stmt| {
         let terminator = choice((just(Token::Newline), just(Token::Semi))).repeated();
 
+        // A loop count is an integer. `NumericLiteral` is here because `-0` is
+        // one — a valid count whose source text does not round-trip, so it
+        // lexes as that variant rather than `Int` and would otherwise stop
+        // parsing.
+        let loop_count = select! {
+            Token::Int(n) => n as usize,
+            Token::NumericLiteral(data) if matches!(data.value, Value::Int(_)) => {
+                match data.value {
+                    Value::Int(n) => n as usize,
+                    _ => unreachable!("guarded by the select! pattern above"),
+                }
+            },
+        };
+
         // break [N] - break out of N levels of loops (default 1)
         let break_stmt = just(Token::Break)
-            .ignore_then(
-                select! { Token::Int(n) => n as usize }.or_not()
-            )
+            .ignore_then(loop_count.or_not())
             .map(Stmt::Break);
 
         // continue [N] - continue to next iteration, skipping N levels (default 1)
         let continue_stmt = just(Token::Continue)
-            .ignore_then(
-                select! { Token::Int(n) => n as usize }.or_not()
-            )
+            .ignore_then(loop_count.or_not())
             .map(Stmt::Continue);
 
         // return [expr] - return from a tool

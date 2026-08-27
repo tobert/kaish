@@ -85,6 +85,22 @@ async fn an_ordinary_loop_count_still_parses() {
     assert_eq!(out, "done");
 }
 
+/// `-0` is a valid count and a valid JSON number, but its source text does not
+/// round-trip, so it lexes as `NumericLiteral` rather than `Int`. The count
+/// grammar matched only `Int`, which turned `break -0` into a parse error --
+/// a regression this rule introduced and nothing else caught.
+#[tokio::test]
+async fn a_negative_zero_count_still_parses() {
+    for source in [
+        "for i in 1 2 3; do break -0; done; echo done",
+        "for i in 1 2 3; do continue -0; done; echo done",
+    ] {
+        let (code, out, err) = run(source).await;
+        assert_eq!(code, 0, "-0 is a number, not a leading zero: {source} {err:?}");
+        assert_eq!(out, "done", "{source}");
+    }
+}
+
 /// The message may reword a diagnosis and must never author one. `break` is
 /// also a bareword an argument list accepts, and `echo break 007` fails ON the
 /// numeral exactly like the statement does, so position in the token stream is
