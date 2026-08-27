@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use kaish_types::backend::{
     BackendResult, MountInfo, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
 };
-use kaish_types::{DirEntry, ToolArgs};
+use kaish_types::{DirEntry, PathAccess, ToolArgs};
 
 use crate::ctx::ToolCtx;
 
@@ -117,6 +117,30 @@ pub trait KernelBackend: Send + Sync {
 
     /// Returns true if this backend is read-only.
     fn read_only(&self) -> bool;
+
+    /// What the kernel can do with one path: the query behind `test -r`,
+    /// `test -w`, and `test -x`.
+    ///
+    /// Neither [`KernelBackend::read_only`] nor `DirEntry.permissions`
+    /// answers "can this path be written" alone. A read-only wrapper over an
+    /// OS-writable directory reports permissive mode bits and refuses every
+    /// write; a `DevFs` mount reports `read_only() == false` (so `>
+    /// /dev/null` works) while its `/dev` directory accepts nothing.
+    /// [`PathAccess::resolve`] combines the two, and is the only way to build
+    /// a `PathAccess` — a caller cannot consult one fact by accident.
+    ///
+    /// The default answers from `stat` plus this backend's whole-backend
+    /// `read_only()`, which is right for a backend that is uniformly
+    /// read-only or uniformly writable. A backend whose mounts differ —
+    /// `LocalBackend`, which routes through a `VfsRouter` — overrides this to
+    /// ask the mount that owns the path.
+    ///
+    /// Errors exactly as `stat` does: a path that does not exist is an error,
+    /// not a `PathAccess` of all-false.
+    async fn path_access(&self, path: &Path) -> BackendResult<PathAccess> {
+        let entry = self.stat(path).await?;
+        Ok(PathAccess::resolve(entry.permissions, self.read_only()))
+    }
 
     /// Returns the backend type identifier (e.g. "local", "kaijutsu").
     fn backend_type(&self) -> &str;

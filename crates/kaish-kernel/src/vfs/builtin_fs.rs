@@ -1,4 +1,17 @@
-//! BuiltinFs — read-only VFS that presents builtins as executable entries under `/v/bin/`.
+//! BuiltinFs — read-only VFS that lists builtins as file entries under `/v/bin/`.
+//!
+//! The entries are not executable and nothing here ever executes. `stat`
+//! reports no mode, so `test -x /v/bin/grep` answers NO, and `real_path`
+//! returns `None`, so there is no path for exec(2) to open. `read` returns a
+//! line opening with `#!`, which makes an entry look executable.
+//!
+//! Running a builtin goes by name through the `ToolRegistry` and never routes
+//! through this filesystem. `/v/bin` is an inventory to list and read, not a
+//! directory of programs. Reporting `0o111` would flip `test -x /v/bin/*` from
+//! NO to YES — a behavior change that wants its own decision.
+//!
+//! `read_only()` is `true`, and the closed `-w` default depends on it staying
+//! true — see `Filesystem::path_access`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,7 +22,8 @@ use async_trait::async_trait;
 use crate::tools::ToolRegistry;
 use super::{DirEntry, Filesystem};
 
-/// A read-only filesystem that exposes registered builtins as entries.
+/// A read-only filesystem that exposes registered builtins as file
+/// entries. Listable and readable; not executable — see the module docs.
 pub struct BuiltinFs {
     tools: Arc<ToolRegistry>,
 }

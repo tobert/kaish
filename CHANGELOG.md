@@ -26,10 +26,19 @@ breaking entries are marked **BREAKING**.
   document, success or error, so a consumer windowing measurements by build
   no longer shells out to `kaish --version` per call.
 
+- **`KernelBackend::path_access` and `Filesystem::path_access`** — the per-path
+  read/write/execute query behind the file tests. Both are defaulted, so
+  existing implementations keep compiling; not breaking.
+
 ### Fixed
 - `help <tool>` renders a tool's subcommands and their flags, and names each
   parameter's aliases. `help kj` and every wrapped command showed "No
   parameters." before.
+
+- **File tests on virtual and real paths** — `-w` claimed read-only mounts and
+  root-owned files were writable, and `-x` denied that a memory-backed
+  directory is searchable. `-w`/`-r`/`-x` now answer from the owning mount plus
+  the OS's effective access.
 
 ## [0.16.0] - 2026-08-23
 

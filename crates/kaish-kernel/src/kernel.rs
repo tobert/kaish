@@ -4343,20 +4343,32 @@ impl Kernel {
                         let ctx = self.exec_ctx.read().await;
                         (ctx.resolve_path(&path_str), ctx.backend.clone())
                     };
-                    let entry = backend.stat(&resolved).await.ok();
+                    // `-r`/`-w`/`-x` go through `path_access`, never through
+                    // the raw mode bits: the mount's read-only state is half
+                    // the answer and `stat` does not carry it. The `test`
+                    // builtin's `file_test` reads the same query, and
+                    // `file_test_writable_tests` runs every case through both
+                    // spellings — this mirror has drifted before.
                     Ok(match op {
-                        FileTestOp::Exists => entry.is_some(),
-                        FileTestOp::IsFile => entry.as_ref().is_some_and(|e| e.is_file()),
-                        FileTestOp::IsDir => entry.as_ref().is_some_and(|e| e.is_dir()),
-                        FileTestOp::Readable => entry.as_ref().is_some_and(|e| {
-                            e.permissions.is_none_or(|p| p & 0o444 != 0)
-                        }),
-                        FileTestOp::Writable => entry.as_ref().is_some_and(|e| {
-                            e.permissions.is_none_or(|p| p & 0o222 != 0)
-                        }),
-                        FileTestOp::Executable => entry.as_ref().is_some_and(|e| {
-                            e.permissions.is_some_and(|p| p & 0o111 != 0)
-                        }),
+                        FileTestOp::Exists => backend.stat(&resolved).await.is_ok(),
+                        FileTestOp::IsFile => {
+                            backend.stat(&resolved).await.is_ok_and(|e| e.is_file())
+                        }
+                        FileTestOp::IsDir => {
+                            backend.stat(&resolved).await.is_ok_and(|e| e.is_dir())
+                        }
+                        FileTestOp::Readable => backend
+                            .path_access(&resolved)
+                            .await
+                            .is_ok_and(|access| access.readable),
+                        FileTestOp::Writable => backend
+                            .path_access(&resolved)
+                            .await
+                            .is_ok_and(|access| access.writable),
+                        FileTestOp::Executable => backend
+                            .path_access(&resolved)
+                            .await
+                            .is_ok_and(|access| access.executable),
                     })
                 }
                 TestExpr::StringTest { op, value } => match op {

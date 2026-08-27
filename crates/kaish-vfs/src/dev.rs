@@ -98,13 +98,28 @@ impl DevFs {
         )
     }
 
+    /// Mode reported for a device node, matching `crw-rw-rw-` on Linux:
+    /// everyone reads, everyone writes, nobody executes. `write` accepts and
+    /// discards for every device, so the write bit is the truth.
+    pub const DEVICE_MODE: u32 = 0o666;
+
+    /// Mode reported for the `/dev` directory itself: searchable and
+    /// readable, **not** writable.
+    ///
+    /// Linux ships `/dev` as 0755, but that write bit is for root, and kaish
+    /// has no root: `mkdir` and `remove` below refuse every caller
+    /// unconditionally. 0755 would make `test -w /dev` answer YES about a
+    /// directory that accepts nothing, which is the exact failure this mode
+    /// exists to prevent. 0555 is the mode that tells the truth here.
+    pub const DIRECTORY_MODE: u32 = 0o555;
+
     fn entry(name: &str) -> DirEntry {
         DirEntry {
             name: name.to_string(),
             kind: DirEntryKind::File,
             size: 0,
             modified: None,
-            permissions: None,
+            permissions: Some(Self::DEVICE_MODE),
             symlink_target: None,
         }
     }
@@ -191,7 +206,7 @@ impl Filesystem for DevFs {
                 kind: DirEntryKind::Directory,
                 size: 0,
                 modified: None,
-                permissions: None,
+                permissions: Some(Self::DIRECTORY_MODE),
                 symlink_target: None,
             });
         }
@@ -220,7 +235,9 @@ impl Filesystem for DevFs {
     fn read_only(&self) -> bool {
         // Writes to the devices "succeed" (they discard), so the mount is not
         // read-only in the sense the router cares about — refusing a write
-        // would break `> /dev/null`.
+        // would break `> /dev/null`. The consequence is that the mount cannot
+        // answer `test -w` here and the modes have to: DEVICE_MODE is
+        // writable, DIRECTORY_MODE is not.
         false
     }
 }

@@ -629,8 +629,8 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ -d /path/dir ]]              # is directory
 [[ -e /path/any ]]              # exists
 [[ -r /path/file ]]             # readable
-[[ -w /path/file ]]             # writable
-[[ -x /path/file ]]             # executable
+[[ -w /path/file ]]             # writable — the mount and the mode must agree
+[[ -x /path/file ]]             # executable; on a directory, searchable
 
 # String tests
 [[ -z $VAR ]]                   # empty

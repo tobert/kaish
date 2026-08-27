@@ -1168,6 +1168,7 @@ dependencies = [
  "async-trait",
  "getrandom 0.3.4",
  "kaish-types",
+ "rustix",
  "tempfile",
  "tokio",
 ]

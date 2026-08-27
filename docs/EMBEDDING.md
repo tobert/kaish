@@ -371,6 +371,40 @@ vfs.mount("/", MemoryFs::with_budget(budget.clone()));
 // budget.used() / budget.remaining() are observable at any time.
 ```
 
+### Reporting file permissions (`path_access`)
+
+`test -r`, `test -w`, and `test -x` ask the mount that owns the path, through
+`Filesystem::path_access`. The default implementation combines two facts —
+`DirEntry.permissions` from `stat`, and the mount's own `read_only()` — in
+`PathAccess::resolve`. `VfsRouter` overrides it to route the question to the
+owning mount; `LocalFs` overrides it to ask the OS for an effective-access
+answer, because mode bits say "some principal may write" where a file test has
+to answer "may this process write".
+
+Report real modes from `stat` and `list` unless your backend is read-only. An
+absent mode is not a neutral default here — it is read as a statement. Who
+answers from what today:
+
+| Backend | Modes |
+|---|---|
+| `LocalFs` | The OS's effective-access answer on Unix; synthesized from `Permissions::readonly()` on a non-Unix target |
+| `MemoryFs` | Constants: dir `0o777`, file `0o666`, symlink `0o777` |
+| `DevFs` | Constants: device `0o666`, the `/dev` directory `0o555` |
+| `OverlayFs` | Whichever layer holds the path |
+| `VfsRouter` | The owning mount; `0o555` for directories it synthesizes |
+| `BuiltinFs`, `JobFs` | None — and both are read-only |
+
+That last row is load-bearing. `PathAccess::resolve` treats an absent mode as
+not writable, and that is correct only because every backend still reporting
+`None` is read-only. **A writable backend that reports `None` will have every
+one of its paths called unwritable** — `test -w` says no, and the write that
+follows succeeds anyway.
+
+Nothing catches that for you. No assertion ties `read_only() == false` to
+reporting a mode, and the failure is a wrong answer rather than an error, so
+your backend's own tests will pass. If you add a writable backend, either
+report a mode or change `resolve` and this table together.
+
 ### Output Limits and Spill Mode (`OutputLimitConfig`)
 
 `KernelConfig::output_limit` caps how much a single command's output can grow

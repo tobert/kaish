@@ -2,7 +2,7 @@
 //!
 //! Provides access to real filesystem paths, with optional read-only mode.
 
-use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
+use crate::traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
 use async_trait::async_trait;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -195,9 +195,56 @@ impl LocalFs {
         Some(meta.permissions().mode())
     }
 
+    /// Synthesize a Unix-shaped mode from the one permission fact a non-Unix
+    /// platform exposes.
+    ///
+    /// Reached on a non-Unix target that enables `localfs` — Windows in
+    /// practice. Not WASI: `localfs` pulls `tokio/fs`, which wasm rejects, so
+    /// `wasm32-wasip1` never compiles `LocalFs` at all.
+    ///
+    /// `LocalFs` is writable, so returning `None` would make every file test
+    /// answer "not writable" (`PathAccess::resolve` reads an absent mode as
+    /// read-only). `Permissions::readonly()` is the only bit to work from.
+    /// The `x` bit is never set: executability is decided by file extension
+    /// on these platforms, so claiming it would be a fabrication.
     #[cfg(not(unix))]
-    fn extract_permissions(_meta: &std::fs::Metadata) -> Option<u32> {
-        None
+    fn extract_permissions(meta: &std::fs::Metadata) -> Option<u32> {
+        Some(Self::synthesized_mode(meta.is_dir(), meta.permissions().readonly()))
+    }
+
+    /// Ask the OS whether this process may read, write, and execute `full`.
+    ///
+    /// `faccessat(AT_FDCWD, full, ..., AT_EACCESS)` — an access check against
+    /// the effective uid/gid, the same primitive `bash`'s `test -w` uses.
+    /// rustix rather than `libc` because `unsafe_code` is denied
+    /// workspace-wide.
+    #[cfg(unix)]
+    fn effective_access(full: &Path) -> EffectiveAccess {
+        use rustix::fs::{Access, AtFlags, accessat};
+        use rustix::fs::CWD;
+
+        let ask = |mode: Access| {
+            accessat(CWD, full, mode, AtFlags::EACCESS).is_ok()
+        };
+        EffectiveAccess {
+            read: ask(Access::READ_OK),
+            write: ask(Access::WRITE_OK),
+            execute: ask(Access::EXEC_OK),
+        }
+    }
+
+    /// The mode [`extract_permissions`](Self::extract_permissions) reports on
+    /// a platform with no Unix mode bits. Split out from the `cfg` so it can
+    /// be tested everywhere, including the Unix targets that never call it.
+    #[cfg_attr(unix, allow(dead_code))]
+    pub(crate) fn synthesized_mode(is_dir: bool, readonly: bool) -> u32 {
+        match (is_dir, readonly) {
+            // Searchable, and writable unless the read-only attribute is set.
+            (true, false) => 0o777,
+            (true, true) => 0o555,
+            (false, false) => 0o666,
+            (false, true) => 0o444,
+        }
     }
 
     /// Build a [`DirEntry`] for one directory member named by `path`, *without*
@@ -529,6 +576,31 @@ impl Filesystem for LocalFs {
         fs::rename(&from_path, &to_path).await
     }
 
+    /// Answers from the OS, not from mode bits — the one backend that can,
+    /// and so the one backend that does not use [`PathAccess::resolve`].
+    ///
+    /// Mode bits say whether *some* principal may write. A root-owned `0o644`
+    /// file has the bit set for a kaish running as an ordinary user who cannot
+    /// write a byte, and `test -w` would have said yes. Every other backend
+    /// models modes we chose ourselves, where the bits are the whole truth.
+    ///
+    /// `from_effective_access` still ANDs in the read-only wrapper, which the
+    /// OS cannot see. On non-Unix this falls through to the trait default over
+    /// `synthesized_mode`.
+    #[cfg(unix)]
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        let full = self.resolve(path)?;
+        // Stat first so a missing path errors exactly the way `stat` does —
+        // `faccessat` would report a plain EACCES/ENOENT with no distinction
+        // the callers can use, and the trait contract is "errors as stat".
+        let _ = fs::metadata(&full).await?;
+        let access =
+            tokio::task::spawn_blocking(move || Self::effective_access(&full))
+                .await
+                .map_err(io::Error::other)?;
+        Ok(PathAccess::from_effective_access(access, self.read_only))
+    }
+
     fn read_only(&self) -> bool {
         self.read_only
     }
@@ -697,6 +769,26 @@ mod tests {
         assert_eq!(data, b"nested");
 
         cleanup(&dir).await;
+    }
+
+    // Without this, `LocalFs` on Windows would be a writable backend
+    // reporting an absent mode, and `test -w` would answer NO about every
+    // file there.
+    #[test]
+    fn synthesized_mode_keeps_writability_and_never_claims_exec() {
+        assert_eq!(LocalFs::synthesized_mode(false, false) & 0o222, 0o222);
+        assert_eq!(LocalFs::synthesized_mode(false, true) & 0o222, 0);
+        assert_eq!(LocalFs::synthesized_mode(true, false) & 0o222, 0o222);
+        assert_eq!(LocalFs::synthesized_mode(true, true) & 0o222, 0);
+        // Everything readable, whatever the read-only attribute says.
+        for (is_dir, readonly) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_ne!(LocalFs::synthesized_mode(is_dir, readonly) & 0o444, 0);
+        }
+        // Only directories get the x bit, and it means searchable.
+        assert_eq!(LocalFs::synthesized_mode(false, false) & 0o111, 0);
+        assert_eq!(LocalFs::synthesized_mode(false, true) & 0o111, 0);
+        assert_ne!(LocalFs::synthesized_mode(true, false) & 0o111, 0);
+        assert_ne!(LocalFs::synthesized_mode(true, true) & 0o111, 0);
     }
 
     #[tokio::test]
