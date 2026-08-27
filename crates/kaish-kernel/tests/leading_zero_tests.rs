@@ -407,6 +407,26 @@ async fn arithmetic_overflow_literal_names_the_64_bit_limit() {
     assert!(text.contains("overflow"), "addition overflow must still say overflow: {text:?}");
 }
 
+// ── `value_to_num` does not round an out-of-range string through f64 ───────
+
+/// `value_to_num`'s `String` arm fell to an `f64` parse whenever the `i64`
+/// parse failed — including on an integer-shaped string that only failed
+/// because it overflowed. Both sides of the comparison below round to 2^63
+/// in f64, so the comparison answered true for two numbers that are not
+/// equal. An all-digit string that overflows i64 must refuse instead.
+#[tokio::test]
+async fn an_overflowing_integer_string_is_refused_not_rounded_through_float() {
+    let text =
+        err_of(r#"x="9223372036854775808"; [[ $x -eq 9223372036854775807 ]]"#).await;
+    assert!(text.contains("64-bit"), "must name the 64-bit limit: {text:?}");
+
+    // A genuine float spelling still falls to f64 as before.
+    let (code, _, err) = run(r#"[[ "1.5" -gt 1 ]]"#).await;
+    assert_eq!(code, 0, "a float string must still compare: {err:?}");
+    let (code, _, err) = run(r#"[[ "1e3" -eq 1000 ]]"#).await;
+    assert_eq!(code, 0, "an exponent string must still compare: {err:?}");
+}
+
 // ── `-0` keeps source text at argv, canonicalizes once it moves ────────────
 
 /// `-0` is a valid JSON number, not a leading-zero refusal (`has_invalid_

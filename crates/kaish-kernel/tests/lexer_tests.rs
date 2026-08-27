@@ -292,6 +292,15 @@ fn lexer_integers(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+/// One past `i64::MAX` fits the `-?[0-9]+` regex but not the type it lexes
+/// into — `IntegerOutOfRange` names the limit instead of a generic failure.
+#[rstest]
+#[case::int_overflow_positive("9223372036854775808")]
+#[case::int_overflow_negative("-9223372036854775809")]
+fn lexer_integer_overflow_is_out_of_range(#[case] input: &str) {
+    run_lexer_error_variant(input, LexerError::IntegerOutOfRange);
+}
+
 // A leading zero followed by another digit is not a JSON number (RFC 8259:
 // `int = zero / (digit1-9 *DIGIT)`) — kaish already agrees for `fromjson`
 // (`fromjson '007'` is a loud parse error), and there is no reason for a

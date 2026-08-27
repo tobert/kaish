@@ -1205,9 +1205,25 @@ fn value_to_num(value: &Value) -> EvalResult<Num> {
                 });
             }
             if let Ok(n) = t.parse::<i64>() {
-                Ok(Num::Int(n))
-            } else if let Ok(f) = t.parse::<f64>() {
-                Ok(Num::Float(f))
+                return Ok(Num::Int(n));
+            }
+            // A float spelling (`1.5`, `1e3`) falls to f64 as before. An
+            // integer-shaped string that only failed above by overflow must
+            // not silently round through f64 — both sides of a comparison
+            // past i64::MAX round to the same f64, so `9223372036854775808
+            // -eq 9223372036854775807` would answer true.
+            let looks_like_float = t.contains(['.', 'e', 'E']);
+            if looks_like_float
+                && let Ok(f) = t.parse::<f64>()
+            {
+                return Ok(Num::Float(f));
+            }
+            let all_digits = t.strip_prefix('-').unwrap_or(t);
+            if !all_digits.is_empty() && all_digits.bytes().all(|b| b.is_ascii_digit()) {
+                Err(EvalError::TypeError {
+                    expected: "a number",
+                    got: format!("`{t}`, which {}", crate::lexer::INTEGER_OUT_OF_RANGE),
+                })
             } else {
                 Err(EvalError::TypeError {
                     expected: "numeric operand",
