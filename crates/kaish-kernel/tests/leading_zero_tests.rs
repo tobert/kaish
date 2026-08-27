@@ -151,6 +151,20 @@ async fn the_suggested_count_keeps_its_sign() {
     assert!(text.contains("write `break -22`"), "the sign must survive: {text:?}");
 }
 
+/// `break 007.5` used to suggest `break 7.5` — the fraction survives the
+/// zero-trim, but the count grammar takes only a whole number, so the
+/// suggestion was itself a parse error. The message must not repeat that
+/// mistake, and `break 007` (a genuine integer) must be unaffected.
+#[tokio::test]
+async fn the_suggested_count_is_never_a_fraction() {
+    let text = err_of("for i in 1 2; do break 007.5; done").await;
+    assert!(text.contains("whole-number"), "must say a whole number is needed: {text:?}");
+    assert!(!text.contains("write `break 7.5`"), "must not suggest a fraction: {text:?}");
+
+    let text = err_of("for i in 1 2; do break 007; done").await;
+    assert!(text.contains("write `break 7`"), "an integer count is unaffected: {text:?}");
+}
+
 /// bash reads `010` as octal and answers 9; kaish reads no octal and would
 /// answer 11. Answering a different number than the shell the author learned
 /// is the outcome worth refusing.

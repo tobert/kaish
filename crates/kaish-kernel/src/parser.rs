@@ -3762,13 +3762,22 @@ fn validate_leading_zero_counts(
         let sign = if word.starts_with('-') { "-" } else { "" };
         let digits = word.trim_start_matches('-').trim_start_matches('0');
         let count = format!("{sign}{}", if digits.is_empty() { "0" } else { digits });
-        return Err(vec![ParseError {
-            span: pair[1].1,
-            message: format!(
+        // The count grammar takes only a whole number — `007.5` trims to
+        // `7.5`, which is itself a parse error, so the fix cannot be the
+        // trimmed value. Name the integer part instead.
+        let message = if let Some((int_part, _)) = count.split_once('.') {
+            let int_part = if int_part.is_empty() || int_part == "-" { "0" } else { int_part };
+            format!(
+                "`{keyword}` takes a whole-number loop count and `{word}` is text (leading \
+                 zero) — write a whole number such as `{keyword} {int_part}`"
+            )
+        } else {
+            format!(
                 "`{keyword}` takes a loop count and `{word}` is text (leading zero) — write \
                  `{keyword} {count}`"
-            ),
-        }]);
+            )
+        };
+        return Err(vec![ParseError { span: pair[1].1, message }]);
     }
     Ok(())
 }
