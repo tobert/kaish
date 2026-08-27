@@ -603,7 +603,6 @@ impl<'a> Evaluator<'a> {
 
 }
 
-/// Convert a Value to its string representation for interpolation.
 /// Coerce a Value into an exit code (i64) for `return`/`exit`.
 ///
 /// Bash semantics: `return $(echo 42)` works because the captured text "42"
@@ -793,6 +792,7 @@ pub fn scalar_test_operand_error(op_symbol: &str, value: &Value) -> Option<Strin
     }
 }
 
+/// Convert a Value to its string representation for interpolation.
 pub fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
