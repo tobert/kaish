@@ -135,6 +135,12 @@ pub enum LexerError {
     HashInsideWord,
 }
 
+/// Message for a numeral outside i64 range. Shared with `arithmetic::parse_number`
+/// so the lexer and `$(( ))` name the same limit in the same words.
+pub(crate) const INTEGER_OUT_OF_RANGE: &str =
+    "does not fit in a 64-bit integer (-9223372036854775808..9223372036854775807); \
+     quote it to keep the text";
+
 impl fmt::Display for LexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -149,11 +155,7 @@ impl fmt::Display for LexerError {
             }
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
-            LexerError::IntegerOutOfRange => write!(
-                f,
-                "does not fit in a 64-bit integer (-9223372036854775808..9223372036854775807); \
-                 quote it to keep the text"
-            ),
+            LexerError::IntegerOutOfRange => write!(f, "{INTEGER_OUT_OF_RANGE}"),
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
             LexerError::NestingTooDeep => write!(f, "nesting depth exceeded (max {})", MAX_PAREN_DEPTH),

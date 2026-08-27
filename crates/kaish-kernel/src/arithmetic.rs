@@ -334,7 +334,9 @@ impl<'a> ArithParser<'a> {
                  `{trimmed}` for the decimal value"
             );
         }
-        num_str.parse().context("invalid number in arithmetic expression")
+        // The loop above admits only `[0-9]+`, so overflow is the only way
+        // this parse fails — same limit the lexer names, same words.
+        num_str.parse().context(crate::lexer::INTEGER_OUT_OF_RANGE)
     }
 
     fn parse_identifier(&mut self) -> Result<String> {

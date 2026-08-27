@@ -378,3 +378,17 @@ async fn a_leading_zero_numeral_past_64_bits_is_still_text() {
     let text = err_of("echo 9223372036854775808").await;
     assert!(text.contains("64-bit"), "must still name the 64-bit limit: {text:?}");
 }
+
+/// `$(( … ))` parses its own numerals separately from the lexer, and used to
+/// say only "invalid number" for an overflowing literal. It now names the
+/// same 64-bit limit the lexer does.
+#[tokio::test]
+async fn arithmetic_overflow_literal_names_the_64_bit_limit() {
+    let text = err_of("echo $((9223372036854775808))").await;
+    assert!(text.contains("64-bit"), "must name the limit: {text:?}");
+    assert!(!text.contains("invalid number"), "must not say only 'invalid': {text:?}");
+
+    // Overflow from addition is a different failure and keeps its own wording.
+    let text = err_of("echo $((9223372036854775807 + 1))").await;
+    assert!(text.contains("overflow"), "addition overflow must still say overflow: {text:?}");
+}
