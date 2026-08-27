@@ -309,7 +309,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Evaluate a bare `(( expr ))` condition: true when the value is
-    /// nonzero. The sibling of [`Self::eval_test`], same coercion as
+    /// nonzero. The sibling of `Self::eval_test`, same coercion as
     /// `$(( ))` (`eval_arithmetic` above) — only the truthiness wrapper
     /// differs.
     fn eval_arith_cond(&mut self, expr_str: &str) -> EvalResult<Value> {

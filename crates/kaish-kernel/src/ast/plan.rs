@@ -339,7 +339,7 @@ impl<'a> Collected<'a> {
     /// index expression (`xs[i]` reads both `xs` and `i` — Decision B, the
     /// index is itself arithmetic) — plus a `${...}`/`base#$var`/nested
     /// `$((...))` operand's own reads, and a `$(...)` operand's reads (via
-    /// [`collect_block`], the same walker a bare `$(...)` already goes
+    /// `collect_block`, the same walker a bare `$(...)` already goes
     /// through, so the two agree by construction rather than by two
     /// implementations staying in sync by hand). `$?`/`$$`/a positional
     /// parameter are not session variables, matching every other reader of

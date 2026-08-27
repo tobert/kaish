@@ -2,8 +2,8 @@
 //! reading.
 //!
 //! Three stages, kept separate so each can be tested on its own:
-//! [`tokenize`] (text → [`Tok`]), [`parse`] ([`Tok`] → [`ArithExpr`]), and
-//! evaluation ([`eval_sync`] for a scope with no `$(...)` reachable, and
+//! `tokenize` (text → `Tok`), `parse` (`Tok` → `ArithExpr`), and
+//! evaluation (`eval_sync` for a scope with no `$(...)` reachable, and
 //! `Kernel::eval_arith_async` in `kernel.rs` for the general case).
 //!
 //! Supports: decimal/hex/`base#digits` literals (base 2..=36), the full C
@@ -94,7 +94,7 @@ pub(crate) enum UnOp {
 
 /// A `$(...)`/`${...}`/`$name`/`$?`/`$$`/`$((...))` operand, still
 /// unresolved. Evaluating one is the only place `$(( ))` needs the async
-/// evaluator — everything else in [`ArithExpr`] is pure.
+/// evaluator — everything else in `ArithExpr` is pure.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Expansion {
     /// Bare `x` or `$x` — the whole value.
@@ -492,8 +492,7 @@ impl<'a> Tokenizer<'a> {
     fn consume_digits(&mut self, base: u32, lit_start: usize) -> Result<(u64, usize), ArithError> {
         let digits_start = self.pos;
         let mut mag: u64 = 0;
-        loop {
-            let Some(c) = self.peek() else { break };
+        while let Some(c) = self.peek() {
             if c == '_' {
                 return Err(ArithError::new(
                     format!("`{}` contains `_`; remove it", self.slice(lit_start, self.pos + 1)),
@@ -534,15 +533,14 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Consume a run of plain `0`-`9` digits, erroring loud on `_`. Unlike
-    /// [`Self::consume_digits`], a non-digit letter (`e`, `x`, …) is a clean
+    /// `Self::consume_digits`, a non-digit letter (`e`, `x`, …) is a clean
     /// stop, not an error — the base-10 run is used both as a full decimal
     /// literal and as the base number before `#`, and the caller decides
     /// what a trailing `e3`/`.5`/`#` means.
     fn consume_decimal_digits(&mut self, lit_start: usize) -> Result<(u64, usize), ArithError> {
         let digits_start = self.pos;
         let mut mag: u64 = 0;
-        loop {
-            let Some(c) = self.peek() else { break };
+        while let Some(c) = self.peek() {
             if c == '_' {
                 return Err(ArithError::new(
                     format!("`{}` contains `_`; remove it", self.slice(lit_start, self.pos + 1)),
@@ -651,8 +649,7 @@ impl<'a> Tokenizer<'a> {
                     start..self.pos,
                 ));
             }
-            if matches!(self.peek(), Some('+') | Some('-')) {
-                let sign = self.peek().unwrap();
+            if let Some(sign @ ('+' | '-')) = self.peek() {
                 let sign_start = self.pos;
                 self.pos += 1;
                 while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric()) {
@@ -699,7 +696,7 @@ impl<'a> Tokenizer<'a> {
         Ok(TokKind::Expansion(self.lex_expansion_body()?))
     }
 
-    /// Same as [`Self::lex_dollar`] but returning the bare [`Expansion`],
+    /// Same as `Self::lex_dollar` but returning the bare `Expansion`,
     /// for `base#$name` and `base#$(...)`.
     fn lex_expansion_body(&mut self) -> Result<Expansion, ArithError> {
         let dollar_start = self.pos;
@@ -1559,7 +1556,7 @@ pub(crate) fn expansion_label(e: &Expansion) -> (String, &'static str) {
 /// form (`16#-ff` is refused, naming `-16#ff`): the digits after `#` take
 /// no sign, whether the `#` came with the sign in source text or the sign
 /// arrived inside an expansion's value. `label`/`verb` name where the value
-/// came from (see [`expansion_label`]) for that refusal's message.
+/// came from (see `expansion_label`) for that refusal's message.
 pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Result<i64, ArithError> {
     let trimmed = text.trim();
     if let Some(stripped) = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')) {

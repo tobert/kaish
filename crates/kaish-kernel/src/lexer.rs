@@ -1662,9 +1662,11 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                             &mut i,
                             dpos,
                             total_len,
-                            &mut out,
-                            &mut arithmetics,
-                            &mut replacements,
+                            &mut ScanBuffers {
+                                out: &mut out,
+                                arithmetics: &mut arithmetics,
+                                replacements: &mut replacements,
+                            },
                             3,
                             false,
                         )?;
@@ -1742,9 +1744,11 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     &mut i,
                     pos,
                     total_len,
-                    &mut out,
-                    &mut arithmetics,
-                    &mut replacements,
+                    &mut ScanBuffers {
+                        out: &mut out,
+                        arithmetics: &mut arithmetics,
+                        replacements: &mut replacements,
+                    },
                     3,
                     false,
                 )?;
@@ -1760,9 +1764,11 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     &mut i,
                     pos,
                     total_len,
-                    &mut out,
-                    &mut arithmetics,
-                    &mut replacements,
+                    &mut ScanBuffers {
+                        out: &mut out,
+                        arithmetics: &mut arithmetics,
+                        replacements: &mut replacements,
+                    },
                     2,
                     true,
                 )?;
@@ -1971,14 +1977,22 @@ fn copy_substitution_verbatim(chars: &[(usize, char)], i: &mut usize, out: &mut 
     }
 }
 
+/// The scanner buffers `extract_arithmetic` appends to, grouped so the
+/// call carries one thing instead of three — `scan`'s own locals (`out`,
+/// `arithmetics`, `replacements`) still own the data; this just borrows
+/// all three for the one call.
+struct ScanBuffers<'a> {
+    out: &'a mut String,
+    arithmetics: &'a mut Vec<(String, String, bool)>,
+    replacements: &'a mut Vec<Replacement>,
+}
+
 fn extract_arithmetic(
     chars: &[(usize, char)],
     i: &mut usize,
     start_pos: usize,
     total_len: usize,
-    out: &mut String,
-    arithmetics: &mut Vec<(String, String, bool)>,
-    replacements: &mut Vec<Replacement>,
+    buffers: &mut ScanBuffers<'_>,
     marker_len: usize,
     is_condition: bool,
 ) -> Result<(), Spanned<LexerError>> {
@@ -2038,15 +2052,15 @@ fn extract_arithmetic(
 
     let end_pos = if *i < n { chars[*i].0 } else { total_len };
     let marker = format!("__KAISH_ARITH_{}__", unique_marker_id());
-    replacements.push(Replacement {
+    buffers.replacements.push(Replacement {
         orig_start: start_pos,
         orig_len: end_pos - start_pos,
-        new_start: out.len(),
+        new_start: buffers.out.len(),
         new_len: marker.len(),
-        kind: ReplacementKind::Arith(arithmetics.len()),
+        kind: ReplacementKind::Arith(buffers.arithmetics.len()),
     });
-    arithmetics.push((marker.clone(), expr, is_condition));
-    out.push_str(&marker);
+    buffers.arithmetics.push((marker.clone(), expr, is_condition));
+    buffers.out.push_str(&marker);
     Ok(())
 }
 

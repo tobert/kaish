@@ -4956,7 +4956,7 @@ impl Kernel {
     /// Evaluate `$(( text ))`'s content. Takes the sync fast path
     /// (`arithmetic::eval_sync` under one scope read lock) when no `$(...)`
     /// is reachable in the parsed tree; otherwise walks it with
-    /// [`Self::eval_arith_expr_async`], which can run a `$(...)` operand and
+    /// `Self::eval_arith_expr_async`, which can run a `$(...)` operand and
     /// never runs one on the unselected side of `&&`/`||`/`?:`.
     async fn eval_arithmetic_async(&self, text: &str) -> Result<i64> {
         let ast = crate::arithmetic::parse(text).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
@@ -4969,11 +4969,11 @@ impl Kernel {
     }
 
     /// Async recursive walk over a parsed `$(( ))` tree. Boxed for the same
-    /// reason as [`Self::eval_expr_async`]: the recursion is unbounded by
+    /// reason as `Self::eval_expr_async`: the recursion is unbounded by
     /// the type system, so a fixed-depth stack frame can't hold it. Each
     /// leaf takes its own short `self.scope` read lock rather than one held
     /// across the whole walk — `Expansion::CommandSubst` runs through
-    /// [`Self::execute_block_capturing`], which takes its own scope lock
+    /// `Self::execute_block_capturing`, which takes its own scope lock
     /// internally, so a lock held here across that await would deadlock.
     fn eval_arith_expr_async<'a>(
         &'a self,
@@ -5088,8 +5088,8 @@ impl Kernel {
     }
 
     /// The expansion's rendered VALUE, for `base#<expansion>` — mirrors
-    /// [`crate::arithmetic::expansion_text_sync`], async so `$(...)` can
-    /// run for real. Never routes through [`Self::eval_arith_expansion_async`]
+    /// `crate::arithmetic::expansion_text_sync`, async so `$(...)` can
+    /// run for real. Never routes through `Self::eval_arith_expansion_async`
     /// (the arithmetically-coerced form): that coercion refuses a leading
     /// zero, which is exactly what `10#$m`/`10#$(date +%m)` exist to escape.
     fn eval_arith_expansion_text_async<'a>(
@@ -5171,9 +5171,9 @@ impl Kernel {
     }
 
     /// Run a `$(...)` operand and return its printed text — the shared half
-    /// of [`Self::run_arith_command_subst`] (a bare operand, coerced to an
+    /// of `Self::run_arith_command_subst` (a bare operand, coerced to an
     /// integer) and the `base#$(...)` case (the text is read as digits in a
-    /// base, never coerced first — see [`crate::arithmetic::based_value`]).
+    /// base, never coerced first — see `crate::arithmetic::based_value`).
     async fn run_arith_command_subst_text(&self, stmts: &[Stmt]) -> Result<String> {
         let saved_scope = Box::new(self.scope.read().await.clone());
         let saved_ec = {
