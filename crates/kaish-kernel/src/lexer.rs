@@ -3583,8 +3583,9 @@ pub(crate) fn is_leading_zero_numeral(word: &str) -> bool {
 /// (`-1`, `42`, `3.14`) pays one string comparison and stays unchanged.
 ///
 /// Runs as the LAST step of `tokenize_impl`, after every fusion pass:
-/// `is_colon_mergeable` and `is_glob_mergeable` match `Int`/`Float` directly,
-/// so a numeral must still present its ordinary shape while fusion decides.
+/// `is_colon_mergeable` matches `Int` and `Float` directly and
+/// `is_glob_mergeable` matches `Int`, so a numeral must still present its
+/// ordinary shape while fusion decides.
 /// Spans are original-source coordinates by now, so `source[span]` is the
 /// exact word the author typed.
 fn preserve_numeric_source_text(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
