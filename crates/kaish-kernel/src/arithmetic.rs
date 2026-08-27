@@ -669,38 +669,80 @@ impl<'a> Tokenizer<'a> {
             }
             Some('(') => {
                 self.advance(); // consume '('
-                let remainder_start_byte = self.byte_pos();
-                let remainder = &self.text[remainder_start_byte..];
-                let toks = crate::lexer::tokenize(remainder).map_err(|_| {
-                    ArithError::new(
+                // A character-level scan, not a re-tokenize of the
+                // remainder: text after this substitution's own `)` is
+                // ARITHMETIC syntax (`+`, `**`, …), which kaish's general
+                // lexer does not tokenize at all outside `$(( ))` — handing
+                // it a remainder like "echo 1) + 2" made `lexer::tokenize`
+                // fail on the `+` before the close was ever found. Quotes
+                // are tracked (a literal `(`/`)` inside one does not count),
+                // matching the risk `extract_arithmetic` already accepts
+                // for `$((`'s own scan; a `\`-escaped quote is honored.
+                let cmd_start = self.pos;
+                let mut depth = 0i32;
+                let closed = loop {
+                    match self.peek() {
+                        None => break false,
+                        Some('\\') => {
+                            self.pos += 1;
+                            if self.peek().is_some() {
+                                self.pos += 1;
+                            }
+                        }
+                        Some('\'') => {
+                            self.pos += 1;
+                            while matches!(self.peek(), Some(c) if c != '\'') {
+                                self.pos += 1;
+                            }
+                            if self.peek() == Some('\'') {
+                                self.pos += 1;
+                            } else {
+                                break false;
+                            }
+                        }
+                        Some('"') => {
+                            self.pos += 1;
+                            loop {
+                                match self.peek() {
+                                    None => break,
+                                    Some('\\') => {
+                                        self.pos += 1;
+                                        if self.peek().is_some() {
+                                            self.pos += 1;
+                                        }
+                                    }
+                                    Some('"') => {
+                                        self.pos += 1;
+                                        break;
+                                    }
+                                    Some(_) => self.pos += 1,
+                                }
+                            }
+                        }
+                        Some('(') => {
+                            depth += 1;
+                            self.pos += 1;
+                        }
+                        Some(')') => {
+                            if depth > 0 {
+                                depth -= 1;
+                                self.pos += 1;
+                            } else {
+                                break true;
+                            }
+                        }
+                        Some(_) => self.pos += 1,
+                    }
+                };
+                if !closed {
+                    return Err(ArithError::new(
                         format!("`{}` has no closing `)`", self.slice(dollar_start, self.pos)),
-                        dollar_start..self.text.len(),
-                    )
-                })?;
-                let toks: Vec<(crate::lexer::Token, crate::parser::Span)> = toks
-                    .into_iter()
-                    .map(|sp| (sp.token, (sp.span.start..sp.span.end).into()))
-                    .collect();
-                let close = crate::parser::find_cmd_subst_close(&toks).ok_or_else(|| {
-                    ArithError::new(
-                        format!("`{}` has no closing `)`", self.slice(dollar_start, self.pos)),
-                        dollar_start..self.text.len(),
-                    )
-                })?;
-                let close_span = toks[close].1;
-                let close_start: usize = close_span.start;
-                let close_end: usize = close_span.end;
-                let cmd_text = &remainder[..close_start];
-                // Advance past the command text plus its closing `)`.
-                let consumed_bytes = close_end;
-                let mut consumed_chars = 0usize;
-                let mut byte_count = 0usize;
-                while byte_count < consumed_bytes && self.pos + consumed_chars < self.chars.len() {
-                    byte_count += self.chars[self.pos + consumed_chars].1.len_utf8();
-                    consumed_chars += 1;
+                        dollar_start..self.byte_pos(),
+                    ));
                 }
-                self.pos += consumed_chars;
-                match crate::parser::parse(cmd_text) {
+                let cmd_text = self.slice(cmd_start, self.pos).to_string();
+                self.pos += 1; // consume the ')'
+                match crate::parser::parse(&cmd_text) {
                     Ok(program) => Ok(Expansion::CommandSubst(program.statements)),
                     Err(_) => Err(ArithError::new(
                         format!("syntax error in command substitution: $({cmd_text})"),
@@ -1110,6 +1152,15 @@ pub(crate) fn apply_binary(op: BinOp, l: i64, r: i64) -> Result<i64, ArithError>
         BinOp::Rem => {
             if r == 0 {
                 return Err(ArithError::new(format!("`{l} % 0` divides by zero"), 0..0));
+            }
+            // `i64::checked_rem` returns `None` for `MIN % -1` too — it is
+            // defined in terms of the division, which overflows, even
+            // though the remainder itself (0, any divisor of ±1 divides
+            // evenly) always fits. Division by ±1 never has a remainder,
+            // for any `l`, so this is a real answer, not a special case
+            // bolted onto an edge — checked_rem is just wrong here.
+            if r == -1 {
+                return Ok(0);
             }
             l.checked_rem(r).ok_or_else(|| overflow(l, op, r))
         }
@@ -1919,3 +1970,4 @@ mod tests {
         assert!(msg.contains("256"), "{msg}");
     }
 }
+
