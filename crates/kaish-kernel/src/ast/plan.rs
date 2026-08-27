@@ -334,20 +334,81 @@ impl<'a> Collected<'a> {
         }
     }
 
-    /// Record every identifier in an arithmetic expression as a read.
-    /// kaish arithmetic is numbers, variables (bare or `${name}`), and
-    /// operators — an identifier token is always a variable.
+    /// Record every variable a `$(( ))` (or bare `(( ))`) reads: every
+    /// `Ref` name — bare or `$`-prefixed, a bare subscript's root AND its
+    /// index expression (`xs[i]` reads both `xs` and `i` — Decision B, the
+    /// index is itself arithmetic) — plus a `${...}`/`base#$var`/nested
+    /// `$((...))` operand's own reads, and a `$(...)` operand's reads (via
+    /// [`collect_block`], the same walker a bare `$(...)` already goes
+    /// through, so the two agree by construction rather than by two
+    /// implementations staying in sync by hand). `$?`/`$$`/a positional
+    /// parameter are not session variables, matching every other reader of
+    /// them in this file. Parses the text with the real arithmetic parser
+    /// rather than scanning for identifier-shaped substrings — the old
+    /// scan read `ff` out of `16#ff` and `xff` out of `0xff` as if they
+    /// were variables. A syntax error inside the text reads nothing: the
+    /// statement's own parse already failed loudly if this text was
+    /// invalid, so a plan never reaches an unparseable arithmetic body.
     fn read_arithmetic(&mut self, expr: &str) {
-        let mut name = String::new();
-        for c in expr.chars() {
-            if c == '_' || c.is_ascii_alphabetic() || (!name.is_empty() && c.is_ascii_digit()) {
-                name.push(c);
-            } else if !name.is_empty() {
-                self.reads.insert(std::mem::take(&mut name));
+        if let Ok(parsed) = crate::arithmetic::parse(expr) {
+            self.read_arith_expr(&parsed);
+        }
+    }
+
+    fn read_arith_expr(&mut self, expr: &crate::arithmetic::ArithExpr) {
+        use crate::arithmetic::ArithExpr;
+        match expr {
+            ArithExpr::Int(_) => {}
+            ArithExpr::Expansion(e) => self.read_arith_expansion(e),
+            ArithExpr::Subscript { root, indices } => {
+                self.reads.insert(root.clone());
+                for index in indices {
+                    self.read_arith_expr(index);
+                }
+            }
+            ArithExpr::BasedExpansion { expansion, .. } => self.read_arith_expansion(expansion),
+            ArithExpr::Unary { operand, .. } => self.read_arith_expr(operand),
+            ArithExpr::Binary { left, right, .. } => {
+                self.read_arith_expr(left);
+                self.read_arith_expr(right);
+            }
+            ArithExpr::Ternary { cond, then_branch, else_branch } => {
+                self.read_arith_expr(cond);
+                self.read_arith_expr(then_branch);
+                self.read_arith_expr(else_branch);
             }
         }
-        if !name.is_empty() {
-            self.reads.insert(name);
+    }
+
+    fn read_arith_expansion(&mut self, e: &crate::arithmetic::Expansion) {
+        use crate::arithmetic::Expansion;
+        match e {
+            // A bare `$1` is a positional parameter, not a session
+            // variable — same exclusion `collect_expr` applies to
+            // `Expr::Positional` below.
+            Expansion::Var(name) => {
+                if name.parse::<usize>().is_err() {
+                    self.reads.insert(name.clone());
+                }
+            }
+            Expansion::BracedPath { root, brackets } => {
+                let raw = format!("${{{root}{brackets}}}");
+                self.read_path(&crate::parser::parse_varpath(&raw));
+            }
+            Expansion::BracedDefault { root, brackets, default } => {
+                let raw = format!("${{{root}{brackets}}}");
+                self.read_path(&crate::parser::parse_varpath(&raw));
+                if let Ok(parsed) = crate::arithmetic::parse(default) {
+                    self.read_arith_expr(&parsed);
+                }
+            }
+            Expansion::LastExitCode | Expansion::CurrentPid => {}
+            Expansion::CommandSubst(stmts) => {
+                let mut inner = Collected::default();
+                collect_block(stmts, false, &mut inner);
+                self.reads.extend(inner.reads);
+            }
+            Expansion::Nested(inner) => self.read_arith_expr(inner),
         }
     }
 }
@@ -1282,6 +1343,67 @@ mod tests {
             "every lexical read is listed, sorted"
         );
         assert!(plan.bound_variables.is_empty());
+    }
+
+    // ── Arithmetic reads via the real parser, not a text scan ──
+    //
+    // The scan used to treat any identifier-shaped substring as a
+    // variable, so a base literal's own digits (`ff` in `16#ff`, `xff` in
+    // `0xff`) were reported as free variables `get_var` can never resolve
+    // — a plan consumer (kaijutsu) reading this to decide what a script
+    // needs before running it got a wrong answer, not a cosmetic one.
+
+    #[test]
+    fn a_based_literal_reads_nothing() {
+        assert!(plan_of("echo $((16#ff + 1))").free_variables.is_empty());
+    }
+
+    #[test]
+    fn a_hex_literal_reads_nothing_but_a_real_operand_still_does() {
+        assert_eq!(plan_of("echo $((0xff + x))").free_variables, vec!["x"]);
+    }
+
+    #[test]
+    fn based_expansion_reads_the_variable_not_the_base() {
+        assert_eq!(plan_of("echo $((10#$m % 12))").free_variables, vec!["m"]);
+    }
+
+    #[test]
+    fn ternary_reads_both_branches_deduped_and_sorted() {
+        assert_eq!(plan_of("echo $((a > b ? a : b))").free_variables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_bare_subscript_reads_the_root_and_the_index_variable() {
+        // Decision B: `xs[i]` reads `i` as a variable (the index is itself
+        // arithmetic) as well as `xs` — unlike `${xs[i]}`, where `i` is a
+        // literal key and only `xs` is read.
+        assert_eq!(plan_of("echo $((xs[i] + 1))").free_variables, vec!["i", "xs"]);
+        assert_eq!(plan_of("echo ${xs[i]}").free_variables, vec!["xs"]);
+    }
+
+    #[test]
+    fn last_exit_code_and_pid_are_not_session_variables() {
+        assert!(plan_of("echo $(($? + $$))").free_variables.is_empty());
+    }
+
+    #[test]
+    fn random_and_seconds_are_free_variables_like_any_other_name() {
+        // Planning is static — it cannot know RANDOM/SECONDS will be
+        // unset at eval time, and a plan consumer may set them, so they
+        // are reported exactly like any other bare name.
+        assert_eq!(plan_of("echo $((RANDOM % 10))").free_variables, vec!["RANDOM"]);
+    }
+
+    #[test]
+    fn command_substitution_inside_arithmetic_contributes_its_own_reads() {
+        assert_eq!(plan_of("echo $((1 + $(echo $y)))").free_variables, vec!["y"]);
+    }
+
+    #[test]
+    fn a_bare_arith_condition_reads_like_any_other_arithmetic() {
+        let plan = plan_of("while (( i <= n )); do :; done");
+        assert_eq!(plan.free_variables, vec!["i", "n"]);
     }
 
     #[test]
