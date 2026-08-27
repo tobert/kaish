@@ -146,7 +146,7 @@ remind us how we got to the code it contains. The code can speak for itself.
 
 Write it as a clinical engineering narrative: the problem, the evidence, the decision,
 the rule now in force. Design stories, plans, review transcripts, and model-panel
-results live in exomemory, not in the repo, and a commit never references them.
+results live in agent memory outside the repo, and a commit never references them.
 
 ## Architecture
 
