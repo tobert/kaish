@@ -1,16 +1,8 @@
-//! random — Print one random integer from `--min` to `--max`, inclusive.
-//!
-//! kaish has no `$RANDOM`; this builtin is the typed replacement. `$(random
-//! --max 100)` binds a `number`, not a string, so `$((x + 1))` works on the
-//! result directly.
-//!
-//! # Examples
+//! random — print one integer from `--min` to `--max`, inclusive.
+//! kaish has no `$RANDOM`; `$(random --max 100)` is the typed replacement.
 //!
 //! ```kaish
-//! random                              # 0..=32767, like bash's $RANDOM
-//! random --max 6                      # roll a die: 0..=6
-//! random --min -5 --max 5             # negative bounds are fine
-//! x=$(random --max 6); echo $((x + 1))
+//! random --max 6   # roll a die: 0..=6
 //! ```
 
 use async_trait::async_trait;
@@ -71,9 +63,7 @@ impl Tool for Random {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
 
-        // random takes no positional argument. Check before argv/clap ever
-        // sees one, so the curated error names the value the caller gave
-        // instead of clap's generic "unexpected argument".
+        // No positional args; curate the error before clap ever sees one.
         if let Some(v) = args.positional.first() {
             let value = value_to_string(v);
             return ExecResult::failure(
@@ -120,12 +110,8 @@ impl Tool for Random {
     }
 }
 
-/// Draw one integer in `min..=max`, inclusive, uniformly at random from the
-/// OS CSPRNG.
-///
-/// No fallback: a `getrandom` failure is a hard error, not a predictable
-/// substitute — a `random` call a script trusted for a coin flip must never
-/// silently return a fixed or guessable value.
+/// Draws one integer in `min..=max` from the OS CSPRNG. No fallback: a
+/// `getrandom` failure is a hard error, never a silently guessable value.
 fn draw_random(min: i64, max: i64) -> Result<i64, getrandom::Error> {
     loop {
         let mut entropy = [0u8; 8];
@@ -134,29 +120,20 @@ fn draw_random(min: i64, max: i64) -> Result<i64, getrandom::Error> {
         if let Some(value) = map_draw_to_range(draw, min, max) {
             return Ok(value);
         }
-        // Rejected below to avoid bias — redraw.
     }
 }
 
-/// Map one 64-bit draw onto `min..=max` (inclusive) via Lemire's method:
-/// widen the multiply into 128 bits, then reject the low slice that would
-/// otherwise make one bucket slightly more likely than the rest. This is
-/// what `draw % width` gets wrong whenever `width` doesn't evenly divide
-/// 2^64 — the plain modulo skews toward the low end of the range.
-///
-/// `None` means the draw must be discarded and redrawn; the caller loops.
-/// Pure and deterministic: the same `draw`, `min`, `max` always agree, so it
-/// never itself touches the CSPRNG.
+/// Maps one 64-bit draw onto `min..=max`, inclusive, via Lemire's method:
+/// widen the multiply to 128 bits and reject the low slice that would bias
+/// a bucket. `None` means redraw.
 fn map_draw_to_range(draw: u64, min: i64, max: i64) -> Option<i64> {
     debug_assert!(min <= max);
 
-    // Width as u128: `max - min + 1` can be exactly 2^64 (the full i64
-    // span), which does not fit a u64.
+    // u128: width can be exactly 2^64, which doesn't fit u64.
     let width: u128 = (max as i128 - min as i128) as u128 + 1;
 
     if width > u64::MAX as u128 {
-        // min == i64::MIN, max == i64::MAX: every draw is already a unique,
-        // uniform point in the range. No scaling, no bias, no rejection.
+        // Full i64 span: every draw already maps 1:1, no bias possible.
         return Some((min as i128 + draw as i128) as i64);
     }
     let width = width as u64;
@@ -168,9 +145,7 @@ fn map_draw_to_range(draw: u64, min: i64, max: i64) -> Option<i64> {
     let hi = (product >> 64) as u64;
     let lo = product as u64;
 
-    // Draws below this threshold would land in a short final bucket,
-    // making it less likely than the rest — reject instead of accepting
-    // that skew.
+    // Below threshold: redraw to avoid skewing the low bucket.
     let threshold = width.wrapping_neg() % width;
     if lo < threshold {
         return None;
