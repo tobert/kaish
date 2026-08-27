@@ -122,6 +122,31 @@ async fn not_supported_table() {
     }
 }
 
+/// Round-2 review: these error texts used to print a hardcoded `name`/`rhs`
+/// placeholder (and the wrong shape for `+=`/`=`) instead of the tokens the
+/// author actually typed.
+#[tokio::test]
+async fn assignment_errors_name_the_real_source() {
+    let text = err_of("echo $((x++))").await;
+    assert!(text.contains("`x++`") && text.contains("x=$((x + 1))"), "{text:?}");
+    let text = err_of("echo $((++x))").await;
+    assert!(text.contains("`++x`") && text.contains("x=$((x + 1))"), "{text:?}");
+    let text = err_of("echo $((x--))").await;
+    assert!(text.contains("`x--`") && text.contains("x=$((x - 1))"), "{text:?}");
+    let text = err_of("echo $((x += 2))").await;
+    assert!(text.contains("`x += 2`") && text.contains("x=$((x + 2))"), "{text:?}");
+    let text = err_of("echo $((x = 2))").await;
+    assert!(text.contains("`x = 2`") && text.contains("write `x=2`, or `==` to compare"), "{text:?}");
+}
+
+#[tokio::test]
+async fn missing_operand_errors_are_specific() {
+    let text = err_of("echo $((1 + ))").await;
+    assert!(text.contains("has no right operand"), "{text:?}");
+    let text = err_of("echo $(( + ))").await;
+    assert!(text.contains("has no operand"), "{text:?}");
+}
+
 // ── Coercion table ──────────────────────────────────────────────────────────
 
 #[tokio::test]

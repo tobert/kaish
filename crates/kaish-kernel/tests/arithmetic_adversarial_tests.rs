@@ -271,8 +271,8 @@ async fn hash_is_never_a_comment_inside_arithmetic() {
 
 #[tokio::test]
 async fn missing_operands_are_errors() {
-    assert!(!err_of("echo $((1 + ))").await.is_empty());
-    assert!(!err_of("echo $(( + ))").await.is_empty());
+    errs("echo $((1 + ))", "has no right operand").await;
+    errs("echo $(( + ))", "has no operand").await;
 }
 
 #[tokio::test]

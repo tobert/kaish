@@ -282,8 +282,16 @@ impl<'a> Tokenizer<'a> {
                         TokKind::Bang
                     }
                 }
-                '+' => { self.advance(); self.reject_compound_or("+")?; TokKind::Op(BinOp::Add) }
-                '-' => { self.advance(); self.reject_compound_or("-")?; TokKind::Op(BinOp::Sub) }
+                '+' => {
+                    self.advance();
+                    self.reject_compound_or('+', start_byte, &out)?;
+                    TokKind::Op(BinOp::Add)
+                }
+                '-' => {
+                    self.advance();
+                    self.reject_compound_or('-', start_byte, &out)?;
+                    TokKind::Op(BinOp::Sub)
+                }
                 '*' => {
                     self.advance();
                     if self.peek() == Some('*') {
@@ -337,12 +345,23 @@ impl<'a> Tokenizer<'a> {
                         self.advance();
                         TokKind::Op(BinOp::Eq)
                     } else {
+                        let end = self.text.len();
+                        let rhs = self.text[self.byte_pos()..].trim();
+                        if let Some((name, name_start)) = Self::preceding_name(&out) {
+                            let source = &self.text[name_start..end];
+                            return Err(ArithError::new(
+                                format!(
+                                    "`{source}` assigns inside `$(( ))`; write `{name}={rhs}`, or `==` to compare"
+                                ),
+                                name_start..end,
+                            ));
+                        }
+                        let source = &self.text[start_byte..end];
                         return Err(ArithError::new(
                             format!(
-                                "`{}` assigns inside `$(( ))`; write `name=$((rhs))`, or `==` to compare",
-                                self.slice(start, self.pos)
+                                "`{source}` assigns inside `$(( ))`; write `name=rhs`, or `==` to compare"
                             ),
-                            start..self.pos,
+                            start_byte..end,
                         ));
                     }
                 }
@@ -385,27 +404,75 @@ impl<'a> Tokenizer<'a> {
 
     /// After consuming `+`/`-`, refuse `++`/`--`/`+=`/`-=` outright — kaish
     /// has no assignment or increment inside `$(( ))`.
-    fn reject_compound_or(&mut self, sym: &str) -> Result<(), ArithError> {
-        let start = self.pos - 1;
-        if self.peek() == Some(sym.chars().next().unwrap_or(' ')) {
+    /// The identifier that ends immediately before `op_start_byte` — the
+    /// `x` in `x++`/`x += 2`/`x = 2`, read from the token already emitted
+    /// (the operator has not been pushed onto `out` yet).
+    fn preceding_name(out: &[Tok]) -> Option<(String, usize)> {
+        match out.last() {
+            Some(Tok { kind: TokKind::Ident(name), span }) => Some((name.clone(), span.start)),
+            _ => None,
+        }
+    }
+
+    /// The identifier starting at the current position — the `x` in
+    /// `++x`/`--x`, where the operator precedes the name. Consumes it:
+    /// this is only called on a path that is about to return `Err`, so
+    /// leaving `self.pos` past it does not affect anything further.
+    fn consume_following_name(&mut self) -> Option<(String, usize)> {
+        let start = self.pos;
+        if !matches!(self.peek(), Some(c) if c.is_ascii_alphabetic() || c == '_') {
+            return None;
+        }
+        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == '_') {
+            self.pos += 1;
+        }
+        Some((self.slice(start, self.pos).to_string(), self.byte_pos()))
+    }
+
+    /// After consuming `+`/`-`, refuse `++`/`--`/`+=`/`-=` outright — kaish
+    /// has no assignment or increment inside `$(( ))`. Names the real
+    /// identifier — from the token just emitted for `x++`/`x+=` (postfix),
+    /// or scanned forward for `++x` (prefix) — rather than a placeholder.
+    fn reject_compound_or(&mut self, sym: char, op_start_byte: usize, out: &[Tok]) -> Result<(), ArithError> {
+        let step = if sym == '+' { "+ 1" } else { "- 1" };
+        if self.peek() == Some(sym) {
             self.advance();
-            let name_hint = "name";
+            let end = self.byte_pos();
+            if let Some((name, name_start)) = Self::preceding_name(out) {
+                let source = &self.text[name_start..end];
+                return Err(ArithError::new(
+                    format!("`{source}` assigns inside `$(( ))`; write `{name}=$(({name} {step}))`"),
+                    name_start..end,
+                ));
+            }
+            if let Some((name, name_end)) = self.consume_following_name() {
+                let source = &self.text[op_start_byte..name_end];
+                return Err(ArithError::new(
+                    format!("`{source}` assigns inside `$(( ))`; write `{name}=$(({name} {step}))`"),
+                    op_start_byte..name_end,
+                ));
+            }
+            let source = &self.text[op_start_byte..end];
             return Err(ArithError::new(
-                format!(
-                    "`{}{sym}` assigns inside `$(( ))`; write `{name_hint} = {name_hint} {sym1} 1`",
-                    sym,
-                    sym1 = sym,
-                ),
-                start..self.pos,
+                format!("`{source}` assigns inside `$(( ))`; write `name=$((name {step}))`"),
+                op_start_byte..end,
             ));
         }
         if self.peek() == Some('=') {
             self.advance();
+            let end = self.text.len();
+            let rhs = self.text[self.byte_pos()..].trim();
+            if let Some((name, name_start)) = Self::preceding_name(out) {
+                let source = &self.text[name_start..end];
+                return Err(ArithError::new(
+                    format!("`{source}` assigns inside `$(( ))`; write `{name}=$(({name} {sym} {rhs}))`"),
+                    name_start..end,
+                ));
+            }
+            let source = &self.text[op_start_byte..end];
             return Err(ArithError::new(
-                format!(
-                    "`{sym}=` assigns inside `$(( ))`; write `name=$((name {sym} rhs))`",
-                ),
-                start..self.pos,
+                format!("`{source}` assigns inside `$(( ))`; write `name=$((name {sym} rhs))`"),
+                op_start_byte..end,
             ));
         }
         Ok(())
@@ -859,11 +926,38 @@ struct Parser {
     pos: usize,
     depth: usize,
     end: usize,
+    /// The arithmetic source, kept so a "no operand" error can quote the
+    /// text consumed so far (`{expr}` in the spec's error table).
+    text: String,
 }
 
 impl Parser {
-    fn new(toks: Vec<Tok>, end: usize) -> Self {
-        Self { toks, pos: 0, depth: 0, end }
+    fn new(toks: Vec<Tok>, end: usize, text: &str) -> Self {
+        Self { toks, pos: 0, depth: 0, end, text: text.to_string() }
+    }
+
+    /// `` `{op}` has no right operand in `{expr}` `` — the operator was the
+    /// last token; `expr` is the whole source (trailing whitespace
+    /// included, as the spec's own example shows: "1 + " — this only fires
+    /// when the operator was the LAST token, so the whole text amounts to
+    /// "everything through end of input").
+    fn missing_right_operand(&self, op: &str, op_span: &Range<usize>) -> ArithError {
+        ArithError::new(
+            format!(
+                "`{op}` has no right operand in `{}`; add an integer expression after `{op}`",
+                self.text
+            ),
+            op_span.clone(),
+        )
+    }
+
+    /// `` `{op}` has no operand `` — a unary/power operator with nothing at
+    /// all after it (no left operand to show, unlike the binary case).
+    fn missing_operand(&self, op: &str, op_span: &Range<usize>) -> ArithError {
+        ArithError::new(
+            format!("`{op}` has no operand; add an integer expression after `{op}`"),
+            op_span.clone(),
+        )
     }
 
     fn peek(&self) -> Option<&TokKind> {
@@ -894,15 +988,6 @@ impl Parser {
         self.depth -= 1;
     }
 
-    fn eat_op(&mut self, want: BinOp) -> bool {
-        if self.peek() == Some(&TokKind::Op(want)) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-
     fn left_assoc(
         &mut self,
         ops: &[BinOp],
@@ -912,7 +997,11 @@ impl Parser {
         loop {
             let matched = ops.iter().copied().find(|op| self.peek() == Some(&TokKind::Op(*op)));
             let Some(op) = matched else { break };
+            let op_span = self.peek_span();
             self.pos += 1;
+            if self.pos >= self.toks.len() {
+                return Err(self.missing_right_operand(op.symbol(), &op_span));
+            }
             let right = next(self)?;
             left = ArithExpr::Binary { op, left: Box::new(left), right: Box::new(right) };
         }
@@ -986,7 +1075,12 @@ impl Parser {
 
     fn parse_power(&mut self) -> Result<ArithExpr, ArithError> {
         let base = self.parse_unary()?;
-        if self.eat_op(BinOp::Pow) {
+        if self.peek() == Some(&TokKind::Op(BinOp::Pow)) {
+            let op_span = self.peek_span();
+            self.pos += 1;
+            if self.pos >= self.toks.len() {
+                return Err(self.missing_right_operand("**", &op_span));
+            }
             self.enter()?;
             let exp = self.parse_power()?;
             self.leave();
@@ -1005,7 +1099,12 @@ impl Parser {
         self.enter()?;
         let result = match self.peek() {
             Some(&TokKind::Op(BinOp::Sub)) => {
+                let op_span = self.peek_span();
                 self.pos += 1;
+                if self.pos >= self.toks.len() {
+                    self.leave();
+                    return Err(self.missing_operand("-", &op_span));
+                }
                 if let Some(&TokKind::Number(mag)) = self.peek() {
                     if mag == Self::MIN_MAGNITUDE {
                         self.pos += 1;
@@ -1017,16 +1116,31 @@ impl Parser {
                 ArithExpr::Unary { op: UnOp::Neg, operand: Box::new(operand) }
             }
             Some(&TokKind::Op(BinOp::Add)) => {
+                let op_span = self.peek_span();
                 self.pos += 1;
+                if self.pos >= self.toks.len() {
+                    self.leave();
+                    return Err(self.missing_operand("+", &op_span));
+                }
                 self.parse_unary()?
             }
             Some(&TokKind::Bang) => {
+                let op_span = self.peek_span();
                 self.pos += 1;
+                if self.pos >= self.toks.len() {
+                    self.leave();
+                    return Err(self.missing_operand("!", &op_span));
+                }
                 let operand = self.parse_unary()?;
                 ArithExpr::Unary { op: UnOp::Not, operand: Box::new(operand) }
             }
             Some(&TokKind::Tilde) => {
+                let op_span = self.peek_span();
                 self.pos += 1;
+                if self.pos >= self.toks.len() {
+                    self.leave();
+                    return Err(self.missing_operand("~", &op_span));
+                }
                 let operand = self.parse_unary()?;
                 ArithExpr::Unary { op: UnOp::BitNot, operand: Box::new(operand) }
             }
@@ -1112,7 +1226,7 @@ pub(crate) fn parse(text: &str) -> Result<ArithExpr, ArithError> {
         ));
     }
     let end = text.len();
-    let mut parser = Parser::new(toks, end);
+    let mut parser = Parser::new(toks, end, text);
     let expr = parser.parse_conditional()?;
     if let Some(extra) = parser.peek() {
         if extra == &TokKind::RParen {
@@ -1954,6 +2068,26 @@ mod tests {
         assert!(err("x += 1").contains("assigns"));
         assert!(err("x++").contains("assigns"));
         assert!(err("1, 2").contains("one expression"));
+    }
+
+    #[test]
+    fn assignment_errors_name_the_real_tokens_not_a_placeholder() {
+        assert_eq!(err("x++"), "`x++` assigns inside `$(( ))`; write `x=$((x + 1))`");
+        assert_eq!(err("++x"), "`++x` assigns inside `$(( ))`; write `x=$((x + 1))`");
+        assert_eq!(err("x--"), "`x--` assigns inside `$(( ))`; write `x=$((x - 1))`");
+        assert_eq!(err("--x"), "`--x` assigns inside `$(( ))`; write `x=$((x - 1))`");
+        assert_eq!(err("x += 2"), "`x += 2` assigns inside `$(( ))`; write `x=$((x + 2))`");
+        assert_eq!(err("x -= 3"), "`x -= 3` assigns inside `$(( ))`; write `x=$((x - 3))`");
+        assert_eq!(err("x = 2"), "`x = 2` assigns inside `$(( ))`; write `x=2`, or `==` to compare");
+    }
+
+    #[test]
+    fn missing_operand_names_the_source_consumed_so_far() {
+        assert_eq!(
+            err("1 + "),
+            "`+` has no right operand in `1 + `; add an integer expression after `+`"
+        );
+        assert_eq!(err(" + "), "`+` has no operand; add an integer expression after `+`");
     }
 
     #[test]
