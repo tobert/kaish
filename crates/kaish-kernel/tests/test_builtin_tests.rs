@@ -83,7 +83,18 @@ async fn numeric_integer() {
     assert_eq!(code_of("test 3 -lt 5").await, 0);
     assert_eq!(code_of("test 5 -ge 5").await, 0);
     assert_eq!(code_of("test 4 -le 5").await, 0);
-    assert_eq!(code_of("test 08 -eq 8").await, 0, "leading zero is decimal, not octal");
+}
+
+/// Deliberate inversion of the old pin above (leading zero used to read as
+/// decimal). The number-position rule itself lives in `leading_zero_tests.rs`.
+#[tokio::test]
+async fn numeric_leading_zero_operand_is_refused() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("test 08 -eq 8").await.expect("kernel execute");
+    assert_eq!(result.code, 2, "leading-zero operand is refused, not read as decimal");
+    assert!(result.err.contains("(leading zero)"), "must name the cause: {:?}", result.err);
+    assert!(result.err.contains("write `8`"), "must name the fix: {:?}", result.err);
 }
 
 /// Negative numbers as operands (second position is the killer spot — a `-5`
