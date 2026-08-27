@@ -189,7 +189,9 @@ impl Tool for Grep {
                             rewrote,
                             Some("-E"),
                         ),
-                    ).with_suggestion("check regex syntax at https://docs.rs/regex"));
+                    )
+                    .with_suggestion("check regex syntax at https://docs.rs/regex")
+                    .with_command(self.name()));
                 }
         }
 

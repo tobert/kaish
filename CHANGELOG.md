@@ -20,11 +20,21 @@ breaking entries are marked **BREAKING**.
   register an external program as a tool with a declared grammar. Verbs and flags
   are deny-by-default, refused with exit 2 before any spawn; the kernel renders
   argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
+- **`ValidationIssue::command`** — the command an issue concerns, when one is
+  genuinely known (`UndefinedCommand`'s name, a builtin's own regex/schema
+  failure), so an embedder can route on it instead of parsing `message`.
+  Absent, not a placeholder, for issues that aren't about a command at all
+  (a bad assignment target, `break` outside a loop). `#[non_exhaustive]`
+  already blocked struct-literal construction, so this is not breaking.
 
 - **Plan JSON carries build identity** — `kaish_version`, `kaish_git_hash`,
   and `kaish_build_date` ride along on every `--plan`/`--plan-file`/`plan`
   document, success or error, so a consumer windowing measurements by build
   no longer shells out to `kaish --version` per call.
+
+- **`KernelBackend::path_access` and `Filesystem::path_access`** — the per-path
+  read/write/execute query behind the file tests. Both are defaulted, so
+  existing implementations keep compiling; not breaking.
 
 ### Fixed
 - `help <tool>` renders a tool's subcommands and their flags, and names each
@@ -66,6 +76,10 @@ breaking entries are marked **BREAKING**.
   `0`, `echo 0.10` printed `0.1`. `echo`, function calls, and script
   `$1`/`$2` now keep the source word, matching the external-command fix
   above.
+- **File tests on virtual and real paths** — `-w` claimed read-only mounts and
+  root-owned files were writable, and `-x` denied that a memory-backed
+  directory is searchable. `-w`/`-r`/`-x` now answer from the owning mount plus
+  the OS's effective access.
 
 ## [0.16.0] - 2026-08-23
 

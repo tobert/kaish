@@ -40,6 +40,7 @@ use super::{
 };
 use crate::tools::{ToolArgs, ToolCtx};
 use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
+use kaish_types::PathAccess;
 
 /// The final path component, used to name a synthesized directory entry for a
 /// shared ancestor (`/v` → `v`). Falls back to `/` for a component-less path.
@@ -416,6 +417,21 @@ impl KernelBackend for VirtualOverlayBackend {
     fn read_only(&self) -> bool {
         // We're not read-only if either layer is writable
         self.inner.read_only() && self.vfs.read_only()
+    }
+
+    /// Routes the same way `stat` does, so the answer comes from the layer
+    /// that owns the path. The trait default would use `read_only()` above,
+    /// which is the AND of both layers and belongs to neither path.
+    async fn path_access(&self, path: &Path) -> BackendResult<PathAccess> {
+        if self.is_virtual_path(path) {
+            Ok(self.vfs.path_access(path).await?)
+        } else if self.is_shared_ancestor(path) {
+            // A synthesized ancestor directory exists only to be traversed:
+            // readable and searchable, and kaish creates nothing in it.
+            Ok(PathAccess::resolve(Some(0o555), true))
+        } else {
+            self.inner.path_access(path).await
+        }
     }
 
     fn backend_type(&self) -> &str {

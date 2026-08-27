@@ -484,6 +484,14 @@ fn a_literal_unknown_flag_is_an_error_before_anything_runs() {
 }
 
 #[test]
+fn a_refusal_records_the_command_it_is_about() {
+    // The message opens with the command, so an absent field here would read
+    // as "not about a command" — the one thing the field exists to mean.
+    let issues = tool(git()).validate(&args(&["log", "--output=/tmp/x"]));
+    assert_eq!(issues[0].command.as_deref(), Some("git"), "{issues:?}");
+}
+
+#[test]
 fn an_opaque_word_cannot_be_an_unknown_flag() {
     // `git log "$branch"` — the validator has no value, so it has no verdict.
     // Execution parses the expanded text like a literal and refuses it there.

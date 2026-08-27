@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 // DirEntry and DirEntryKind live in kaish-types.
-pub use kaish_types::{DirEntry, DirEntryKind, ReadRange};
+pub use kaish_types::{DirEntry, DirEntryKind, EffectiveAccess, PathAccess, ReadRange};
 
 /// Abstract filesystem interface.
 ///
@@ -93,6 +93,34 @@ pub trait Filesystem: Send + Sync {
 
     /// Returns true if this filesystem is read-only.
     fn read_only(&self) -> bool;
+
+    /// What the kernel can do with one path on this filesystem.
+    ///
+    /// The query behind `test -r`, `test -w`, and `test -x`. Neither
+    /// [`Filesystem::read_only`] nor `DirEntry.permissions` answers on its
+    /// own — `MemoryFs` (writable) and `JobFs` (read-only) both report
+    /// `permissions: None`, and a `LocalFs::read_only` wrapper over an
+    /// OS-writable directory reports the write bit set. [`PathAccess::resolve`]
+    /// is where the two combine.
+    ///
+    /// The default is right for a filesystem that is uniformly read-only or
+    /// uniformly writable. `VfsRouter` overrides it to ask the mount that owns
+    /// the path.
+    ///
+    /// A backend that can be written must report a mode; an absent one is read
+    /// as read-only, and nothing checks that for you. See `docs/EMBEDDING.md`,
+    /// "Reporting file permissions".
+    ///
+    /// `OverlayFs` keeps the default and inherits its one inaccuracy: writes
+    /// always land in the upper, so a lower file whose mode clears `0o222`
+    /// reports unwritable while copy-up would write it.
+    ///
+    /// Errors exactly as `stat` does: a path that does not exist is an error,
+    /// not a `PathAccess` of all-false.
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        let entry = self.stat(path).await?;
+        Ok(PathAccess::resolve(entry.permissions, self.read_only()))
+    }
 
     /// Memory-resident content bytes this filesystem is holding, if it
     /// tracks them.

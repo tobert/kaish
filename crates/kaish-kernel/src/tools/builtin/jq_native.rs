@@ -507,7 +507,8 @@ impl Tool for JqNative {
                     IssueCode::InvalidJqFilter,
                     format!("jq: {msg}"),
                 )
-                .with_suggestion("check jq filter syntax: https://jqlang.org/manual/"),
+                .with_suggestion("check jq filter syntax: https://jqlang.org/manual/")
+                .with_command(self.name()),
             );
         }
 

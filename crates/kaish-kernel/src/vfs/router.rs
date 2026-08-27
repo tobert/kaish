@@ -3,6 +3,7 @@
 //! Routes filesystem operations to the appropriate backend based on path.
 
 use super::{DirEntry, Filesystem};
+use kaish_vfs::PathAccess;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::io;
@@ -13,6 +14,12 @@ use std::sync::Arc;
 // KernelBackend contract). Re-exported here so existing `vfs::MountInfo`
 // paths keep working.
 pub use kaish_types::backend::MountInfo;
+
+/// Mode reported for a directory the router synthesizes rather than reads
+/// from a mount: the root, and any ancestor of a mount that has no mount of
+/// its own. Readable and searchable, never writable — these directories are
+/// derived from the mount table and the router creates nothing in them.
+const SYNTHESIZED_DIRECTORY_MODE: u32 = 0o555;
 
 /// Routes filesystem operations to mounted backends.
 ///
@@ -388,6 +395,33 @@ impl Filesystem for VfsRouter {
         from_fs.rename(&from_relative, &to_relative).await
     }
 
+    /// Delegates to the mount that owns the path, so the answer is that
+    /// mount's — not the whole router's. `read_only()` below is the
+    /// whole-router question and cannot answer for one path: a router with a
+    /// writable `/` and a read-only `/v/bin` is read-only for neither.
+    ///
+    /// Falls back the way `stat` does. `stat` synthesizes a directory for the
+    /// root and for any ancestor of a mount (`/v` above `/v/jobs`), so those
+    /// paths exist, and an answer here that errored on them would contradict
+    /// it: `[[ -e /v ]]` true and `[[ -r /v ]]` false about the same path.
+    /// A synthesized directory is readable and searchable, and never
+    /// writable — the router creates nothing in one.
+    async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
+        match self.find_mount(path) {
+            Ok((fs, relative)) => fs.path_access(&relative).await,
+            Err(e) => {
+                let path_str = path.to_string_lossy();
+                let is_synthesized =
+                    path_str.is_empty() || path_str == "/" || self.has_mount_under(path);
+                if is_synthesized {
+                    Ok(PathAccess::resolve(Some(SYNTHESIZED_DIRECTORY_MODE), true))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     fn read_only(&self) -> bool {
         // Router is read-only iff every mount is. Empty router returns
         // false — a router with no mounts isn't meaningfully read-only,
@@ -620,6 +654,87 @@ mod tests {
         let result = router.rename(Path::new("/mount1/file.txt"), Path::new("/mount2/file.txt")).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+    }
+
+    // `stat` synthesizes a directory for the root and for any ancestor of a
+    // mount, so those paths exist. `path_access` has to agree with `stat`
+    // about the same path — going straight to `find_mount` errors where
+    // `stat` succeeds, and `[[ -e /v ]]` would be true while `[[ -r /v ]]`
+    // was false about the identical path.
+    #[tokio::test]
+    async fn path_access_agrees_with_stat_on_synthesized_directories() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/docs", MemoryFs::new());
+
+        for path in ["/", "/v"] {
+            let path = Path::new(path);
+            assert!(
+                router.stat(path).await.is_ok(),
+                "{} is synthesized by stat",
+                path.display()
+            );
+            let access = router
+                .path_access(path)
+                .await
+                .unwrap_or_else(|e| panic!("path_access must not error where stat succeeds: {e}"));
+            assert!(access.readable, "{} must be readable", path.display());
+            assert!(access.executable, "{} must be searchable", path.display());
+            assert!(
+                !access.writable,
+                "the router creates nothing in {}",
+                path.display()
+            );
+        }
+    }
+
+    // The synthesis must not swallow a genuinely absent path.
+    #[tokio::test]
+    async fn path_access_errors_on_a_path_with_no_mount() {
+        let mut router = VfsRouter::new();
+        router.mount("/v/docs", MemoryFs::new());
+        assert!(router.path_access(Path::new("/nope")).await.is_err());
+        assert!(router.path_access(Path::new("/v/docs/absent")).await.is_err());
+    }
+
+    // A real mount answers for itself, not with the synthesized defaults.
+    #[tokio::test]
+    async fn path_access_at_a_mount_point_asks_the_mount() {
+        let mut router = VfsRouter::new();
+        router.mount("/rw", MemoryFs::new());
+        router.mount("/ro", BuiltinFsStub);
+
+        assert!(router.path_access(Path::new("/rw")).await.unwrap().writable);
+        assert!(!router.path_access(Path::new("/ro")).await.unwrap().writable);
+        assert!(router.path_access(Path::new("/ro")).await.unwrap().readable);
+    }
+
+    /// A minimal read-only mount that reports no mode, standing in for
+    /// `BuiltinFs`/`JobFs` without dragging a ToolRegistry into this module.
+    struct BuiltinFsStub;
+
+    #[async_trait]
+    impl Filesystem for BuiltinFsStub {
+        async fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+        }
+        async fn list(&self, _path: &Path) -> io::Result<Vec<DirEntry>> {
+            Ok(Vec::new())
+        }
+        async fn stat(&self, _path: &Path) -> io::Result<DirEntry> {
+            Ok(DirEntry::directory("."))
+        }
+        async fn mkdir(&self, _path: &Path) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+        }
+        async fn remove(&self, _path: &Path) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+        }
+        fn read_only(&self) -> bool {
+            true
+        }
     }
 
     #[tokio::test]

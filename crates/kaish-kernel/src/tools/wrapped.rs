@@ -484,10 +484,18 @@ fn issue(error: &WrappedError, uncertain: bool) -> ValidationIssue {
         }
         _ => IssueCode::WrappedCallRejected,
     };
-    if uncertain {
+    let issue = if uncertain {
         ValidationIssue::warning(code, error.to_string())
     } else {
         ValidationIssue::error(code, error.to_string())
+    };
+    // Every variant names its command, so absent here would mean "not about a
+    // command" for a message that opens with one. Empty only before
+    // `attributed_to` has run.
+    if error.command().is_empty() {
+        issue
+    } else {
+        issue.with_command(error.command().to_string())
     }
 }
 

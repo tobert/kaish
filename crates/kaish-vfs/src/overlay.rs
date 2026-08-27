@@ -2033,6 +2033,17 @@ mod tests {
         use super::*;
         use crate::local::LocalFs;
 
+        // A whiteouted path is gone, so it has no access at all — not a
+        // PathAccess of all-false, an error, the same as stat.
+        #[tokio::test]
+        async fn path_access_errors_on_a_whiteouted_path() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("gone.txt"), b"x").unwrap();
+            let overlay = OverlayFs::over(Arc::new(LocalFs::read_only(dir.path())));
+            overlay.remove(Path::new("gone.txt")).await.unwrap();
+            assert!(overlay.path_access(Path::new("gone.txt")).await.is_err());
+        }
+
         #[tokio::test]
         async fn test_real_tree_byte_identical_after_overlay_writes() {
             let dir = tempfile::tempdir().unwrap();
