@@ -82,7 +82,7 @@ async fn arithmetic_division_by_zero_is_matchable_as_failed_while_running() {
     // was actually lost — only `Display`'s single line is terse.
     assert_eq!(inner.to_string(), "failed to evaluate assignment");
     let chain = format!("{inner:?}");
-    assert!(chain.contains("division by zero"), "the chain must still carry the original fault: {chain}");
+    assert!(chain.contains("divides by zero"), "the chain must still carry the original fault: {chain}");
 }
 
 // ── 3: a parse/lexer error is classified deliberately ──────────────────
@@ -192,7 +192,7 @@ async fn execution_display_walks_the_cause_chain_under_alternate() {
         "`{{:#}}` must add the cause chain, not repeat `{{}}`: plain={plain:?} alternate={alternate:?}"
     );
     assert!(
-        alternate.contains("division by zero"),
+        alternate.contains("divides by zero"),
         "the real cause must survive `{{:#}}`: {alternate:?}"
     );
 }

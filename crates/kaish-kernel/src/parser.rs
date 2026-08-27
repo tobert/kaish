@@ -3445,7 +3445,7 @@ impl CmdSubstFrames {
 /// Plain-slice twin of [`cmd_subst_body_tokens`]'s live chumsky capture, used
 /// only by `validate_cmd_subst_bodies`'s error-path fallback — see that
 /// function's doc comment for why a second, non-chumsky scan exists at all.
-fn find_cmd_subst_close(tokens: &[(Token, Span)]) -> Option<usize> {
+pub(crate) fn find_cmd_subst_close(tokens: &[(Token, Span)]) -> Option<usize> {
     let mut tracker = CmdSubstFrames::default();
     (0..tokens.len()).find(|&i| {
         let next = tokens.get(i + 1).map(|(t, _)| t);

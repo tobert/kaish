@@ -542,20 +542,23 @@ fn spaced_session_state_inside_arithmetic_still_refuses() {
 }
 
 /// The control for the test above, and the one that makes it mean something:
-/// a *spaced* ordinary variable must still expand. `$(( $ COUNT + 1 ))` reads
-/// COUNT and prints 42 when executed (verified against the binary), so a
-/// scanner that treated the space itself as unnameable would refuse a body
-/// that expands correctly — and the refusal test alone cannot tell the two
-/// apart, because refusing everything passes it.
+/// The 0.16 arithmetic rewrite tightened `$(( ))`: whitespace never splits a
+/// token there, the same rule that refuses `16 # ff`. `$ COUNT` (a space
+/// between `$` and the name) used to expand like `$COUNT` under the old
+/// whitespace-skipping scanner; now it is refused like any other split
+/// token, so the fragment expansion surfaces the arithmetic error rather
+/// than silently reading COUNT.
 #[test]
-fn a_spaced_ordinary_variable_inside_arithmetic_still_expands() {
-    assert_eq!(
-        expand(
-            "python3 <<PY\nn = $(( $ COUNT + 1 ))\nPY",
-            0,
-            &[("COUNT".to_string(), Value::Int(41))]
-        ),
-        Expansion::Complete("n = 42\n".to_string())
+fn a_spaced_variable_inside_arithmetic_is_refused() {
+    let err = expand_fragment(
+        "python3 <<PY\nn = $(( $ COUNT + 1 ))\nPY",
+        FragmentAddr::new(0, 0),
+        &[("COUNT".to_string(), Value::Int(41))],
+    )
+    .expect_err("a space inside `$ COUNT` must not expand");
+    assert!(
+        matches!(err, FragmentError::Eval { ref message } if message.contains("cannot start a value")),
+        "got: {err:?}"
     );
 }
 
