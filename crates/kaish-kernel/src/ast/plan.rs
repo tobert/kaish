@@ -439,6 +439,10 @@ fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
             collect_block(&def.body, background, out)
         }
         Stmt::Test(t) => collect_test(t, background, out),
+        // Mirrors `Expr::Arithmetic`: free-variable reads only, same as a
+        // bare `$(( ))` — a `$(...)` operand inside is not walked into
+        // `PlannedCommand`s (a narrower surface than `Test`'s).
+        Stmt::Arith(expr) => out.read_arithmetic(expr),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             collect_stmt(left, background, out);
             collect_stmt(right, background, out);
@@ -534,6 +538,7 @@ fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
         }
         Expr::VarRef(path) | Expr::VarLength(path) => out.read_path(path),
         Expr::Arithmetic(e) => out.read_arithmetic(e),
+        Expr::Arith(e) => out.read_arithmetic(e),
         // Special forms ($1, $@, $#, $?, $$) are not session variables; an
         // embedder cannot peek them with `get_var`, so they are not listed.
         Expr::Literal(_)
@@ -608,6 +613,7 @@ pub(crate) fn render_stmt(stmt: &Stmt) -> String {
         Stmt::Exit(e) => render_keyword("exit", e.as_ref().map(|e| render_expr(e))),
         Stmt::ToolDef(def) => render_tooldef(def),
         Stmt::Test(t) => format!("[[ {} ]]", render_test(t)),
+        Stmt::Arith(e) => format!("(({e}))"),
         Stmt::AndChain { left, right } => {
             format!("{} && {}", render_stmt(left), render_stmt(right))
         }
@@ -897,6 +903,7 @@ pub(crate) fn render_expr(expr: &Expr) -> String {
             format!("${{{}:-{}}}", render_varpath(path), render_parts(default))
         }
         Expr::Arithmetic(e) => format!("$(({e}))"),
+        Expr::Arith(e) => format!("(({e}))"),
         // Render the source text, not `value`'s canonical form — that is what
         // this variant is for.
         Expr::NumericLiteral { raw, .. } => raw.clone(),

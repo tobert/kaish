@@ -105,6 +105,9 @@ impl<'a> Validator<'a> {
             }
             Stmt::ToolDef(tool_def) => self.validate_tool_def(tool_def),
             Stmt::Test(test_expr) => self.validate_test(test_expr),
+            // Arithmetic parsing (and the base-cap/depth-cap checks it
+            // carries) happens at runtime, same as `Expr::Arithmetic` below.
+            Stmt::Arith(_) => {}
             Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
                 self.validate_stmt(left);
                 self.validate_stmt(right);
@@ -603,7 +606,7 @@ impl<'a> Validator<'a> {
             Expr::VarWithDefault { .. } => {
                 // Don't warn — the default handles the undefined/absent case.
             }
-            Expr::Arithmetic(_) => {
+            Expr::Arithmetic(_) | Expr::Arith(_) => {
                 // Arithmetic parsing is done at runtime
             }
             Expr::Command(cmd) => self.validate_command(cmd),

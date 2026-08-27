@@ -1571,6 +1571,7 @@ where
             return_stmt,
             exit_stmt,
             test_expr_stmt_parser().map(Stmt::Test),
+            arith_cond_parser().map(Stmt::Arith),
             // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
             pipeline_parser(choice((
                 compound.map(|s| PipelineStage::Compound(Box::new(s))),
@@ -2204,6 +2205,7 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
         | Stmt::Return(_)
         | Stmt::Exit(_)
         | Stmt::Test(_)
+        | Stmt::Arith(_)
         | Stmt::Empty => false,
     }
 }
@@ -2699,6 +2701,18 @@ where
 /// - Comparisons: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
 /// - Compound: `[[ -f a && -d b ]]`, `[[ -z x || -n y ]]`, `[[ ! -f file ]]`
 ///
+/// `(( expr ))` — the sibling of `test_expr_stmt_parser` for a bare
+/// arithmetic condition. The lexer already extracted the text between the
+/// two `(` and the two `)` into one `ArithCond` token (mirroring `$((`'s
+/// `Arithmetic` token); this parser only unwraps it.
+fn arith_cond_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, String, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    select! { Token::ArithCond(expr) => expr }.labelled("arithmetic condition")
+}
+
 /// Precedence (highest to lowest): `!` > `&&` > `||`
 fn test_expr_stmt_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, TestExpr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -2866,12 +2880,15 @@ where
     // [[ ]] test expression - wrap as Expr::Test
     let test_expr_condition = test_expr_stmt_parser().map(|test| Expr::Test(Box::new(test)));
 
+    // (( expr )) arithmetic condition - the sibling of [[ ]] above.
+    let arith_condition = arith_cond_parser().map(Expr::Arith);
+
     // Command as condition (includes true/false/: as command names)
     // The command's exit code determines truthiness (0 = true, non-zero = false)
     let command_condition = command_parser().map(Expr::Command);
 
-    // Base: test expr OR command
-    let base = choice((test_expr_condition, command_condition));
+    // Base: test expr OR arithmetic condition OR command
+    let base = choice((test_expr_condition, arith_condition, command_condition));
 
     // `!` negates the command that follows it, BEFORE `&&`/`||` fold below —
     // bash reads `! true && true` as `(! true) && true`. Repeated so `! ! x`
@@ -3612,6 +3629,10 @@ fn is_word_token(tok: &Token) -> bool {
         Token::Pipe | Token::Amp | Token::Semi | Token::DoubleSemi | Token::DotDotDot
         | Token::LBrace | Token::RBrace | Token::LBracket | Token::RBracket
         | Token::LParen | Token::RParen => false,
+
+        // `(( ))` is a whole command/condition, like `[[ ]]` — never a word
+        // an argument would glue onto.
+        Token::ArithCond(_) => false,
 
         // `$(` opens a balanced group, not a single-token word — `word_unit`
         // handles it by scanning to the matching `)`.

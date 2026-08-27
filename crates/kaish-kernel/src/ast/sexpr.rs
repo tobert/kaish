@@ -54,6 +54,7 @@ pub fn format_stmt(stmt: &Stmt) -> String {
         },
         Stmt::ToolDef(tool) => format_tooldef(tool),
         Stmt::Test(test_expr) => format!("(test {})", format_test_expr(test_expr)),
+        Stmt::Arith(expr_str) => format!("(arith \"{}\")", expr_str),
         Stmt::AndChain { left, right } => {
             format!("(and-chain {} {})", format_stmt(left), format_stmt(right))
         }
@@ -314,6 +315,7 @@ pub fn format_expr(expr: &Expr) -> String {
             format!("(var-default {} ({}))", format_varpath(path), default_parts.join(" "))
         }
         Expr::Arithmetic(expr_str) => format!("(arithmetic \"{}\")", expr_str),
+        Expr::Arith(expr_str) => format!("(arith \"{}\")", expr_str),
         Expr::Command(cmd) => format_command(cmd),
         Expr::LastExitCode => "(last-exit-code)".to_string(),
         Expr::CurrentPid => "(current-pid)".to_string(),

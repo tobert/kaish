@@ -466,6 +466,37 @@ impl<'a> Tokenizer<'a> {
         Ok((mag, digits_start))
     }
 
+    /// Consume a run of plain `0`-`9` digits, erroring loud on `_`. Unlike
+    /// [`Self::consume_digits`], a non-digit letter (`e`, `x`, …) is a clean
+    /// stop, not an error — the base-10 run is used both as a full decimal
+    /// literal and as the base number before `#`, and the caller decides
+    /// what a trailing `e3`/`.5`/`#` means.
+    fn consume_decimal_digits(&mut self, lit_start: usize) -> Result<(u64, usize), ArithError> {
+        let digits_start = self.pos;
+        let mut mag: u64 = 0;
+        loop {
+            let Some(c) = self.peek() else { break };
+            if c == '_' {
+                return Err(ArithError::new(
+                    format!("`{}` contains `_`; remove it", self.slice(lit_start, self.pos + 1)),
+                    lit_start..self.byte_pos() + c.len_utf8(),
+                ));
+            }
+            if !c.is_ascii_digit() {
+                break;
+            }
+            let digit_val = c as u64 - '0' as u64;
+            mag = mag.checked_mul(10).and_then(|m| m.checked_add(digit_val)).ok_or_else(|| {
+                ArithError::new(
+                    format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.pos + 1)),
+                    lit_start..self.byte_pos(),
+                )
+            })?;
+            self.pos += 1;
+        }
+        Ok((mag, digits_start))
+    }
+
     fn lex_number(&mut self) -> Result<TokKind, ArithError> {
         let start = self.pos;
 
@@ -502,8 +533,40 @@ impl<'a> Tokenizer<'a> {
 
         // Plain decimal run — either a bare decimal literal, or the base
         // number before `#`.
-        let (base_mag, digits_start) = self.consume_digits(10, start)?;
+        let (base_mag, digits_start) = self.consume_decimal_digits(start)?;
         debug_assert!(digits_start == start);
+
+        // Float/exponent shape (`1.5`, `1e3`, `1E-3`): not a kaish spelling
+        // — checked before `#` and leading-zero, since a numeral can't be
+        // both a based prefix and a float.
+        let looks_like_float = (self.peek() == Some('.')
+            && matches!(self.peek_at(1), Some(c) if c.is_ascii_digit()))
+            || (matches!(self.peek(), Some('e' | 'E'))
+                && (matches!(self.peek_at(1), Some(c) if c.is_ascii_digit())
+                    || (matches!(self.peek_at(1), Some('+' | '-'))
+                        && matches!(self.peek_at(2), Some(c) if c.is_ascii_digit()))));
+        if looks_like_float {
+            if self.peek() == Some('.') {
+                self.pos += 1;
+                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                    self.pos += 1;
+                }
+            }
+            if matches!(self.peek(), Some('e' | 'E')) {
+                self.pos += 1;
+                if matches!(self.peek(), Some('+' | '-')) {
+                    self.pos += 1;
+                }
+                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                    self.pos += 1;
+                }
+            }
+            let text = self.slice(start, self.pos);
+            return Err(ArithError::new(
+                format!("`{text}` is not an integer; arithmetic is integer-only"),
+                start..self.pos,
+            ));
+        }
 
         if self.peek() == Some('#') {
             self.advance(); // consume '#'
@@ -1190,7 +1253,7 @@ fn parse_numeric_string(s: &str, name: &str) -> Result<i64, ArithError> {
 
 /// Coerce a `$(...)` operand's printed text — the command must print exactly
 /// one integer.
-fn parse_command_output(text: &str, cmd: &str) -> Result<i64, ArithError> {
+pub(crate) fn parse_command_output(text: &str, cmd: &str) -> Result<i64, ArithError> {
     match read_numeral(text) {
         Numeral::Ok(n) => Ok(n),
         Numeral::Empty => Err(ArithError::new(
@@ -1237,7 +1300,7 @@ pub(crate) fn value_to_arith(value: &Value, name: &str) -> Result<i64, ArithErro
     }
 }
 
-fn unset_error(name: &str) -> ArithError {
+pub(crate) fn unset_error(name: &str) -> ArithError {
     let message = match name {
         "RANDOM" => "`$RANDOM` has no value in kaish; write `$(random --max 100)`".to_string(),
         "SECONDS" => {
@@ -1249,7 +1312,7 @@ fn unset_error(name: &str) -> ArithError {
     ArithError::new(message, 0..0)
 }
 
-fn resolve_var_sync(scope: &Scope, name: &str) -> Result<i64, ArithError> {
+pub(crate) fn resolve_var_sync(scope: &Scope, name: &str) -> Result<i64, ArithError> {
     // `$1`, `$2`, … reach the same variable slot bash gives them: text,
     // coerced by the same rules as any other string operand.
     if let Ok(index) = name.parse::<usize>() {
@@ -1264,7 +1327,7 @@ fn resolve_var_sync(scope: &Scope, name: &str) -> Result<i64, ArithError> {
     }
 }
 
-fn braced_path_value(scope: &Scope, root: &str, brackets: &str) -> Result<Value, ArithError> {
+pub(crate) fn braced_path_value(scope: &Scope, root: &str, brackets: &str) -> Result<Value, ArithError> {
     let raw = format!("${{{root}{brackets}}}");
     let path: VarPath = crate::parser::parse_varpath(&raw);
     scope.resolve_path(&path).map_err(|e| match e {
@@ -1286,7 +1349,7 @@ fn subscript_path(root: &str, indices: &[i64]) -> VarPath {
     crate::parser::parse_varpath(&raw)
 }
 
-fn resolve_subscript_sync(scope: &Scope, root: &str, indices: &[i64]) -> Result<i64, ArithError> {
+pub(crate) fn resolve_subscript_sync(scope: &Scope, root: &str, indices: &[i64]) -> Result<i64, ArithError> {
     let path = subscript_path(root, indices);
     let value = scope.resolve_path(&path).map_err(|e| match e {
         crate::interpreter::PathError::UndefinedRoot(_) => unset_error(root),
@@ -1297,19 +1360,24 @@ fn resolve_subscript_sync(scope: &Scope, root: &str, indices: &[i64]) -> Result<
     value_to_arith(&value, root)
 }
 
-fn based_value(base: u32, text: &str, name: &str) -> Result<i64, ArithError> {
+/// Read `text` as digits in `base` — the evaluation half of `base#<expansion>`
+/// (`2#$BITS`, `10#$(date +%m)`). `text` is the expansion's rendered VALUE,
+/// never re-coerced through the normal numeral rules first: that coercion is
+/// exactly what a leading-zero string (`m="08"`) needs `10#$m` to escape, so
+/// routing through it here would defeat the form's only purpose.
+pub(crate) fn based_value(base: u32, text: &str) -> Result<i64, ArithError> {
     let trimmed = text.trim();
     let (neg, digits) = match trimmed.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
     };
     if digits.is_empty() {
-        return Err(ArithError::new(format!("`{name}` printed `{text}`; the command must print one integer"), 0..0));
+        return Err(ArithError::new(format!("`{text}` has no digits"), 0..0));
     }
     let mut mag: u64 = 0;
     for c in digits.chars() {
         if !c.is_ascii_alphanumeric() {
-            return Err(ArithError::new(format!("`{name}` printed `{text}`, which is not a number"), 0..0));
+            return Err(ArithError::new(format!("`{c}` is not a digit in `{text}`; use digits valid for base {base}"), 0..0));
         }
         let digit_val = match c {
             '0'..='9' => c as u32 - '0' as u32,
@@ -1318,7 +1386,7 @@ fn based_value(base: u32, text: &str, name: &str) -> Result<i64, ArithError> {
             _ => unreachable!(),
         };
         if digit_val >= base {
-            return Err(ArithError::new(format!("`{name}` printed `{text}`, which is not a number"), 0..0));
+            return Err(ArithError::new(format!("`{c}` is not a digit in `{text}`; use digits valid for base {base}"), 0..0));
         }
         mag = mag
             .checked_mul(base as u64)
@@ -1367,14 +1435,51 @@ fn resolve_expansion_sync(e: &Expansion, scope: &Scope) -> Result<i64, ArithErro
     }
 }
 
-fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope) -> Result<i64, ArithError> {
+/// The expansion's rendered VALUE, for `base#<expansion>` — not its
+/// arithmetically-coerced number. A `String` value's text passes through
+/// untouched (leading zero included); other values render through the same
+/// `value_to_string` interpolation uses.
+pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String, ArithError> {
     match e {
-        Expansion::CommandSubst(_) => Err(needs_async("$(...)")),
-        _ => {
-            let n = resolve_expansion_sync(e, scope)?;
-            based_value(base, &n.to_string(), "expansion")
+        Expansion::Var(name) => {
+            if let Ok(index) = name.parse::<usize>() {
+                return match scope.get_positional(index) {
+                    Some(s) => Ok(s.to_string()),
+                    None => Err(unset_error(name)),
+                };
+            }
+            match scope.get(name) {
+                Some(v) => Ok(value_to_string(v)),
+                None => Err(unset_error(name)),
+            }
         }
+        Expansion::BracedPath { root, brackets } => {
+            braced_path_value(scope, root, brackets).map(|v| value_to_string(&v))
+        }
+        Expansion::BracedDefault { root, brackets, default } => {
+            let resolved = if brackets.is_empty() {
+                scope.get(root).cloned()
+            } else {
+                braced_path_value(scope, root, brackets).ok()
+            };
+            match resolved {
+                Some(Value::Null) | None => {
+                    let default_expr = parse(default)?;
+                    Ok(eval_sync(&default_expr, scope)?.to_string())
+                }
+                Some(v) => Ok(value_to_string(&v)),
+            }
+        }
+        Expansion::LastExitCode => Ok(scope.last_result().code.to_string()),
+        Expansion::CurrentPid => Ok(scope.pid().to_string()),
+        Expansion::CommandSubst(_) => Err(needs_async("$(...)")),
+        Expansion::Nested(inner) => Ok(eval_sync(inner, scope)?.to_string()),
     }
+}
+
+fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope) -> Result<i64, ArithError> {
+    let text = expansion_text_sync(e, scope)?;
+    based_value(base, &text)
 }
 
 pub(crate) fn eval_sync(expr: &ArithExpr, scope: &Scope) -> Result<i64, ArithError> {
