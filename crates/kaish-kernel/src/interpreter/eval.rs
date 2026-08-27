@@ -617,13 +617,25 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
         Value::String(s) => {
             let trimmed = s.trim();
             trimmed.parse::<i64>().map_err(|_| {
-                anyhow::anyhow!("numeric argument required: {:?}", s)
+                if is_i64_overflow_shape(trimmed) {
+                    anyhow::anyhow!("`{trimmed}`, which {}", crate::lexer::INTEGER_OUT_OF_RANGE)
+                } else {
+                    anyhow::anyhow!("numeric argument required: {:?}", s)
+                }
             })
         }
         Value::Null | Value::Json(_) | Value::Bytes(_) => {
             anyhow::bail!("numeric argument required (got {:?})", value)
         }
     }
+}
+
+/// True for a string shaped like `-?[0-9]+` — the only shape whose `i64`
+/// parse can fail exclusively by overflow. Shared by `value_to_exit_code`
+/// and `value_to_num` so both name the same 64-bit limit the same way.
+fn is_i64_overflow_shape(t: &str) -> bool {
+    let digits = t.strip_prefix('-').unwrap_or(t);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Length of a value for `${#…}`: element count for a list, key count for a
@@ -1216,10 +1228,18 @@ fn value_to_num(value: &Value) -> EvalResult<Num> {
             if looks_like_float
                 && let Ok(f) = t.parse::<f64>()
             {
+                // kaish numbers are JSON numbers, and JSON has no infinity —
+                // `1e309` parses to f64::INFINITY without an Err, so a
+                // magnitude past the f64 range needs its own check here.
+                if !f.is_finite() {
+                    return Err(EvalError::TypeError {
+                        expected: "a number",
+                        got: format!("`{t}`, which is outside the 64-bit float range"),
+                    });
+                }
                 return Ok(Num::Float(f));
             }
-            let all_digits = t.strip_prefix('-').unwrap_or(t);
-            if !all_digits.is_empty() && all_digits.bytes().all(|b| b.is_ascii_digit()) {
+            if is_i64_overflow_shape(t) {
                 Err(EvalError::TypeError {
                     expected: "a number",
                     got: format!("`{t}`, which {}", crate::lexer::INTEGER_OUT_OF_RANGE),
