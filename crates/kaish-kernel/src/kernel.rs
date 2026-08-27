@@ -4995,7 +4995,8 @@ impl Kernel {
                 }
                 ArithExpr::BasedExpansion { base, expansion } => {
                     let text = self.eval_arith_expansion_text_async(expansion).await?;
-                    crate::arithmetic::based_value(*base, &text)
+                    let (label, verb) = crate::arithmetic::expansion_label(expansion);
+                    crate::arithmetic::based_value(*base, &text, &label, verb)
                         .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
                 }
                 ArithExpr::Unary { op, operand } => {

@@ -49,20 +49,22 @@ async fn based_expansion_from_a_variable_and_a_command() {
     ok("echo $((8#$(echo 17) + 1))", "16").await;
 }
 
-/// The spec's coercion table says a based-expansion's text is "digits only
-/// (optional sign)" — a sign IS part of the accepted text, so
-/// `16#$digits` with `digits` holding `-ff` is -255, not a refusal. A
-/// reviewer expected an error naming `-16#ff` (the LITERAL sign-after-`#`
-/// refusal, `16#-ff`), but that rule is about the sign appearing in SOURCE
-/// TEXT after `#`; here the sign arrives inside the expansion's VALUE,
-/// which the spec explicitly allows. Pinning the spec's answer.
+/// One rule for the text after `#`, whether it is typed or expanded: the
+/// digits take no sign. `16#-ff` (a sign in SOURCE text after `#`) was
+/// always refused, naming `-16#ff`; `16#$digits` with `digits` holding
+/// `-ff` used to accept the sign arriving through the expansion's VALUE
+/// (round-2 review corrected an earlier reading of the coercion table's
+/// "optional sign" — that clause describes a plain STRING's own coercion,
+/// `x="-ff"` for a bare `$((x))`, not a based-expansion operand). Both
+/// forms now refuse alike, naming the same fix.
 ///
 /// (Written with a quoted assignment — `digits=-ff` unquoted hits an
 /// unrelated, pre-existing parser gap: a bareword assignment value that
 /// starts with `-` is misparsed as a command, not this rewrite's doing.)
 #[tokio::test]
-async fn based_expansion_text_may_carry_a_sign() {
-    ok(r#"digits="-ff"; echo $((16#$digits))"#, "-255").await;
+async fn based_expansion_text_takes_no_sign() {
+    errs(r#"digits="-ff"; echo $((16#$digits))"#, "-16#ff").await;
+    errs(r#"echo $((16#$(printf -- "-ff")))"#, "-16#ff").await;
 }
 
 #[tokio::test]

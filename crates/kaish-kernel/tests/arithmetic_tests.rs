@@ -147,6 +147,20 @@ async fn missing_operand_errors_are_specific() {
     assert!(text.contains("has no operand"), "{text:?}");
 }
 
+#[tokio::test]
+async fn a_leading_zero_base_is_refused() {
+    for source in ["echo $((08#17))", "echo $((010#5))"] {
+        let text = err_of(source).await;
+        assert!(text.contains("without a leading zero"), "{source:?}: {text:?}");
+    }
+}
+
+#[tokio::test]
+async fn based_expansion_digits_take_no_sign() {
+    let text = err_of(r#"d="-ff"; echo $((16#$d))"#).await;
+    assert!(text.contains("take no sign") && text.contains("-16#ff"), "{text:?}");
+}
+
 // ── Coercion table ──────────────────────────────────────────────────────────
 
 #[tokio::test]

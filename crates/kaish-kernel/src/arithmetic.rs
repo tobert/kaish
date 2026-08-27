@@ -636,6 +636,13 @@ impl<'a> Tokenizer<'a> {
         }
 
         if self.peek() == Some('#') {
+            let base_text = self.slice(start, self.pos);
+            if base_text.len() > 1 && base_text.starts_with('0') {
+                return Err(ArithError::new(
+                    format!("`{base_text}` is not a base spelling; write the base without a leading zero"),
+                    start..self.pos,
+                ));
+            }
             self.advance(); // consume '#'
             let base = base_mag as u32;
             if !(2..=36).contains(&base) {
@@ -1525,17 +1532,46 @@ pub(crate) fn resolve_subscript_sync(scope: &Scope, root: &str, indices: &[i64])
     value_to_arith(&value, root)
 }
 
+/// The name and verb an error about `base#<expansion>`'s VALUE uses to
+/// describe where the value came from — `` `m` holds `08` `` versus
+/// `` `$(...)` printed `08` ``, matching the phrasing the rest of the
+/// coercion errors already use for a variable vs. a command's output.
+pub(crate) fn expansion_label(e: &Expansion) -> (String, &'static str) {
+    match e {
+        Expansion::Var(name) => (name.clone(), "holds"),
+        Expansion::BracedPath { root, .. } | Expansion::BracedDefault { root, .. } => {
+            (root.clone(), "holds")
+        }
+        Expansion::LastExitCode => ("$?".to_string(), "holds"),
+        Expansion::CurrentPid => ("$$".to_string(), "holds"),
+        Expansion::CommandSubst(_) => ("$(...)".to_string(), "printed"),
+        Expansion::Nested(_) => ("$((...))".to_string(), "holds"),
+    }
+}
+
 /// Read `text` as digits in `base` — the evaluation half of `base#<expansion>`
 /// (`2#$BITS`, `10#$(date +%m)`). `text` is the expansion's rendered VALUE,
 /// never re-coerced through the normal numeral rules first: that coercion is
 /// exactly what a leading-zero string (`m="08"`) needs `10#$m` to escape, so
 /// routing through it here would defeat the form's only purpose.
-pub(crate) fn based_value(base: u32, text: &str) -> Result<i64, ArithError> {
+///
+/// A sign in `text` is refused, not applied — the same rule as the literal
+/// form (`16#-ff` is refused, naming `-16#ff`): the digits after `#` take
+/// no sign, whether the `#` came with the sign in source text or the sign
+/// arrived inside an expansion's value. `label`/`verb` name where the value
+/// came from (see [`expansion_label`]) for that refusal's message.
+pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Result<i64, ArithError> {
     let trimmed = text.trim();
-    let (neg, digits) = match trimmed.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
-    };
+    if let Some(stripped) = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')) {
+        let sign = &trimmed[..1];
+        return Err(ArithError::new(
+            format!(
+                "`{label}` {verb} `{text}`; the digits after `#` take no sign — write `{sign}{base}#{stripped}`"
+            ),
+            0..0,
+        ));
+    }
+    let digits = trimmed;
     if digits.is_empty() {
         return Err(ArithError::new(format!("`{text}` has no digits"), 0..0));
     }
@@ -1558,7 +1594,7 @@ pub(crate) fn based_value(base: u32, text: &str) -> Result<i64, ArithError> {
             .and_then(|m| m.checked_add(digit_val as u64))
             .ok_or_else(|| ArithError::new(format!("`{text}` {INTEGER_OUT_OF_RANGE}"), 0..0))?;
     }
-    match int_from_magnitude(mag, neg, 0..0)? {
+    match int_from_magnitude(mag, false, 0..0)? {
         ArithExpr::Int(n) => Ok(n),
         _ => unreachable!(),
     }
@@ -1644,7 +1680,8 @@ pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String
 
 fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope) -> Result<i64, ArithError> {
     let text = expansion_text_sync(e, scope)?;
-    based_value(base, &text)
+    let (label, verb) = expansion_label(e);
+    based_value(base, &text, &label, verb)
 }
 
 pub(crate) fn eval_sync(expr: &ArithExpr, scope: &Scope) -> Result<i64, ArithError> {
@@ -2088,6 +2125,18 @@ mod tests {
             "`+` has no right operand in `1 + `; add an integer expression after `+`"
         );
         assert_eq!(err(" + "), "`+` has no operand; add an integer expression after `+`");
+    }
+
+    #[test]
+    fn a_leading_zero_base_is_refused() {
+        assert_eq!(err("08#17"), "`08` is not a base spelling; write the base without a leading zero");
+        assert_eq!(err("010#5"), "`010` is not a base spelling; write the base without a leading zero");
+    }
+
+    #[test]
+    fn based_expansion_digits_take_no_sign() {
+        let msg = err_with("16#$d", |s| s.set("d", Value::String("-ff".to_string())));
+        assert_eq!(msg, "`d` holds `-ff`; the digits after `#` take no sign — write `-16#ff`");
     }
 
     #[test]
