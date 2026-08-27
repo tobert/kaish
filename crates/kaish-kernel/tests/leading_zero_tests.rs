@@ -362,3 +362,19 @@ async fn an_integer_past_64_bits_names_the_limit_and_the_fix() {
     let (code, out, _) = run("echo 9223372036854775807 -9223372036854775808").await;
     assert_eq!((code, out.as_str()), (0, "9223372036854775807 -9223372036854775808"));
 }
+
+/// A leading zero makes a word text before overflow ever gets to matter —
+/// `09223372036854775808` is one past `i64::MAX`, but it is text (leading
+/// zero) first, same as `007`, not a 64-bit refusal.
+#[tokio::test]
+async fn a_leading_zero_numeral_past_64_bits_is_still_text() {
+    let (code, out, err) = run("echo 09223372036854775808").await;
+    assert_eq!(code, 0, "must run: {err:?}");
+    assert_eq!(out, "09223372036854775808", "leading zero wins over overflow");
+    let (_, out, _) = run("echo $(typeof 09223372036854775808)").await;
+    assert_eq!(out, "string", "09223372036854775808 must not type as a number");
+
+    // The un-zeroed overflow still refuses.
+    let text = err_of("echo 9223372036854775808").await;
+    assert!(text.contains("64-bit"), "must still name the 64-bit limit: {text:?}");
+}

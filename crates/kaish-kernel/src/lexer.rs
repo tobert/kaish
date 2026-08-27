@@ -1092,7 +1092,16 @@ fn lex_var_length(lex: &mut logos::Lexer<Token>) -> String {
 
 /// Lex an integer literal.
 fn lex_int(lex: &mut logos::Lexer<Token>) -> Result<i64, LexerError> {
-    lex.slice().parse().map_err(|_| LexerError::IntegerOutOfRange)
+    let slice = lex.slice();
+    // A leading-zero numeral is text, not a number, whether or not its
+    // digits fit in i64 — `09223372036854775808` is text (leading zero)
+    // before it is ever an overflow. `preserve_numeric_source_text` reads
+    // the source span, not this value, to reclassify the token into
+    // `NumberIdent`, so any placeholder here is discarded.
+    if has_invalid_leading_zero(slice) {
+        return Ok(0);
+    }
+    slice.parse().map_err(|_| LexerError::IntegerOutOfRange)
 }
 
 /// Lex a float literal.
