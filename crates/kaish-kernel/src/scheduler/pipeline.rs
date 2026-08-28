@@ -1073,6 +1073,23 @@ pub async fn build_tool_args(
         .map_err(|e| e.to_string())
 }
 
+/// Message for a `$(...)` used directly as a scatter/gather flag value
+/// (`--limit $(...)`) — also reused when a `$((...))` flag value reaches
+/// one (`--limit $(( $(...) ))`), so the two spellings behave alike.
+fn command_subst_flag_value_message() -> String {
+    "command substitution `$(...)` is not supported in a scatter/gather flag value here; \
+     assign it to a variable first (e.g. `n=$(...); scatter --limit $n`)"
+        .to_string()
+}
+
+/// Message for a `$(...)` inside an interpolated flag value
+/// (`--as "W$(...)"`) — also reused when a quoted `$((...))` reaches one.
+fn command_subst_interpolated_value_message() -> String {
+    "command substitution `$(...)` is not supported inside a scatter/gather \
+     flag's interpolated value here; assign it to a variable first"
+        .to_string()
+}
+
 /// Simple expression evaluation for args (without full scope access).
 ///
 /// `Ok(None)` means "not representable in this reduced sync context" (only
@@ -1130,9 +1147,21 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
         // here"), so a bare `$((...))` flag value never bound at all — a
         // valid `--limit $((1+1))` silently ran unlimited, and a bad
         // `--limit $((1/0))` silently did too, instead of failing (GH #183).
-        Expr::Arithmetic(expr_str) => arithmetic::eval_arithmetic(expr_str, &ctx.scope)
-            .map(|n| Some(Value::Int(n)))
-            .map_err(|e| format!("arithmetic error: {e}")),
+        //
+        // A `$(...)` reachable inside the expression (`$(( $(echo 2) ))`)
+        // can't run here either — the sync evaluator's own internal
+        // refusal for that case is not user-facing wording, so it's
+        // checked for and reported the same as the bare `$(...)` arm below.
+        Expr::Arithmetic(expr_str) => {
+            let parsed = arithmetic::parse(expr_str).map_err(|e| format!("arithmetic error: {e}"))?;
+            if parsed.contains_command_subst() {
+                Err(command_subst_flag_value_message())
+            } else {
+                arithmetic::eval_sync(&parsed, &ctx.scope)
+                    .map(|n| Some(Value::Int(n)))
+                    .map_err(|e| format!("arithmetic error: {e}"))
+            }
+        }
         Expr::HereDocBody { parts, strip_tabs } => {
             // Heredoc body materialization for redirect targets. `<<-` tab
             // stripping applies to the literal source, not to tabs from a
@@ -1155,11 +1184,7 @@ pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<
         // coalesce to a bare boolean flag/dropped value the way an unset
         // bare variable does. `scatter --limit $(echo 5)` used to silently
         // run at the default limit instead of erroring.
-        Expr::CommandSubst(_) | Expr::Command(_) => Err(
-            "command substitution `$(...)` is not supported in a scatter/gather flag value here; \
-             assign it to a variable first (e.g. `n=$(...); scatter --limit $n`)"
-                .to_string(),
-        ),
+        Expr::CommandSubst(_) | Expr::Command(_) => Err(command_subst_flag_value_message()),
         _ => Ok(None), // Binary ops need more context
     }
 }
@@ -1233,7 +1258,17 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                 // the real arithmetic error. Matches the bare
                 // `Expr::Arithmetic` arm above and the async
                 // `eval_string_part_async` (kernel.rs).
-                let value = arithmetic::eval_arithmetic(expr, &ctx.scope)
+                //
+                // A `$(...)` reachable inside the expression can't run here
+                // either (see the bare `Expr::Arithmetic` arm above) — check
+                // for it and report the same message as the `CommandSubst`
+                // arm below, rather than the sync evaluator's internal
+                // refusal.
+                let parsed = arithmetic::parse(expr).map_err(|e| format!("arithmetic error: {e}"))?;
+                if parsed.contains_command_subst() {
+                    return Err(command_subst_interpolated_value_message());
+                }
+                let value = arithmetic::eval_sync(&parsed, &ctx.scope)
                     .map_err(|e| format!("arithmetic error: {e}"))?;
                 result.push_str(&value.to_string());
             }
@@ -1243,11 +1278,7 @@ fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -
                 // loud instead of silently splicing in nothing.
                 // `scatter --as "W$(suffix)"` used to bind the plain "W"
                 // with the substitution silently dropped.
-                return Err(
-                    "command substitution `$(...)` is not supported inside a scatter/gather \
-                     flag's interpolated value here; assign it to a variable first"
-                        .to_string(),
-                );
+                return Err(command_subst_interpolated_value_message());
             }
             crate::ast::StringPart::LastExitCode => {
                 result.push_str(&ctx.scope.last_result().code.to_string());

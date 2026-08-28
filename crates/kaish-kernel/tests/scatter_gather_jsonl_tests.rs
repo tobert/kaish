@@ -564,6 +564,50 @@ async fn scatter_quoted_arithmetic_flag_value_division_by_zero_is_loud() {
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// A `$(...)` reachable INSIDE `$((...))` (`--limit $(( $(echo 2) ))`) can't
+// be evaluated by the reduced sync arg binder either — the sync arithmetic
+// evaluator's own internal refusal ("`$(...)` must be resolved by the async
+// evaluator before sync evaluation") used to leak straight to the user
+// instead of the same "assign it to a variable first" message the bare
+// `$(...)` arm already gives for `--limit $(echo 2)`.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn scatter_bare_arithmetic_flag_value_command_subst_is_not_internal_wording() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, "seq 1 3 | scatter --limit $(( $(echo 2) )) | echo $ITEM | gather").await;
+    assert_ne!(r.code, 0, "a $(...) inside $((...)) must fail loud: {r:?}");
+    assert!(
+        !r.err.contains("async evaluator") && !r.err.contains("sync evaluation"),
+        "internal evaluator wording leaked to the user: {}",
+        r.err
+    );
+    assert!(
+        r.err.contains("scatter/gather flag value")
+            && r.err.contains("assign it to a variable first"),
+        "expected the same message the bare $(...) arm gives, got: {}",
+        r.err
+    );
+}
+
+#[tokio::test]
+async fn scatter_quoted_arithmetic_flag_value_command_subst_is_not_internal_wording() {
+    let k = kernel_at(tempdir().unwrap().path());
+    let r = run_full(&k, r#"seq 1 3 | scatter --limit "$(( $(echo 2) ))" | echo $ITEM | gather"#).await;
+    assert_ne!(r.code, 0, "a $(...) inside a quoted $((...)) must fail loud: {r:?}");
+    assert!(
+        !r.err.contains("async evaluator") && !r.err.contains("sync evaluation"),
+        "internal evaluator wording leaked to the user: {}",
+        r.err
+    );
+    assert!(
+        r.err.contains("flag's interpolated value") && r.err.contains("assign it to a variable first"),
+        "expected the same message the quoted $(...) arm gives, got: {}",
+        r.err
+    );
+}
+
 #[tokio::test]
 async fn scatter_bare_arithmetic_flag_value_binds_successfully() {
     // Regression guard, pairing with the loud-error test above: a VALID bare
