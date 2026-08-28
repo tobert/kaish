@@ -647,13 +647,16 @@ impl<'a> Tokenizer<'a> {
                 ));
             }
             self.advance(); // consume '#'
-            let base = base_mag as u32;
-            if !(2..=36).contains(&base) {
+            // Range-check the full u64 before narrowing: `as u32` on
+            // k*2^32 + b (b in 2..=36) truncates to b and passes the
+            // check, silently evaluating in base b instead of refusing.
+            if !(2..=36).contains(&base_mag) {
                 return Err(ArithError::new(
                     format!("base `{base_mag}` is outside 2..=36"),
                     start..self.pos,
                 ));
             }
+            let base = base_mag as u32;
             if let Some(sign @ ('+' | '-')) = self.peek() {
                 let sign_start = self.pos;
                 self.pos += 1;
@@ -1356,6 +1359,11 @@ enum Numeral {
     ExpressionLike,
     LeadingZero,
     NotANumber,
+    /// The tokenizer refused with a message that already names a fix
+    /// (`0b101` → `2#101`, `1_000` → remove the `_`, `1e3` → integer-only).
+    /// Carries that message so the caller can keep it instead of a generic
+    /// "is not a number".
+    NotANumberWithFix(String),
     OutOfRange,
 }
 
@@ -1386,7 +1394,8 @@ fn read_numeral(text: &str) -> Numeral {
             },
             _ => Numeral::NotANumber,
         },
-        _ => Numeral::NotANumber,
+        Ok(_) => Numeral::NotANumber,
+        Err(e) => Numeral::NotANumberWithFix(e.message),
     }
 }
 
@@ -1408,6 +1417,9 @@ fn parse_numeric_string(s: &str, name: &str) -> Result<i64, ArithError> {
         Numeral::NotANumber => {
             Err(ArithError::new(format!("`{name}` holds `{s}`, which is not a number"), 0..0))
         }
+        Numeral::NotANumberWithFix(fix) => {
+            Err(ArithError::new(format!("`{name}` holds `{s}`; {fix}"), 0..0))
+        }
         Numeral::OutOfRange => {
             Err(ArithError::new(format!("`{name}` holds `{s}`, outside the 64-bit range"), 0..0))
         }
@@ -1423,12 +1435,14 @@ pub(crate) fn parse_command_output(text: &str, cmd: &str) -> Result<i64, ArithEr
             format!("`{cmd}` printed nothing; the command must print one integer"),
             0..0,
         )),
-        Numeral::ExpressionLike | Numeral::NotANumber | Numeral::LeadingZero | Numeral::OutOfRange => {
-            Err(ArithError::new(
-                format!("`{cmd}` printed `{text}`; the command must print one integer"),
-                0..0,
-            ))
-        }
+        Numeral::ExpressionLike
+        | Numeral::NotANumber
+        | Numeral::NotANumberWithFix(_)
+        | Numeral::LeadingZero
+        | Numeral::OutOfRange => Err(ArithError::new(
+            format!("`{cmd}` printed `{text}`; the command must print one integer"),
+            0..0,
+        )),
     }
 }
 
@@ -1834,6 +1848,42 @@ mod tests {
         assert!(msg.contains("not a digit"), "{msg}");
     }
 
+    // A base of the form k*2^32 + b (b in 2..=36) used to truncate through
+    // `as u32` BEFORE the range check, landing in range and silently
+    // computing as base b instead of refusing. Covers the typed literal,
+    // the `base#$VAR` expansion form, and a string variable holding the
+    // same spelling.
+    #[test]
+    fn base_out_of_range_survives_u32_truncation() {
+        for (expr, true_base) in [
+            ("4294967298#10", "4294967298"),
+            ("4294967299#10", "4294967299"),
+            ("4294967330#10", "4294967330"),
+            ("8589934594#10", "8589934594"),
+        ] {
+            let msg = err(expr);
+            assert!(msg.contains("outside 2..=36"), "{expr}: {msg}");
+            assert!(msg.contains(true_base), "{expr}: {msg}");
+        }
+    }
+
+    #[test]
+    fn based_expansion_out_of_range_survives_u32_truncation() {
+        let msg = err_with("4294967298#$d", |s| s.set("d", Value::String("10".to_string())));
+        assert!(msg.contains("outside 2..=36"), "{msg}");
+        assert!(msg.contains("4294967298"), "{msg}");
+    }
+
+    #[test]
+    fn string_variable_based_literal_base_overflow_does_not_compute() {
+        let mut scope = Scope::new();
+        scope.set("x", Value::String("4294967298#10".to_string()));
+        assert!(
+            eval_arithmetic("x", &scope).is_err(),
+            "a u32-truncated out-of-range base must refuse, not silently compute a value"
+        );
+    }
+
     #[test]
     fn no_digits_after_prefix() {
         let msg = err("0x");
@@ -2031,6 +2081,31 @@ mod tests {
     fn string_non_numeric_is_an_error() {
         let msg = err_with("x", |s| s.set("x", Value::String("abc".to_string())));
         assert!(msg.contains("not a number"), "{msg}");
+    }
+
+    // `read_numeral` used to flatten every tokenizer `Err` to a generic
+    // "is not a number", discarding a fix the tokenizer already named.
+    // These three spellings each carry a real fix; `abc` above has none
+    // and must keep the generic message.
+    #[test]
+    fn string_binary_spelling_names_the_fix() {
+        let msg = err_with("x", |s| s.set("x", Value::String("0b101".to_string())));
+        assert!(msg.contains("`x`") && msg.contains("0b101"), "{msg}");
+        assert!(msg.contains("2#101"), "{msg}");
+    }
+
+    #[test]
+    fn string_underscore_digit_group_names_the_fix() {
+        let msg = err_with("x", |s| s.set("x", Value::String("1_000".to_string())));
+        assert!(msg.contains("`x`") && msg.contains("1_000"), "{msg}");
+        assert!(msg.contains("remove it"), "{msg}");
+    }
+
+    #[test]
+    fn string_float_spelling_names_the_fix() {
+        let msg = err_with("x", |s| s.set("x", Value::String("1e3".to_string())));
+        assert!(msg.contains("`x`") && msg.contains("1e3"), "{msg}");
+        assert!(msg.contains("integer-only"), "{msg}");
     }
 
     #[test]
