@@ -2034,11 +2034,13 @@ mod tests {
     }
 
     #[test]
-    fn list_and_record_error() {
+    fn list_record_and_bytes_error() {
         let msg = err_with("x", |s| s.set("x", Value::Json(serde_json::json!([1, 2]))));
         assert!(msg.contains("list"), "{msg}");
         let msg = err_with("x", |s| s.set("x", Value::Json(serde_json::json!({"a": 1}))));
         assert!(msg.contains("record"), "{msg}");
+        let msg = err_with("x", |s| s.set("x", Value::Bytes(vec![0xff, 0xfe, 0x00, 0x01])));
+        assert!(msg.contains("bytes"), "{msg}");
     }
 
     #[test]

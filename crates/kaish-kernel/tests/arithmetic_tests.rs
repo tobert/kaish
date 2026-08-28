@@ -229,15 +229,14 @@ async fn coercion_null_and_unset() {
 }
 
 #[tokio::test]
-async fn coercion_list_record_bytes() {
+async fn coercion_list_and_record() {
     let text = err_of("x=[1 2]; echo $((x))").await;
     assert!(text.contains("list"), "{text:?}");
     let text = err_of("x={a: 1}; echo $((x))").await;
     assert!(text.contains("record"), "{text:?}");
-    // `head -c` off the synthetic /dev/urandom produces a real Value::Bytes
-    // with no localfs/subprocess feature needed.
-    let text = err_of("x=$(head -c 4 /dev/urandom); echo $((x))").await;
-    assert!(text.contains("bytes"), "{text:?}");
+    // The Bytes arm is unit-tested in arithmetic.rs: no shell command produces
+    // Bytes deterministically, and /dev/urandom decodes as UTF-8 often enough
+    // to fail this assertion roughly once in twelve runs.
 }
 
 // ── Precedence ───────────────────────────────────────────────────────────
