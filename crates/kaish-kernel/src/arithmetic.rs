@@ -256,6 +256,17 @@ impl<'a> Tokenizer<'a> {
         &self.text[start_byte..end_byte]
     }
 
+    /// End of the numeral run starting at `from` — digits, letters, and `_`.
+    /// An error quotes the literal the user wrote, not the prefix scanned so
+    /// far, so `1_000` is not reported as `1_`.
+    fn numeral_run_end(&self, from: usize) -> usize {
+        let mut end = from;
+        while self.chars.get(end).is_some_and(|(_, c)| c.is_ascii_alphanumeric() || *c == '_') {
+            end += 1;
+        }
+        end
+    }
+
     fn skip_ws(&mut self) {
         while matches!(self.peek(), Some(c) if c.is_whitespace()) {
             self.pos += 1;
@@ -500,7 +511,7 @@ impl<'a> Tokenizer<'a> {
         while let Some(c) = self.peek() {
             if c == '_' {
                 return Err(ArithError::new(
-                    format!("`{}` contains `_`; remove it", self.slice(lit_start, self.pos + 1)),
+                    format!("`{}` contains `_`; remove it", self.slice(lit_start, self.numeral_run_end(self.pos))),
                     lit_start..self.byte_pos() + c.len_utf8(),
                 ));
             }
@@ -528,7 +539,7 @@ impl<'a> Tokenizer<'a> {
                 .and_then(|m| m.checked_add(digit_val as u64))
                 .ok_or_else(|| {
                     ArithError::new(
-                        format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.pos + 1)),
+                        format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.numeral_run_end(self.pos))),
                         lit_start..self.byte_pos(),
                     )
                 })?;
@@ -548,7 +559,7 @@ impl<'a> Tokenizer<'a> {
         while let Some(c) = self.peek() {
             if c == '_' {
                 return Err(ArithError::new(
-                    format!("`{}` contains `_`; remove it", self.slice(lit_start, self.pos + 1)),
+                    format!("`{}` contains `_`; remove it", self.slice(lit_start, self.numeral_run_end(self.pos))),
                     lit_start..self.byte_pos() + c.len_utf8(),
                 ));
             }
@@ -558,7 +569,7 @@ impl<'a> Tokenizer<'a> {
             let digit_val = c as u64 - '0' as u64;
             mag = mag.checked_mul(10).and_then(|m| m.checked_add(digit_val)).ok_or_else(|| {
                 ArithError::new(
-                    format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.pos + 1)),
+                    format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.numeral_run_end(self.pos))),
                     lit_start..self.byte_pos(),
                 )
             })?;
@@ -1893,9 +1904,11 @@ mod tests {
     }
 
     #[test]
-    fn underscore_in_literal() {
-        let msg = err("1_000");
-        assert!(msg.contains('_'), "{msg}");
+    fn underscore_in_literal_quotes_the_whole_literal() {
+        // Not `1_`: the message names the literal the user wrote.
+        assert!(err("1_000").contains("`1_000`"), "{}", err("1_000"));
+        assert!(err("12_345_6").contains("`12_345_6`"), "{}", err("12_345_6"));
+        assert!(err("16#f_f").contains("`16#f_f`"), "{}", err("16#f_f"));
     }
 
     #[test]
