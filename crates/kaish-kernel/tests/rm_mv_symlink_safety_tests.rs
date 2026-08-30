@@ -314,3 +314,59 @@ async fn rm_r_symlink_to_dir_under_trash_keeps_target() {
         "trash mode must not move the link target"
     );
 }
+
+// ============================================================================
+// GROUP I — a symlink at the DESTINATION: replaced or kept, never written through
+// ============================================================================
+
+#[tokio::test]
+async fn mv_file_onto_symlink_to_file_replaces_link_keeps_target() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("src"), "NEW").unwrap();
+    std::fs::write(root.join("target"), "TARGET").unwrap();
+    symlink("target", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "mv src link").await;
+    assert_eq!(r.code, 0, "mv failed: {}", r.err);
+
+    let meta = std::fs::symlink_metadata(root.join("link")).unwrap();
+    assert!(meta.file_type().is_file(), "link is replaced by the file, not written through");
+    assert_eq!(std::fs::read_to_string(root.join("link")).unwrap(), "NEW");
+    assert_eq!(
+        std::fs::read_to_string(root.join("target")).unwrap(),
+        "TARGET",
+        "the link's target is untouched"
+    );
+    assert!(!lexists(&root.join("src")), "source gone");
+}
+
+#[tokio::test]
+async fn mv_n_file_onto_dangling_symlink_keeps_both() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("src"), "NEW").unwrap();
+    symlink("nowhere", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "mv -n src link").await;
+    assert_eq!(r.code, 0, "mv -n failed: {}", r.err);
+
+    // -n asks "is something there", and a dangling link is something.
+    let meta = std::fs::symlink_metadata(root.join("link")).unwrap();
+    assert!(meta.file_type().is_symlink(), "dangling link kept under -n");
+    assert_eq!(std::fs::read_to_string(root.join("src")).unwrap(), "NEW", "source kept");
+}
+
+#[tokio::test]
+async fn ln_sf_onto_dangling_symlink_replaces_it() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("x"), "X").unwrap();
+    symlink("nowhere", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "ln -sf x link").await;
+    assert_eq!(r.code, 0, "ln -sf failed: {}", r.err);
+
+    assert_eq!(std::fs::read_link(root.join("link")).unwrap(), Path::new("x"));
+    assert_eq!(std::fs::read_to_string(root.join("link")).unwrap(), "X");
+}

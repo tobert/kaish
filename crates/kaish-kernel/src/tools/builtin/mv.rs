@@ -163,8 +163,8 @@ async fn move_path(
         _ => dst.to_path_buf(),
     };
 
-    // Check for no-clobber mode
-    if no_clobber && backend.exists(&final_dst).await {
+    // -n asks whether a name is taken, so lstat: a dangling link counts.
+    if no_clobber && backend.lstat(&final_dst).await.is_ok() {
         return Ok(()); // Silently skip if destination exists
     }
 
