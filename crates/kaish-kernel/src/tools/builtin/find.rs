@@ -211,27 +211,36 @@ impl Tool for Find {
         for start_path in &start_paths {
             let resolved_path = ctx.resolve_path(start_path);
 
-            if !ctx.backend.exists(Path::new(&resolved_path)).await {
-                return ExecResult::failure(
-                    1,
-                    format!("find: '{}': No such file or directory", start_path),
-                );
-            }
-
-            // Detect whether the start path is a regular file (not a directory).
-            // GNU find: when given a regular-file operand it prints that path and
-            // moves on — it does NOT recurse into it.
-            let start_stat = ctx.backend.stat(Path::new(&resolved_path)).await.ok();
-            let start_is_file = start_stat
-                .as_ref()
-                .map(|s| !s.is_dir())
-                .unwrap_or(false);
+            // lstat, not exists/stat: the operand is classified by its own
+            // kind, matching how the walker classifies every other visited
+            // entry below. A dangling symlink still lstats successfully — it
+            // is reported as a link, never "No such file or directory" — and
+            // a symlink to a directory is a leaf here, never descended into
+            // (GNU find without -L).
+            let start_stat = match ctx.backend.lstat(Path::new(&resolved_path)).await {
+                Ok(info) => info,
+                Err(_) => {
+                    return ExecResult::failure(
+                        1,
+                        format!("find: '{}': No such file or directory", start_path),
+                    );
+                }
+            };
+            let start_is_file = !start_stat.is_dir();
 
             if start_is_file {
-                // Apply type filter: a plain file only matches "f" or no type.
-                if matches!(type_filter.as_deref(), Some("d")) {
-                    // -type d excludes regular files
-                    continue;
+                // Apply type filter: exact match against the lstat'd kind. A
+                // symlink operand (file or dir target, or dangling) can only
+                // satisfy -type l, never -type f/d.
+                if let Some(t) = type_filter.as_deref() {
+                    let is_match = match t {
+                        "f" => start_stat.is_file(),
+                        "l" => start_stat.is_symlink(),
+                        _ => false, // "d" never matches a non-directory leaf
+                    };
+                    if !is_match {
+                        continue;
+                    }
                 }
                 // Apply -name predicate to the filename component.
                 if let Some(ref pattern) = name_pattern {
@@ -247,10 +256,14 @@ impl Tool for Find {
                 if !path_matches(&path_glob, &ipath_glob, start_path) {
                     continue;
                 }
-                if !passes_mtime_size(start_stat.as_ref(), mtime_filter, size_filter) {
+                if !passes_mtime_size(Some(&start_stat), mtime_filter, size_filter) {
                     continue;
                 }
-                let entry_type = EntryType::File;
+                let entry_type = if start_stat.is_symlink() {
+                    EntryType::Symlink
+                } else {
+                    EntryType::File
+                };
                 nodes.push(OutputNode::new(start_path).with_entry_type(entry_type));
                 json_array.push(serde_json::Value::String(start_path.clone()));
                 continue;
@@ -275,7 +288,7 @@ impl Tool for Find {
                     if !path_matches(&path_glob, &ipath_glob, start_path) {
                         continue;
                     }
-                    if !passes_mtime_size(start_stat.as_ref(), mtime_filter, size_filter) {
+                    if !passes_mtime_size(Some(&start_stat), mtime_filter, size_filter) {
                         continue;
                     }
                     nodes.push(
