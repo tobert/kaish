@@ -29,6 +29,9 @@ breaking entries are marked **BREAKING**.
   `Filesystem` backend runs against itself via `run_all(make_root)`.
 - **`[[ -L path ]]`** (alias `-h`) and `test -L` — true when the path is a
   symlink, including a dangling one.
+- **`find -type l`**; `find` classifies with `lstat`, so `-type f` no longer
+  matches a link to a file. **`stat`** describes the link itself by default,
+  with its target; `stat -L` follows.
 - **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
   chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
 - **`$(( ))` reads another base** (`0x`, `base#digits`, `base#$var`) and

@@ -198,3 +198,26 @@ async fn stat_json_includes_target_for_a_link_and_omits_it_for_a_file() {
         "a plain file row must not carry a TARGET key: {file_json}"
     );
 }
+
+#[tokio::test]
+async fn find_type_l_finds_a_link_to_a_directory_and_stat_names_its_target() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::create_dir(root.join("realdir")).unwrap();
+    std::fs::write(root.join("plain"), "p").unwrap();
+    symlink("realdir", root.join("dirlink")).unwrap();
+    let kernel = kernel_at(root);
+
+    let r = run(&kernel, "find . -type l").await;
+    assert_eq!(r.code, 0, "find failed: {}", r.err);
+    assert_eq!(r.text_out().trim(), "./dirlink");
+
+    let r = run(&kernel, "stat dirlink").await;
+    assert_eq!(r.code, 0, "stat failed: {}", r.err);
+    let out = r.text_out();
+    assert!(out.contains("symbolic link") && out.contains("realdir"), "{out}");
+
+    // A plain file's row carries no target cell.
+    let r = run(&kernel, "stat plain").await;
+    assert_eq!(r.text_out().trim(), "plain\t1\tregular file");
+}
