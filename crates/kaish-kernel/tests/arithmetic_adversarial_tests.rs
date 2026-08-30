@@ -339,3 +339,58 @@ async fn command_output_that_is_an_expression_is_refused() {
 async fn bare_true_false_are_variable_names_not_literals() {
     errs("echo $(( true + false ))", "unset").await;
 }
+
+// ── Command substitution nested inside `$(( ))`: bracket balancing ─────────
+//
+// Each case nests `$(…)` or a `${…:-…}` default inside `$(( ))` with a
+// character the bracket-balancing scan must treat as inside the
+// substitution. Disposition per case, against bash:
+//
+//   * `#` comment in `$(…)` → bash `1`; the `)` on the comment line must
+//     not close. Fixed (`skip_group` honors `#`).
+//   * quoted `}` in a `${x:-$(…)}` default → bash `6`; the `}` inside `"}"`
+//     must not close the brace. Fixed (`skip_group` skips nested quotes).
+//   * heredoc in `$(…)` → bash itself mishandles it (errors, empty, exit 0),
+//     so kaish keeps the loud error. Pinned.
+//   * quoted `)` in `$(…)` → bash `3`; the control, already correct.
+
+/// `#` inside `$(…)` is a comment, so the `)` on its line does not close:
+/// `$(true # )\necho 1)` yields `1`, `$(( 1 ))` is `1` (bash agrees).
+#[tokio::test]
+async fn cmdsubst_comment_inside_arith_should_be_honored() {
+    ok("echo $(( $(true # )\necho 1) ))", "1").await;
+}
+
+/// A heredoc inside `$(…)` inside `$(( ))`: the `)` on the heredoc body line
+/// would close the substitution early, so kaish refuses it loudly. bash does
+/// not handle this cleanly either, so the error is kept rather than matched.
+#[tokio::test]
+async fn cmdsubst_heredoc_inside_arith_errors_loud_by_design() {
+    errs(
+        "echo $(( $(cat <<'EOF' > /dev/null\n)\nEOF\necho 1)\n+ 1 ))",
+        "syntax error in command substitution",
+    )
+    .await;
+}
+
+/// The `}` inside `"}` is quoted, so it does not close `${…:-…}`; the
+/// default yields `5`, `$(( 5 + 1 ))` is `6` (bash agrees).
+#[tokio::test]
+async fn braced_default_quoted_close_brace_should_be_skipped() {
+    ok(
+        r#"echo $(( ${x:-$(echo "}" > /dev/null; echo 5)} + 1 ))"#,
+        "6",
+    )
+    .await;
+}
+
+/// Control: the `)` inside `"")"` is quoted, so it does not close `$(…)`;
+/// the nested `$(( ))` sums to `3` (bash agrees).
+#[tokio::test]
+async fn cmdsubst_quoted_paren_balances_and_works() {
+    ok(
+        r#"echo $(( $(( $(echo ")" > /dev/null; echo 1) + 1 )) + 1 ))"#,
+        "3",
+    )
+    .await;
+}

@@ -724,108 +724,20 @@ impl<'a> Tokenizer<'a> {
             Some('?') => { self.advance(); Ok(Expansion::LastExitCode) }
             Some('$') => { self.advance(); Ok(Expansion::CurrentPid) }
             Some('(') if self.peek_at(1) == Some('(') => {
-                self.pos += 2;
+                self.pos += 2; // consume both '(' after the '$'
                 let inner_start = self.pos;
-                let mut depth = 0i32;
-                let mut closed = false;
-                while let Some(c) = self.peek() {
-                    match c {
-                        '(' => { depth += 1; self.pos += 1; }
-                        ')' => {
-                            if depth > 0 {
-                                depth -= 1;
-                                self.pos += 1;
-                            } else if self.peek_at(1) == Some(')') {
-                                self.pos += 2;
-                                closed = true;
-                                break;
-                            } else {
-                                self.pos += 1;
-                            }
-                        }
-                        _ => { self.pos += 1; }
-                    }
-                }
-                if !closed {
-                    return Err(ArithError::new(
-                        format!("`{}` has no closing `)`", self.slice(dollar_start, self.pos)),
-                        dollar_start..self.byte_pos(),
-                    ));
-                }
-                let inner_end = self.pos - 2;
-                let inner_text = self.slice(inner_start, inner_end).to_string();
+                let close = self.skip_group(')', true, dollar_start, false)?;
+                let inner_text = self.slice(inner_start, close).to_string();
                 let inner = parse(&inner_text)?;
                 Ok(Expansion::Nested(Box::new(inner)))
             }
             Some('(') => {
                 self.advance(); // consume '('
-                // Character-level, quote-aware scan — re-tokenizing the
-                // remainder chokes on arithmetic syntax the general lexer
-                // doesn't know outside `$(( ))`.
+                // `skip_group` finds the close; the general lexer can't
+                // re-tokenize arithmetic syntax here. `comments = true`.
                 let cmd_start = self.pos;
-                let mut depth = 0i32;
-                let closed = loop {
-                    match self.peek() {
-                        None => break false,
-                        Some('\\') => {
-                            self.pos += 1;
-                            if self.peek().is_some() {
-                                self.pos += 1;
-                            }
-                        }
-                        Some('\'') => {
-                            self.pos += 1;
-                            while matches!(self.peek(), Some(c) if c != '\'') {
-                                self.pos += 1;
-                            }
-                            if self.peek() == Some('\'') {
-                                self.pos += 1;
-                            } else {
-                                break false;
-                            }
-                        }
-                        Some('"') => {
-                            self.pos += 1;
-                            loop {
-                                match self.peek() {
-                                    None => break,
-                                    Some('\\') => {
-                                        self.pos += 1;
-                                        if self.peek().is_some() {
-                                            self.pos += 1;
-                                        }
-                                    }
-                                    Some('"') => {
-                                        self.pos += 1;
-                                        break;
-                                    }
-                                    Some(_) => self.pos += 1,
-                                }
-                            }
-                        }
-                        Some('(') => {
-                            depth += 1;
-                            self.pos += 1;
-                        }
-                        Some(')') => {
-                            if depth > 0 {
-                                depth -= 1;
-                                self.pos += 1;
-                            } else {
-                                break true;
-                            }
-                        }
-                        Some(_) => self.pos += 1,
-                    }
-                };
-                if !closed {
-                    return Err(ArithError::new(
-                        format!("`{}` has no closing `)`", self.slice(dollar_start, self.pos)),
-                        dollar_start..self.byte_pos(),
-                    ));
-                }
-                let cmd_text = self.slice(cmd_start, self.pos).to_string();
-                self.pos += 1; // consume the ')'
+                let close = self.skip_group(')', false, dollar_start, true)?;
+                let cmd_text = self.slice(cmd_start, close).to_string();
                 match crate::parser::parse(&cmd_text) {
                     Ok(program) => Ok(Expansion::CommandSubst(program.statements)),
                     Err(_) => Err(ArithError::new(
@@ -837,21 +749,8 @@ impl<'a> Tokenizer<'a> {
             Some('{') => {
                 self.advance(); // consume '{'
                 let body_start = self.pos;
-                let mut depth = 1i32;
-                while depth > 0 {
-                    match self.peek() {
-                        Some('{') => { depth += 1; self.pos += 1; }
-                        Some('}') => { depth -= 1; self.pos += 1; }
-                        Some(_) => { self.pos += 1; }
-                        None => {
-                            return Err(ArithError::new(
-                                format!("`{}` has no closing `}}`", self.slice(dollar_start, self.pos)),
-                                dollar_start..self.byte_pos(),
-                            ));
-                        }
-                    }
-                }
-                let body = self.slice(body_start, self.pos - 1).to_string();
+                let close = self.skip_group('}', false, dollar_start, false)?;
+                let body = self.slice(body_start, close).to_string();
                 parse_braced_body(&body, dollar_start..self.byte_pos())
             }
             // `$1`, `$2`, … — positional parameters. A leading digit is
@@ -869,6 +768,144 @@ impl<'a> Tokenizer<'a> {
                 format!("`{}` cannot start a value", self.slice(dollar_start, self.pos + 1)),
                 dollar_start..self.byte_pos() + 1,
             )),
+        }
+    }
+
+    /// Scan a balanced group from just past its opener (`$(`, `$((`, `${`, or
+    /// a bare `(`) to its `close`, quote/escape-aware and recursing into
+    /// nested `$(…)`, `$((…))`, `${…}`, and `(…)`. Returns the char index of
+    /// the close and leaves `self.pos` past it; the body is
+    /// `slice(body_start, close)`. `double` closes on two `close` chars
+    /// (`$((…))`).
+    ///
+    /// `comments` true treats `#` as a comment to EOL (command-substitution
+    /// bodies only); false leaves it as the base separator (`$((…))`) or a
+    /// literal (`${…}`). The word boundary reuses `lexer::opens_a_word`.
+    /// `group_start` is the error span for an unterminated group.
+    fn skip_group(
+        &mut self,
+        close: char,
+        double: bool,
+        group_start: usize,
+        comments: bool,
+    ) -> Result<usize, ArithError> {
+        let open: char = if close == '}' { '{' } else { '(' };
+        let mut depth = 1i32;
+        loop {
+            match self.peek() {
+                None => {
+                    let close_str = if double { "))" } else if close == '}' { "}" } else { ")" };
+                    return Err(ArithError::new(
+                        format!("`{}` has no closing `{close_str}`", self.slice(group_start, self.pos)),
+                        group_start..self.byte_pos(),
+                    ));
+                }
+                Some('\\') => {
+                    self.pos += 1;
+                    if self.peek().is_some() {
+                        self.pos += 1;
+                    }
+                }
+                Some('\'') => {
+                    self.pos += 1;
+                    while matches!(self.peek(), Some(c) if c != '\'') {
+                        self.pos += 1;
+                    }
+                    if self.peek() == Some('\'') {
+                        self.pos += 1;
+                    }
+                    // unterminated → `None` errors "no closing …"
+                }
+                Some('"') => {
+                    self.pos += 1;
+                    loop {
+                        match self.peek() {
+                            None => break,
+                            Some('\\') => {
+                                self.pos += 1;
+                                if self.peek().is_some() {
+                                    self.pos += 1;
+                                }
+                            }
+                            Some('"') => {
+                                self.pos += 1;
+                                break;
+                            }
+                            Some(_) => self.pos += 1,
+                        }
+                    }
+                }
+                Some('#') => {
+                    if comments {
+                        // comment only at a word start (`opens_a_word`);
+                        // skip to EOL (`\n`/`\r`, matching the lexer)
+                        // so a `)` in it does not close.
+                        let prev = self
+                            .pos
+                            .checked_sub(1)
+                            .and_then(|i| self.chars.get(i))
+                            .map(|(_, c)| *c);
+                        if prev.is_none() || prev.is_some_and(crate::lexer::opens_a_word) {
+                            while matches!(self.peek(), Some(c) if c != '\n' && c != '\r') {
+                                self.pos += 1;
+                            }
+                        } else {
+                            self.pos += 1; // mid-word `#` is a normal char here
+                        }
+                    } else {
+                        self.pos += 1; // `#` is the base separator / literal
+                    }
+                }
+                Some('$') => {
+                    let nested_start = self.pos;
+                    match self.peek_at(1) {
+                        Some('(') if self.peek_at(2) == Some('(') => {
+                            self.pos += 3;
+                            self.skip_group(')', true, nested_start, false)?;
+                        }
+                        Some('(') => {
+                            self.pos += 2;
+                            self.skip_group(')', false, nested_start, true)?;
+                        }
+                        Some('{') => {
+                            self.pos += 2;
+                            self.skip_group('}', false, nested_start, false)?;
+                        }
+                        _ => self.pos += 1, // `$name` — the `$` is plain here
+                    }
+                }
+                Some('(') => {
+                    // bare `(`: recurse so its `)`/`}` does not close the
+                    // outer group; `comments` propagates.
+                    let nested_start = self.pos;
+                    self.pos += 1;
+                    self.skip_group(')', false, nested_start, comments)?;
+                }
+                Some(c) if c == open => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some(c) if c == close => {
+                    if double {
+                        if self.peek_at(1) == Some(close) {
+                            let close_pos = self.pos;
+                            self.pos += 2;
+                            return Ok(close_pos);
+                        }
+                        // lone `)` in `$((…))`: consume, keep scanning.
+                        self.pos += 1;
+                    } else {
+                        depth -= 1;
+                        self.pos += 1;
+                        if depth == 0 {
+                            return Ok(self.pos - 1);
+                        }
+                    }
+                }
+                Some(_) => {
+                    self.pos += 1;
+                }
+            }
         }
     }
 }

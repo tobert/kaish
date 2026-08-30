@@ -1155,7 +1155,7 @@ fn reject_backtick(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
 /// deliberately absent: `$(f)#3` is one word in bash, and the lexer cannot
 /// tell that `)` from a subshell's here, so both are a loud error rather than
 /// a silent comment.
-fn opens_a_word(c: char) -> bool {
+pub(crate) fn opens_a_word(c: char) -> bool {
     c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(')
 }
 
