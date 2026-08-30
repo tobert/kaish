@@ -1022,6 +1022,62 @@ impl Filesystem for OverlayFs {
         Ok(())
     }
 
+    /// Rename never follows the source's final component (POSIX `rename(2)`
+    /// on a symlink moves the link, not its target) and never writes
+    /// through a symlink sitting at the destination.
+    ///
+    /// The trait default (`stat`+`read`+`write`+`remove`) does neither: its
+    /// `stat` follows the source, and its `write` — now that the upper's
+    /// `MemoryFs::write` follows a destination symlink to its target — would
+    /// land the bytes on whatever the destination link points at instead of
+    /// replacing the link. This override routes entirely through `lstat`,
+    /// `read_link`, `symlink`, `read`, `write`, and `remove` so whiteouts,
+    /// bases, and `dirty_symlinks` stay consistent; it never touches
+    /// `state` directly.
+    ///
+    /// A directory source keeps the default's `Unsupported` — a recursive
+    /// move across whiteouts and bases is out of scope here.
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let from = normalize(from);
+        let to = normalize(to);
+
+        let entry = self.lstat(&from).await?;
+
+        if entry.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "rename directories not supported by this filesystem",
+            ));
+        }
+
+        if entry.is_symlink() {
+            // Move the link itself: read its stored target verbatim, clear
+            // whatever sits at `to` (a symlink there is replaced, never
+            // followed), then recreate the link at `to`.
+            let target = self.read_link(&from).await?;
+            match self.remove(&to).await {
+                Ok(()) => {}
+                Err(ref error) if is_not_found(error) => {}
+                Err(error) => return Err(error),
+            }
+            self.symlink(&target, &to).await?;
+            self.remove(&from).await?;
+            return Ok(());
+        }
+
+        // Regular file: clear the destination first. `write` alone would
+        // follow a symlink left at `to` straight to its target.
+        match self.remove(&to).await {
+            Ok(()) => {}
+            Err(ref error) if is_not_found(error) => {}
+            Err(error) => return Err(error),
+        }
+        let data = self.read(&from).await?;
+        self.write(&to, &data).await?;
+        self.remove(&from).await?;
+        Ok(())
+    }
+
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
         let path = normalize(path);
         let mut state = self.state.write().await;
