@@ -53,6 +53,11 @@ async fn run(kernel: &Kernel, script: &str) -> ExecResult {
     kernel.execute(script).await.expect("kernel execute")
 }
 
+/// `symlink_metadata` (lstat) — exists without following the link.
+fn lexists(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok()
+}
+
 // ============================================================================
 // A — find: the start operand is lstat'd, not stat'd
 // ============================================================================
@@ -165,4 +170,97 @@ async fn mv_cross_mount_dir_recreates_symlink_children() {
         "subdir",
         "a link to a directory must be recreated as a link, not descended into"
     );
+}
+
+// ============================================================================
+// C — ls: the operand is lstat'd, not stat'd
+// ============================================================================
+
+#[tokio::test]
+async fn ls_l_on_a_link_to_a_file_shows_l_and_target() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("target.txt"), "hello").unwrap();
+    symlink("target.txt", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "ls -l link").await;
+    assert_eq!(r.code, 0, "ls -l link failed: {}", r.err);
+    let out = r.text_out();
+    assert!(out.contains('l'), "ls -l on a link must show type 'l': {out}");
+    assert!(out.contains("-> target.txt"), "ls -l on a link must show its target: {out}");
+}
+
+#[tokio::test]
+async fn ls_l_on_a_dirlink_lists_the_directorys_contents() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::create_dir(root.join("realdir")).unwrap();
+    std::fs::write(root.join("realdir/child.txt"), "keepme").unwrap();
+    symlink("realdir", root.join("dirlink")).unwrap();
+
+    let r = run(&kernel_at(root), "ls -l dirlink").await;
+    assert_eq!(r.code, 0, "ls -l dirlink failed: {}", r.err);
+    assert!(r.text_out().contains("child.txt"), "{}", r.text_out());
+}
+
+#[tokio::test]
+async fn ls_l_on_a_dangling_link_succeeds_and_shows_the_link() {
+    let dir = tempdir();
+    let root = dir.path();
+    symlink("nowhere", root.join("dangling")).unwrap();
+
+    let r = run(&kernel_at(root), "ls -l dangling").await;
+    assert_eq!(r.code, 0, "ls -l on a dangling-link operand must succeed: {}", r.err);
+    let out = r.text_out();
+    assert!(out.contains('l'), "must show type 'l': {out}");
+    assert!(out.contains("dangling"), "{out}");
+}
+
+#[tokio::test]
+async fn ls_json_on_a_link_operand_shows_a_symlink_entry() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("target.txt"), "hello").unwrap();
+    symlink("target.txt", root.join("link")).unwrap();
+
+    // Non-long --json: a bare array of names; a symlink gets the `@` suffix
+    // ls -F uses, matching the rendering ls already uses for a link found
+    // inside a directory listing.
+    let r = run(&kernel_at(root), "ls link --json").await;
+    assert_eq!(r.code, 0, "ls link --json failed: {}", r.err);
+    let json: serde_json::Value = serde_json::from_str(&r.text_out()).expect("valid json");
+    assert_eq!(json, serde_json::json!(["link@"]), "{json}");
+
+    // Long --json: a table row whose TYPE cell is 'l' and whose NAME carries
+    // the target, mirroring a link found inside a directory listing.
+    let r = run(&kernel_at(root), "ls -l link --json").await;
+    assert_eq!(r.code, 0, "ls -l link --json failed: {}", r.err);
+    let json: serde_json::Value = serde_json::from_str(&r.text_out()).expect("valid json");
+    assert_eq!(
+        json[0].get("TYPE").and_then(|v| v.as_str()),
+        Some("l"),
+        "{json}"
+    );
+    assert_eq!(
+        json[0].get("NAME").and_then(|v| v.as_str()),
+        Some("link -> target.txt"),
+        "{json}"
+    );
+}
+
+// Sanity: the directory-walk path (unaffected by this change) still keeps
+// its symlink safety — a plain-file operand is untouched by any of the
+// classification changes above.
+#[tokio::test]
+async fn ls_l_on_a_regular_file_operand_is_unaffected() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("plain.txt"), "x").unwrap();
+
+    let r = run(&kernel_at(root), "ls -l plain.txt").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    let out = r.text_out();
+    assert!(out.contains('-'), "{out}");
+    assert!(!out.contains("->"), "{out}");
+    assert!(lexists(&root.join("plain.txt")));
 }
