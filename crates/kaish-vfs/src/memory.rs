@@ -133,6 +133,41 @@ impl MemoryFs {
         }
     }
 
+    /// Follow a chain of symlink entries to the path a `write`/`append`
+    /// should land on, matching `open(O_WRONLY|O_CREAT)`: the bytes go to
+    /// the target, the link entries stay untouched.
+    ///
+    /// Returns the final path, whether or not anything exists there yet —
+    /// a dangling chain's last hop is the write target, same as the OS
+    /// creating the file the link already points at. A directory anywhere
+    /// in the chain (including the starting path) is `IsADirectory`; a
+    /// loop past the depth limit is the same error `read`/`stat` give.
+    fn resolve_write_target_locked(
+        entries: &HashMap<PathBuf, Entry>,
+        path: &Path,
+    ) -> io::Result<PathBuf> {
+        let mut current = Self::normalize(path);
+        let mut depth = 0usize;
+        loop {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            match entries.get(&current) {
+                Some(Entry::Symlink { target, .. }) => {
+                    current = Self::normalize(&Self::resolve_symlink_target(&current, target));
+                    depth += 1;
+                }
+                Some(Entry::Directory { .. }) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::IsADirectory,
+                        format!("is a directory: {}", current.display()),
+                    ));
+                }
+                Some(Entry::File { .. }) | None => return Ok(current),
+            }
+        }
+    }
+
     /// Maximum symlink follow depth (matches Linux ELOOP limit).
     /// Mode reported for a `MemoryFs` directory: readable, writable, and
     /// searchable by everyone.
@@ -408,20 +443,20 @@ impl Filesystem for MemoryFs {
         // Ensure parent directories exist (under the same guard — no TOCTOU)
         Self::ensure_parents_locked(&mut entries, &normalized)?;
 
-        // Check we're not overwriting a directory
-        if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
-            return Err(io::Error::new(
-                io::ErrorKind::IsADirectory,
-                format!("is a directory: {}", path.display()),
-            ));
-        }
+        // A symlink at `normalized` is followed to its target — the target
+        // gets the bytes, the link entry is left alone. `resolve` also
+        // catches a directory anywhere in the chain (IsADirectory).
+        let target = Self::resolve_write_target_locked(&entries, &normalized)?;
+        // The resolved target may sit under a directory that does not exist
+        // yet (a dangling link pointing into an uncreated subtree).
+        Self::ensure_parents_locked(&mut entries, &target)?;
 
-        let old_len = Self::file_len(entries.get(&normalized));
+        let old_len = Self::file_len(entries.get(&target));
         let new_len = data.len() as u64;
         self.charge_grow(old_len, new_len)?;
 
         entries.insert(
-            normalized,
+            target,
             Entry::File {
                 data: data.to_vec(),
                 modified: system_now(),
@@ -443,27 +478,25 @@ impl Filesystem for MemoryFs {
 
         Self::ensure_parents_locked(&mut entries, &normalized)?;
 
-        if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
-            return Err(io::Error::new(
-                io::ErrorKind::IsADirectory,
-                format!("is a directory: {}", path.display()),
-            ));
-        }
+        // Same follow-through as `write`: append lands on the symlink's
+        // target, never replacing the link.
+        let target = Self::resolve_write_target_locked(&entries, &normalized)?;
+        Self::ensure_parents_locked(&mut entries, &target)?;
 
-        let old_len = Self::file_len(entries.get(&normalized));
+        let old_len = Self::file_len(entries.get(&target));
         let new_len = old_len + data.len() as u64;
         self.charge_grow(old_len, new_len)?;
 
-        match entries.get_mut(&normalized) {
+        match entries.get_mut(&target) {
             Some(Entry::File { data: existing, modified }) => {
                 existing.extend_from_slice(data);
                 *modified = system_now();
             }
-            // Non-file entry (or none): same as `write` overwriting a
-            // symlink or absent path, an append creates a fresh file.
+            // Nothing at the resolved target yet (a dangling link, or a
+            // fresh path): append creates the file there.
             _ => {
                 entries.insert(
-                    normalized,
+                    target,
                     Entry::File {
                         data: data.to_vec(),
                         modified: system_now(),
