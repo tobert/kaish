@@ -648,6 +648,44 @@ pub async fn rename_to_itself_keeps_the_file(fs: &dyn Filesystem) -> Result<(), 
     Ok(())
 }
 
+pub async fn remove_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> {
+    // The root is empty here, so "not empty" cannot be the reason.
+    for spelling in ["", "/", "."] {
+        if fs.remove(Path::new(spelling)).await.is_ok() {
+            return Err(format!("remove({spelling:?}) removed the empty mount root"));
+        }
+    }
+    fs.write(Path::new("keep"), b"K")
+        .await
+        .map_err(|e| format!("write keep after the refusals (root gone?): {e}"))?;
+    if fs.remove(Path::new("")).await.is_ok() {
+        return Err("remove(\"\") removed the mount root".to_string());
+    }
+    fs.read(Path::new("keep"))
+        .await
+        .map_err(|e| format!("read(keep): {e}"))?;
+    Ok(())
+}
+
+pub async fn rename_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> {
+    fs.write(Path::new("keep"), b"K")
+        .await
+        .map_err(|e| format!("write keep: {e}"))?;
+    if fs.rename(Path::new(""), Path::new("moved")).await.is_ok() {
+        return Err("rename(\"\", moved) moved the mount root".to_string());
+    }
+    if fs.rename(Path::new("keep"), Path::new("")).await.is_ok() {
+        return Err("rename(keep, \"\") replaced the mount root".to_string());
+    }
+    fs.read(Path::new("keep"))
+        .await
+        .map_err(|e| format!("read(keep) after the refusals: {e}"))?;
+    if fs.lstat(Path::new("moved")).await.is_ok() {
+        return Err("a path named moved appeared".to_string());
+    }
+    Ok(())
+}
+
 // Adapts an async case fn to the boxed-future `Case` fn-pointer shape. The
 // local `adapt` fn is a fresh item per invocation, so names never collide.
 macro_rules! case {
@@ -679,6 +717,8 @@ pub const CASES: &[(&str, Case)] = &[
     case!(list_through_a_link_to_a_directory),
     case!(set_mtime_through_a_link_touches_the_target),
     case!(rename_to_itself_keeps_the_file),
+    case!(remove_refuses_the_root),
+    case!(rename_refuses_the_root),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

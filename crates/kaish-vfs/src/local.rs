@@ -56,6 +56,19 @@ impl LocalFs {
         resolve_beneath(&self.root, path, follow)
     }
 
+    /// Resolve a path that is about to be removed or renamed: the link
+    /// itself, and never the mount root.
+    fn resolve_for_change(&self, path: &Path) -> io::Result<PathBuf> {
+        let resolved = self.resolve(path, Follow::LinkItself)?;
+        if resolved == self.root.canonicalize()? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot remove or rename the mount root",
+            ));
+        }
+        Ok(resolved)
+    }
+
     /// Check if write operations are allowed.
     fn check_writable(&self) -> io::Result<()> {
         if self.read_only {
@@ -415,7 +428,7 @@ impl Filesystem for LocalFs {
         self.check_writable()?;
         // The link itself is unlinked; `symlink_metadata` sends a link (even
         // to a directory) down the `remove_file` branch.
-        let full_path = self.resolve(path, Follow::LinkItself)?;
+        let full_path = self.resolve_for_change(path)?;
         let meta = fs::symlink_metadata(&full_path).await?;
 
         if meta.is_dir() {
@@ -431,8 +444,8 @@ impl Filesystem for LocalFs {
         // source link is moved, and a destination link is replaced, never
         // written through. A missing destination parent is appended literally
         // and created below.
-        let from_path = self.resolve(from, Follow::LinkItself)?;
-        let to_path = self.resolve(to, Follow::LinkItself)?;
+        let from_path = self.resolve_for_change(from)?;
+        let to_path = self.resolve_for_change(to)?;
 
         // Ensure parent directory exists for destination
         if let Some(parent) = to_path.parent() {
@@ -771,6 +784,24 @@ mod tests {
         assert!(!fs.exists(Path::new("file.txt")).await);
 
         cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_link_and_lstat_through_an_escaping_intermediate_are_refused() {
+        // `out -> <outside dir>` sits inside the root; `out/host-link` is a
+        // link that lives outside. Neither its metadata nor its target may
+        // be read through the root.
+        let (fs, dir) = setup().await;
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/secret", outside.path().join("host-link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join("out")).unwrap();
+
+        let read_link = fs.read_link(Path::new("out/host-link")).await;
+        let lstat = fs.lstat(Path::new("out/host-link")).await;
+        cleanup(&dir).await;
+        assert_eq!(read_link.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(lstat.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[cfg(unix)]

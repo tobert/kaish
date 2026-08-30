@@ -66,6 +66,8 @@ breaking entries are marked **BREAKING**.
   through a dangling link whose target lay outside the root created that
   target. Both are refused before any I/O.
 - `Filesystem::rename`'s default deleted the source when renamed to itself.
+- `LocalFs` removed its own mount root on `rm ""`/`rm /` when empty; every
+  backend now refuses to remove or rename its root (conformance row).
 - `mv file link` on a local mount wrote through the link into its target;
   it now replaces the link, as rename(2) does. Onto a link to a directory it
   no longer fails EISDIR.
