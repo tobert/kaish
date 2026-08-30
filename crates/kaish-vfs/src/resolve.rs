@@ -21,7 +21,9 @@ pub enum Follow {
     /// The operation follows the final component: read, write, stat, list,
     /// mkdir, set_mtime, and every other call that opens or inspects the
     /// target. Containment is checked on the fully resolved path, so a
-    /// link inside the root that points outside it is refused.
+    /// link inside the root that points outside it is refused. A dangling
+    /// chain is followed to the path it names and checked there, so the
+    /// caller's open flags carry no part of the guarantee.
     Final,
     /// The operation acts on the link itself and never follows it: remove,
     /// both sides of rename, lstat, read_link, and the link side of
