@@ -7,6 +7,7 @@
 //! find . -name "*.rs"                # Find by name pattern
 //! find src -type f                   # Find files only
 //! find . -type d                     # Find directories only
+//! find . -type l                     # Find symlinks only
 //! find . -maxdepth 2                 # Limit recursion depth
 //! find . -name "*.rs" -type f        # Combine predicates
 //! find . -mindepth 1                 # Skip start directory
@@ -47,7 +48,8 @@ struct FindArgs {
     #[arg(long = "name")]
     name: Option<String>,
 
-    /// Type filter: 'f' for files, 'd' for directories.
+    /// Type filter: 'f' for files, 'd' for directories, 'l' for symlinks
+    /// (a link is never reported as the type of what it points to).
     #[arg(id = "type", long = "type")]
     type_: Option<String>,
 
@@ -97,6 +99,7 @@ impl Tool for Find {
                 ("Find all files", "find ."),
                 ("Find by name pattern", "find src -name '*.rs'"),
                 ("Find directories only", "find . -type d"),
+                ("Find symlinks only", "find . -type l"),
             ],
         )
     }
@@ -135,8 +138,13 @@ impl Tool for Find {
         let entry_types = match type_filter.as_deref() {
             Some("f") => EntryTypes::files_only(),
             Some("d") => EntryTypes::dirs_only(),
+            // The walker buckets symlinks in with files (kaish-glob's
+            // EntryTypes has no symlink bucket of its own); this is a coarse
+            // pre-filter, and the exact `-type l` check happens below with
+            // `lstat`, which is the only way to tell a link from a file.
+            Some("l") => EntryTypes::files_only(),
             Some(t) => {
-                return ExecResult::failure(1, format!("find: invalid type '{}': use 'f' or 'd'", t));
+                return ExecResult::failure(1, format!("find: invalid type '{}': use 'f', 'd', or 'l'", t));
             }
             None => EntryTypes::all(),
         };
@@ -330,7 +338,23 @@ impl Tool for Find {
                 .unwrap_or(0);
 
             for path in paths {
-                let info = ctx.backend.stat(&path).await.ok();
+                // lstat, not stat: a symlink is classified by its own kind,
+                // never by the kind of what it points to.
+                let info = ctx.backend.lstat(&path).await.ok();
+
+                // -type f/d/l: the walker's entry_types bucket above is coarse
+                // (symlinks share the "files" bucket); this is the exact check.
+                if let Some(t) = type_filter.as_deref() {
+                    let is_match = match (&info, t) {
+                        (Some(i), "f") => i.is_file(),
+                        (Some(i), "d") => i.is_dir(),
+                        (Some(i), "l") => i.is_symlink(),
+                        _ => false,
+                    };
+                    if !is_match {
+                        continue;
+                    }
+                }
 
                 // -mtime filter
                 if let Some((sign, days)) = mtime_filter
@@ -372,7 +396,15 @@ impl Tool for Find {
                 }
 
                 let entry_type = info
-                    .map(|i| if i.is_dir() { EntryType::Directory } else { EntryType::File })
+                    .map(|i| {
+                        if i.is_symlink() {
+                            EntryType::Symlink
+                        } else if i.is_dir() {
+                            EntryType::Directory
+                        } else {
+                            EntryType::File
+                        }
+                    })
                     .unwrap_or(EntryType::File);
 
                 nodes.push(OutputNode::new(&display_path).with_entry_type(entry_type));
