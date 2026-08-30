@@ -67,8 +67,9 @@ breaking entries are marked **BREAKING**.
   to the link on the same mount and refuses a target on another mount by
   name. `readlink` shows the relative form; `readlink -f` gives the absolute.
 - MemoryFs (`/v`, overlay uppers) resolved a relative link target from the
-  mount root instead of the link's directory, and a write through a link
-  replaced the link with a file. Both now behave as the OS does.
+  mount root instead of the link's directory; a write through a link replaced
+  the link with a file; `ls` and `touch` did not follow a link at all. All
+  four now behave as the OS does.
 - `Filesystem::rename`'s default followed a symlink source, so a backend
   without its own `rename` (OverlayFs) turned a moved link into a file copy.
   The default now moves the link and replaces a link at the destination.

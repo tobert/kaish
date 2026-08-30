@@ -574,6 +574,63 @@ pub async fn symlink_refuses_an_absolute_target(fs: &dyn Filesystem) -> Result<(
     Ok(())
 }
 
+pub async fn list_through_a_link_to_a_directory(fs: &dyn Filesystem) -> Result<(), String> {
+    fs.mkdir(Path::new("dir"))
+        .await
+        .map_err(|e| format!("mkdir dir: {e}"))?;
+    fs.write(Path::new("dir/inner"), b"I")
+        .await
+        .map_err(|e| format!("write dir/inner: {e}"))?;
+    fs.symlink(Path::new("dir"), Path::new("link"))
+        .await
+        .map_err(|e| format!("symlink: {e}"))?;
+
+    let entries = fs
+        .list(Path::new("link"))
+        .await
+        .map_err(|e| format!("list(link) must follow the link: {e}"))?;
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    if names != ["inner"] {
+        return Err(format!("expected list(link) == [\"inner\"], got {names:?}"));
+    }
+    Ok(())
+}
+
+pub async fn set_mtime_through_a_link_touches_the_target(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.write(Path::new("target"), b"TARGET")
+        .await
+        .map_err(|e| format!("write target: {e}"))?;
+    fs.symlink(Path::new("target"), Path::new("link"))
+        .await
+        .map_err(|e| format!("symlink: {e}"))?;
+
+    let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    fs.set_mtime(Path::new("link"), stamp)
+        .await
+        .map_err(|e| format!("set_mtime(link) must follow the link: {e}"))?;
+
+    let entry = fs
+        .stat(Path::new("target"))
+        .await
+        .map_err(|e| format!("stat(target): {e}"))?;
+    if entry.modified != Some(stamp) {
+        return Err(format!(
+            "expected the target's mtime to be the stamp, got {:?}",
+            entry.modified
+        ));
+    }
+    let link_entry = fs
+        .lstat(Path::new("link"))
+        .await
+        .map_err(|e| format!("lstat(link): {e}"))?;
+    if !link_entry.is_symlink() {
+        return Err(format!("expected link to still be a symlink, got {:?}", link_entry.kind));
+    }
+    Ok(())
+}
+
 // Adapts an async case fn to the boxed-future `Case` fn-pointer shape. The
 // local `adapt` fn is a fresh item per invocation, so names never collide.
 macro_rules! case {
@@ -602,6 +659,8 @@ pub const CASES: &[(&str, Case)] = &[
     case!(stat_on_a_link_loop_errors_instead_of_hanging),
     case!(list_shows_a_link_as_a_link),
     case!(symlink_refuses_an_absolute_target),
+    case!(list_through_a_link_to_a_directory),
+    case!(set_mtime_through_a_link_touches_the_target),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

@@ -133,6 +133,34 @@ impl MemoryFs {
         }
     }
 
+    /// Follow a chain of symlink entries to the entry it names. The result
+    /// is a normalized path whose entry is not a symlink; a dangling chain
+    /// is `NotFound`, a loop past the depth limit is an error.
+    fn follow_locked(entries: &HashMap<PathBuf, Entry>, path: &Path) -> io::Result<PathBuf> {
+        let mut current = Self::normalize(path);
+        let mut depth = 0usize;
+        loop {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            match entries.get(&current) {
+                Some(Entry::Symlink { target, .. }) => {
+                    current = Self::normalize(&Self::resolve_symlink_target(&current, target));
+                    depth += 1;
+                }
+                Some(_) => return Ok(current),
+                // The root has no entry of its own.
+                None if current.as_os_str().is_empty() => return Ok(current),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("not found: {}", path.display()),
+                    ))
+                }
+            }
+        }
+    }
+
     /// Follow a chain of symlink entries to the path a `write`/`append`
     /// should land on, matching `open(O_WRONLY|O_CREAT)`: the bytes go to
     /// the target, the link entries stay untouched.
@@ -509,8 +537,9 @@ impl Filesystem for MemoryFs {
     }
 
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
-        let normalized = Self::normalize(path);
         let mut entries = self.entries.write().await;
+        // touch follows: the target's stamp changes, the link's does not.
+        let normalized = Self::follow_locked(&entries, path)?;
         match entries.get_mut(&normalized) {
             Some(Entry::File { modified, .. })
             | Some(Entry::Directory { modified })
@@ -526,19 +555,13 @@ impl Filesystem for MemoryFs {
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
-        let normalized = Self::normalize(path);
         let entries = self.entries.read().await;
+        // A link to a directory lists the directory.
+        let normalized = Self::follow_locked(&entries, path)?;
 
-        // Verify the path is a directory
         match entries.get(&normalized) {
             Some(Entry::Directory { .. }) => {}
-            Some(Entry::File { .. }) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotADirectory,
-                    format!("not a directory: {}", path.display()),
-                ))
-            }
-            Some(Entry::Symlink { .. }) => {
+            Some(Entry::File { .. }) | Some(Entry::Symlink { .. }) => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotADirectory,
                     format!("not a directory: {}", path.display()),

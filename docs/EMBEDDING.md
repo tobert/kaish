@@ -376,6 +376,32 @@ vfs.mount("/", MemoryFs::with_budget(budget.clone()));
 // budget.used() / budget.remaining() are observable at any time.
 ```
 
+### Symlinks in a custom backend
+
+Every operation on `KernelBackend` and `Filesystem` states its symlink policy
+in its doc comment. The rule for the destructive pair: `remove` and `rename`
+never follow the final path component, on either side of `rename`. `stat`,
+`exists`, `read`, and `write` follow; `lstat`, `read_link`, and `symlink` do
+not. `symlink` refuses an absolute target (`InvalidInput`); the kernel's VFS
+router rewrites `ln -s /abs/target link` relative to the link on the same
+mount before it reaches a backend.
+
+A backend rooted at a host directory resolves paths with
+`kaish_vfs::resolve_beneath`, which puts the policy in the signature and the
+containment check inside the function:
+
+```rust
+use kaish_vfs::{resolve_beneath, Follow};
+
+let host = resolve_beneath(&root, path, Follow::Final)?;      // read, write, stat
+let host = resolve_beneath(&root, path, Follow::ParentOnly)?; // remove, rename, lstat
+```
+
+`kaish_vfs::conformance` (feature `conformance`) runs the same symlink cases
+against any `Filesystem`; `run_all(make_root)` takes a closure that returns a
+fresh empty root per case. A backend that inherits the trait's `lstat`
+default fails the first case rather than passing silently.
+
 ### Reporting file permissions (`path_access`)
 
 `test -r`, `test -w`, and `test -x` ask the mount that owns the path, through
