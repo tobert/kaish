@@ -95,8 +95,8 @@ impl Tool for Ln {
                 return ExecResult::failure(1, format!("ln: cannot remove '{}': {}", link_name, e));
             }
 
-        // Create the symlink
-        // Note: target is stored as-is (can be relative or absolute)
+        // A relative target is stored verbatim; the VFS router rewrites an
+        // absolute one relative to the link, or refuses it across mounts.
         match ctx.backend.symlink(Path::new(&target), Path::new(&link_path)).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("ln: failed to create symbolic link '{}': {}", link_name, e)),

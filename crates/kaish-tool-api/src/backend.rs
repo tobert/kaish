@@ -94,7 +94,9 @@ pub trait KernelBackend: Send + Sync {
     async fn read_link(&self, path: &Path) -> BackendResult<PathBuf>;
 
     /// Create a symlink at `link` pointing to `target`. The target is stored
-    /// verbatim; a relative target resolves from the link's directory.
+    /// verbatim; a relative target resolves from the link's directory. An
+    /// absolute target is rewritten relative to the link when both are on one
+    /// mount, and refused when they are not.
     async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()>;
 
     // ═══════════════════════════════════════════════════════════════════════

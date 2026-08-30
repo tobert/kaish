@@ -62,6 +62,10 @@ breaking entries are marked **BREAKING**.
   no longer fails EISDIR.
 - `ln -sf` and `mv -n` treated a dangling link at the destination as absent;
   `-f` now replaces it and `-n` keeps it.
+- **Symlink targets are relative.** A backend refuses an absolute target
+  (`InvalidInput`); the VFS router rewrites `ln -s /abs/target link` relative
+  to the link on the same mount and refuses a target on another mount by
+  name. `readlink` shows the relative form; `readlink -f` gives the absolute.
 - MemoryFs (`/v`, overlay uppers) resolved a relative link target from the
   mount root instead of the link's directory, and a write through a link
   replaced the link with a file. Both now behave as the OS does.
