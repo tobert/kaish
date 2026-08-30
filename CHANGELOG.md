@@ -62,6 +62,12 @@ breaking entries are marked **BREAKING**.
   no longer fails EISDIR.
 - `ln -sf` and `mv -n` treated a dangling link at the destination as absent;
   `-f` now replaces it and `-n` keeps it.
+- MemoryFs (`/v`, overlay uppers) resolved a relative link target from the
+  mount root instead of the link's directory, and a write through a link
+  replaced the link with a file. Both now behave as the OS does.
+- `Filesystem::rename`'s default followed a symlink source, so a backend
+  without its own `rename` (OverlayFs) turned a moved link into a file copy.
+  The default now moves the link and replaces a link at the destination.
 - `Filesystem` and `KernelBackend` state the symlink policy of `stat`,
   `exists`, `remove`, `rename`, `lstat`, and `symlink`.
 - `help <tool>` renders a tool's subcommands and their flags, and names each

@@ -157,22 +157,31 @@ pub trait Filesystem: Send + Sync {
     /// through to its target.
     ///
     /// This is an atomic operation when source and destination are on the same
-    /// filesystem. The default implementation falls back to copy+delete, which
-    /// is not atomic.
+    /// filesystem. The default implementation is remove-destination, copy,
+    /// delete, which is not atomic and does not move directories.
     ///
     /// Returns `Err` if the filesystem is read-only.
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        // Default implementation: copy then delete (not atomic)
-        let entry = self.stat(from).await?;
+        let entry = self.lstat(from).await?;
         if entry.is_dir() {
-            // For directories, we'd need recursive copy - just error for now
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "rename directories not supported by this filesystem",
             ));
         }
-        let data = self.read(from).await?;
-        self.write(to, &data).await?;
+        // Clear the destination first: `write` would follow a link left there.
+        match self.remove(to).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if entry.is_symlink() {
+            let target = self.read_link(from).await?;
+            self.symlink(&target, to).await?;
+        } else {
+            let data = self.read(from).await?;
+            self.write(to, &data).await?;
+        }
         self.remove(from).await?;
         Ok(())
     }
