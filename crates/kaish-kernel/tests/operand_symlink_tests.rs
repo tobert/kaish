@@ -264,3 +264,24 @@ async fn ls_l_on_a_regular_file_operand_is_unaffected() {
     assert!(!out.contains("->"), "{out}");
     assert!(lexists(&root.join("plain.txt")));
 }
+
+#[tokio::test]
+async fn ls_l_with_several_operands_shows_a_link_as_a_link() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("target"), "t").unwrap();
+    std::fs::write(root.join("plain"), "p").unwrap();
+    symlink("target", root.join("link")).unwrap();
+    symlink("nowhere", root.join("dangling")).unwrap();
+    let kernel = kernel_at(root);
+
+    let r = run(&kernel, "ls -l link plain dangling").await;
+    assert_eq!(r.code, 0, "ls -l failed: {}", r.err);
+    let out = r.text_out();
+    assert!(out.contains("link -> target"), "{out}");
+    assert!(out.contains("dangling -> nowhere"), "{out}");
+    let link_row = out.lines().find(|l| l.contains("link ->")).unwrap();
+    assert!(link_row.starts_with('l'), "link row is type l: {link_row}");
+    let plain_row = out.lines().find(|l| l.contains("plain")).unwrap();
+    assert!(plain_row.starts_with('-'), "plain row is type -: {plain_row}");
+}

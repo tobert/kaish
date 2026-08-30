@@ -243,16 +243,21 @@ pub trait Filesystem: Send + Sync {
     }
 }
 
-/// Whether two paths spell the same name, ignoring a leading `/` and `.`
-/// components.
+/// Whether two paths spell the same name once `.` and `..` are resolved
+/// lexically and a leading `/` is ignored; `..` at the root stays there.
 fn same_name(a: &Path, b: &Path) -> bool {
     let key = |p: &Path| -> Vec<std::ffi::OsString> {
-        p.components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(name) => Some(name.to_os_string()),
-                _ => None,
-            })
-            .collect()
+        let mut out: Vec<std::ffi::OsString> = Vec::new();
+        for component in p.components() {
+            match component {
+                std::path::Component::Normal(name) => out.push(name.to_os_string()),
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                _ => {}
+            }
+        }
+        out
     };
     key(a) == key(b)
 }

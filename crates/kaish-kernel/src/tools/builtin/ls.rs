@@ -372,7 +372,8 @@ impl Ls {
         let mut error_text = String::new();
         for name in &names {
             let abs = ctx.resolve_path(name);
-            match ctx.backend.stat(Path::new(&abs)).await {
+            // lstat: an operand that is a link renders as the link.
+            match ctx.backend.lstat(Path::new(&abs)).await {
                 Ok(info) => entries.push((name.clone(), info)),
                 Err(e) => {
                     if report_missing {
@@ -424,11 +425,11 @@ impl Ls {
                     } else {
                         e.size.to_string()
                     };
-                    OutputNode::new(&e.name)
+                    OutputNode::new(entry_name_display(&e.name, e, true))
                         .with_cells(vec![type_char.to_string(), size_str])
                         .with_entry_type(entry_type)
                 } else {
-                    OutputNode::new(&e.name).with_entry_type(entry_type)
+                    OutputNode::new(entry_name_display(&e.name, e, false)).with_entry_type(entry_type)
                 }
             })
             .collect();

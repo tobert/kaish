@@ -648,9 +648,31 @@ pub async fn rename_to_itself_keeps_the_file(fs: &dyn Filesystem) -> Result<(), 
     Ok(())
 }
 
+pub async fn rename_to_itself_spelled_with_dotdot_keeps_the_file(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.mkdir(Path::new("d"))
+        .await
+        .map_err(|e| format!("mkdir d: {e}"))?;
+    fs.write(Path::new("d/file"), b"KEEP")
+        .await
+        .map_err(|e| format!("write d/file: {e}"))?;
+    fs.rename(Path::new("d/../d/file"), Path::new("d/file"))
+        .await
+        .map_err(|e| format!("rename(d/../d/file, d/file): {e}"))?;
+    let data = fs
+        .read(Path::new("d/file"))
+        .await
+        .map_err(|e| format!("read(d/file) after identity rename: {e}"))?;
+    if data != b"KEEP" {
+        return Err(format!("expected b\"KEEP\", got {:?}", String::from_utf8_lossy(&data)));
+    }
+    Ok(())
+}
+
 pub async fn remove_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> {
     // The root is empty here, so "not empty" cannot be the reason.
-    for spelling in ["", "/", "."] {
+    for spelling in ["", "/", ".", "./", "a/.."] {
         if fs.remove(Path::new(spelling)).await.is_ok() {
             return Err(format!("remove({spelling:?}) removed the empty mount root"));
         }
@@ -717,6 +739,7 @@ pub const CASES: &[(&str, Case)] = &[
     case!(list_through_a_link_to_a_directory),
     case!(set_mtime_through_a_link_touches_the_target),
     case!(rename_to_itself_keeps_the_file),
+    case!(rename_to_itself_spelled_with_dotdot_keeps_the_file),
     case!(remove_refuses_the_root),
     case!(rename_refuses_the_root),
 ];

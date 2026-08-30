@@ -22,8 +22,9 @@ pub enum Follow {
     /// mkdir, set_mtime, and every other call that opens or inspects the
     /// target. Containment is checked on the fully resolved path, so a
     /// link inside the root that points outside it is refused. A dangling
-    /// chain is followed to the path it names and checked there, so the
-    /// caller's open flags carry no part of the guarantee.
+    /// chain is followed, with the same lexical `..` rule as the input
+    /// path, to the path it names and checked there, so the caller's open
+    /// flags carry no part of the guarantee.
     Final,
     /// The operation acts on the link itself and never follows it: remove,
     /// both sides of rename, lstat, read_link, and the link side of
@@ -46,9 +47,8 @@ pub enum Follow {
 /// canonicalized and the components that do not exist yet are appended
 /// literally: a component that does not exist cannot be a symlink, so
 /// containment on the existing prefix is containment on the whole path.
-/// An intermediate link that dangles does not exist either; it lands in
-/// the literal tail, and mkdir(2) then refuses it with EEXIST, so nothing
-/// is created through it.
+/// An intermediate link that dangles is `NotFound`: it is a component
+/// that exists, so it is canonicalized, and canonicalizing it fails.
 ///
 /// `..` is resolved lexically before canonicalization, so a `..` that
 /// follows a symlink resolves against the link's own parent, not its
@@ -185,8 +185,10 @@ fn fold_dots(path: &Path) -> PathBuf {
 /// above; never `lexical` itself) and append the remaining components
 /// literally.
 fn canonicalize_deepest_ancestor(root: &Path, lexical: &Path) -> io::Result<PathBuf> {
+    // symlink_metadata, not exists: a dangling link is a component that
+    // exists, and canonicalizing it is the error we want.
     let mut ancestor = lexical.parent().unwrap_or(root);
-    while ancestor != root && !ancestor.exists() {
+    while ancestor != root && ancestor.symlink_metadata().is_err() {
         ancestor = ancestor.parent().unwrap_or(root);
     }
     let canonical = ancestor.canonicalize()?;
@@ -322,6 +324,33 @@ mod tests {
         let resolved =
             resolve_beneath(dir.path(), Path::new("link/../x"), Follow::Final).expect("ok");
         assert_eq!(resolved, dir.path().canonicalize().expect("root").join("x"));
+    }
+
+    #[test]
+    fn a_dangling_intermediate_link_is_not_found_under_every_policy() {
+        let dir = root();
+        std::os::unix::fs::symlink("../escape", dir.path().join("dangle")).expect("symlink");
+        for follow in [Follow::Final, Follow::LinkItself] {
+            let error = resolve_beneath(dir.path(), Path::new("dangle/x"), follow)
+                .expect_err("dangling intermediate");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{follow:?}");
+        }
+    }
+
+    /// The lexical `..` rule applies inside a dangling target too:
+    /// `link -> sub/../outside` with `sub` a link to a directory outside
+    /// the root resolves beside `sub`, not beside its target. A flip to
+    /// `/outside` is an escape; a flip to an error breaks in-root `..`
+    /// inside targets.
+    #[test]
+    fn dotdot_inside_a_dangling_target_is_lexical() {
+        let dir = root();
+        let outside = root();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("sub")).expect("symlink");
+        std::os::unix::fs::symlink("sub/../outside", dir.path().join("link")).expect("symlink");
+        let resolved =
+            resolve_beneath(dir.path(), Path::new("link"), Follow::Final).expect("ok");
+        assert_eq!(resolved, dir.path().canonicalize().expect("root").join("outside"));
     }
 
     #[test]
