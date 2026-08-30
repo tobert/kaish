@@ -363,8 +363,8 @@ async fn file_test(ctx: &ExecContext, op: &str, path: &str) -> bool {
             .path_access(&resolved)
             .await
             .is_ok_and(|access| access.executable),
-        // `lstat`, never `stat`: a dangling link still lstats fine, so this
-        // is true where `-e` is false — the reason `-L` exists at all.
+        // lstat: what is at this name. A dangling link is true here and
+        // false under `-e`.
         "-L" | "-h" => ctx
             .backend
             .lstat(&resolved)

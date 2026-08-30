@@ -25,8 +25,10 @@ breaking entries are marked **BREAKING**.
   path resolver for a backend rooted at a host directory: sync, std-only,
   containment inside. `Follow::Final` follows the last component;
   `Follow::ParentOnly` keeps it literal (remove, rename, lstat, symlink).
-- **`kaish_vfs::conformance`** (`conformance` feature) — 13 symlink cases any
+- **`kaish_vfs::conformance`** (`conformance` feature) — 16 symlink cases any
   `Filesystem` backend runs against itself via `run_all(make_root)`.
+- **`[[ -L path ]]`** (alias `-h`) and `test -L` — true when the path is a
+  symlink, including a dangling one.
 - **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
   chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
 - **`$(( ))` reads another base** (`0x`, `base#digits`, `base#$var`) and
