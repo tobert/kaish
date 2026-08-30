@@ -21,6 +21,20 @@ breaking entries are marked **BREAKING**.
   runs.
 
 ### Added
+- **`kaish_vfs::resolve_beneath(root, path, Follow)`** — the one root-scoped
+  path resolver for a backend rooted at a host directory: sync, std-only,
+  containment inside. `Follow::Final` follows the last component;
+  `Follow::LinkItself` acts on the link (remove, rename, lstat, symlink).
+- **`kaish_vfs::conformance`** (`conformance` feature) — 19 symlink cases any
+  `Filesystem` backend runs against itself via `run_all(make_root)`.
+- **`[[ -L path ]]`** (alias `-h`) and `test -L` — true when the path is a
+  symlink, including a dangling one.
+- **`cp -P`/`-L`**; `cp -r` recreates a symlink as a link with the same
+  target instead of copying through it, and no longer loops on a link cycle.
+- **`find -type l`**; `find` classifies with `lstat`, so `-type f` no longer
+  matches a link to a file, and a link operand is a leaf. `ls -l link` shows
+  `l` and the target; `mv` across mounts keeps links inside a directory. **`stat`** describes the link itself by default,
+  with its target; `stat -L` follows.
 - **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
   chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
 - **`$(( ))` reads another base** (`0x`, `base#digits`, `base#$var`) and
@@ -48,6 +62,31 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
+- **LocalFs sandbox escapes**: a write under a non-existent `..` chain
+  (`../sibling/x`) created a directory beside the mount root, and a write
+  through a dangling link whose target lay outside the root created that
+  target. Both are refused before any I/O.
+- `Filesystem::rename`'s default deleted the source when renamed to itself.
+- `LocalFs` removed its own mount root on `rm ""`/`rm /` when empty; every
+  backend now refuses to remove or rename its root (conformance row).
+- `mv file link` on a local mount wrote through the link into its target;
+  it now replaces the link, as rename(2) does. Onto a link to a directory it
+  no longer fails EISDIR.
+- `ln -sf` and `mv -n` treated a dangling link at the destination as absent;
+  `-f` now replaces it and `-n` keeps it.
+- **Symlink targets are relative.** A backend refuses an absolute target
+  (`InvalidInput`); the VFS router rewrites `ln -s /abs/target link` relative
+  to the link on the same mount and refuses a target on another mount by
+  name. `readlink` shows the relative form; `readlink -f` gives the absolute.
+- MemoryFs (`/v`, overlay uppers) resolved a relative link target from the
+  mount root instead of the link's directory; a write through a link replaced
+  the link with a file; `ls` and `touch` did not follow a link at all. All
+  four now behave as the OS does.
+- `Filesystem::rename`'s default followed a symlink source, so a backend
+  without its own `rename` (OverlayFs) turned a moved link into a file copy.
+  The default now moves the link and replaces a link at the destination.
+- `Filesystem` and `KernelBackend` state the symlink policy of `stat`,
+  `exists`, `remove`, `rename`, `lstat`, and `symlink`.
 - `help <tool>` renders a tool's subcommands and their flags, and names each
   parameter's aliases. `help kj` and every wrapped command showed "No
   parameters." before.

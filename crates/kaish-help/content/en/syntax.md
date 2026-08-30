@@ -245,6 +245,7 @@ while ! cmd; do …; done   # and is how kaish spells `until`
 
 ```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
+#   -L (symlink, alias -h) — true even for a dangling link, unlike -e
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
 # Shape guard: -list -record — the value's shape, not a path stat. A
 #   defined-but-wrong-shaped value is false; a bare unset $var errors (like
@@ -254,6 +255,7 @@ while ! cmd; do …; done   # and is how kaish spells `until`
 # Membership: in (list→element, record→key) / not in — RHS must be a collection
 
 [[ -f config.json && -n $NAME ]]
+[[ -L /path/link ]]
 [[ $N -gt 5 ]]
 [[ $s =~ "\.rs$" ]]
 if [[ banana in $fruits ]]; then echo "have one"; fi

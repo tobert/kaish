@@ -113,6 +113,89 @@ impl MemoryFs {
         crate::paths::normalize(path)
     }
 
+    /// Resolve a symlink's stored target against the link that holds it.
+    ///
+    /// POSIX resolves a relative target against the link's parent
+    /// directory, not the filesystem root. `link_path` must already be
+    /// normalized; the result still needs `normalize` applied (by the
+    /// caller's next lookup) to fold any `..` the target contributes. An
+    /// absolute target is returned as-is — normalizing it elsewhere strips
+    /// the leading `/`, which is the existing, deliberately unresolved
+    /// absolute-target policy.
+    fn resolve_symlink_target(link_path: &Path, target: &Path) -> PathBuf {
+        if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            link_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(target)
+        }
+    }
+
+    /// Follow a chain of symlink entries to the entry it names. The result
+    /// is a normalized path whose entry is not a symlink; a dangling chain
+    /// is `NotFound`, a loop past the depth limit is an error.
+    fn follow_locked(entries: &HashMap<PathBuf, Entry>, path: &Path) -> io::Result<PathBuf> {
+        let mut current = Self::normalize(path);
+        let mut depth = 0usize;
+        loop {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            match entries.get(&current) {
+                Some(Entry::Symlink { target, .. }) => {
+                    current = Self::normalize(&Self::resolve_symlink_target(&current, target));
+                    depth += 1;
+                }
+                Some(_) => return Ok(current),
+                // The root has no entry of its own.
+                None if current.as_os_str().is_empty() => return Ok(current),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("not found: {}", path.display()),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Follow a chain of symlink entries to the path a `write`/`append`
+    /// should land on, matching `open(O_WRONLY|O_CREAT)`: the bytes go to
+    /// the target, the link entries stay untouched.
+    ///
+    /// Returns the final path, whether or not anything exists there yet —
+    /// a dangling chain's last hop is the write target, same as the OS
+    /// creating the file the link already points at. A directory anywhere
+    /// in the chain (including the starting path) is `IsADirectory`; a
+    /// loop past the depth limit is the same error `read`/`stat` give.
+    fn resolve_write_target_locked(
+        entries: &HashMap<PathBuf, Entry>,
+        path: &Path,
+    ) -> io::Result<PathBuf> {
+        let mut current = Self::normalize(path);
+        let mut depth = 0usize;
+        loop {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            match entries.get(&current) {
+                Some(Entry::Symlink { target, .. }) => {
+                    current = Self::normalize(&Self::resolve_symlink_target(&current, target));
+                    depth += 1;
+                }
+                Some(Entry::Directory { .. }) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::IsADirectory,
+                        format!("is a directory: {}", current.display()),
+                    ));
+                }
+                Some(Entry::File { .. }) | None => return Ok(current),
+            }
+        }
+    }
+
     /// Maximum symlink follow depth (matches Linux ELOOP limit).
     /// Mode reported for a `MemoryFs` directory: readable, writable, and
     /// searchable by everyone.
@@ -169,9 +252,9 @@ impl MemoryFs {
                     format!("is a directory: {}", path.display()),
                 )),
                 Some(Entry::Symlink { target, .. }) => {
-                    let target = target.clone();
+                    let next = Self::resolve_symlink_target(&normalized, target);
                     drop(entries);
-                    self.read_inner(&target, depth + 1).await
+                    self.read_inner(&next, depth + 1).await
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -214,9 +297,9 @@ impl MemoryFs {
                     format!("is a directory: {}", path.display()),
                 )),
                 Some(Entry::Symlink { target, .. }) => {
-                    let target = target.clone();
+                    let next = Self::resolve_symlink_target(&normalized, target);
                     drop(entries);
-                    self.read_range_inner(&target, offset, limit, depth + 1).await
+                    self.read_range_inner(&next, offset, limit, depth + 1).await
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -283,7 +366,7 @@ impl MemoryFs {
                             permissions: Some(Self::FILE_MODE),
                             symlink_target: None,
                         },
-                        Some(target.clone()),
+                        Some(Self::resolve_symlink_target(&normalized, target)),
                     )),
                     None => None,
                 }
@@ -291,7 +374,7 @@ impl MemoryFs {
 
             match entry_info {
                 Some((entry, None)) => Ok(entry),
-                Some((_, Some(target))) => self.stat_inner(&target, depth + 1).await,
+                Some((_, Some(next))) => self.stat_inner(&next, depth + 1).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("not found: {}", path.display()),
@@ -388,20 +471,20 @@ impl Filesystem for MemoryFs {
         // Ensure parent directories exist (under the same guard — no TOCTOU)
         Self::ensure_parents_locked(&mut entries, &normalized)?;
 
-        // Check we're not overwriting a directory
-        if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
-            return Err(io::Error::new(
-                io::ErrorKind::IsADirectory,
-                format!("is a directory: {}", path.display()),
-            ));
-        }
+        // A symlink at `normalized` is followed to its target — the target
+        // gets the bytes, the link entry is left alone. `resolve` also
+        // catches a directory anywhere in the chain (IsADirectory).
+        let target = Self::resolve_write_target_locked(&entries, &normalized)?;
+        // The resolved target may sit under a directory that does not exist
+        // yet (a dangling link pointing into an uncreated subtree).
+        Self::ensure_parents_locked(&mut entries, &target)?;
 
-        let old_len = Self::file_len(entries.get(&normalized));
+        let old_len = Self::file_len(entries.get(&target));
         let new_len = data.len() as u64;
         self.charge_grow(old_len, new_len)?;
 
         entries.insert(
-            normalized,
+            target,
             Entry::File {
                 data: data.to_vec(),
                 modified: system_now(),
@@ -423,27 +506,25 @@ impl Filesystem for MemoryFs {
 
         Self::ensure_parents_locked(&mut entries, &normalized)?;
 
-        if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
-            return Err(io::Error::new(
-                io::ErrorKind::IsADirectory,
-                format!("is a directory: {}", path.display()),
-            ));
-        }
+        // Same follow-through as `write`: append lands on the symlink's
+        // target, never replacing the link.
+        let target = Self::resolve_write_target_locked(&entries, &normalized)?;
+        Self::ensure_parents_locked(&mut entries, &target)?;
 
-        let old_len = Self::file_len(entries.get(&normalized));
+        let old_len = Self::file_len(entries.get(&target));
         let new_len = old_len + data.len() as u64;
         self.charge_grow(old_len, new_len)?;
 
-        match entries.get_mut(&normalized) {
+        match entries.get_mut(&target) {
             Some(Entry::File { data: existing, modified }) => {
                 existing.extend_from_slice(data);
                 *modified = system_now();
             }
-            // Non-file entry (or none): same as `write` overwriting a
-            // symlink or absent path, an append creates a fresh file.
+            // Nothing at the resolved target yet (a dangling link, or a
+            // fresh path): append creates the file there.
             _ => {
                 entries.insert(
-                    normalized,
+                    target,
                     Entry::File {
                         data: data.to_vec(),
                         modified: system_now(),
@@ -456,15 +537,19 @@ impl Filesystem for MemoryFs {
     }
 
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
-        let normalized = Self::normalize(path);
         let mut entries = self.entries.write().await;
+        // touch follows: the target's stamp changes, the link's does not.
+        let normalized = Self::follow_locked(&entries, path)?;
         match entries.get_mut(&normalized) {
-            Some(Entry::File { modified, .. })
-            | Some(Entry::Directory { modified })
-            | Some(Entry::Symlink { modified, .. }) => {
+            Some(Entry::File { modified, .. }) | Some(Entry::Directory { modified }) => {
                 *modified = mtime;
                 Ok(())
             }
+            // follow_locked never returns a symlink path.
+            Some(Entry::Symlink { .. }) => Err(io::Error::other(format!(
+                "internal error: follow_locked returned a symlink: {}",
+                path.display()
+            ))),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("no such file or directory: {}", path.display()),
@@ -473,19 +558,13 @@ impl Filesystem for MemoryFs {
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
-        let normalized = Self::normalize(path);
         let entries = self.entries.read().await;
+        // A link to a directory lists the directory.
+        let normalized = Self::follow_locked(&entries, path)?;
 
-        // Verify the path is a directory
         match entries.get(&normalized) {
             Some(Entry::Directory { .. }) => {}
-            Some(Entry::File { .. }) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotADirectory,
-                    format!("not a directory: {}", path.display()),
-                ))
-            }
-            Some(Entry::Symlink { .. }) => {
+            Some(Entry::File { .. }) | Some(Entry::Symlink { .. }) => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotADirectory,
                     format!("not a directory: {}", path.display()),
@@ -618,6 +697,7 @@ impl Filesystem for MemoryFs {
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
+        crate::refuse_absolute_target(target)?;
         let normalized = Self::normalize(link);
 
         let mut entries = self.entries.write().await;
@@ -1192,19 +1272,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_symlink_absolute_path() {
+    async fn test_symlink_absolute_target_refused() {
         let fs = MemoryFs::new();
         fs.write(Path::new("target.txt"), b"content").await.unwrap();
 
-        // Store absolute path
-        fs.symlink(Path::new("/target.txt"), Path::new("link.txt")).await.unwrap();
-
-        let target = fs.read_link(Path::new("link.txt")).await.unwrap();
-        assert_eq!(target.to_string_lossy(), "/target.txt");
-
-        // Following should work (normalize strips leading /)
-        let data = fs.read(Path::new("link.txt")).await.unwrap();
-        assert_eq!(data, b"content");
+        let error = fs
+            .symlink(Path::new("/target.txt"), Path::new("link.txt"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(fs.lstat(Path::new("link.txt")).await.is_err(), "nothing created");
     }
 
     #[tokio::test]

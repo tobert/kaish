@@ -172,6 +172,13 @@ impl VfsRouter {
     ///
     /// Returns the mount and the path relative to that mount.
     fn find_mount(&self, path: &Path) -> io::Result<(Arc<dyn Filesystem>, PathBuf)> {
+        let (_, fs, relative) = self.mount_of(path)?;
+        Ok((fs, relative))
+    }
+
+    /// The mount that owns `path`: its mount point, its filesystem, and the
+    /// path relative to the mount point.
+    fn mount_of(&self, path: &Path) -> io::Result<(&Path, Arc<dyn Filesystem>, PathBuf)> {
         let path_str = path.to_string_lossy();
         let normalized = if path_str.starts_with('/') {
             path.to_path_buf()
@@ -221,7 +228,7 @@ impl VfsRouter {
                         .to_string()
                 };
 
-                Ok((Arc::clone(fs), PathBuf::from(relative)))
+                Ok((mount_path.as_path(), Arc::clone(fs), PathBuf::from(relative)))
             }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -229,6 +236,48 @@ impl VfsRouter {
             )),
         }
     }
+}
+
+/// Resolve `.` and `..` lexically in an absolute VFS path; `..` at the root
+/// stays at the root.
+fn lexical_absolute(path: &Path) -> PathBuf {
+    let mut out = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => out.push(name),
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The relative path from directory `from` to `to`, both absolute and
+/// lexically normalized: `..` for each component of `from` past the common
+/// prefix, then the rest of `to`.
+fn relative_path_from(from: &Path, to: &Path) -> PathBuf {
+    let mut from_parts = from.components().skip(1).peekable();
+    let mut to_parts = to.components().skip(1).peekable();
+    while let (Some(a), Some(b)) = (from_parts.peek(), to_parts.peek()) {
+        if a != b {
+            break;
+        }
+        from_parts.next();
+        to_parts.next();
+    }
+    let mut relative = PathBuf::new();
+    for _ in from_parts {
+        relative.push("..");
+    }
+    for part in to_parts {
+        relative.push(part);
+    }
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+    relative
 }
 
 #[async_trait]
@@ -330,8 +379,33 @@ impl Filesystem for VfsRouter {
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
-        let (fs, relative) = self.find_mount(link)?;
-        fs.symlink(target, &relative).await
+        let (link_mount, fs, relative_link) = self.mount_of(link)?;
+        // A backend refuses an absolute target: it has no namespace to read
+        // one in. The router has the namespace, so an absolute VFS target on
+        // the link's own mount is rewritten relative to the link's directory.
+        // The stored spelling is what readlink then shows.
+        let target = if target.is_absolute() {
+            let target = lexical_absolute(target);
+            let (target_mount, _, _) = self.mount_of(&target)?;
+            if target_mount != link_mount {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "symlink target {} is on mount {} and the link {} is on mount {}; a link cannot cross mounts",
+                        target.display(),
+                        target_mount.display(),
+                        link.display(),
+                        link_mount.display()
+                    ),
+                ));
+            }
+            let link_dir = lexical_absolute(link);
+            let link_dir = link_dir.parent().unwrap_or(Path::new("/"));
+            relative_path_from(link_dir, &target)
+        } else {
+            target.to_path_buf()
+        };
+        fs.symlink(&target, &relative_link).await
     }
 
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
@@ -474,6 +548,105 @@ impl VfsRouter {
 mod tests {
     use super::*;
     use crate::vfs::MemoryFs;
+
+    #[tokio::test]
+    async fn symlink_absolute_target_on_the_same_mount_is_stored_relative() {
+        let mut router = VfsRouter::new();
+        let data = MemoryFs::new();
+        data.write(Path::new("etc/hosts"), b"hosts").await.unwrap();
+        data.mkdir(Path::new("home")).await.unwrap();
+        router.mount("/data", data);
+
+        router
+            .symlink(Path::new("/data/etc/hosts"), Path::new("/data/home/link"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            router.read_link(Path::new("/data/home/link")).await.unwrap(),
+            PathBuf::from("../etc/hosts")
+        );
+        assert_eq!(router.read(Path::new("/data/home/link")).await.unwrap(), b"hosts");
+    }
+
+    #[tokio::test]
+    async fn symlink_absolute_target_beside_the_link_is_a_bare_name() {
+        let mut router = VfsRouter::new();
+        let root = MemoryFs::new();
+        root.write(Path::new("a/target"), b"t").await.unwrap();
+        router.mount("/", root);
+
+        router
+            .symlink(Path::new("/a/target"), Path::new("/a/link"))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.read_link(Path::new("/a/link")).await.unwrap(),
+            PathBuf::from("target")
+        );
+    }
+
+    #[tokio::test]
+    async fn symlink_absolute_target_with_dotdot_is_normalized_first() {
+        let mut router = VfsRouter::new();
+        let root = MemoryFs::new();
+        root.write(Path::new("etc/hosts"), b"hosts").await.unwrap();
+        root.mkdir(Path::new("home")).await.unwrap();
+        router.mount("/", root);
+
+        router
+            .symlink(Path::new("/home/../etc/./hosts"), Path::new("/home/link"))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.read_link(Path::new("/home/link")).await.unwrap(),
+            PathBuf::from("../etc/hosts")
+        );
+        assert_eq!(router.read(Path::new("/home/link")).await.unwrap(), b"hosts");
+    }
+
+    #[tokio::test]
+    async fn symlink_relative_target_is_stored_verbatim() {
+        let mut router = VfsRouter::new();
+        router.mount("/data", MemoryFs::new());
+
+        router
+            .symlink(Path::new("../x/../y"), Path::new("/data/d/link"))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.read_link(Path::new("/data/d/link")).await.unwrap(),
+            PathBuf::from("../x/../y")
+        );
+    }
+
+    #[tokio::test]
+    async fn symlink_across_mounts_is_refused_and_creates_nothing() {
+        let mut router = VfsRouter::new();
+        router.mount("/data", MemoryFs::new());
+        let scratch = MemoryFs::new();
+        scratch.write(Path::new("x"), b"x").await.unwrap();
+        router.mount("/scratch", scratch);
+
+        let error = router
+            .symlink(Path::new("/scratch/x"), Path::new("/data/link"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let message = error.to_string();
+        assert!(message.contains("/scratch") && message.contains("/data"), "{message}");
+        assert!(router.lstat(Path::new("/data/link")).await.is_err(), "nothing created");
+    }
+
+    #[test]
+    fn relative_path_from_walks_up_then_down() {
+        let rel = |from: &str, to: &str| relative_path_from(Path::new(from), Path::new(to));
+        assert_eq!(rel("/a/b", "/a/c/d"), PathBuf::from("../c/d"));
+        assert_eq!(rel("/a", "/a/x"), PathBuf::from("x"));
+        assert_eq!(rel("/", "/x/y"), PathBuf::from("x/y"));
+        assert_eq!(rel("/a/b/c", "/"), PathBuf::from("../../.."));
+        assert_eq!(rel("/a/b", "/a/b"), PathBuf::from("."));
+    }
 
     #[tokio::test]
     async fn test_basic_mount() {

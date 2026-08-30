@@ -4419,6 +4419,11 @@ impl Kernel {
                             .path_access(&resolved)
                             .await
                             .is_ok_and(|access| access.executable),
+                        // lstat: what is at this name. A dangling link is true
+                        // here and false under `-e`.
+                        FileTestOp::IsSymlink => {
+                            backend.lstat(&resolved).await.is_ok_and(|e| e.is_symlink())
+                        }
                     })
                 }
                 TestExpr::StringTest { op, value } => match op {

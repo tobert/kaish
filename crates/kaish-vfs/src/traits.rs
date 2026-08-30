@@ -64,7 +64,9 @@ pub trait Filesystem: Send + Sync {
     /// List entries in a directory.
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
 
-    /// Get metadata for a file or directory.
+    /// Get metadata for a file or directory, following symlinks.
+    ///
+    /// A dangling link is `NotFound`. Use `lstat` to see the link itself.
     async fn stat(&self, path: &Path) -> io::Result<DirEntry>;
 
     /// Create a directory (and parent directories if needed).
@@ -72,7 +74,11 @@ pub trait Filesystem: Send + Sync {
     /// Returns `Err` if the filesystem is read-only.
     async fn mkdir(&self, path: &Path) -> io::Result<()>;
 
-    /// Remove a file or empty directory.
+    /// Remove a file, empty directory, or symlink.
+    ///
+    /// The final component is never followed: removing a symlink unlinks the
+    /// link and leaves its target untouched, even when the target is a
+    /// directory.
     ///
     /// Returns `Err` if the filesystem is read-only.
     async fn remove(&self, path: &Path) -> io::Result<()>;
@@ -136,30 +142,51 @@ pub trait Filesystem: Send + Sync {
         None
     }
 
-    /// Check if a path exists.
+    /// Check if a path exists, following symlinks.
+    ///
+    /// A dangling link does not exist, and any error reads as `false`. Ask
+    /// `lstat` when the question is whether a link is present.
     async fn exists(&self, path: &Path) -> bool {
         self.stat(path).await.is_ok()
     }
 
-    /// Rename (move) a file or directory.
+    /// Rename (move) a file, directory, or symlink.
+    ///
+    /// Neither path follows its final component: a symlink source is moved as
+    /// a link, and a symlink at the destination is replaced, never written
+    /// through to its target.
     ///
     /// This is an atomic operation when source and destination are on the same
-    /// filesystem. The default implementation falls back to copy+delete, which
-    /// is not atomic.
+    /// filesystem. The default implementation is remove-destination, copy,
+    /// delete, which is not atomic and does not move directories.
     ///
     /// Returns `Err` if the filesystem is read-only.
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        // Default implementation: copy then delete (not atomic)
-        let entry = self.stat(from).await?;
+        let entry = self.lstat(from).await?;
         if entry.is_dir() {
-            // For directories, we'd need recursive copy - just error for now
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "rename directories not supported by this filesystem",
             ));
         }
-        let data = self.read(from).await?;
-        self.write(to, &data).await?;
+        // Renaming a path to itself is a no-op; clearing the destination
+        // below would delete the source.
+        if same_name(from, to) {
+            return Ok(());
+        }
+        // Clear the destination first: `write` would follow a link left there.
+        match self.remove(to).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if entry.is_symlink() {
+            let target = self.read_link(from).await?;
+            self.symlink(&target, to).await?;
+        } else {
+            let data = self.read(from).await?;
+            self.write(to, &data).await?;
+        }
         self.remove(from).await?;
         Ok(())
     }
@@ -188,8 +215,14 @@ pub trait Filesystem: Send + Sync {
 
     /// Create a symbolic link.
     ///
-    /// Creates a symlink at `link` pointing to `target`. The target path
-    /// is stored as-is (may be relative or absolute).
+    /// Creates a symlink at `link` pointing to `target`. The target is stored
+    /// verbatim; a relative target resolves from the link's directory, as in
+    /// `readlink`. An absolute target is refused with `InvalidInput` (see
+    /// [`refuse_absolute_target`]): a backend has no namespace to read it in,
+    /// and a tree of relative links moves intact. The router above the
+    /// backends rewrites an absolute target inside the same mount to the
+    /// relative form. `link` itself is never followed: an existing path there
+    /// is `AlreadyExists`.
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         let _ = (target, link);
         Err(io::Error::new(
@@ -198,12 +231,50 @@ pub trait Filesystem: Send + Sync {
         ))
     }
 
-    /// Get metadata for a path without following symlinks.
+    /// Get metadata for a path without following its final symlink.
     ///
     /// Unlike `stat`, this returns metadata about the symlink itself,
-    /// not the target it points to.
+    /// not the target it points to. A backend that supports symlinks must
+    /// override this: the default aliases `stat`, and the conformance suite
+    /// fails a backend whose `lstat` follows.
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // Default: same as stat (for backends that don't support symlinks)
         self.stat(path).await
     }
+}
+
+/// Whether two paths spell the same name once `.` and `..` are resolved
+/// lexically and a leading `/` is ignored; `..` at the root stays there.
+fn same_name(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| -> Vec<std::ffi::OsString> {
+        let mut out: Vec<std::ffi::OsString> = Vec::new();
+        for component in p.components() {
+            match component {
+                std::path::Component::Normal(name) => out.push(name.to_os_string()),
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                _ => {}
+            }
+        }
+        out
+    };
+    key(a) == key(b)
+}
+
+/// The one refusal every backend gives an absolute symlink target.
+///
+/// The error names the fix: write the target relative to the link's
+/// directory.
+pub fn refuse_absolute_target(target: &Path) -> io::Result<()> {
+    if target.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "symlink target {} is absolute; write it relative to the link's directory",
+                target.display()
+            ),
+        ));
+    }
+    Ok(())
 }

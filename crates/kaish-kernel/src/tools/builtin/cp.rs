@@ -25,6 +25,14 @@ struct CpArgs {
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
+    /// Copy a symlink as a link with the same target; never follow it.
+    #[arg(short = 'P', long = "no-dereference")]
+    no_dereference: bool,
+
+    /// Follow every symlink, including inside -r; a dangling link is an error.
+    #[arg(short = 'L', long = "dereference")]
+    dereference: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -46,6 +54,8 @@ impl Tool for Cp {
             [
                 ("Copy a file", "cp src.txt dest.txt"),
                 ("Copy directory recursively", "cp -r src/ backup/"),
+                ("Copy a symlink itself, not its target", "cp -P link.txt dest.txt"),
+                ("Follow every symlink found while copying a tree", "cp -rL src/ backup/"),
             ],
         )
         .with_operations([KernelOperation::FsOverwrite.as_str()])
@@ -72,6 +82,20 @@ impl Tool for Cp {
         // `-p`/`--preserve` is intentionally NOT accepted: the VFS has no mode,
         // mtime, or ownership to preserve, so advertising the flag would be a
         // silent no-op. clap rejects it loudly as an unknown argument instead.
+
+        if parsed.no_dereference && parsed.dereference {
+            return ExecResult::failure(
+                2,
+                "cp: -P/--no-dereference and -L/--dereference are mutually exclusive",
+            );
+        }
+        let link_mode = if parsed.dereference {
+            LinkMode::Dereference
+        } else if parsed.no_dereference {
+            LinkMode::NoDereference
+        } else {
+            LinkMode::Default
+        };
 
         // POSIX: `cp SRC DST` for one source, `cp SRC... DIR/` for many.
         // Last positional is the destination.
@@ -120,12 +144,15 @@ impl Tool for Cp {
                 .unwrap_or(false);
             let src_display = &sources[0];
             let src_resolved = ctx.resolve_path(src_display);
-            let src_is_dir = ctx
-                .backend
-                .stat(Path::new(&src_resolved))
-                .await
-                .map(|info| info.is_dir())
-                .unwrap_or(false);
+            // Same policy copy_path applies: a source link that is copied as a
+            // link is not a directory here either.
+            let src_is_dir = if link_mode.follows_top_level(recursive) {
+                ctx.backend.stat(Path::new(&src_resolved)).await
+            } else {
+                ctx.backend.lstat(Path::new(&src_resolved)).await
+            }
+            .map(|info| info.is_dir())
+            .unwrap_or(false);
             // Only a file→existing-file copy is a truncating overwrite. A dir
             // source onto a file errors at mkdir anyway, so gating it would just
             // take a spurious trash snapshot of a file that's never overwritten.
@@ -152,6 +179,7 @@ impl Tool for Cp {
                 recursive,
                 no_clobber,
                 expected_dst.as_ref(),
+                link_mode,
             )
             .await
             {
@@ -165,6 +193,46 @@ impl Tool for Cp {
     }
 }
 
+/// How `cp` treats a symlink, chosen by `-P`/`-L`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkMode {
+    /// A non-recursive copy follows its source; `-r` never follows.
+    Default,
+    /// `-P`: never follow.
+    NoDereference,
+    /// `-L`: always follow; a dangling link is an error.
+    Dereference,
+}
+
+impl LinkMode {
+    /// Whether the top-level source is followed. Under `-r`, coreutils
+    /// treats it like a tree child.
+    fn follows_top_level(self, recursive: bool) -> bool {
+        match self {
+            LinkMode::Dereference => true,
+            LinkMode::NoDereference => false,
+            LinkMode::Default => !recursive,
+        }
+    }
+}
+
+/// Prefix a backend error with the path it happened to, keeping its variant;
+/// `From<io::Error>` drops the path.
+fn name_error(path: &Path, err: BackendError) -> BackendError {
+    let msg = format!("{}: {}", path.display(), err);
+    match err {
+        BackendError::NotFound(_) => BackendError::NotFound(msg),
+        BackendError::AlreadyExists(_) => BackendError::AlreadyExists(msg),
+        BackendError::PermissionDenied(_) => BackendError::PermissionDenied(msg),
+        BackendError::IsDirectory(_) => BackendError::IsDirectory(msg),
+        BackendError::NotDirectory(_) => BackendError::NotDirectory(msg),
+        BackendError::Io(_) => BackendError::Io(msg),
+        BackendError::InvalidOperation(_) => BackendError::InvalidOperation(msg),
+        // No payload to carry the path in, or context already present.
+        other => other,
+    }
+}
+
 /// Copy a path to destination, optionally recursively.
 async fn copy_path(
     backend: &dyn KernelBackend,
@@ -173,8 +241,19 @@ async fn copy_path(
     recursive: bool,
     no_clobber: bool,
     expected: Option<&crate::tools::OverwriteExpectation>,
+    link_mode: LinkMode,
 ) -> Result<(), BackendError> {
-    let info = backend.stat(src).await?;
+    let info = if link_mode.follows_top_level(recursive) {
+        // Following: a dangling link is an error that names the link.
+        backend.stat(src).await.map_err(|e| name_error(src, e))?
+    } else {
+        backend.lstat(src).await?
+    };
+
+    // Only lstat reports a symlink; the source is copied as a link.
+    if info.is_symlink() {
+        return copy_symlink_source(backend, src, dst, no_clobber).await;
+    }
 
     if info.is_dir() {
         if !recursive {
@@ -183,7 +262,7 @@ async fn copy_path(
                 src.display()
             )));
         }
-        copy_dir_recursive(backend, src, dst, no_clobber).await
+        copy_dir_recursive(backend, src, dst, no_clobber, link_mode).await
     } else {
         // Check if destination is a directory
         let final_dst = match backend.stat(dst).await {
@@ -210,12 +289,58 @@ async fn copy_path(
     }
 }
 
+/// Copy a top-level symlink source to `dst`, resolving `dst` the same way
+/// the plain-file path does: into the directory under `src`'s filename when
+/// `dst` already exists as one, else exactly at `dst`.
+async fn copy_symlink_source(
+    backend: &dyn KernelBackend,
+    src: &Path,
+    dst: &Path,
+    no_clobber: bool,
+) -> Result<(), BackendError> {
+    let final_dst = match backend.stat(dst).await {
+        Ok(dst_info) if dst_info.is_dir() => {
+            let filename = src.file_name().ok_or_else(|| {
+                BackendError::InvalidOperation("invalid source path".to_string())
+            })?;
+            dst.join(filename)
+        }
+        _ => dst.to_path_buf(),
+    };
+    recreate_symlink(backend, src, &final_dst, no_clobber).await
+}
+
+/// Recreate the symlink at `src` verbatim at the exact path `dst` — same
+/// target string, `read_link` then `symlink`, never opened.
+async fn recreate_symlink(
+    backend: &dyn KernelBackend,
+    src: &Path,
+    dst: &Path,
+    no_clobber: bool,
+) -> Result<(), BackendError> {
+    // -n asks whether a name is already taken, so lstat: a dangling link at
+    // `dst` still counts as "there" (same rule mv -n uses).
+    if no_clobber && backend.lstat(dst).await.is_ok() {
+        return Ok(());
+    }
+    let target = backend.read_link(src).await?;
+    // Clear a prior entry at dst first: `symlink` errors AlreadyExists, and
+    // cp (like mv/`ln -f`) replaces what's there rather than refusing.
+    match backend.remove(dst, false).await {
+        Ok(()) => {}
+        Err(BackendError::NotFound(_)) => {}
+        Err(e) => return Err(e),
+    }
+    backend.symlink(&target, dst).await
+}
+
 /// Recursively copy a directory.
 fn copy_dir_recursive<'a>(
     backend: &'a dyn KernelBackend,
     src: &'a Path,
     dst: &'a Path,
     no_clobber: bool,
+    link_mode: LinkMode,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
         // Create destination directory
@@ -227,8 +352,26 @@ fn copy_dir_recursive<'a>(
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            if entry.is_dir() {
-                copy_dir_recursive(backend, &src_child, &dst_child, no_clobber).await?;
+            // `list()` lstats, so a link child is a link; only -L follows it.
+            // Recreating it is also what keeps a link cycle from looping.
+            if entry.is_symlink() && link_mode != LinkMode::Dereference {
+                recreate_symlink(backend, &src_child, &dst_child, no_clobber).await?;
+                continue;
+            }
+
+            let is_dir = if entry.is_symlink() {
+                // -L: a dangling link is an error that names the link.
+                backend
+                    .stat(&src_child)
+                    .await
+                    .map_err(|e| name_error(&src_child, e))?
+                    .is_dir()
+            } else {
+                entry.is_dir()
+            };
+
+            if is_dir {
+                copy_dir_recursive(backend, &src_child, &dst_child, no_clobber, link_mode).await?;
             } else {
                 // Check for no-clobber mode
                 if no_clobber && backend.exists(&dst_child).await {
@@ -299,6 +442,151 @@ mod tests {
         // File should be copied into destdir with same name
         let data = ctx.backend.read(Path::new("/destdir/file.txt"), None).await.unwrap();
         assert_eq!(data, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_cp_r_recreates_symlink_in_tree() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("nested.txt"), Path::new("/dir/alias.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/dir".into()));
+        args.positional.push(Value::String("/dircopy".into()));
+        args.flags.insert("r".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        let entry = ctx.backend.lstat(Path::new("/dircopy/alias.txt")).await.unwrap();
+        assert!(entry.is_symlink(), "the copied entry must still be a symlink");
+        let target = ctx.backend.read_link(Path::new("/dircopy/alias.txt")).await.unwrap();
+        assert_eq!(target, Path::new("nested.txt"));
+        // The link target itself must be untouched, real content — not a
+        // link the copy dereferenced and re-linked to somewhere new.
+        let data = ctx.backend.read(Path::new("/dircopy/nested.txt"), None).await.unwrap();
+        assert_eq!(data, b"nested content");
+    }
+
+    #[tokio::test]
+    async fn test_cp_r_recreates_dangling_symlink_in_tree() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("nowhere"), Path::new("/dir/orphan"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/dir".into()));
+        args.positional.push(Value::String("/dircopy".into()));
+        args.flags.insert("r".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "a dangling link inside -r must not error: {}", result.err);
+
+        let target = ctx.backend.read_link(Path::new("/dircopy/orphan")).await.unwrap();
+        assert_eq!(target, Path::new("nowhere"));
+    }
+
+    #[tokio::test]
+    async fn test_cp_r_recreates_symlink_to_dir_as_link() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("/emptydir"), Path::new("/dir/linkdir"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/dir".into()));
+        args.positional.push(Value::String("/dircopy".into()));
+        args.flags.insert("r".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        let entry = ctx.backend.lstat(Path::new("/dircopy/linkdir")).await.unwrap();
+        assert!(
+            entry.is_symlink(),
+            "a link-to-dir inside the tree must be recreated as a link, never descended into"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cp_r_symlink_cycle_does_not_loop() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("loop"), Path::new("/dir/loop"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/dir".into()));
+        args.positional.push(Value::String("/dircopy".into()));
+        args.flags.insert("r".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "a symlink cycle inside -r must not loop or error: {}", result.err);
+        let entry = ctx.backend.lstat(Path::new("/dircopy/loop")).await.unwrap();
+        assert!(entry.is_symlink());
+    }
+
+    #[tokio::test]
+    async fn test_cp_p_top_level_symlink_never_follows() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("file.txt"), Path::new("/link.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/link.txt".into()));
+        args.positional.push(Value::String("/dst.txt".into()));
+        args.flags.insert("no-dereference".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        let entry = ctx.backend.lstat(Path::new("/dst.txt")).await.unwrap();
+        assert!(entry.is_symlink(), "cp -P must copy the link itself, not the file");
+    }
+
+    #[tokio::test]
+    async fn test_cp_l_dereferences_inside_r() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("nested.txt"), Path::new("/dir/alias.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/dir".into()));
+        args.positional.push(Value::String("/dircopy".into()));
+        args.flags.insert("r".to_string());
+        args.flags.insert("dereference".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        let entry = ctx.backend.lstat(Path::new("/dircopy/alias.txt")).await.unwrap();
+        assert!(!entry.is_symlink(), "cp -L must materialize the link as a real file");
+        let data = ctx.backend.read(Path::new("/dircopy/alias.txt"), None).await.unwrap();
+        assert_eq!(data, b"nested content");
+    }
+
+    #[tokio::test]
+    async fn test_cp_p_and_l_together_is_a_usage_error() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.positional.push(Value::String("/dst.txt".into()));
+        args.flags.insert("no-dereference".to_string());
+        args.flags.insert("dereference".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert_eq!(result.code, 2);
     }
 
     #[tokio::test]

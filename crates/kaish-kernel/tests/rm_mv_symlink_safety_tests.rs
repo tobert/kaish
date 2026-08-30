@@ -314,3 +314,102 @@ async fn rm_r_symlink_to_dir_under_trash_keeps_target() {
         "trash mode must not move the link target"
     );
 }
+
+// ============================================================================
+// GROUP I — a symlink at the DESTINATION: replaced or kept, never written through
+// ============================================================================
+
+#[tokio::test]
+async fn mv_file_onto_symlink_to_file_replaces_link_keeps_target() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("src"), "NEW").unwrap();
+    std::fs::write(root.join("target"), "TARGET").unwrap();
+    symlink("target", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "mv src link").await;
+    assert_eq!(r.code, 0, "mv failed: {}", r.err);
+
+    let meta = std::fs::symlink_metadata(root.join("link")).unwrap();
+    assert!(meta.file_type().is_file(), "link is replaced by the file, not written through");
+    assert_eq!(std::fs::read_to_string(root.join("link")).unwrap(), "NEW");
+    assert_eq!(
+        std::fs::read_to_string(root.join("target")).unwrap(),
+        "TARGET",
+        "the link's target is untouched"
+    );
+    assert!(!lexists(&root.join("src")), "source gone");
+}
+
+#[tokio::test]
+async fn mv_n_file_onto_dangling_symlink_keeps_both() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("src"), "NEW").unwrap();
+    symlink("nowhere", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "mv -n src link").await;
+    assert_eq!(r.code, 0, "mv -n failed: {}", r.err);
+
+    // -n asks "is something there", and a dangling link is something.
+    let meta = std::fs::symlink_metadata(root.join("link")).unwrap();
+    assert!(meta.file_type().is_symlink(), "dangling link kept under -n");
+    assert_eq!(std::fs::read_to_string(root.join("src")).unwrap(), "NEW", "source kept");
+}
+
+#[tokio::test]
+async fn ln_sf_onto_dangling_symlink_replaces_it() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::write(root.join("x"), "X").unwrap();
+    symlink("nowhere", root.join("link")).unwrap();
+
+    let r = run(&kernel_at(root), "ln -sf x link").await;
+    assert_eq!(r.code, 0, "ln -sf failed: {}", r.err);
+
+    assert_eq!(std::fs::read_link(root.join("link")).unwrap(), Path::new("x"));
+    assert_eq!(std::fs::read_to_string(root.join("link")).unwrap(), "X");
+}
+
+// ============================================================================
+// GROUP J — an absolute target is stored relative to the link, never as a host path
+// ============================================================================
+
+#[tokio::test]
+async fn ln_s_absolute_target_is_stored_relative_and_still_resolves() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("etc")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(root.join("etc/hosts"), "hosts").unwrap();
+    let kernel = kernel_at(root);
+
+    let target = root.join("etc/hosts");
+    let r = run(&kernel, &format!("ln -s '{}' home/link", target.display())).await;
+    assert_eq!(r.code, 0, "ln failed: {}", r.err);
+
+    assert_eq!(
+        std::fs::read_link(root.join("home/link")).unwrap(),
+        Path::new("../etc/hosts"),
+        "the stored target is relative to the link's directory"
+    );
+    assert_eq!(std::fs::read_to_string(root.join("home/link")).unwrap(), "hosts");
+
+    // readlink -f hands back the absolute path for anyone who needs it.
+    let r = run(&kernel, "readlink -f home/link").await;
+    assert_eq!(r.code, 0, "readlink -f failed: {}", r.err);
+    assert_eq!(r.text_out().trim(), root.join("etc/hosts").to_string_lossy());
+}
+
+#[tokio::test]
+async fn ln_s_target_on_another_mount_is_refused_by_name() {
+    let dir = tempdir();
+    let root = dir.path();
+    let kernel = kernel_at(root);
+
+    // /v is the REPL's memory mount; the link lives on the local / mount.
+    let r = run(&kernel, "ln -s /v/file link").await;
+    assert_ne!(r.code, 0, "cross-mount link must fail");
+    assert!(r.err.contains("/v") && r.err.contains("cross"), "names the mounts: {}", r.err);
+    assert!(!lexists(&root.join("link")), "nothing created");
+}

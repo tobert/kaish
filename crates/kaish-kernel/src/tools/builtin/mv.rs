@@ -163,8 +163,8 @@ async fn move_path(
         _ => dst.to_path_buf(),
     };
 
-    // Check for no-clobber mode
-    if no_clobber && backend.exists(&final_dst).await {
+    // -n asks whether a name is taken, so lstat: a dangling link counts.
+    if no_clobber && backend.lstat(&final_dst).await.is_ok() {
         return Ok(()); // Silently skip if destination exists
     }
 
@@ -222,7 +222,16 @@ fn move_dir_recursive<'a>(
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            if entry.is_dir() {
+            // A link child is recreated with the same target, never read
+            // through; a link to a directory is not descended into.
+            if entry.is_symlink() {
+                let target = backend.read_link(&src_child).await?;
+                match backend.remove(&dst_child, false).await {
+                    Ok(()) | Err(BackendError::NotFound(_)) => {}
+                    Err(e) => return Err(e),
+                }
+                backend.symlink(&target, &dst_child).await?;
+            } else if entry.is_dir() {
                 move_dir_recursive(backend, &src_child, &dst_child).await?;
             } else {
                 let data = backend.read(&src_child, None).await?;

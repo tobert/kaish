@@ -689,6 +689,7 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ -r /path/file ]]             # readable
 [[ -w /path/file ]]             # writable — the mount and the mode must agree
 [[ -x /path/file ]]             # executable; on a directory, searchable
+[[ -L /path/link ]]             # is a symlink (alias -h); true even for a dangling link
 
 # String tests
 [[ -z $VAR ]]                   # empty
@@ -735,7 +736,7 @@ if false, `2` on a usage or type error. It is a real builtin (VFS-aware,
 validated), not a shell-out to the host `/usr/bin/test`:
 
 ```sh
-test -f config.toml             # file tests: -e -f -d -r -w -x
+test -f config.toml             # file tests: -e -f -d -r -w -x -L (-h)
 test -z "$out"                  # string tests: -z -n
 test "$mode" = release          # equality: = == != (literal, not glob)
 test "$count" -gt 0             # numeric: -eq -ne -gt -lt -ge -le

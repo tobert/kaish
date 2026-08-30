@@ -89,14 +89,14 @@ impl Tool for Ln {
 
         let link_path = ctx.resolve_path(&link_name);
 
-        // Handle force flag - remove existing link
-        if force && ctx.backend.exists(Path::new(&link_path)).await
+        // -f asks whether a name is taken, so lstat: a dangling link counts.
+        if force && ctx.backend.lstat(Path::new(&link_path)).await.is_ok()
             && let Err(e) = ctx.backend.remove(Path::new(&link_path), false).await {
                 return ExecResult::failure(1, format!("ln: cannot remove '{}': {}", link_name, e));
             }
 
-        // Create the symlink
-        // Note: target is stored as-is (can be relative or absolute)
+        // A relative target is stored verbatim; the VFS router rewrites an
+        // absolute one relative to the link, or refuses it across mounts.
         match ctx.backend.symlink(Path::new(&target), Path::new(&link_path)).await {
             Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("ln: failed to create symbolic link '{}': {}", link_name, e)),

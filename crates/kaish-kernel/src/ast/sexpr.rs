@@ -362,6 +362,7 @@ pub fn format_test_expr(test: &TestExpr) -> String {
                 FileTestOp::Readable => "-r",
                 FileTestOp::Writable => "-w",
                 FileTestOp::Executable => "-x",
+                FileTestOp::IsSymlink => "-L",
             };
             format!("(file {} {})", op_str, format_expr(path))
         }

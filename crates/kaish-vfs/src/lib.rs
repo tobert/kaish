@@ -1,7 +1,7 @@
 //! kaish's virtual filesystem contract.
 //!
 //! This leaf crate holds the [`Filesystem`] trait every VFS backend implements
-//! and the [`LocalFs`] real-filesystem backend. It exists so backends that
+//! and the `LocalFs` real-filesystem backend. It exists so backends that
 //! aren't part of the kernel can live in their own crates without depending on
 //! `kaish-kernel`.
 //!
@@ -14,7 +14,13 @@ mod traits;
 
 pub use budget::ByteBudget;
 pub use dev::DevFs;
-pub use traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
+pub use traits::{
+    refuse_absolute_target, DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess,
+    ReadRange,
+};
+
+mod resolve;
+pub use resolve::{resolve_beneath, Follow};
 
 // `LocalFs` pulls in `tokio/fs`; gated so the in-memory/wasm sandbox build
 // (which doesn't enable `localfs`) stays free of a real-filesystem dependency.
@@ -39,3 +45,8 @@ pub use overlay::{ChangeKind, OverlayChange, OverlayFs};
 
 #[cfg(any(feature = "memory", feature = "overlay"))]
 mod paths;
+
+// Cross-backend symlink cases every backend can run against itself. Also
+// compiled under `cfg(test)` so this crate's own suite exercises it.
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;

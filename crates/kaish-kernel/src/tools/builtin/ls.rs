@@ -267,6 +267,7 @@ impl Ls {
         opts: &ListOptions,
     ) -> ExecResult {
         let entry_type = dir_entry_to_type(info);
+        let name_display = entry_name_display(path, info, opts.long_format);
         let node = if opts.long_format {
             let type_char = if info.is_symlink() { "l" } else { "-" };
             let size_str = if opts.human_readable {
@@ -274,11 +275,11 @@ impl Ls {
             } else {
                 info.size.to_string()
             };
-            OutputNode::new(path)
+            OutputNode::new(name_display)
                 .with_cells(vec![type_char.to_string(), size_str])
                 .with_entry_type(entry_type)
         } else {
-            OutputNode::new(path).with_entry_type(entry_type)
+            OutputNode::new(name_display).with_entry_type(entry_type)
         };
 
         let output = if opts.long_format {
@@ -322,11 +323,23 @@ impl Ls {
             return self.list_glob(ctx, path, opts).await;
         }
         let resolved = ctx.resolve_path(path);
-        // Real `ls file.txt` just echoes the filename rather than erroring.
-        if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
-            && !info.is_dir()
-        {
-            return self.list_file(ctx, path, &info, opts);
+        // lstat the operand: a link to a directory is listed as the
+        // directory; any other link renders as the link itself.
+        if let Ok(link_info) = ctx.backend.lstat(Path::new(&resolved)).await {
+            if link_info.is_symlink() {
+                let target_is_dir = ctx
+                    .backend
+                    .stat(Path::new(&resolved))
+                    .await
+                    .map(|info| info.is_dir())
+                    .unwrap_or(false);
+                if !target_is_dir {
+                    return self.list_file(ctx, path, &link_info, opts);
+                }
+            } else if !link_info.is_dir() {
+                // Real `ls file.txt` just echoes the filename rather than erroring.
+                return self.list_file(ctx, path, &link_info, opts);
+            }
         }
         if recursive {
             self.list_recursive(ctx, &resolved, path, opts).await
@@ -359,7 +372,8 @@ impl Ls {
         let mut error_text = String::new();
         for name in &names {
             let abs = ctx.resolve_path(name);
-            match ctx.backend.stat(Path::new(&abs)).await {
+            // lstat: an operand that is a link renders as the link.
+            match ctx.backend.lstat(Path::new(&abs)).await {
                 Ok(info) => entries.push((name.clone(), info)),
                 Err(e) => {
                     if report_missing {
@@ -411,11 +425,11 @@ impl Ls {
                     } else {
                         e.size.to_string()
                     };
-                    OutputNode::new(&e.name)
+                    OutputNode::new(entry_name_display(&e.name, e, true))
                         .with_cells(vec![type_char.to_string(), size_str])
                         .with_entry_type(entry_type)
                 } else {
-                    OutputNode::new(&e.name).with_entry_type(entry_type)
+                    OutputNode::new(entry_name_display(&e.name, e, false)).with_entry_type(entry_type)
                 }
             })
             .collect();
@@ -460,19 +474,7 @@ impl Ls {
                     .iter()
                     .map(|e| {
                         let entry_type = dir_entry_to_type(e);
-                        let name_display = if e.is_symlink() {
-                            if opts.long_format {
-                                if let Some(target) = &e.symlink_target {
-                                    format!("{} -> {}", e.name, target.display())
-                                } else {
-                                    format!("{}@", e.name)
-                                }
-                            } else {
-                                format!("{}@", e.name)
-                            }
-                        } else {
-                            e.name.clone()
-                        };
+                        let name_display = entry_name_display(&e.name, e, opts.long_format);
 
                         if opts.long_format {
                             let type_char = if e.is_symlink() {
@@ -679,6 +681,24 @@ fn filter_and_sort(entries: Vec<DirEntry>, show_all: bool, sort_opts: &SortOptio
     });
 
     filtered
+}
+
+/// Render one entry's display name: `name -> target` for a symlink under
+/// `-l` (or a bare `name@` when the link is dangling), `name@` for a
+/// symlink otherwise (matching `ls -F`), and the name unchanged for
+/// anything else. `name` is passed separately from `entry` so a caller can
+/// use the exact operand string (`ls -l some/link`) rather than only the
+/// entry's own basename.
+fn entry_name_display(name: &str, entry: &DirEntry, long_format: bool) -> String {
+    if !entry.is_symlink() {
+        return name.to_string();
+    }
+    if long_format {
+        if let Some(target) = &entry.symlink_target {
+            return format!("{} -> {}", name, target.display());
+        }
+    }
+    format!("{}@", name)
 }
 
 /// Convert DirEntry to EntryType for coloring.

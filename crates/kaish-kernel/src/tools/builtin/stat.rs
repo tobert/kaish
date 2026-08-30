@@ -18,6 +18,10 @@ struct StatArgs {
     #[arg(short = 'c', long)]
     format: Option<String>,
 
+    /// Follow the final symlink and describe its target instead of the link itself.
+    #[arg(short = 'L', long = "dereference")]
+    dereference: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -39,6 +43,7 @@ impl Tool for Stat {
             [
                 ("Show file info", "stat README.md"),
                 ("Just the size", "stat --format '%s' file.txt"),
+                ("Follow a symlink to its target", "stat -L link.txt"),
             ],
         )
     }
@@ -80,17 +85,50 @@ impl Tool for Stat {
                 Err(e) => return ExecResult::failure(1, format!("stat: {e}")),
             };
             let resolved = ctx.resolve_path(&path_str);
-            match ctx.backend.stat(Path::new(&resolved)).await {
+            // Default describes the link itself (lstat); -L follows to the
+            // target, matching GNU `stat` (which does not follow by default).
+            let stat_result = if parsed.dereference {
+                ctx.backend.stat(Path::new(&resolved)).await
+            } else {
+                ctx.backend.lstat(Path::new(&resolved)).await
+            };
+            match stat_result {
                 Ok(info) => {
                     if let Some(fmt) = &format {
                         format_output.push_str(&format_stat(fmt, &path_str, &info));
                     } else {
+                        let is_symlink = info.is_symlink();
                         let is_dir = info.is_dir();
-                        let file_type = if is_dir { "directory" } else { "regular file" };
-                        let entry_type = if is_dir { EntryType::Directory } else { EntryType::File };
+                        let file_type = if is_symlink {
+                            "symbolic link"
+                        } else if is_dir {
+                            "directory"
+                        } else {
+                            "regular file"
+                        };
+                        let entry_type = if is_symlink {
+                            EntryType::Symlink
+                        } else if is_dir {
+                            EntryType::Directory
+                        } else {
+                            EntryType::File
+                        };
+                        let mut cells = vec![info.size.to_string(), file_type.to_string()];
+                        // TARGET is a fourth header; only a symlink row adds
+                        // this third cell, so a file/dir row's JSON object
+                        // (headers zipped positionally against cells) never
+                        // gets a "TARGET" key at all.
+                        if is_symlink {
+                            let target = info
+                                .symlink_target
+                                .as_ref()
+                                .map(|t| t.display().to_string())
+                                .unwrap_or_default();
+                            cells.push(target);
+                        }
                         nodes.push(
                             OutputNode::new(&path_str)
-                                .with_cells(vec![info.size.to_string(), file_type.to_string()])
+                                .with_cells(cells)
                                 .with_entry_type(entry_type),
                         );
                     }
@@ -105,7 +143,12 @@ impl Tool for Stat {
         let mut result = if format.is_some() {
             ExecResult::with_output(OutputData::text(format_output))
         } else {
-            let headers = vec!["FILE".to_string(), "SIZE".to_string(), "TYPE".to_string()];
+            let headers = vec![
+                "FILE".to_string(),
+                "SIZE".to_string(),
+                "TYPE".to_string(),
+                "TARGET".to_string(),
+            ];
             ExecResult::with_output(OutputData::table(headers, nodes))
         };
         if let Some(msg) = last_err {
@@ -127,7 +170,13 @@ fn format_stat(fmt: &str, name: &str, info: &crate::vfs::DirEntry) -> String {
     result = result.replace("%s", &info.size.to_string());
 
     // %F - file type
-    let file_type = if info.is_dir() { "directory" } else { "regular file" };
+    let file_type = if info.is_symlink() {
+        "symbolic link"
+    } else if info.is_dir() {
+        "directory"
+    } else {
+        "regular file"
+    };
     result = result.replace("%F", file_type);
 
     // Add newline if not present

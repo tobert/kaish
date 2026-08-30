@@ -71,22 +71,32 @@ pub trait KernelBackend: Send + Sync {
     /// escape to the host via `resolve_real_path`.
     async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()>;
 
-    /// Remove a file or directory.
+    /// Remove a file, directory, or symlink; `recursive` descends into a
+    /// directory. The final component is never followed: a symlink is
+    /// unlinked and its target kept, and a link to a directory is not
+    /// descended into.
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()>;
 
-    /// Rename/move a path.
+    /// Rename/move a path. Neither side follows a final symlink: a symlink
+    /// source moves as a link, and a symlink at the destination is replaced,
+    /// never written through.
     async fn rename(&self, from: &Path, to: &Path) -> BackendResult<()>;
 
-    /// Whether a path exists.
+    /// Whether a path exists, following symlinks: a dangling link does not
+    /// exist, and an error reads as `false`. Use `lstat` to ask whether a
+    /// link is present.
     async fn exists(&self, path: &Path) -> bool;
 
     /// Stat a path without following symlinks.
     async fn lstat(&self, path: &Path) -> BackendResult<DirEntry>;
 
-    /// Read a symlink's target.
+    /// Read a symlink's target as stored, without resolving it.
     async fn read_link(&self, path: &Path) -> BackendResult<PathBuf>;
 
-    /// Create a symlink.
+    /// Create a symlink at `link` pointing to `target`. The target is stored
+    /// verbatim; a relative target resolves from the link's directory. An
+    /// absolute target is rewritten relative to the link when both are on one
+    /// mount, and refused when they are not.
     async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()>;
 
     // ═══════════════════════════════════════════════════════════════════════
