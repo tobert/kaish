@@ -39,3 +39,8 @@ pub use overlay::{ChangeKind, OverlayChange, OverlayFs};
 
 #[cfg(any(feature = "memory", feature = "overlay"))]
 mod paths;
+
+// Cross-backend symlink cases every backend can run against itself. Also
+// compiled under `cfg(test)` so this crate's own suite exercises it.
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
