@@ -38,6 +38,9 @@ pub enum Stmt {
     ToolDef(ToolDef),
     /// Test expression: `[[ -f path ]]` or `[[ $X == "value" ]]`
     Test(TestExpr),
+    /// Bare arithmetic condition as a command: `(( expr ))`. Exit 0 when the
+    /// value is nonzero, 1 when zero — the sibling of `Test`.
+    Arith(String),
     /// Statement chain with `&&`: run right only if left succeeds
     AndChain { left: Box<Stmt>, right: Box<Stmt> },
     /// Statement chain with `||`: run right only if left fails
@@ -68,6 +71,7 @@ impl Stmt {
             Stmt::Exit(_) => "exit",
             Stmt::ToolDef(_) => "tooldef",
             Stmt::Test(_) => "test",
+            Stmt::Arith(_) => "arith",
             Stmt::AndChain { .. } => "and_chain",
             Stmt::OrChain { .. } => "or_chain",
             Stmt::EnvScoped { .. } => "env_scoped",
@@ -377,6 +381,9 @@ pub enum Expr {
     VarWithDefault { path: VarPath, default: Vec<StringPart> },
     /// Arithmetic expansion: `$((expr))` - evaluates to integer
     Arithmetic(String),
+    /// Bare arithmetic condition: `(( expr ))` in `if`/`while` condition
+    /// position — truthy when the value is nonzero, the sibling of `Test`.
+    Arith(String),
     /// Command as condition: `if grep -q pattern file; then` - exit code determines truthiness
     Command(Command),
     /// Last exit code: `$?`

@@ -503,6 +503,11 @@ pub enum Token {
     /// Contains the expression string between `$((` and `))`.
     Arithmetic(String),
 
+    /// Bare `(( expr ))` arithmetic condition: synthesized by preprocessing,
+    /// the same way as `Arithmetic` but for the unquoted, `$`-less form.
+    /// Contains the expression string between the two `(` and the two `)`.
+    ArithCond(String),
+
     /// Command substitution start: `$(` - begins a command substitution
     #[token("$(")]
     CmdSubstStart,
@@ -905,7 +910,8 @@ impl Token {
             | Token::Newline
             | Token::LineContinuation
             | Token::CmdSubstStart
-            | Token::DotDotDot => TokenCategory::Punctuation,
+            | Token::DotDotDot
+            | Token::ArithCond(_) => TokenCategory::Punctuation,
 
             // Glob words (merged tokens containing wildcards)
             Token::GlobWord(_) => TokenCategory::Path,
@@ -1149,7 +1155,7 @@ fn reject_backtick(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
 /// deliberately absent: `$(f)#3` is one word in bash, and the lexer cannot
 /// tell that `)` from a subshell's here, so both are a loud error rather than
 /// a silent comment.
-fn opens_a_word(c: char) -> bool {
+pub(crate) fn opens_a_word(c: char) -> bool {
     c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(')
 }
 
@@ -1330,6 +1336,7 @@ impl fmt::Display for Token {
             Token::Question => write!(f, "?"),
             Token::GlobWord(s) => write!(f, "GLOB({})", s),
             Token::Arithmetic(s) => write!(f, "ARITHMETIC({})", s),
+            Token::ArithCond(s) => write!(f, "((ARITHCOND({})))", s),
             Token::CmdSubstStart => write!(f, "$("),
             Token::LongFlag(s) => write!(f, "--{}", s),
             Token::ShortFlag(s) => write!(f, "-{}", s),
@@ -1558,8 +1565,12 @@ struct PendingHeredoc {
 /// markers and correct spans.
 struct ScanOutput {
     text: String,
-    /// (marker, expression) pairs, indexed by `ReplacementKind::Arith`.
-    arithmetics: Vec<(String, String)>,
+    /// (marker, expression, is_condition) triples, indexed by
+    /// `ReplacementKind::Arith`. `is_condition` is set only for a bare
+    /// `(( expr ))` at the top level — `$((expr))` is always `false`, and a
+    /// quoted string's own `$((` never sets it (the condition form has no
+    /// meaning inside a string).
+    arithmetics: Vec<(String, String, bool)>,
     /// Heredoc extracts, indexed by `ReplacementKind::HeredocIntro`.
     heredocs: Vec<HeredocExtract>,
     replacements: Vec<Replacement>,
@@ -1581,7 +1592,7 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
     };
 
     let mut out = String::with_capacity(source.len());
-    let mut arithmetics: Vec<(String, String)> = Vec::new();
+    let mut arithmetics: Vec<(String, String, bool)> = Vec::new();
     let mut heredocs: Vec<HeredocExtract> = Vec::new();
     let mut replacements: Vec<Replacement> = Vec::new();
     let mut pending: Vec<PendingHeredoc> = Vec::new();
@@ -1651,9 +1662,13 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                             &mut i,
                             dpos,
                             total_len,
-                            &mut out,
-                            &mut arithmetics,
-                            &mut replacements,
+                            &mut ScanBuffers {
+                                out: &mut out,
+                                arithmetics: &mut arithmetics,
+                                replacements: &mut replacements,
+                            },
+                            3,
+                            false,
                         )?;
                         continue;
                     }
@@ -1729,9 +1744,33 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
                     &mut i,
                     pos,
                     total_len,
-                    &mut out,
-                    &mut arithmetics,
-                    &mut replacements,
+                    &mut ScanBuffers {
+                        out: &mut out,
+                        arithmetics: &mut arithmetics,
+                        replacements: &mut replacements,
+                    },
+                    3,
+                    false,
+                )?;
+            }
+            // Bare `((expr))` — an arithmetic condition, the sibling of
+            // `[[ ]]`. Unlike `$((`, there is no sigil to make this
+            // unambiguous; it is safe because kaish gives a lone `(` no
+            // other meaning at this (unquoted, top-level) position — see
+            // `Stmt::Arith`/`Expr::Arith` in `ast/types.rs`.
+            '(' if i + 1 < n && chars[i + 1].1 == '(' => {
+                extract_arithmetic(
+                    &chars,
+                    &mut i,
+                    pos,
+                    total_len,
+                    &mut ScanBuffers {
+                        out: &mut out,
+                        arithmetics: &mut arithmetics,
+                        replacements: &mut replacements,
+                    },
+                    2,
+                    true,
                 )?;
             }
             '$' if i + 1 < n && chars[i + 1].1 == '{' => {
@@ -1938,17 +1977,27 @@ fn copy_substitution_verbatim(chars: &[(usize, char)], i: &mut usize, out: &mut 
     }
 }
 
+/// The scanner buffers `extract_arithmetic` appends to, grouped so the
+/// call carries one thing instead of three — `scan`'s own locals (`out`,
+/// `arithmetics`, `replacements`) still own the data; this just borrows
+/// all three for the one call.
+struct ScanBuffers<'a> {
+    out: &'a mut String,
+    arithmetics: &'a mut Vec<(String, String, bool)>,
+    replacements: &'a mut Vec<Replacement>,
+}
+
 fn extract_arithmetic(
     chars: &[(usize, char)],
     i: &mut usize,
     start_pos: usize,
     total_len: usize,
-    out: &mut String,
-    arithmetics: &mut Vec<(String, String)>,
-    replacements: &mut Vec<Replacement>,
+    buffers: &mut ScanBuffers<'_>,
+    marker_len: usize,
+    is_condition: bool,
 ) -> Result<(), Spanned<LexerError>> {
     let n = chars.len();
-    *i += 3; // consume `$((`
+    *i += marker_len; // consume `$((` (3) or bare `((` (2)
 
     let mut expr = String::new();
     let mut depth = 0usize;
@@ -2003,15 +2052,15 @@ fn extract_arithmetic(
 
     let end_pos = if *i < n { chars[*i].0 } else { total_len };
     let marker = format!("__KAISH_ARITH_{}__", unique_marker_id());
-    replacements.push(Replacement {
+    buffers.replacements.push(Replacement {
         orig_start: start_pos,
         orig_len: end_pos - start_pos,
-        new_start: out.len(),
+        new_start: buffers.out.len(),
         new_len: marker.len(),
-        kind: ReplacementKind::Arith(arithmetics.len()),
+        kind: ReplacementKind::Arith(buffers.arithmetics.len()),
     });
-    arithmetics.push((marker.clone(), expr));
-    out.push_str(&marker);
+    buffers.arithmetics.push((marker.clone(), expr, is_condition));
+    buffers.out.push_str(&marker);
     Ok(())
 }
 
@@ -2368,7 +2417,8 @@ fn resolve_markers(
         }
 
         match (&spanned.token, contained.as_slice()) {
-            // Exact cover by a single arithmetic marker → Arithmetic token.
+            // Exact cover by a single arithmetic marker → Arithmetic token,
+            // or ArithCond for a bare `((expr))` condition.
             (Token::Ident(_), [m])
                 if matches!(m.kind, ReplacementKind::Arith(_))
                     && m.new_start == span.start
@@ -2377,10 +2427,13 @@ fn resolve_markers(
                 let ReplacementKind::Arith(idx) = m.kind else {
                     unreachable!("guarded by matches! above")
                 };
-                result.push(Spanned::new(
-                    Token::Arithmetic(scan.arithmetics[idx].1.clone()),
-                    span,
-                ));
+                let (_, expr, is_condition) = &scan.arithmetics[idx];
+                let token = if *is_condition {
+                    Token::ArithCond(expr.clone())
+                } else {
+                    Token::Arithmetic(expr.clone())
+                };
+                result.push(Spanned::new(token, span));
             }
 
             // Exact cover by a heredoc marker → HereDoc token (the parser
@@ -2420,7 +2473,8 @@ fn resolve_markers(
                         // never does.
                         unreachable!("heredoc marker inside string content")
                     };
-                    let (marker, expr) = &scan.arithmetics[idx];
+                    let (marker, expr, is_condition) = &scan.arithmetics[idx];
+                    debug_assert!(!is_condition, "a bare `((` condition never scans inside a string");
                     content =
                         content.replacen(marker, &format!("${{__ARITH:{}__}}", expr), 1);
                 }
@@ -2444,10 +2498,13 @@ fn resolve_markers(
                     }
                     match m.kind {
                         ReplacementKind::Arith(idx) => {
-                            result.push(Spanned::new(
-                                Token::Arithmetic(scan.arithmetics[idx].1.clone()),
-                                m.new_start..m.new_start + m.new_len,
-                            ));
+                            let (_, expr, is_condition) = &scan.arithmetics[idx];
+                            let token = if *is_condition {
+                                Token::ArithCond(expr.clone())
+                            } else {
+                                Token::Arithmetic(expr.clone())
+                            };
+                            result.push(Spanned::new(token, m.new_start..m.new_start + m.new_len));
                         }
                         ReplacementKind::HeredocIntro(_) | ReplacementKind::Elision => {
                             // Heredoc markers are always delimited by the

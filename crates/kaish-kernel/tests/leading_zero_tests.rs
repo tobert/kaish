@@ -171,9 +171,10 @@ async fn the_suggested_count_is_never_a_fraction() {
 #[tokio::test]
 async fn arithmetic_refuses_a_leading_zero_rather_than_reading_decimal() {
     let text = err_of("echo $((010 + 1))").await;
-    assert!(text.contains("(leading zero)"), "must name the cause: {text:?}");
+    assert!(text.contains("leading zero"), "must name the cause: {text:?}");
     assert!(text.contains("no octal"), "must say kaish reads no octal: {text:?}");
-    assert!(text.contains("write `10`"), "must name the fix: {text:?}");
+    assert!(text.contains("8#10"), "must name the octal fix: {text:?}");
+    assert!(text.contains("or `10`"), "must name the decimal fix: {text:?}");
     assert!(!text.contains("11"), "must not answer 11: {text:?}");
 }
 
@@ -243,12 +244,11 @@ async fn every_ordinary_slice_spelling_still_works() {
 /// was already refused; this is the same numeral arriving by another road.
 #[tokio::test]
 async fn arithmetic_refuses_a_leading_zero_that_arrives_in_a_variable() {
-    for (source, decimal) in
-        [("x=010; echo $((x))", "write `10`"), ("x=007; echo $((x + 1))", "write `7`")]
-    {
+    for source in ["x=010; echo $((x))", "x=007; echo $((x + 1))"] {
         let text = err_of(source).await;
         assert!(text.contains("(leading zero)"), "must name the cause: {text:?}");
-        assert!(text.contains(decimal), "must name the fix: {text:?}");
+        assert!(text.contains("10#$x"), "must name the decimal fix: {text:?}");
+        assert!(text.contains("8#$x"), "must name the octal fix: {text:?}");
     }
     let (code, out, err) = run("x=10; echo $((x + 1))").await;
     assert_eq!(code, 0, "an ordinary variable must still work: {err:?}");
@@ -402,9 +402,11 @@ async fn arithmetic_overflow_literal_names_the_64_bit_limit() {
     assert!(text.contains("64-bit"), "must name the limit: {text:?}");
     assert!(!text.contains("invalid number"), "must not say only 'invalid': {text:?}");
 
-    // Overflow from addition is a different failure and keeps its own wording.
+    // Overflow from addition is a different failure and keeps its own wording:
+    // the 0.16 rewrite names the operands and the 64-bit limit directly
+    // rather than the word "overflow".
     let text = err_of("echo $((9223372036854775807 + 1))").await;
-    assert!(text.contains("overflow"), "addition overflow must still say overflow: {text:?}");
+    assert!(text.contains("does not fit"), "addition overflow must name the limit: {text:?}");
 }
 
 // ── `value_to_num` does not round an out-of-range string through f64 ───────

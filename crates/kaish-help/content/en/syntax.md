@@ -339,11 +339,20 @@ DATA=$(kaish-last)                # capture for later use
 ## Arithmetic
 
 ```sh
-X=$((5 + 3))              # 8
-Y=$((X * 2))              # 16
-# Operators: + - * / % > < >= <= == !=
-# Comparisons return 1/0
+echo $((5 + 3 * 2))       # 11    checked 64-bit integers; overflow is an error
+echo $((0xff))            # 255   hex; also $((16#ff)) — base#digits, base 2 to 36
+echo $((8#17))            # 15    octal; $((010)) is an error — write 8#10 or 10
+m=$(date +%m); echo $((10#$m + 1))   # text with a leading zero, read as decimal
+echo $((2 ** 10))         # 1024
+echo $((5 > 3))           # 1     comparisons return 1 or 0
+echo $((a > b ? a : b))   # ternary; && || ? : skip the side they do not need
+echo $(( $(wc -l < f) * 2 ))         # $(cmd) is an operand
+x=$((x + 1))              # assignment stays outside; x++ is an error
+while (( i <= 5 )); do ...; done     # (( )) alone is a condition
 ```
+
+Operators, highest first: `+ - ! ~` · `**` · `* / %` · `+ -` · `<< >>` · `< <= > >=` · `== !=` · `&` · `^` · `|` · `&&` · `||` · `? :`.
+An unset variable, a float, or `$RANDOM` is an error that names the fix.
 
 ## Functions
 

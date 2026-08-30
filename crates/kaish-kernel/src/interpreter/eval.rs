@@ -219,6 +219,7 @@ impl<'a> Evaluator<'a> {
             Expr::VarLength(path) => self.eval_var_length(path),
             Expr::VarWithDefault { path, default } => self.eval_var_with_default(path, default),
             Expr::Arithmetic(expr_str) => self.eval_arithmetic(expr_str),
+            Expr::Arith(expr_str) => self.eval_arith_cond(expr_str),
             Expr::Command(cmd) => self.eval_command(cmd),
             Expr::LastExitCode => self.eval_last_exit_code(),
             Expr::CurrentPid => self.eval_current_pid(),
@@ -304,6 +305,16 @@ impl<'a> Evaluator<'a> {
     fn eval_arithmetic(&mut self, expr_str: &str) -> EvalResult<Value> {
         arithmetic::eval_arithmetic(expr_str, self.scope)
             .map(Value::Int)
+            .map_err(|e| EvalError::ArithmeticError(e.to_string()))
+    }
+
+    /// Evaluate a bare `(( expr ))` condition: true when the value is
+    /// nonzero. The sibling of `Self::eval_test`, same coercion as
+    /// `$(( ))` (`eval_arithmetic` above) — only the truthiness wrapper
+    /// differs.
+    fn eval_arith_cond(&mut self, expr_str: &str) -> EvalResult<Value> {
+        arithmetic::eval_arithmetic(expr_str, self.scope)
+            .map(|n| Value::Bool(n != 0))
             .map_err(|e| EvalError::ArithmeticError(e.to_string()))
     }
 

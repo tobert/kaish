@@ -15,9 +15,17 @@ breaking entries are marked **BREAKING**.
   an `ExecContext` can spawn a child with the kernel's external-command
   discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
 
+- **Arithmetic diverges from bash on purpose** — overflow, an unset/empty
+  operand, and a leading zero are errors, never a wrap or 0; strings are
+  values, not expressions; a skipped `&&`/`||`/`?:` branch's `$(...)` never
+  runs.
+
 ### Added
 - **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
   chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
+- **`$(( ))` reads another base** (`0x`, `base#digits`, `base#$var`) and
+  does checked 64-bit arithmetic with the full C operator set through `?:`;
+  `$(...)` is an operand; bare `(( expr ))` is a condition, like `[[ ]]`.
 
 - **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
   register an external program as a tool with a declared grammar. Verbs and flags

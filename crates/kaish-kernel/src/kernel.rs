@@ -3073,6 +3073,27 @@ impl Kernel {
                 }
                 Ok(ControlFlow::ok(result))
             }
+            // `(( expr ))` — the sibling of `Test` above, but an evaluation
+            // fault (division by zero, an unset variable) does not abort
+            // the statement list the way a bad `[[ ]]` comparison does: it
+            // is exit 2 with the arithmetic error as the message, same as
+            // any other command that ran and failed.
+            Stmt::Arith(expr_str) => {
+                let result = match self.eval_arithmetic_async(expr_str).await {
+                    Ok(n) if n != 0 => ExecResult::success(""),
+                    Ok(_) => ExecResult::failure(1, ""),
+                    Err(e) => ExecResult::failure(2, e.to_string()),
+                };
+                self.update_last_result(&result).await;
+                if !result.ok() {
+                    let scope = self.scope.read().await;
+                    if scope.error_exit_enabled() {
+                        let code = result.code;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                }
+                Ok(ControlFlow::ok(result))
+            }
             Stmt::EnvScoped { assignments, body } => {
                 // Inline env prefix (`NAME=value ... command`): apply the
                 // assignments as EXPORTED vars in a fresh frame so the command
@@ -4209,6 +4230,18 @@ impl Kernel {
             Expr::Test(test_expr) => {
                 Ok(Value::Bool(self.eval_test_async(test_expr).await?))
             }
+            // `(( expr ))` in condition position (`if`/`while`). Unlike the
+            // standalone `Stmt::Arith` form, a condition has no exit-code
+            // channel separate from true/false, so an evaluation fault
+            // propagates like `Expr::Test`'s does — it aborts the
+            // enclosing statement rather than silently reading false.
+            Expr::Arith(expr_str) => {
+                let n = self
+                    .eval_arithmetic_async(expr_str)
+                    .await
+                    .context("arithmetic condition")?;
+                Ok(Value::Bool(n != 0))
+            }
             Expr::Positional(n) => {
                 let scope = self.scope.read().await;
                 match scope.get_positional(*n) {
@@ -4244,10 +4277,7 @@ impl Kernel {
                 }
             }
             Expr::Arithmetic(expr_str) => {
-                let scope = self.scope.read().await;
-                crate::arithmetic::eval_arithmetic(expr_str, &scope)
-                    .map(Value::Int)
-                    .map_err(|e| anyhow::anyhow!("arithmetic error: {}", e))
+                self.eval_arithmetic_async(expr_str).await.map(Value::Int)
             }
             Expr::Command(cmd) => {
                 // A command in expression position — an `if`/`while`
@@ -4541,10 +4571,7 @@ impl Kernel {
                 // `"$((1/0))"` — `echo "value: $((1/0))"` printed "value: "
                 // at exit 0 instead of failing. Matches the bare (non-string)
                 // `Expr::Arithmetic` arm above, which already propagates.
-                let scope = self.scope.read().await;
-                crate::arithmetic::eval_arithmetic(expr, &scope)
-                    .map(|value| value.to_string())
-                    .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                self.eval_arithmetic_async(expr).await.map(|value| value.to_string())
             }
             StringPart::CommandSubst(stmts) => {
                 // Snapshot scope, cwd, and session config — command
@@ -4924,6 +4951,283 @@ impl Kernel {
         result.data_is_value = last_data.is_some();
         result.data = last_data;
         Ok(result)
+    }
+
+    /// Evaluate `$(( text ))`'s content. Takes the sync fast path
+    /// (`arithmetic::eval_sync` under one scope read lock) when no `$(...)`
+    /// is reachable in the parsed tree; otherwise walks it with
+    /// `Self::eval_arith_expr_async`, which can run a `$(...)` operand and
+    /// never runs one on the unselected side of `&&`/`||`/`?:`.
+    async fn eval_arithmetic_async(&self, text: &str) -> Result<i64> {
+        let ast = crate::arithmetic::parse(text).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
+        if ast.contains_command_subst() {
+            self.eval_arith_expr_async(&ast).await
+        } else {
+            let scope = self.scope.read().await;
+            crate::arithmetic::eval_sync(&ast, &scope).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+        }
+    }
+
+    /// Async recursive walk over a parsed `$(( ))` tree. Boxed for the same
+    /// reason as `Self::eval_expr_async`: the recursion is unbounded by
+    /// the type system, so a fixed-depth stack frame can't hold it. Each
+    /// leaf takes its own short `self.scope` read lock rather than one held
+    /// across the whole walk — `Expansion::CommandSubst` runs through
+    /// `Self::execute_block_capturing`, which takes its own scope lock
+    /// internally, so a lock held here across that await would deadlock.
+    fn eval_arith_expr_async<'a>(
+        &'a self,
+        expr: &'a crate::arithmetic::ArithExpr,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64>> + Send + 'a>> {
+        use crate::arithmetic::{ArithExpr, BinOp};
+        Box::pin(async move {
+            match expr {
+                ArithExpr::Int(n) => Ok(*n),
+                ArithExpr::Expansion(e) => self.eval_arith_expansion_async(e).await,
+                ArithExpr::Subscript { root, indices } => {
+                    let mut values = Vec::with_capacity(indices.len());
+                    for index in indices {
+                        values.push(self.eval_arith_expr_async(index).await?);
+                    }
+                    let scope = self.scope.read().await;
+                    crate::arithmetic::resolve_subscript_sync(&scope, root, &values)
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                ArithExpr::BasedExpansion { base, expansion } => {
+                    let text = self.eval_arith_expansion_text_async(expansion).await?;
+                    let (label, verb) = crate::arithmetic::expansion_label(expansion);
+                    crate::arithmetic::based_value(*base, &text, &label, verb)
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                ArithExpr::Unary { op, operand } => {
+                    let v = self.eval_arith_expr_async(operand).await?;
+                    crate::arithmetic::apply_unary(*op, v).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                // `&&`/`||` short-circuit: the unselected side's `$(...)`
+                // must not run (docs/LANGUAGE.md, "Operators").
+                ArithExpr::Binary { op: BinOp::And, left, right } => {
+                    if self.eval_arith_expr_async(left).await? == 0 {
+                        Ok(0)
+                    } else {
+                        Ok(if self.eval_arith_expr_async(right).await? != 0 { 1 } else { 0 })
+                    }
+                }
+                ArithExpr::Binary { op: BinOp::Or, left, right } => {
+                    if self.eval_arith_expr_async(left).await? != 0 {
+                        Ok(1)
+                    } else {
+                        Ok(if self.eval_arith_expr_async(right).await? != 0 { 1 } else { 0 })
+                    }
+                }
+                ArithExpr::Binary { op, left, right } => {
+                    let l = self.eval_arith_expr_async(left).await?;
+                    let r = self.eval_arith_expr_async(right).await?;
+                    crate::arithmetic::apply_binary(*op, l, r).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                ArithExpr::Ternary { cond, then_branch, else_branch } => {
+                    if self.eval_arith_expr_async(cond).await? != 0 {
+                        self.eval_arith_expr_async(then_branch).await
+                    } else {
+                        self.eval_arith_expr_async(else_branch).await
+                    }
+                }
+            }
+        })
+    }
+
+    fn eval_arith_expansion_async<'a>(
+        &'a self,
+        expansion: &'a crate::arithmetic::Expansion,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64>> + Send + 'a>> {
+        use crate::arithmetic::Expansion;
+        Box::pin(async move {
+            match expansion {
+                Expansion::Var(name) => {
+                    let scope = self.scope.read().await;
+                    crate::arithmetic::resolve_var_sync(&scope, name)
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                Expansion::BracedPath { root, brackets } => {
+                    let scope = self.scope.read().await;
+                    let value = crate::arithmetic::braced_path_value(&scope, root, brackets)
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
+                    crate::arithmetic::value_to_arith(&value, root)
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                Expansion::BracedDefault { root, brackets, default } => {
+                    let resolved = {
+                        let scope = self.scope.read().await;
+                        if brackets.is_empty() {
+                            scope.get(root).cloned()
+                        } else {
+                            crate::arithmetic::braced_path_value(&scope, root, brackets).ok()
+                        }
+                    };
+                    match resolved {
+                        Some(Value::Null) | None => {
+                            let default_expr = crate::arithmetic::parse(default)
+                                .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
+                            self.eval_arith_expr_async(&default_expr).await
+                        }
+                        Some(value) => crate::arithmetic::value_to_arith(&value, root)
+                            .map_err(|e| anyhow::anyhow!("arithmetic error: {e}")),
+                    }
+                }
+                Expansion::LastExitCode => {
+                    let scope = self.scope.read().await;
+                    Ok(scope.last_result().code)
+                }
+                Expansion::CurrentPid => {
+                    let scope = self.scope.read().await;
+                    Ok(scope.pid() as i64)
+                }
+                Expansion::CommandSubst(stmts) => self.run_arith_command_subst(stmts).await,
+                Expansion::Nested(inner) => self.eval_arith_expr_async(inner).await,
+            }
+        })
+    }
+
+    /// The expansion's rendered VALUE, for `base#<expansion>` — mirrors
+    /// `crate::arithmetic::expansion_text_sync`, async so `$(...)` can
+    /// run for real. Never routes through `Self::eval_arith_expansion_async`
+    /// (the arithmetically-coerced form): that coercion refuses a leading
+    /// zero, which is exactly what `10#$m`/`10#$(date +%m)` exist to escape.
+    fn eval_arith_expansion_text_async<'a>(
+        &'a self,
+        expansion: &'a crate::arithmetic::Expansion,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+        use crate::arithmetic::Expansion;
+        Box::pin(async move {
+            match expansion {
+                Expansion::Var(name) => {
+                    let scope = self.scope.read().await;
+                    if let Ok(index) = name.parse::<usize>() {
+                        return match scope.get_positional(index) {
+                            Some(s) => Ok(s.to_string()),
+                            None => Err(anyhow::anyhow!(
+                                "arithmetic error: {}",
+                                crate::arithmetic::unset_error(name)
+                            )),
+                        };
+                    }
+                    match scope.get(name) {
+                        Some(v) => Ok(value_to_string(v)),
+                        None => Err(anyhow::anyhow!(
+                            "arithmetic error: {}",
+                            crate::arithmetic::unset_error(name)
+                        )),
+                    }
+                }
+                Expansion::BracedPath { root, brackets } => {
+                    let scope = self.scope.read().await;
+                    crate::arithmetic::braced_path_value(&scope, root, brackets)
+                        .map(|v| value_to_string(&v))
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                Expansion::BracedDefault { root, brackets, default } => {
+                    let resolved = {
+                        let scope = self.scope.read().await;
+                        if brackets.is_empty() {
+                            scope.get(root).cloned()
+                        } else {
+                            crate::arithmetic::braced_path_value(&scope, root, brackets).ok()
+                        }
+                    };
+                    match resolved {
+                        // Stays in TEXT mode when the default is itself a
+                        // single expansion — see the sync twin,
+                        // `expansion_text_sync`, for why.
+                        Some(Value::Null) | None => {
+                            let default_expr = crate::arithmetic::parse(default)
+                                .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
+                            match default_expr {
+                                crate::arithmetic::ArithExpr::Expansion(e) => {
+                                    self.eval_arith_expansion_text_async(&e).await
+                                }
+                                default_expr => {
+                                    let n = self.eval_arith_expr_async(&default_expr).await?;
+                                    Ok(n.to_string())
+                                }
+                            }
+                        }
+                        Some(value) => Ok(value_to_string(&value)),
+                    }
+                }
+                Expansion::LastExitCode => {
+                    let scope = self.scope.read().await;
+                    Ok(scope.last_result().code.to_string())
+                }
+                Expansion::CurrentPid => {
+                    let scope = self.scope.read().await;
+                    Ok(scope.pid().to_string())
+                }
+                Expansion::CommandSubst(stmts) => self.run_arith_command_subst_text(stmts).await,
+                Expansion::Nested(inner) => {
+                    let n = self.eval_arith_expr_async(inner).await?;
+                    Ok(n.to_string())
+                }
+            }
+        })
+    }
+
+    /// Run a `$(...)` operand inside `$(( ))`. Mirrors `Expr::CommandSubst`'s
+    /// isolation (scope/cwd/config snapshot-and-restore, stderr forwarded to
+    /// the enclosing statement) — the same substitution mechanism, just
+    /// coerced to an integer instead of spliced in as text.
+    async fn run_arith_command_subst(&self, stmts: &[Stmt]) -> Result<i64> {
+        let text = self.run_arith_command_subst_text(stmts).await?;
+        crate::arithmetic::parse_command_output(&text, "$(...)")
+            .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+    }
+
+    /// Run a `$(...)` operand and return its printed text — the shared half
+    /// of `Self::run_arith_command_subst` (a bare operand, coerced to an
+    /// integer) and the `base#$(...)` case (the text is read as digits in a
+    /// base, never coerced first — see `crate::arithmetic::based_value`).
+    async fn run_arith_command_subst_text(&self, stmts: &[Stmt]) -> Result<String> {
+        let saved_scope = Box::new(self.scope.read().await.clone());
+        let saved_ec = {
+            let ec = self.exec_ctx.read().await;
+            (
+                ec.cwd.clone(),
+                ec.prev_cwd.clone(),
+                ec.aliases.clone(),
+                ec.ignore_config.clone(),
+                ec.output_limit.clone(),
+            )
+        };
+
+        let run_result = self.execute_block_capturing(stmts).await;
+
+        {
+            let mut scope = self.scope.write().await;
+            *scope = *saved_scope;
+            if let Ok(ref r) = run_result {
+                scope.set_last_result(r.clone());
+                scope.note_cmdsubst_code(r.code);
+            }
+        }
+        {
+            let mut ec = self.exec_ctx.write().await;
+            let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+            ec.cwd = cwd;
+            ec.prev_cwd = prev_cwd;
+            ec.aliases = aliases;
+            ec.ignore_config = ignore_config;
+            ec.output_limit = output_limit;
+        }
+
+        if let Ok(ref r) = run_result {
+            self.emit_cmdsubst_stderr(&r.err).await;
+        }
+
+        let result = run_result?;
+        if result.out_bytes().is_some() {
+            return Err(anyhow::anyhow!(
+                "arithmetic error: `$(...)` printed binary data; the command must print one integer"
+            ));
+        }
+        Ok(result.text_out().trim_end_matches('\n').to_string())
     }
 
     /// Execute the `source` / `.` command to include and run a script.

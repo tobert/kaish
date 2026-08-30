@@ -200,7 +200,7 @@ async fn interpolated_arithmetic_division_by_zero_is_loud() {
         "division by zero inside a string must fail loudly, not silently splice in \"\""
     );
     assert!(
-        result.err.contains("division by zero"),
+        result.err.contains("divides by zero"),
         "got: {}",
         result.err
     );
