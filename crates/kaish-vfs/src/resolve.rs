@@ -9,38 +9,41 @@
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-/// Whether the last path component follows a symlink.
+/// What the caller promises about the last path component.
 ///
 /// Every policy follows symlinks in the parent directories, as the OS does
 /// for every call including `lstat(2)`. The policies differ only on the
-/// final component.
+/// final component, and the policy must match the syscall that follows:
+/// the containment check is only as good as the path the kernel then acts
+/// on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Follow {
-    /// Follow the final component. For read, write, stat, list, mkdir:
-    /// the operation acts on the link's target.
-    ///
-    /// Containment is checked on the fully resolved path, so a link inside
-    /// the root that points outside it is refused.
+    /// The operation follows the final component: read, write, stat, list,
+    /// mkdir, set_mtime, and every other call that opens or inspects the
+    /// target. Containment is checked on the fully resolved path, so a
+    /// link inside the root that points outside it is refused.
     Final,
-    /// Keep the final component literal. For remove, both sides of rename,
-    /// lstat, read_link, and the link side of symlink: the operation acts
-    /// on the link itself.
+    /// The operation acts on the link itself and never follows it: remove,
+    /// both sides of rename, lstat, read_link, and the link side of
+    /// symlink. Containment is checked on the resolved parent plus the
+    /// literal name, so a link inside the root that points outside it
+    /// passes.
     ///
-    /// Containment is checked on the resolved parent plus the literal
-    /// name. A link inside the root that points outside it passes, because
-    /// the link is the object of the operation. An operation that then
-    /// writes through the returned path has weaker containment than under
-    /// `Final`.
-    ParentOnly,
+    /// Valid only for a syscall that does not follow the final component.
+    /// Paired with one that does (`open`, `stat`, `truncate`), the check
+    /// validates a path the kernel will not use, and the write lands
+    /// outside the root.
+    LinkItself,
 }
 
 /// Resolve `path` under `root` and refuse any result outside `root`.
 ///
 /// `path` is root-relative; a leading `/` is stripped. `.` and `..` are
 /// resolved lexically first, and `..` above the root is an error before
-/// anything touches the filesystem. Components that do not exist yet are
-/// appended literally to the deepest existing ancestor, so a path for a
-/// file about to be created resolves the same way as an existing one.
+/// anything touches the filesystem. The deepest existing ancestor is
+/// canonicalized and the components that do not exist yet are appended
+/// literally: a component that does not exist cannot be a symlink, so
+/// containment on the existing prefix is containment on the whole path.
 ///
 /// Errors: `PermissionDenied` when the result is outside `root`;
 /// `NotFound` when `root` itself does not exist; any I/O error from
@@ -58,7 +61,7 @@ pub fn resolve_beneath(root: &Path, path: &Path, follow: Follow) -> io::Result<P
         // A dangling link does not "exist", so it falls through to the
         // parent case and stays literal, which is what open(2) then sees.
         Follow::Final if lexical.exists() => lexical.canonicalize()?,
-        Follow::Final | Follow::ParentOnly => {
+        Follow::Final | Follow::LinkItself => {
             if lexical == root {
                 canonical_root.clone()
             } else {
@@ -143,7 +146,7 @@ mod tests {
         let error = resolve_beneath(dir.path(), Path::new("../../nonexistent/x"), Follow::Final)
             .expect_err("escape");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        let error = resolve_beneath(dir.path(), Path::new("a/../../x"), Follow::ParentOnly)
+        let error = resolve_beneath(dir.path(), Path::new("a/../../x"), Follow::LinkItself)
             .expect_err("escape");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
@@ -160,7 +163,7 @@ mod tests {
         let dir = root();
         std::fs::create_dir(dir.path().join("a")).expect("mkdir");
         let resolved =
-            resolve_beneath(dir.path(), Path::new("a/b/c/d"), Follow::ParentOnly).expect("ok");
+            resolve_beneath(dir.path(), Path::new("a/b/c/d"), Follow::LinkItself).expect("ok");
         assert_eq!(
             resolved,
             dir.path().canonicalize().expect("root").join("a/b/c/d")
@@ -168,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn final_follows_a_link_and_parent_only_keeps_it() {
+    fn final_follows_a_link_and_link_itself_keeps_it() {
         let dir = root();
         std::fs::write(dir.path().join("target"), b"t").expect("write");
         std::os::unix::fs::symlink("target", dir.path().join("link")).expect("symlink");
@@ -177,12 +180,12 @@ mod tests {
         let followed = resolve_beneath(dir.path(), Path::new("link"), Follow::Final).expect("ok");
         assert_eq!(followed, canonical.join("target"));
 
-        let kept = resolve_beneath(dir.path(), Path::new("link"), Follow::ParentOnly).expect("ok");
+        let kept = resolve_beneath(dir.path(), Path::new("link"), Follow::LinkItself).expect("ok");
         assert_eq!(kept, canonical.join("link"));
     }
 
     #[test]
-    fn a_link_pointing_outside_is_refused_under_final_and_kept_under_parent_only() {
+    fn a_link_pointing_outside_is_refused_under_final_and_kept_under_link_itself() {
         let dir = root();
         let outside = root();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).expect("symlink");
@@ -192,7 +195,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
 
         let kept =
-            resolve_beneath(dir.path(), Path::new("escape"), Follow::ParentOnly).expect("ok");
+            resolve_beneath(dir.path(), Path::new("escape"), Follow::LinkItself).expect("ok");
         assert_eq!(kept, dir.path().canonicalize().expect("root").join("escape"));
     }
 
@@ -202,7 +205,7 @@ mod tests {
         let outside = root();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).expect("symlink");
 
-        for follow in [Follow::Final, Follow::ParentOnly] {
+        for follow in [Follow::Final, Follow::LinkItself] {
             let error = resolve_beneath(dir.path(), Path::new("escape/file"), follow)
                 .expect_err("escape");
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{follow:?}");
@@ -221,7 +224,7 @@ mod tests {
     fn the_root_itself_resolves_under_every_policy() {
         let dir = root();
         let canonical = dir.path().canonicalize().expect("root");
-        for follow in [Follow::Final, Follow::ParentOnly] {
+        for follow in [Follow::Final, Follow::LinkItself] {
             assert_eq!(resolve_beneath(dir.path(), Path::new(""), follow).expect("ok"), canonical);
             assert_eq!(resolve_beneath(dir.path(), Path::new("/"), follow).expect("ok"), canonical);
         }

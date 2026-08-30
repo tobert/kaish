@@ -24,7 +24,7 @@ breaking entries are marked **BREAKING**.
 - **`kaish_vfs::resolve_beneath(root, path, Follow)`** — the one root-scoped
   path resolver for a backend rooted at a host directory: sync, std-only,
   containment inside. `Follow::Final` follows the last component;
-  `Follow::ParentOnly` keeps it literal (remove, rename, lstat, symlink).
+  `Follow::LinkItself` acts on the link (remove, rename, lstat, symlink).
 - **`kaish_vfs::conformance`** (`conformance` feature) — 16 symlink cases any
   `Filesystem` backend runs against itself via `run_all(make_root)`.
 - **`[[ -L path ]]`** (alias `-h`) and `test -L` — true when the path is a

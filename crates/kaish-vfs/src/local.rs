@@ -338,7 +338,7 @@ impl Filesystem for LocalFs {
 
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // lstat doesn't follow symlinks - validate containment without canonicalization
-        let full_path = self.resolve(path, Follow::ParentOnly)?;
+        let full_path = self.resolve(path, Follow::LinkItself)?;
 
         // Use symlink_metadata which doesn't follow symlinks
         let meta = fs::symlink_metadata(&full_path).await?;
@@ -375,7 +375,7 @@ impl Filesystem for LocalFs {
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
-        let full_path = self.resolve(path, Follow::ParentOnly)?;
+        let full_path = self.resolve(path, Follow::LinkItself)?;
         fs::read_link(&full_path).await
     }
 
@@ -386,7 +386,7 @@ impl Filesystem for LocalFs {
         // caller's namespace; the layer that owns the namespace relativizes.
         refuse_absolute_target(target)?;
 
-        let link_path = self.resolve(link, Follow::ParentOnly)?;
+        let link_path = self.resolve(link, Follow::LinkItself)?;
 
         // Ensure parent directory exists
         if let Some(parent) = link_path.parent() {
@@ -415,7 +415,7 @@ impl Filesystem for LocalFs {
         self.check_writable()?;
         // The link itself is unlinked; `symlink_metadata` sends a link (even
         // to a directory) down the `remove_file` branch.
-        let full_path = self.resolve(path, Follow::ParentOnly)?;
+        let full_path = self.resolve(path, Follow::LinkItself)?;
         let meta = fs::symlink_metadata(&full_path).await?;
 
         if meta.is_dir() {
@@ -431,8 +431,8 @@ impl Filesystem for LocalFs {
         // source link is moved, and a destination link is replaced, never
         // written through. A missing destination parent is appended literally
         // and created below.
-        let from_path = self.resolve(from, Follow::ParentOnly)?;
-        let to_path = self.resolve(to, Follow::ParentOnly)?;
+        let from_path = self.resolve(from, Follow::LinkItself)?;
+        let to_path = self.resolve(to, Follow::LinkItself)?;
 
         // Ensure parent directory exists for destination
         if let Some(parent) = to_path.parent() {
@@ -860,7 +860,7 @@ mod tests {
     async fn test_remove_symlink_to_dir_unlinks_link_not_target() {
         // Safety regression: `rm <symlink-to-dir>` must unlink the link and
         // leave the target directory (and its contents) intact. resolve()
-        // canonicalizes, so before the parent-only resolve fix remove() would
+        // canonicalizes, so before the link-itself resolve fix remove() would
         // operate on the target — deleting/erroring on real data.
         let (fs, dir) = setup().await;
 

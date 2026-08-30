@@ -394,7 +394,7 @@ containment check inside the function:
 use kaish_vfs::{resolve_beneath, Follow};
 
 let host = resolve_beneath(&root, path, Follow::Final)?;      // read, write, stat
-let host = resolve_beneath(&root, path, Follow::ParentOnly)?; // remove, rename, lstat
+let host = resolve_beneath(&root, path, Follow::LinkItself)?; // remove, rename, lstat, never open
 ```
 
 `kaish_vfs::conformance` (feature `conformance`) runs the same symlink cases
