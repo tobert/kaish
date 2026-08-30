@@ -50,6 +50,18 @@ pub enum Follow {
 /// the literal tail, and mkdir(2) then refuses it with EEXIST, so nothing
 /// is created through it.
 ///
+/// `..` is resolved lexically before canonicalization, so a `..` that
+/// follows a symlink resolves against the link's own parent, not its
+/// target's: `link/../x` is `x` beside the link, where POSIX would give
+/// `x` beside the target. This is deliberate and unlike `cd` or
+/// `realpath`; the alternative reintroduces the escape.
+///
+/// Resolution is by pathname, and the operation that follows is a second
+/// pathname-based syscall. A parent swapped for a symlink between the two
+/// is not defended against; that guarantee needs `openat2(2)` with
+/// `RESOLVE_BENEATH` and directory-relative operations, which this
+/// function is named for and does not yet provide.
+///
 /// Errors: `PermissionDenied` when the result is outside `root`;
 /// `NotFound` when `root` itself does not exist; any I/O error from
 /// canonicalizing an existing ancestor.
@@ -295,6 +307,21 @@ mod tests {
         let error = resolve_beneath(dir.path(), Path::new("hop"), Follow::Final)
             .expect_err("escape");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// Deliberate divergence from POSIX: `..` after a symlink is lexical.
+    /// If this flips to `outside/x`, containment has been broken; if it
+    /// flips to an error, legitimate in-root `..` has been broken too.
+    #[test]
+    fn dotdot_after_a_symlink_is_lexical_not_posix() {
+        let dir = root();
+        let outside = root();
+        std::fs::create_dir(outside.path().join("deep")).expect("mkdir");
+        std::os::unix::fs::symlink(outside.path().join("deep"), dir.path().join("link"))
+            .expect("symlink");
+        let resolved =
+            resolve_beneath(dir.path(), Path::new("link/../x"), Follow::Final).expect("ok");
+        assert_eq!(resolved, dir.path().canonicalize().expect("root").join("x"));
     }
 
     #[test]
