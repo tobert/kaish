@@ -775,6 +775,27 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn write_under_a_dangling_intermediate_link_creates_nothing() {
+        // `dangle -> ../escape` does not exist, so `dangle/x` has no existing
+        // parent below the root; the write must fail without creating
+        // `escape` beside the root.
+        let (fs, dir) = setup().await;
+        let outside = dir.parent().unwrap().join(format!("kaish-escape-dir-{}", std::process::id()));
+        std::os::unix::fs::symlink(
+            format!("../{}", outside.file_name().unwrap().to_string_lossy()),
+            dir.join("dangle"),
+        )
+        .unwrap();
+        let result = fs.write(Path::new("dangle/x"), b"out").await;
+        let escaped = outside.exists();
+        cleanup(&dir).await;
+        let _ = std::fs::remove_dir_all(&outside);
+        assert!(!escaped, "write created a directory outside the root through a dangling link");
+        assert!(result.is_err(), "write through a dangling intermediate link must fail");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn write_through_a_dangling_link_pointing_outside_is_refused() {
         // The link exists inside the root; its target does not exist and is
         // outside. open(2) with O_CREAT follows a dangling link, so a write

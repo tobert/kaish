@@ -44,6 +44,9 @@ pub enum Follow {
 /// canonicalized and the components that do not exist yet are appended
 /// literally: a component that does not exist cannot be a symlink, so
 /// containment on the existing prefix is containment on the whole path.
+/// An intermediate link that dangles does not exist either; it lands in
+/// the literal tail, and mkdir(2) then refuses it with EEXIST, so nothing
+/// is created through it.
 ///
 /// Errors: `PermissionDenied` when the result is outside `root`;
 /// `NotFound` when `root` itself does not exist; any I/O error from
