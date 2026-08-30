@@ -551,6 +551,29 @@ pub async fn list_shows_a_link_as_a_link(fs: &dyn Filesystem) -> Result<(), Stri
     Ok(())
 }
 
+pub async fn symlink_refuses_an_absolute_target(fs: &dyn Filesystem) -> Result<(), String> {
+    fs.write(Path::new("target"), b"TARGET")
+        .await
+        .map_err(|e| format!("write target: {e}"))?;
+
+    match fs.symlink(Path::new("/target"), Path::new("link")).await {
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+        Err(e) => {
+            return Err(format!(
+                "expected symlink(\"/target\") to be Err(InvalidInput), got a different error: {e}"
+            ))
+        }
+        Ok(()) => return Err("expected symlink(\"/target\") to be refused, got Ok".to_string()),
+    }
+    if let Ok(entry) = fs.lstat(Path::new("link")).await {
+        return Err(format!(
+            "expected nothing at link after the refusal, got {:?}",
+            entry.kind
+        ));
+    }
+    Ok(())
+}
+
 // Adapts an async case fn to the boxed-future `Case` fn-pointer shape. The
 // local `adapt` fn is a fresh item per invocation, so names never collide.
 macro_rules! case {
@@ -578,6 +601,7 @@ pub const CASES: &[(&str, Case)] = &[
     case!(write_through_a_file_link_updates_the_target),
     case!(stat_on_a_link_loop_errors_instead_of_hanging),
     case!(list_shows_a_link_as_a_link),
+    case!(symlink_refuses_an_absolute_target),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

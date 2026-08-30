@@ -212,8 +212,12 @@ pub trait Filesystem: Send + Sync {
     ///
     /// Creates a symlink at `link` pointing to `target`. The target is stored
     /// verbatim; a relative target resolves from the link's directory, as in
-    /// `readlink`. `link` itself is never followed: an existing path there is
-    /// `AlreadyExists`.
+    /// `readlink`. An absolute target is refused with `InvalidInput` (see
+    /// [`refuse_absolute_target`]): a backend has no namespace to read it in,
+    /// and a tree of relative links moves intact. The router above the
+    /// backends rewrites an absolute target inside the same mount to the
+    /// relative form. `link` itself is never followed: an existing path there
+    /// is `AlreadyExists`.
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         let _ = (target, link);
         Err(io::Error::new(
@@ -232,4 +236,21 @@ pub trait Filesystem: Send + Sync {
         // Default: same as stat (for backends that don't support symlinks)
         self.stat(path).await
     }
+}
+
+/// The one refusal every backend gives an absolute symlink target.
+///
+/// The error names the fix: write the target relative to the link's
+/// directory.
+pub fn refuse_absolute_target(target: &Path) -> io::Result<()> {
+    if target.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "symlink target {} is absolute; write it relative to the link's directory",
+                target.display()
+            ),
+        ));
+    }
+    Ok(())
 }

@@ -14,7 +14,10 @@ mod traits;
 
 pub use budget::ByteBudget;
 pub use dev::DevFs;
-pub use traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
+pub use traits::{
+    refuse_absolute_target, DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess,
+    ReadRange,
+};
 
 mod resolve;
 pub use resolve::{resolve_beneath, Follow};

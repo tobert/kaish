@@ -3,6 +3,7 @@
 //! Provides access to real filesystem paths, with optional read-only mode.
 
 use crate::resolve::{resolve_beneath, Follow};
+use crate::traits::refuse_absolute_target;
 use crate::traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
 use async_trait::async_trait;
 use std::io;
@@ -381,22 +382,9 @@ impl Filesystem for LocalFs {
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         self.check_writable()?;
 
-        // Validate absolute symlink targets stay within sandbox.
-        // `resolve` would strip the leading slash and treat `/etc/passwd` as
-        // root-relative, so `<root>/etc/passwd` always "contains". For symlink
-        // targets the OS follows the literal absolute path, so compare the
-        // canonical target (or the literal path if it doesn't exist yet) to
-        // the canonical root.
-        if target.is_absolute() {
-            let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
-            let canonical_target = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
-            if !canonical_target.starts_with(&canonical_root) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("symlink target escapes root: {}", target.display()),
-                ));
-            }
-        }
+        // An absolute target would be a host path here, not a path in the
+        // caller's namespace; the layer that owns the namespace relativizes.
+        refuse_absolute_target(target)?;
 
         let link_path = self.resolve(link, Follow::ParentOnly)?;
 
@@ -854,15 +842,15 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_symlink_absolute_target_escape_blocked() {
-        // Bug I: absolute symlink targets must stay within sandbox
+    async fn test_symlink_absolute_target_refused() {
+        // `/etc/passwd` would be a host path, whatever the caller meant.
         let (fs, dir) = setup().await;
 
         let result = fs
             .symlink(Path::new("/etc/passwd"), Path::new("escape_link"))
             .await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!dir.join("escape_link").exists());
 
         cleanup(&dir).await;
     }

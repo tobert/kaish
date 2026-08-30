@@ -671,6 +671,7 @@ impl Filesystem for MemoryFs {
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
+        crate::refuse_absolute_target(target)?;
         let normalized = Self::normalize(link);
 
         let mut entries = self.entries.write().await;
@@ -1245,19 +1246,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_symlink_absolute_path() {
+    async fn test_symlink_absolute_target_refused() {
         let fs = MemoryFs::new();
         fs.write(Path::new("target.txt"), b"content").await.unwrap();
 
-        // Store absolute path
-        fs.symlink(Path::new("/target.txt"), Path::new("link.txt")).await.unwrap();
-
-        let target = fs.read_link(Path::new("link.txt")).await.unwrap();
-        assert_eq!(target.to_string_lossy(), "/target.txt");
-
-        // Following should work (normalize strips leading /)
-        let data = fs.read(Path::new("link.txt")).await.unwrap();
-        assert_eq!(data, b"content");
+        let error = fs
+            .symlink(Path::new("/target.txt"), Path::new("link.txt"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(fs.lstat(Path::new("link.txt")).await.is_err(), "nothing created");
     }
 
     #[tokio::test]
