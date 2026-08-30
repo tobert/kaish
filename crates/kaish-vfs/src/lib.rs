@@ -1,7 +1,7 @@
 //! kaish's virtual filesystem contract.
 //!
 //! This leaf crate holds the [`Filesystem`] trait every VFS backend implements
-//! and the [`LocalFs`] real-filesystem backend. It exists so backends that
+//! and the `LocalFs` real-filesystem backend. It exists so backends that
 //! aren't part of the kernel can live in their own crates without depending on
 //! `kaish-kernel`.
 //!
