@@ -139,13 +139,16 @@ async fn cp_r_recreates_symlink_to_dir_as_link_not_descended() {
     let r = run(&kernel_at(root), "cp -r src dstdir").await;
     assert_eq!(r.code, 0, "cp -r failed: {}", r.err);
 
+    let meta = std::fs::symlink_metadata(root.join("dstdir/linkdir")).unwrap();
     assert!(
-        is_symlink(&root.join("dstdir/linkdir")),
-        "a link-to-dir inside the tree must be recreated as a link, never descended into"
+        meta.file_type().is_symlink(),
+        "a link-to-dir inside the tree must be recreated as a link, never descended \
+         into — a real recursive copy would have materialized it as a directory"
     );
-    assert!(
-        !root.join("dstdir/linkdir/child.txt").exists(),
-        "the copy must not have walked through the link into elsewhere/"
+    assert_eq!(
+        std::fs::read_link(root.join("dstdir/linkdir")).unwrap(),
+        Path::new("../elsewhere"),
+        "the recreated link must carry the same relative target string"
     );
 }
 
