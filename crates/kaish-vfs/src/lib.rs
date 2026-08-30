@@ -16,6 +16,9 @@ pub use budget::ByteBudget;
 pub use dev::DevFs;
 pub use traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
 
+mod resolve;
+pub use resolve::{resolve_beneath, Follow};
+
 // `LocalFs` pulls in `tokio/fs`; gated so the in-memory/wasm sandbox build
 // (which doesn't enable `localfs`) stays free of a real-filesystem dependency.
 #[cfg(feature = "localfs")]

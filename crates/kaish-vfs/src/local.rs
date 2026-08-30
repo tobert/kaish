@@ -2,6 +2,7 @@
 //!
 //! Provides access to real filesystem paths, with optional read-only mode.
 
+use crate::resolve::{resolve_beneath, Follow};
 use crate::traits::{DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess, ReadRange};
 use async_trait::async_trait;
 use std::io;
@@ -48,132 +49,10 @@ impl LocalFs {
         &self.root
     }
 
-    /// Resolve a relative path to an absolute path within the root.
-    ///
-    /// Returns an error if the path escapes the root (via `..`).
-    fn resolve(&self, path: &Path) -> io::Result<PathBuf> {
-        // Strip leading slash if present
-        let path = path.strip_prefix("/").unwrap_or(path);
-
-        // Join with root
-        let full = self.root.join(path);
-
-        // Canonicalize to resolve symlinks and ..
-        // For non-existent paths, we need to check parent
-        let canonical = if full.exists() {
-            full.canonicalize()?
-        } else {
-            // For new files, canonicalize parent and append filename
-            let parent = full.parent().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid path")
-            })?;
-            let filename = full.file_name().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid path")
-            })?;
-
-            if parent.exists() {
-                parent.canonicalize()?.join(filename)
-            } else {
-                // Parent doesn't exist, just use the path as-is
-                // (will fail on actual operation)
-                full
-            }
-        };
-
-        // Verify we haven't escaped the root
-        let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
-        if !canonical.starts_with(&canonical_root) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "path escapes root: {} is not under {}",
-                    canonical.display(),
-                    canonical_root.display()
-                ),
-            ));
-        }
-
-        Ok(canonical)
-    }
-
-    /// Resolve a path within the root WITHOUT following symlinks.
-    ///
-    /// Used by `lstat()` and `read_link()` which must not follow symlinks.
-    /// Validates that the path stays within the sandbox by normalizing
-    /// path components (resolving `.` and `..`) without canonicalization.
-    fn resolve_no_follow(&self, path: &Path) -> io::Result<PathBuf> {
-        let path = path.strip_prefix("/").unwrap_or(path);
-
-        let mut normalized = self.root.clone();
-        for component in path.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    if normalized == self.root {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "path escapes root",
-                        ));
-                    }
-                    normalized.pop();
-                    if !normalized.starts_with(&self.root) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "path escapes root",
-                        ));
-                    }
-                }
-                std::path::Component::Normal(c) => normalized.push(c),
-                std::path::Component::CurDir => {} // skip
-                _ => {}
-            }
-        }
-
-        // Final containment check
-        if !normalized.starts_with(&self.root) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "path escapes root",
-            ));
-        }
-        Ok(normalized)
-    }
-
-    /// Resolve a path for an unlink/remove: follow intermediate symlinks but
-    /// NOT the final component, mirroring `unlink(2)`/`rmdir(2)` semantics.
-    ///
-    /// `resolve()` canonicalizes the *whole* path, so removing a symlink would
-    /// resolve to (and operate on) its target — `rm symlink-to-dir` could then
-    /// delete the target's contents. Here we canonicalize the parent only and
-    /// re-attach the literal final component, so `symlink_metadata` + `remove_*`
-    /// act on the link itself. The root-containment check still applies to the
-    /// resolved parent, so an intermediate symlink escaping the root is rejected.
-    fn resolve_for_unlink(&self, path: &Path) -> io::Result<PathBuf> {
-        let path = path.strip_prefix("/").unwrap_or(path);
-        let full = self.root.join(path);
-
-        let parent = full
-            .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
-        let filename = full
-            .file_name()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
-
-        // Canonicalize the parent (following intermediate symlinks); if the
-        // parent doesn't exist there's nothing to remove, so surface NotFound.
-        let canonical = parent.canonicalize()?.join(filename);
-
-        let canonical_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
-        if !canonical.starts_with(&canonical_root) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "path escapes root: {} is not under {}",
-                    canonical.display(),
-                    canonical_root.display()
-                ),
-            ));
-        }
-        Ok(canonical)
+    /// Resolve a root-relative path to a host path under the root; the
+    /// policy says whether the final component follows a symlink.
+    fn resolve(&self, path: &Path, follow: Follow) -> io::Result<PathBuf> {
+        resolve_beneath(&self.root, path, follow)
     }
 
     /// Check if write operations are allowed.
@@ -294,7 +173,7 @@ impl LocalFs {
 #[async_trait]
 impl Filesystem for LocalFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
         fs::read(&full_path).await
     }
 
@@ -311,7 +190,7 @@ impl Filesystem for LocalFs {
             let content = self.read(path).await?;
             return Ok(r.apply(&content));
         }
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
         let offset = r.offset.unwrap_or(0);
         let limit = r.limit;
         // Blocking std file I/O on the blocking pool, mirroring `set_mtime`.
@@ -340,7 +219,7 @@ impl Filesystem for LocalFs {
 
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         self.check_writable()?;
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
 
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
@@ -352,7 +231,7 @@ impl Filesystem for LocalFs {
 
     async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         self.check_writable()?;
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
 
         // Ensure parent directory exists, matching `write`'s behavior for a
         // path in a missing directory.
@@ -384,7 +263,7 @@ impl Filesystem for LocalFs {
 
     async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
         self.check_writable()?;
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
         // `set_modified` calls futimens(2) on the fd. Run it on the blocking
         // pool — std file I/O must not occupy an async worker.
         //
@@ -410,7 +289,7 @@ impl Filesystem for LocalFs {
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
         let mut entries = Vec::new();
         let mut dir = fs::read_dir(&full_path).await?;
 
@@ -428,7 +307,7 @@ impl Filesystem for LocalFs {
     }
 
     async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
         // stat follows symlinks
         let meta = fs::metadata(&full_path).await?;
 
@@ -458,7 +337,7 @@ impl Filesystem for LocalFs {
 
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // lstat doesn't follow symlinks - validate containment without canonicalization
-        let full_path = self.resolve_no_follow(path)?;
+        let full_path = self.resolve(path, Follow::ParentOnly)?;
 
         // Use symlink_metadata which doesn't follow symlinks
         let meta = fs::symlink_metadata(&full_path).await?;
@@ -495,7 +374,7 @@ impl Filesystem for LocalFs {
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
-        let full_path = self.resolve_no_follow(path)?;
+        let full_path = self.resolve(path, Follow::ParentOnly)?;
         fs::read_link(&full_path).await
     }
 
@@ -519,7 +398,7 @@ impl Filesystem for LocalFs {
             }
         }
 
-        let link_path = self.resolve_no_follow(link)?;
+        let link_path = self.resolve(link, Follow::ParentOnly)?;
 
         // Ensure parent directory exists
         if let Some(parent) = link_path.parent() {
@@ -540,16 +419,15 @@ impl Filesystem for LocalFs {
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
         self.check_writable()?;
-        let full_path = self.resolve(path)?;
+        let full_path = self.resolve(path, Follow::Final)?;
         fs::create_dir_all(&full_path).await
     }
 
     async fn remove(&self, path: &Path) -> io::Result<()> {
         self.check_writable()?;
-        // Never follow the final symlink: a symlink (even to a directory) must
-        // be unlinked, not resolved to its target. `symlink_metadata` reports
-        // the link itself, so a symlink takes the `remove_file` (unlink) branch.
-        let full_path = self.resolve_for_unlink(path)?;
+        // The link itself is unlinked; `symlink_metadata` sends a link (even
+        // to a directory) down the `remove_file` branch.
+        let full_path = self.resolve(path, Follow::ParentOnly)?;
         let meta = fs::symlink_metadata(&full_path).await?;
 
         if meta.is_dir() {
@@ -561,12 +439,12 @@ impl Filesystem for LocalFs {
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.check_writable()?;
-        // Don't follow the source's final symlink: `mv link new` must rename the
-        // link itself, not canonicalize to (and move) its target. The dest keeps
-        // normal resolution — it's the path we're creating, and resolve()'s
-        // missing-parent fallback pairs with the create_dir_all below.
-        let from_path = self.resolve_for_unlink(from)?;
-        let to_path = self.resolve(to)?;
+        // Neither side follows its final symlink, as rename(2) does not: the
+        // source link is moved, and a destination link is replaced, never
+        // written through. A missing destination parent is appended literally
+        // and created below.
+        let from_path = self.resolve(from, Follow::ParentOnly)?;
+        let to_path = self.resolve(to, Follow::ParentOnly)?;
 
         // Ensure parent directory exists for destination
         if let Some(parent) = to_path.parent() {
@@ -589,7 +467,7 @@ impl Filesystem for LocalFs {
     /// `synthesized_mode`.
     #[cfg(unix)]
     async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
-        let full = self.resolve(path)?;
+        let full = self.resolve(path, Follow::Final)?;
         // Stat first so a missing path errors exactly the way `stat` does —
         // `faccessat` would report a plain EACCES/ENOENT with no distinction
         // the callers can use, and the trait contract is "errors as stat".
@@ -606,7 +484,7 @@ impl Filesystem for LocalFs {
     }
 
     fn real_path(&self, path: &Path) -> Option<PathBuf> {
-        self.resolve(path).ok()
+        self.resolve(path, Follow::Final).ok()
     }
 }
 
@@ -908,6 +786,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_under_a_missing_dotdot_chain_is_refused() {
+        // Nothing under the escaping path exists, so a resolver that only
+        // canonicalizes existing paths would fall back to the raw join and
+        // let write create a directory beside the root.
+        let (fs, dir) = setup().await;
+        let sibling = format!("../kaish-escape-{}", std::process::id());
+        let result = fs.write(Path::new(&format!("{sibling}/x")), b"out").await;
+        let escaped = dir.parent().unwrap().join(&sibling[3..]).exists();
+        cleanup(&dir).await;
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().join(&sibling[3..]));
+        assert!(!escaped, "write created a directory beside the root");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
     async fn test_path_escape_blocked() {
         let (fs, dir) = setup().await;
 
@@ -979,7 +872,7 @@ mod tests {
     async fn test_remove_symlink_to_dir_unlinks_link_not_target() {
         // Safety regression: `rm <symlink-to-dir>` must unlink the link and
         // leave the target directory (and its contents) intact. resolve()
-        // canonicalizes, so before the resolve_for_unlink fix remove() would
+        // canonicalizes, so before the parent-only resolve fix remove() would
         // operate on the target — deleting/erroring on real data.
         let (fs, dir) = setup().await;
 
