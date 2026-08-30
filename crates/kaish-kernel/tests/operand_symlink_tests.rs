@@ -280,8 +280,12 @@ async fn ls_l_with_several_operands_shows_a_link_as_a_link() {
     let out = r.text_out();
     assert!(out.contains("link -> target"), "{out}");
     assert!(out.contains("dangling -> nowhere"), "{out}");
-    let link_row = out.lines().find(|l| l.contains("link ->")).unwrap();
-    assert!(link_row.starts_with('l'), "link row is type l: {link_row}");
-    let plain_row = out.lines().find(|l| l.contains("plain")).unwrap();
-    assert!(plain_row.starts_with('-'), "plain row is type -: {plain_row}");
+    // Rows are `name\ttype\tsize`.
+    let type_of = |needle: &str| -> String {
+        let row = out.lines().find(|l| l.starts_with(needle)).unwrap();
+        row.split('\t').nth(1).unwrap().to_string()
+    };
+    assert_eq!(type_of("link ->"), "l");
+    assert_eq!(type_of("dangling ->"), "l");
+    assert_eq!(type_of("plain"), "-");
 }
