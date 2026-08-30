@@ -4419,6 +4419,13 @@ impl Kernel {
                             .path_access(&resolved)
                             .await
                             .is_ok_and(|access| access.executable),
+                        // `lstat`, never `stat`: the question is what's AT
+                        // this name, not what it points to. A dangling link
+                        // still lstats fine, so this is true where `-e` is
+                        // false — that's the whole reason `-L` exists.
+                        FileTestOp::IsSymlink => {
+                            backend.lstat(&resolved).await.is_ok_and(|e| e.is_symlink())
+                        }
                     })
                 }
                 TestExpr::StringTest { op, value } => match op {

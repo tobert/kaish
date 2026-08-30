@@ -4,7 +4,8 @@
 //! error. Unlike POSIX `test` it is a *command* over kaish's own value model:
 //!
 //! - **VFS-aware** file tests (`-e -f -d -r -w -x`) stat through the kernel
-//!   backend, not the host filesystem.
+//!   backend, not the host filesystem. `-L`/`-h` (is a symlink) lstat
+//!   instead, so a dangling link is true where `-e` is false.
 //! - **Numeric** comparison (`-eq -ne -gt -lt -ge -le`) is kaish's number
 //!   semantics — floats compare, identical to `[[`, not POSIX integer-only.
 //!   Non-numeric operands are a loud error, never silently zero.
@@ -165,7 +166,7 @@ impl Tool for Test {
 }
 
 fn is_unary_op(s: &str) -> bool {
-    matches!(s, "-z" | "-n" | "-e" | "-f" | "-d" | "-r" | "-w" | "-x")
+    matches!(s, "-z" | "-n" | "-e" | "-f" | "-d" | "-r" | "-w" | "-x" | "-L" | "-h")
 }
 
 fn is_binary_op(s: &str) -> bool {
@@ -286,7 +287,7 @@ async fn apply_unary(ctx: &ExecContext, op: &str, operand: &Value) -> Result<boo
         "-n" => Ok(!value_to_text_sink_named(operand, "a test operand")
             .map_err(|e| format!("test: {e}"))?
             .is_empty()),
-        "-e" | "-f" | "-d" | "-r" | "-w" | "-x" => {
+        "-e" | "-f" | "-d" | "-r" | "-w" | "-x" | "-L" | "-h" => {
             // A binary operand goes loud rather than silently stat'ing a file
             // literally named `[binary: N bytes]` — mirrors `[[`'s `FileTest`
             // arm (kernel.rs::eval_test_async) so the two evaluators agree.
@@ -362,6 +363,13 @@ async fn file_test(ctx: &ExecContext, op: &str, path: &str) -> bool {
             .path_access(&resolved)
             .await
             .is_ok_and(|access| access.executable),
+        // `lstat`, never `stat`: a dangling link still lstats fine, so this
+        // is true where `-e` is false — the reason `-L` exists at all.
+        "-L" | "-h" => ctx
+            .backend
+            .lstat(&resolved)
+            .await
+            .is_ok_and(|e| e.is_symlink()),
         _ => unreachable!("file_test called with non-file op {op:?}"),
     }
 }

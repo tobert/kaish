@@ -513,6 +513,9 @@ pub enum FileTestOp {
     Writable,
     /// `-x` - is executable
     Executable,
+    /// `-L` (alias `-h`) - is a symlink. `lstat` succeeds and the entry is a
+    /// symlink; true for a dangling link, unlike every other op above.
+    IsSymlink,
 }
 
 /// String test operators for `[[ ]]`.
@@ -716,6 +719,7 @@ impl fmt::Display for FileTestOp {
             FileTestOp::Readable => write!(f, "-r"),
             FileTestOp::Writable => write!(f, "-w"),
             FileTestOp::Executable => write!(f, "-x"),
+            FileTestOp::IsSymlink => write!(f, "-L"),
         }
     }
 }

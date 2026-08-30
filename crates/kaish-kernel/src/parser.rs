@@ -2719,7 +2719,7 @@ fn test_expr_stmt_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // File test operators: -e, -f, -d, -r, -w, -x
+    // File test operators: -e, -f, -d, -r, -w, -x, -L (alias -h)
     let file_test_op = select! {
         Token::ShortFlag(s) if s == "e" => FileTestOp::Exists,
         Token::ShortFlag(s) if s == "f" => FileTestOp::IsFile,
@@ -2727,6 +2727,8 @@ where
         Token::ShortFlag(s) if s == "r" => FileTestOp::Readable,
         Token::ShortFlag(s) if s == "w" => FileTestOp::Writable,
         Token::ShortFlag(s) if s == "x" => FileTestOp::Executable,
+        Token::ShortFlag(s) if s == "L" => FileTestOp::IsSymlink,
+        Token::ShortFlag(s) if s == "h" => FileTestOp::IsSymlink,
     };
 
     // String test operators: -z, -n, plus the shape-guard operators -list /
