@@ -169,6 +169,11 @@ pub trait Filesystem: Send + Sync {
                 "rename directories not supported by this filesystem",
             ));
         }
+        // Renaming a path to itself is a no-op; clearing the destination
+        // below would delete the source.
+        if same_name(from, to) {
+            return Ok(());
+        }
         // Clear the destination first: `write` would follow a link left there.
         match self.remove(to).await {
             Ok(()) => {}
@@ -236,6 +241,20 @@ pub trait Filesystem: Send + Sync {
         // Default: same as stat (for backends that don't support symlinks)
         self.stat(path).await
     }
+}
+
+/// Whether two paths spell the same name, ignoring a leading `/` and `.`
+/// components.
+fn same_name(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| -> Vec<std::ffi::OsString> {
+        p.components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(name) => Some(name.to_os_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    key(a) == key(b)
 }
 
 /// The one refusal every backend gives an absolute symlink target.

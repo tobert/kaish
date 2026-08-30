@@ -631,6 +631,23 @@ pub async fn set_mtime_through_a_link_touches_the_target(
     Ok(())
 }
 
+pub async fn rename_to_itself_keeps_the_file(fs: &dyn Filesystem) -> Result<(), String> {
+    fs.write(Path::new("file"), b"KEEP")
+        .await
+        .map_err(|e| format!("write file: {e}"))?;
+    fs.rename(Path::new("file"), Path::new("file"))
+        .await
+        .map_err(|e| format!("rename(file, file): {e}"))?;
+    let data = fs
+        .read(Path::new("file"))
+        .await
+        .map_err(|e| format!("read(file) after identity rename: {e}"))?;
+    if data != b"KEEP" {
+        return Err(format!("expected b\"KEEP\", got {:?}", String::from_utf8_lossy(&data)));
+    }
+    Ok(())
+}
+
 // Adapts an async case fn to the boxed-future `Case` fn-pointer shape. The
 // local `adapt` fn is a fresh item per invocation, so names never collide.
 macro_rules! case {
@@ -661,6 +678,7 @@ pub const CASES: &[(&str, Case)] = &[
     case!(symlink_refuses_an_absolute_target),
     case!(list_through_a_link_to_a_directory),
     case!(set_mtime_through_a_link_touches_the_target),
+    case!(rename_to_itself_keeps_the_file),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

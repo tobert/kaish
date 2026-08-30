@@ -58,10 +58,18 @@ pub fn resolve_beneath(root: &Path, path: &Path, follow: Follow) -> io::Result<P
     let lexical = normalize_under(root, path)?;
 
     let resolved = match follow {
-        // A dangling link does not "exist", so it falls through to the
-        // parent case and stays literal, which is what open(2) then sees.
         Follow::Final if lexical.exists() => lexical.canonicalize()?,
-        Follow::Final | Follow::LinkItself => {
+        // open(2) with O_CREAT follows a dangling link and creates its
+        // target, so containment is checked where the chain ends.
+        Follow::Final => {
+            let end = end_of_dangling_chain(&lexical)?;
+            if end == root {
+                canonical_root.clone()
+            } else {
+                canonicalize_deepest_ancestor(root, &end)?
+            }
+        }
+        Follow::LinkItself => {
             if lexical == root {
                 canonical_root.clone()
             } else {
@@ -109,6 +117,51 @@ fn normalize_under(root: &Path, path: &Path) -> io::Result<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+/// Follow a chain of symlinks from a path that does not exist to the path
+/// the chain names. A path that is not a symlink is returned as is.
+fn end_of_dangling_chain(path: &Path) -> io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let is_link = current
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            return Ok(current);
+        }
+        let target = current.read_link()?;
+        let next = if target.is_absolute() {
+            target
+        } else {
+            current.parent().unwrap_or(Path::new("/")).join(target)
+        };
+        current = fold_dots(&next);
+    }
+    Err(io::Error::other(format!(
+        "too many levels of symbolic links: {}",
+        path.display()
+    )))
+}
+
+/// Linux's ELOOP limit.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Resolve `.` and `..` lexically in a host path; `..` at the top stays
+/// there.
+fn fold_dots(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Canonicalize the deepest existing ancestor of `lexical` (its parent or
@@ -213,11 +266,40 @@ mod tests {
     }
 
     #[test]
-    fn a_dangling_link_stays_literal_under_final() {
+    fn a_dangling_link_resolves_to_its_target_under_final() {
+        // open(2) with O_CREAT creates the target, so that is the path checked.
         let dir = root();
         std::os::unix::fs::symlink("nowhere", dir.path().join("link")).expect("symlink");
         let resolved = resolve_beneath(dir.path(), Path::new("link"), Follow::Final).expect("ok");
-        assert_eq!(resolved, dir.path().canonicalize().expect("root").join("link"));
+        assert_eq!(resolved, dir.path().canonicalize().expect("root").join("nowhere"));
+
+        let kept = resolve_beneath(dir.path(), Path::new("link"), Follow::LinkItself).expect("ok");
+        assert_eq!(kept, dir.path().canonicalize().expect("root").join("link"));
+    }
+
+    #[test]
+    fn a_dangling_link_pointing_outside_is_refused_under_final() {
+        let dir = root();
+        std::os::unix::fs::symlink("../escape", dir.path().join("link")).expect("symlink");
+        let error = resolve_beneath(dir.path(), Path::new("link"), Follow::Final)
+            .expect_err("escape");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        // Two hops: a dangling link to a dangling link that escapes.
+        std::os::unix::fs::symlink("link", dir.path().join("hop")).expect("symlink");
+        let error = resolve_beneath(dir.path(), Path::new("hop"), Follow::Final)
+            .expect_err("escape");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_dangling_link_loop_is_an_error_not_a_hang() {
+        let dir = root();
+        std::os::unix::fs::symlink("b", dir.path().join("a")).expect("symlink");
+        std::os::unix::fs::symlink("a", dir.path().join("b")).expect("symlink");
+        let error = resolve_beneath(dir.path(), Path::new("a"), Follow::Final)
+            .expect_err("loop");
+        assert!(error.to_string().contains("symbolic links"), "{error}");
     }
 
     #[test]

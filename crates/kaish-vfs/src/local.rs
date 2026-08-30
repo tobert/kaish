@@ -773,6 +773,27 @@ mod tests {
         cleanup(&dir).await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_through_a_dangling_link_pointing_outside_is_refused() {
+        // The link exists inside the root; its target does not exist and is
+        // outside. open(2) with O_CREAT follows a dangling link, so a write
+        // must be refused before it creates the target.
+        let (fs, dir) = setup().await;
+        let outside = dir.parent().unwrap().join(format!("kaish-escape-{}", std::process::id()));
+        std::os::unix::fs::symlink(
+            format!("../{}", outside.file_name().unwrap().to_string_lossy()),
+            dir.join("link"),
+        )
+        .unwrap();
+        let result = fs.write(Path::new("link"), b"out").await;
+        let escaped = outside.exists();
+        cleanup(&dir).await;
+        let _ = std::fs::remove_file(&outside);
+        assert!(!escaped, "write created a file outside the root through a dangling link");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
     #[tokio::test]
     async fn write_under_a_missing_dotdot_chain_is_refused() {
         // Nothing under the escaping path exists, so a resolver that only

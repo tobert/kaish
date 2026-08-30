@@ -61,9 +61,11 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
-- **LocalFs sandbox escape**: a write to a path under a non-existent `..`
-  chain (`../sibling/x`) created a directory beside the mount root. `..`
-  above the root is now refused before any I/O.
+- **LocalFs sandbox escapes**: a write under a non-existent `..` chain
+  (`../sibling/x`) created a directory beside the mount root, and a write
+  through a dangling link whose target lay outside the root created that
+  target. Both are refused before any I/O.
+- `Filesystem::rename`'s default deleted the source when renamed to itself.
 - `mv file link` on a local mount wrote through the link into its target;
   it now replaces the link, as rename(2) does. Onto a link to a directory it
   no longer fails EISDIR.

@@ -541,12 +541,15 @@ impl Filesystem for MemoryFs {
         // touch follows: the target's stamp changes, the link's does not.
         let normalized = Self::follow_locked(&entries, path)?;
         match entries.get_mut(&normalized) {
-            Some(Entry::File { modified, .. })
-            | Some(Entry::Directory { modified })
-            | Some(Entry::Symlink { modified, .. }) => {
+            Some(Entry::File { modified, .. }) | Some(Entry::Directory { modified }) => {
                 *modified = mtime;
                 Ok(())
             }
+            // follow_locked never returns a symlink path.
+            Some(Entry::Symlink { .. }) => Err(io::Error::other(format!(
+                "internal error: follow_locked returned a symlink: {}",
+                path.display()
+            ))),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("no such file or directory: {}", path.display()),
