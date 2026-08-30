@@ -128,6 +128,7 @@ fn canonicalize_deepest_ancestor(root: &Path, lexical: &Path) -> io::Result<Path
 
 #[cfg(all(test, unix))]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
 
     fn root() -> tempfile::TempDir {
