@@ -21,6 +21,12 @@ breaking entries are marked **BREAKING**.
   runs.
 
 ### Added
+- **`kaish_vfs::resolve_beneath(root, path, Follow)`** — the one root-scoped
+  path resolver for a backend rooted at a host directory: sync, std-only,
+  containment inside. `Follow::Final` follows the last component;
+  `Follow::ParentOnly` keeps it literal (remove, rename, lstat, symlink).
+- **`kaish_vfs::conformance`** (`conformance` feature) — 13 symlink cases any
+  `Filesystem` backend runs against itself via `run_all(make_root)`.
 - **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
   chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
 - **`$(( ))` reads another base** (`0x`, `base#digits`, `base#$var`) and
@@ -48,6 +54,16 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
+- **LocalFs sandbox escape**: a write to a path under a non-existent `..`
+  chain (`../sibling/x`) created a directory beside the mount root. `..`
+  above the root is now refused before any I/O.
+- `mv file link` on a local mount wrote through the link into its target;
+  it now replaces the link, as rename(2) does. Onto a link to a directory it
+  no longer fails EISDIR.
+- `ln -sf` and `mv -n` treated a dangling link at the destination as absent;
+  `-f` now replaces it and `-n` keeps it.
+- `Filesystem` and `KernelBackend` state the symlink policy of `stat`,
+  `exists`, `remove`, `rename`, `lstat`, and `symlink`.
 - `help <tool>` renders a tool's subcommands and their flags, and names each
   parameter's aliases. `help kj` and every wrapped command showed "No
   parameters." before.
