@@ -222,7 +222,16 @@ fn move_dir_recursive<'a>(
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            if entry.is_dir() {
+            // `list()` lstats, so a link child (incl. a dangling one, or one
+            // to a directory) is a link; recreate it verbatim rather than
+            // reading through it — reading would follow the link, and a
+            // dir-link would recurse into the target instead of moving the
+            // link. Mirrors cp.rs's `recreate_symlink`.
+            if entry.is_symlink() {
+                let target = backend.read_link(&src_child).await?;
+                let _ = backend.remove(&dst_child, false).await;
+                backend.symlink(&target, &dst_child).await?;
+            } else if entry.is_dir() {
                 move_dir_recursive(backend, &src_child, &dst_child).await?;
             } else {
                 let data = backend.read(&src_child, None).await?;

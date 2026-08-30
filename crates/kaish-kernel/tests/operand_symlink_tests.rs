@@ -118,3 +118,51 @@ async fn find_on_a_missing_path_still_errors() {
     assert_ne!(r.code, 0, "a genuinely missing path must still error");
     assert!(r.err.contains("No such file or directory"), "{}", r.err);
 }
+
+// ============================================================================
+// B — mv: cross-mount directory fallback recreates symlink children
+// ============================================================================
+
+#[tokio::test]
+async fn mv_cross_mount_dir_recreates_symlink_children() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::create_dir(root.join("d")).unwrap();
+    std::fs::write(root.join("d/file.txt"), "precious").unwrap();
+    symlink("file.txt", root.join("d/link")).unwrap();
+    symlink("nowhere", root.join("d/dangling")).unwrap();
+    std::fs::create_dir(root.join("d/subdir")).unwrap();
+    symlink("subdir", root.join("d/dirlink")).unwrap();
+
+    let kernel = kernel_at(root);
+    // "/v" is the REPL kernel's memory mount, so this move crosses mounts
+    // and takes the copy+remove fallback (move_dir_recursive), not rename.
+    let r = run(&kernel, "mv d /v/d").await;
+    assert_eq!(r.code, 0, "mv failed: {}", r.err);
+
+    assert!(!root.join("d").exists(), "source dir must be gone");
+
+    let file_r = run(&kernel, "cat /v/d/file.txt").await;
+    assert_eq!(file_r.code, 0, "cat moved file failed: {}", file_r.err);
+    assert_eq!(file_r.text_out(), "precious");
+
+    let link_r = run(&kernel, "readlink /v/d/link").await;
+    assert_eq!(link_r.code, 0, "readlink moved link failed: {}", link_r.err);
+    assert_eq!(
+        link_r.text_out().trim(),
+        "file.txt",
+        "the moved link must carry the same target string, not the target's bytes"
+    );
+
+    let dangling_r = run(&kernel, "readlink /v/d/dangling").await;
+    assert_eq!(dangling_r.code, 0, "readlink on the moved dangling link failed: {}", dangling_r.err);
+    assert_eq!(dangling_r.text_out().trim(), "nowhere");
+
+    let dirlink_r = run(&kernel, "readlink /v/d/dirlink").await;
+    assert_eq!(dirlink_r.code, 0, "readlink on the moved dir-link failed: {}", dirlink_r.err);
+    assert_eq!(
+        dirlink_r.text_out().trim(),
+        "subdir",
+        "a link to a directory must be recreated as a link, not descended into"
+    );
+}
