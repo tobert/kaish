@@ -113,6 +113,26 @@ impl MemoryFs {
         crate::paths::normalize(path)
     }
 
+    /// Resolve a symlink's stored target against the link that holds it.
+    ///
+    /// POSIX resolves a relative target against the link's parent
+    /// directory, not the filesystem root. `link_path` must already be
+    /// normalized; the result still needs `normalize` applied (by the
+    /// caller's next lookup) to fold any `..` the target contributes. An
+    /// absolute target is returned as-is — normalizing it elsewhere strips
+    /// the leading `/`, which is the existing, deliberately unresolved
+    /// absolute-target policy.
+    fn resolve_symlink_target(link_path: &Path, target: &Path) -> PathBuf {
+        if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            link_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(target)
+        }
+    }
+
     /// Maximum symlink follow depth (matches Linux ELOOP limit).
     /// Mode reported for a `MemoryFs` directory: readable, writable, and
     /// searchable by everyone.
@@ -169,9 +189,9 @@ impl MemoryFs {
                     format!("is a directory: {}", path.display()),
                 )),
                 Some(Entry::Symlink { target, .. }) => {
-                    let target = target.clone();
+                    let next = Self::resolve_symlink_target(&normalized, target);
                     drop(entries);
-                    self.read_inner(&target, depth + 1).await
+                    self.read_inner(&next, depth + 1).await
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -214,9 +234,9 @@ impl MemoryFs {
                     format!("is a directory: {}", path.display()),
                 )),
                 Some(Entry::Symlink { target, .. }) => {
-                    let target = target.clone();
+                    let next = Self::resolve_symlink_target(&normalized, target);
                     drop(entries);
-                    self.read_range_inner(&target, offset, limit, depth + 1).await
+                    self.read_range_inner(&next, offset, limit, depth + 1).await
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -283,7 +303,7 @@ impl MemoryFs {
                             permissions: Some(Self::FILE_MODE),
                             symlink_target: None,
                         },
-                        Some(target.clone()),
+                        Some(Self::resolve_symlink_target(&normalized, target)),
                     )),
                     None => None,
                 }
@@ -291,7 +311,7 @@ impl MemoryFs {
 
             match entry_info {
                 Some((entry, None)) => Ok(entry),
-                Some((_, Some(target))) => self.stat_inner(&target, depth + 1).await,
+                Some((_, Some(next))) => self.stat_inner(&next, depth + 1).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("not found: {}", path.display()),
