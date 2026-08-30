@@ -64,7 +64,9 @@ pub trait Filesystem: Send + Sync {
     /// List entries in a directory.
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
 
-    /// Get metadata for a file or directory.
+    /// Get metadata for a file or directory, following symlinks.
+    ///
+    /// A dangling link is `NotFound`. Use `lstat` to see the link itself.
     async fn stat(&self, path: &Path) -> io::Result<DirEntry>;
 
     /// Create a directory (and parent directories if needed).
@@ -72,7 +74,11 @@ pub trait Filesystem: Send + Sync {
     /// Returns `Err` if the filesystem is read-only.
     async fn mkdir(&self, path: &Path) -> io::Result<()>;
 
-    /// Remove a file or empty directory.
+    /// Remove a file, empty directory, or symlink.
+    ///
+    /// The final component is never followed: removing a symlink unlinks the
+    /// link and leaves its target untouched, even when the target is a
+    /// directory.
     ///
     /// Returns `Err` if the filesystem is read-only.
     async fn remove(&self, path: &Path) -> io::Result<()>;
@@ -136,12 +142,19 @@ pub trait Filesystem: Send + Sync {
         None
     }
 
-    /// Check if a path exists.
+    /// Check if a path exists, following symlinks.
+    ///
+    /// A dangling link does not exist, and any error reads as `false`. Ask
+    /// `lstat` when the question is whether a link is present.
     async fn exists(&self, path: &Path) -> bool {
         self.stat(path).await.is_ok()
     }
 
-    /// Rename (move) a file or directory.
+    /// Rename (move) a file, directory, or symlink.
+    ///
+    /// Neither path follows its final component: a symlink source is moved as
+    /// a link, and a symlink at the destination is replaced, never written
+    /// through to its target.
     ///
     /// This is an atomic operation when source and destination are on the same
     /// filesystem. The default implementation falls back to copy+delete, which
@@ -188,8 +201,10 @@ pub trait Filesystem: Send + Sync {
 
     /// Create a symbolic link.
     ///
-    /// Creates a symlink at `link` pointing to `target`. The target path
-    /// is stored as-is (may be relative or absolute).
+    /// Creates a symlink at `link` pointing to `target`. The target is stored
+    /// verbatim; a relative target resolves from the link's directory, as in
+    /// `readlink`. `link` itself is never followed: an existing path there is
+    /// `AlreadyExists`.
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         let _ = (target, link);
         Err(io::Error::new(
@@ -198,10 +213,12 @@ pub trait Filesystem: Send + Sync {
         ))
     }
 
-    /// Get metadata for a path without following symlinks.
+    /// Get metadata for a path without following its final symlink.
     ///
     /// Unlike `stat`, this returns metadata about the symlink itself,
-    /// not the target it points to.
+    /// not the target it points to. A backend that supports symlinks must
+    /// override this: the default aliases `stat`, and the conformance suite
+    /// fails a backend whose `lstat` follows.
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // Default: same as stat (for backends that don't support symlinks)
         self.stat(path).await
