@@ -211,12 +211,8 @@ impl Tool for Find {
         for start_path in &start_paths {
             let resolved_path = ctx.resolve_path(start_path);
 
-            // lstat, not exists/stat: the operand is classified by its own
-            // kind, matching how the walker classifies every other visited
-            // entry below. A dangling symlink still lstats successfully — it
-            // is reported as a link, never "No such file or directory" — and
-            // a symlink to a directory is a leaf here, never descended into
-            // (GNU find without -L).
+            // lstat: the operand is classified by its own kind, like every
+            // walked entry. A link to a directory is a leaf, not descended.
             let start_stat = match ctx.backend.lstat(Path::new(&resolved_path)).await {
                 Ok(info) => info,
                 Err(_) => {
@@ -229,9 +225,7 @@ impl Tool for Find {
             let start_is_file = !start_stat.is_dir();
 
             if start_is_file {
-                // Apply type filter: exact match against the lstat'd kind. A
-                // symlink operand (file or dir target, or dangling) can only
-                // satisfy -type l, never -type f/d.
+                // Exact match against the lstat kind: a link satisfies only -type l.
                 if let Some(t) = type_filter.as_deref() {
                     let is_match = match t {
                         "f" => start_stat.is_file(),

@@ -323,11 +323,8 @@ impl Ls {
             return self.list_glob(ctx, path, opts).await;
         }
         let resolved = ctx.resolve_path(path);
-        // lstat, not stat: the operand is classified by its own kind (GNU ls
-        // without -L). A symlink to a directory still gets listed like a
-        // directory (follow it to decide that); a symlink to a file, or a
-        // dangling one, renders as the link itself rather than erroring or
-        // showing the target's kind.
+        // lstat the operand: a link to a directory is listed as the
+        // directory; any other link renders as the link itself.
         if let Ok(link_info) = ctx.backend.lstat(Path::new(&resolved)).await {
             if link_info.is_symlink() {
                 let target_is_dir = ctx

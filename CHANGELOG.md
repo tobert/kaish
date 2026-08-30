@@ -32,7 +32,8 @@ breaking entries are marked **BREAKING**.
 - **`cp -P`/`-L`**; `cp -r` recreates a symlink as a link with the same
   target instead of copying through it, and no longer loops on a link cycle.
 - **`find -type l`**; `find` classifies with `lstat`, so `-type f` no longer
-  matches a link to a file. **`stat`** describes the link itself by default,
+  matches a link to a file, and a link operand is a leaf. `ls -l link` shows
+  `l` and the target; `mv` across mounts keeps links inside a directory. **`stat`** describes the link itself by default,
   with its target; `stat -L` follows.
 - **`random` builtin** — `random [--min N] [--max N]` prints one uniformly
   chosen integer, typed; the default range is bash's `$RANDOM` (0 to 32767).
