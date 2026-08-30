@@ -25,11 +25,11 @@ struct CpArgs {
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
-    /// Never follow a symlink in a source path — copy the link itself (same target, unfollowed).
+    /// Copy a symlink as a link with the same target; never follow it.
     #[arg(short = 'P', long = "no-dereference")]
     no_dereference: bool,
 
-    /// Always follow a symlink in a source path, including one found while walking -r; a dangling link is then an error.
+    /// Follow every symlink, including inside -r; a dangling link is an error.
     #[arg(short = 'L', long = "dereference")]
     dereference: bool,
 
@@ -144,11 +144,8 @@ impl Tool for Cp {
                 .unwrap_or(false);
             let src_display = &sources[0];
             let src_resolved = ctx.resolve_path(src_display);
-            // Ask the same question copy_path is about to ask: does the top-level
-            // source, under this run's link policy, resolve to a directory? A
-            // -P'd (or default -r) symlink source never gets copied as a
-            // directory — it becomes a link — so it must not be excluded here as
-            // if it were one.
+            // Same policy copy_path applies: a source link that is copied as a
+            // link is not a directory here either.
             let src_is_dir = if link_mode.follows_top_level(recursive) {
                 ctx.backend.stat(Path::new(&src_resolved)).await
             } else {
@@ -196,25 +193,20 @@ impl Tool for Cp {
     }
 }
 
-/// How `cp` treats a symlink it encounters, chosen by `-P`/`-L`.
+/// How `cp` treats a symlink, chosen by `-P`/`-L`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkMode {
-    /// Neither `-P` nor `-L`: bash/coreutils's default. A non-recursive copy
-    /// follows its (single) source; a recursive copy never follows any
-    /// symlink it finds, top-level source or tree child.
+    /// A non-recursive copy follows its source; `-r` never follows.
     Default,
-    /// `-P`/`--no-dereference`: never follow, anywhere.
+    /// `-P`: never follow.
     NoDereference,
-    /// `-L`/`--dereference`: always follow, anywhere — a dangling link is
-    /// then an error rather than something to recreate.
+    /// `-L`: always follow; a dangling link is an error.
     Dereference,
 }
 
 impl LinkMode {
-    /// Whether the top-level source argument should be dereferenced.
-    /// Verified against a real `cp -r <symlink-to-dir>` (no -P/-L): GNU
-    /// coreutils treats the top-level source the same as a tree child under
-    /// `-r`, never following it — only `-L` does.
+    /// Whether the top-level source is followed. Under `-r`, coreutils
+    /// treats it like a tree child.
     fn follows_top_level(self, recursive: bool) -> bool {
         match self {
             LinkMode::Dereference => true,
@@ -224,11 +216,8 @@ impl LinkMode {
     }
 }
 
-/// Prefix a backend error with the path it happened to, keeping its variant.
-/// `From<io::Error>` builds `BackendError` from `io::Error::to_string()`
-/// alone (e.g. "No such file or directory"), which never carries the path —
-/// so a caller that already has `path` in hand names it here rather than
-/// leaving the error to speak for itself.
+/// Prefix a backend error with the path it happened to, keeping its variant;
+/// `From<io::Error>` drops the path.
 fn name_error(path: &Path, err: BackendError) -> BackendError {
     let msg = format!("{}: {}", path.display(), err);
     match err {
@@ -239,9 +228,7 @@ fn name_error(path: &Path, err: BackendError) -> BackendError {
         BackendError::NotDirectory(_) => BackendError::NotDirectory(msg),
         BackendError::Io(_) => BackendError::Io(msg),
         BackendError::InvalidOperation(_) => BackendError::InvalidOperation(msg),
-        BackendError::ReadOnly => BackendError::InvalidOperation(msg),
-        // Conflict/ToolNotFound already carry their own context; any future
-        // `#[non_exhaustive]` variant is left as-is rather than guessed at.
+        // No payload to carry the path in, or context already present.
         other => other,
     }
 }
@@ -257,20 +244,14 @@ async fn copy_path(
     link_mode: LinkMode,
 ) -> Result<(), BackendError> {
     let info = if link_mode.follows_top_level(recursive) {
-        // -L (or the non-recursive default) follows: a dangling link is a
-        // real error here, not an empty file, and must name the link — a
-        // bare io::Error's text ("No such file or directory") doesn't carry
-        // the path on its own.
+        // Following: a dangling link is an error that names the link.
         backend.stat(src).await.map_err(|e| name_error(src, e))?
     } else {
         backend.lstat(src).await?
     };
 
+    // Only lstat reports a symlink; the source is copied as a link.
     if info.is_symlink() {
-        // `stat` never returns a Symlink kind, so reaching here means we
-        // deliberately lstat'd and this source is copied as a link —
-        // `read_link` then `symlink`, the target string carried over
-        // verbatim, never opened.
         return copy_symlink_source(backend, src, dst, no_clobber).await;
     }
 
@@ -371,19 +352,15 @@ fn copy_dir_recursive<'a>(
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            // `list()` lstats each child, so a symlink entry's `is_dir()`
-            // never comes from its followed target. Default and -P both
-            // leave it as a link (this is also what keeps a self-referential
-            // link from sending the walk into a cycle); only -L follows it.
+            // `list()` lstats, so a link child is a link; only -L follows it.
+            // Recreating it is also what keeps a link cycle from looping.
             if entry.is_symlink() && link_mode != LinkMode::Dereference {
                 recreate_symlink(backend, &src_child, &dst_child, no_clobber).await?;
                 continue;
             }
 
             let is_dir = if entry.is_symlink() {
-                // -L: follow to see what's on the other end. A dangling link
-                // here surfaces the same named NotFound `cp -L` gives at the
-                // top level.
+                // -L: a dangling link is an error that names the link.
                 backend
                     .stat(&src_child)
                     .await
