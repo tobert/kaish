@@ -48,16 +48,20 @@ impl std::error::Error for ArithError {}
 const MAX_DEPTH: usize = 256;
 
 /// The decimal a leading-zero numeral was probably meant to be — `010`
-/// becomes `10`, `-007` becomes `-7`. `None` when the text is not one.
+/// becomes `10`. `None` when the text is not one.
 ///
-/// The suggestion keeps the sign: `-007` is not fixed by writing `7`.
+/// Takes unsigned text: the tokenizer always splits a source-level
+/// `-`/`+` into its own token before a numeral like `007` ever reaches
+/// this, so `text` never carries one. The caller (`Tokenizer::lex_number`,
+/// via `Tokenizer::leading_unary_sign`) prepends the sign to the built
+/// suggestion separately — `-007` must not be "fixed" into a positive
+/// `7`.
 pub(crate) fn leading_zero_decimal(text: &str) -> Option<String> {
     if !crate::lexer::is_leading_zero_numeral(text) {
         return None;
     }
-    let sign = if text.starts_with('-') { "-" } else { "" };
-    let digits = text.trim_start_matches('-').trim_start_matches('0');
-    Some(format!("{sign}{}", if digits.is_empty() { "0" } else { digits }))
+    let digits = text.trim_start_matches('0');
+    Some(if digits.is_empty() { "0".to_string() } else { digits.to_string() })
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -289,7 +293,7 @@ impl<'a> Tokenizer<'a> {
             let Some(c) = self.peek() else { break };
             let start_byte = self.byte_pos();
             let kind = match c {
-                '0'..='9' => self.lex_number()?,
+                '0'..='9' => self.lex_number(&out)?,
                 '$' => self.lex_dollar()?,
                 c if c.is_ascii_alphabetic() || c == '_' => self.lex_ident(),
                 '(' => { self.advance(); TokKind::LParen }
@@ -436,6 +440,40 @@ impl<'a> Tokenizer<'a> {
             Some(Tok { kind: TokKind::Ident(name), span }) => Some((name.clone(), span.start)),
             _ => None,
         }
+    }
+
+    /// The `+`/`-` immediately before the numeral about to be lexed, IF it
+    /// is acting as a unary sign on that numeral rather than a binary
+    /// operator between two operands (`5 - 007`'s `-` is binary; `-007`'s
+    /// is unary). `out.last()` is the candidate sign; the token before
+    /// that decides which — a `+`/`-` is unary except right after
+    /// something that can itself END an expression. Mirrors the
+    /// grammatical position `parse_unary`/`parse_additive` compute later,
+    /// without building a parser: `tokenize` has already refused by the
+    /// time a numeral like `007` would reach the parser at all, so the
+    /// sign has to be read back from the flat token stream here instead.
+    fn leading_unary_sign(out: &[Tok]) -> Option<char> {
+        let sign = match out.last() {
+            Some(Tok { kind: TokKind::Op(BinOp::Sub), .. }) => '-',
+            Some(Tok { kind: TokKind::Op(BinOp::Add), .. }) => '+',
+            _ => return None,
+        };
+        let ends_an_expression = out
+            .len()
+            .checked_sub(2)
+            .and_then(|i| out.get(i))
+            .is_some_and(|tok| {
+                matches!(
+                    tok.kind,
+                    TokKind::Number(_)
+                        | TokKind::Ident(_)
+                        | TokKind::Expansion(_)
+                        | TokKind::BasedExpansion { .. }
+                        | TokKind::RParen
+                        | TokKind::RBracket
+                )
+            });
+        if ends_an_expression { None } else { Some(sign) }
     }
 
     /// The identifier starting at the current position — the `x` in
@@ -586,7 +624,7 @@ impl<'a> Tokenizer<'a> {
         Ok((mag, digits_start))
     }
 
-    fn lex_number(&mut self) -> Result<TokKind, ArithError> {
+    fn lex_number(&mut self, out: &[Tok]) -> Result<TokKind, ArithError> {
         let start = self.pos;
 
         // `0x` / `0X` hex.
@@ -614,8 +652,13 @@ impl<'a> Tokenizer<'a> {
             let digits = self.slice(digits_start, self.pos);
             let full = self.slice(start, self.pos);
             let (base, word) = if matches!(kind_char, 'b' | 'B') { (2, "binary") } else { (8, "octal") };
+            // The `-`/`+` above this numeral, if any, was already emitted
+            // as its own token before `lex_number` ran — fold it into the
+            // suggestion here, or `-0b101` would suggest `2#101` and
+            // silently flip the sign.
+            let sign = Self::leading_unary_sign(out).map(String::from).unwrap_or_default();
             return Err(ArithError::new(
-                format!("`{full}` is not a kaish base spelling; write `{base}#{digits}` for {word}"),
+                format!("`{full}` is not a kaish base spelling; write `{sign}{base}#{digits}` for {word}"),
                 self.byte_at(start)..self.byte_pos(),
             ));
         }
@@ -705,10 +748,15 @@ impl<'a> Tokenizer<'a> {
 
         let text = self.slice(start, self.pos);
         if crate::lexer::is_leading_zero_numeral(text) {
+            // Same reasoning as the `0b`/`0o` refusal above: the sign, if
+            // any, is a separate token already emitted before this
+            // numeral was lexed — fold it into both suggestions, or
+            // `-007` would suggest positive `8#7`/`7` and flip the sign.
+            let sign_str = Self::leading_unary_sign(out).map(String::from).unwrap_or_default();
             let decimal = leading_zero_decimal(text).unwrap_or_else(|| "0".to_string());
             return Err(ArithError::new(
                 format!(
-                    "`{text}` has a leading zero — kaish reads no octal; write `8#{}` for octal or `{decimal}` for decimal",
+                    "`{text}` has a leading zero — kaish reads no octal; write `{sign_str}8#{}` for octal or `{sign_str}{decimal}` for decimal",
                     text.trim_start_matches('0')
                 ),
                 self.byte_at(start)..self.byte_pos(),
@@ -1413,7 +1461,10 @@ enum Numeral {
     Ok(i64),
     Empty,
     ExpressionLike,
-    LeadingZero,
+    /// `digits` is the unsigned digit text (`neg` already carries the
+    /// sign separately) — kept so the caller can build a sign-correct
+    /// suggestion instead of always suggesting a positive fix.
+    LeadingZero { neg: bool, digits: String },
     NotANumber,
     /// The tokenizer refused with a message that already names a fix
     /// (`0b101` → `2#101`, `1_000` → remove the `_`, `1e3` → integer-only).
@@ -1439,7 +1490,7 @@ fn read_numeral(text: &str) -> Numeral {
         return Numeral::NotANumber;
     }
     if crate::lexer::is_leading_zero_numeral(digits) {
-        return Numeral::LeadingZero;
+        return Numeral::LeadingZero { neg, digits: digits.to_string() };
     }
     match tokenize(digits) {
         Ok(toks) if toks.len() == 1 => match &toks[0].kind {
@@ -1464,9 +1515,21 @@ fn parse_numeric_string(s: &str, name: &str) -> Result<i64, ArithError> {
             ),
             0..0,
         )),
-        Numeral::LeadingZero => Err(ArithError::new(
+        // Unsigned: `10#$name`/`8#$name` genuinely works — `based_value`
+        // has no sign in `$name`'s text to refuse. Signed: it never
+        // works, sign or no — `based_value` refuses ANY sign inside the
+        // resolved text, so `$name` itself (holding e.g. `-007`) still
+        // refuses even from `-10#$name`. The only fix that actually
+        // evaluates embeds the known digits literally, sign outside `#`.
+        Numeral::LeadingZero { neg: false, .. } => Err(ArithError::new(
             format!(
                 "`{name}` holds `{s}` (leading zero) — kaish reads no octal; write `10#${name}` for decimal or `8#${name}` for octal"
+            ),
+            0..0,
+        )),
+        Numeral::LeadingZero { neg: true, digits } => Err(ArithError::new(
+            format!(
+                "`{name}` holds `{s}` (leading zero) — kaish reads no octal; write `-10#{digits}` for decimal or `-8#{digits}` for octal"
             ),
             0..0,
         )),
@@ -1494,7 +1557,7 @@ pub(crate) fn parse_command_output(text: &str, cmd: &str) -> Result<i64, ArithEr
         Numeral::ExpressionLike
         | Numeral::NotANumber
         | Numeral::NotANumberWithFix(_)
-        | Numeral::LeadingZero
+        | Numeral::LeadingZero { .. }
         | Numeral::OutOfRange => Err(ArithError::new(
             format!("`{cmd}` printed `{text}`; the command must print one integer"),
             0..0,
@@ -1905,6 +1968,86 @@ mod tests {
         assert!(msg.contains("2#101"), "{msg}");
         let msg = err("0o17");
         assert!(msg.contains("8#17"), "{msg}");
+    }
+
+    // ── Defect 7b: a refused leading-zero/base-spelling numeral must not
+    // drop the unary sign above it from its suggested fixes ──
+    //
+    // `-007` refuses on the `007` token alone — the tokenizer sees the `-`
+    // as an already-emitted, separate `Sub` token, not part of the numeral.
+    // A suggestion built without checking for it is POSITIVE, and
+    // following it silently flips the value's sign. Round-tripping the
+    // suggested text (not just checking the message string) is the real
+    // assertion: a well-formed but wrong-signed suggestion would still
+    // pass a text-only check.
+
+    #[test]
+    fn negative_leading_zero_names_a_signed_fix() {
+        let msg = err("-007");
+        assert!(msg.contains("-8#7"), "{msg}");
+        assert!(msg.contains("-7"), "{msg}");
+        assert_eq!(eval("-8#7"), -7);
+        assert_eq!(eval("-7"), -7);
+    }
+
+    #[test]
+    fn positive_sign_leading_zero_names_a_signed_fix() {
+        let msg = err("+007");
+        assert!(msg.contains("+8#7"), "{msg}");
+        assert!(msg.contains("+7"), "{msg}");
+        assert_eq!(eval("+8#7"), 7);
+        assert_eq!(eval("+7"), 7);
+    }
+
+    #[test]
+    fn unsigned_leading_zero_fix_is_unchanged() {
+        let msg = err("007");
+        assert!(msg.contains("`8#7`"), "{msg}");
+        assert!(!msg.contains("-8#7") && !msg.contains("+8#7"), "{msg}");
+    }
+
+    #[test]
+    fn binary_minus_before_leading_zero_keeps_the_unsigned_fix() {
+        // `5 - 007`: `-` is BINARY subtraction here, not a unary sign on
+        // `007` — the suggestion must stay unsigned, or "fixing" it would
+        // silently change `5 - 7` into `5 - -7`.
+        let msg = err("5 - 007");
+        assert!(msg.contains("`8#7`"), "{msg}");
+        assert!(!msg.contains("-8#7"), "{msg}");
+    }
+
+    #[test]
+    fn negative_binary_base_spelling_names_a_signed_fix() {
+        let msg = err("-0b101");
+        assert!(msg.contains("-2#101"), "{msg}");
+        assert_eq!(eval("-2#101"), -5);
+    }
+
+    #[test]
+    fn negative_octal_o_spelling_names_a_signed_fix() {
+        let msg = err("-0o17");
+        assert!(msg.contains("-8#17"), "{msg}");
+        assert_eq!(eval("-8#17"), -15);
+    }
+
+    #[test]
+    fn based_expansion_holding_a_signed_leading_zero_string_names_a_working_literal() {
+        // `10#$x`/`8#$x` (the unsigned suggestion) can never work here:
+        // `based_value` refuses ANY sign inside the resolved text, so
+        // prepending `-` to `$x` wouldn't help — `$x` itself still reads
+        // as `-007`. The only working fix embeds the digits literally.
+        let msg = err_with("x", |s| s.set("x", Value::String("-007".to_string())));
+        assert!(msg.contains("-10#007"), "{msg}");
+        assert!(msg.contains("-8#007"), "{msg}");
+        assert_eq!(eval("-10#007"), -7);
+        assert_eq!(eval("-8#007"), -7);
+    }
+
+    #[test]
+    fn based_expansion_holding_an_unsigned_leading_zero_string_is_unchanged() {
+        let msg = err_with("x", |s| s.set("x", Value::String("007".to_string())));
+        assert!(msg.contains("10#$x"), "{msg}");
+        assert!(msg.contains("8#$x"), "{msg}");
     }
 
     #[test]
