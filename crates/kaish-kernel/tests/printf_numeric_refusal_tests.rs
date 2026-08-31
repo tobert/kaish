@@ -95,6 +95,29 @@ async fn a_non_numeric_string_is_refused_for_a_float_conversion_too() {
 }
 
 #[tokio::test]
+async fn an_empty_operand_is_refused_in_its_own_words() {
+    // The common shape of an unset variable reaching a number position.
+    // Arithmetic already calls an empty operand an error; printf agrees,
+    // and says which operand problem it is rather than quoting nothing.
+    let msg = refused(r#"printf '%d' """#).await;
+    assert!(msg.contains("empty"), "must name the emptiness: {msg}");
+}
+
+#[tokio::test]
+async fn an_empty_variable_is_refused_the_same_way() {
+    let msg = refused(r#"x=""; printf '%d' "$x""#).await;
+    assert!(msg.contains("empty"), "must name the emptiness: {msg}");
+}
+
+#[tokio::test]
+async fn the_integer_bounds_convert_exactly() {
+    // i64::MIN is representable in f64 and must not be refused by the
+    // range guard; i64::MAX must survive the i64 parse path.
+    assert_eq!(ok("printf '%d' -- -9223372036854775808").await, "-9223372036854775808");
+    assert_eq!(ok("printf '%d' 9223372036854775807").await, "9223372036854775807");
+}
+
+#[tokio::test]
 async fn a_character_conversion_past_the_range_is_refused() {
     // `*i as u32` truncated a wide integer into some other character.
     let msg = refused("printf '%c' 4294967296").await;

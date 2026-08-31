@@ -93,6 +93,13 @@ enum Number {
 /// while `0xff` and `007` are not. Each refusal names the spelling that
 /// works, because a model that reads `$(( 0xff ))` gets it right next turn.
 fn string_as_number(s: &str) -> Result<Number, String> {
+    // An empty operand is the common shape of an unset variable reaching a
+    // number position. It refuses like any other non-number — the same call
+    // arithmetic makes — but says so in its own words, because `` is not a
+    // number`` names nothing the reader can act on.
+    if s.is_empty() {
+        return Err("an empty operand is not a number".to_string());
+    }
     // Checked before the JSON parse: `"007".parse::<i64>()` succeeds and
     // would answer 7 for text kaish reads as text everywhere else.
     if crate::lexer::is_leading_zero_numeral(s) {
