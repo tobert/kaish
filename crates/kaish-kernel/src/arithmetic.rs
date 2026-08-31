@@ -778,9 +778,13 @@ impl<'a> Tokenizer<'a> {
     /// `slice(body_start, close)`. `double` closes on two `close` chars
     /// (`$((…))`).
     ///
-    /// `comments` true treats `#` as a comment to EOL (command-substitution
-    /// bodies only); false leaves it as the base separator (`$((…))`) or a
-    /// literal (`${…}`). The word boundary reuses `lexer::opens_a_word`.
+    /// `comments` true treats `#` as a comment to EOL and `<<[-]delimiter`
+    /// as a heredoc introducer whose body — through the closing delimiter
+    /// line, via [`crate::lexer::skip_heredoc_body`] — is skipped whole;
+    /// both only apply to command-substitution bodies, matching ordinary
+    /// `$(...)`. `comments` false leaves `#` as the base separator
+    /// (`$((…))`) or a literal (`${…}`), where kaish has no heredoc
+    /// grammar either. The word boundary reuses `lexer::opens_a_word`.
     /// `group_start` is the error span for an unterminated group.
     fn skip_group(
         &mut self,
@@ -855,6 +859,17 @@ impl<'a> Tokenizer<'a> {
                     } else {
                         self.pos += 1; // `#` is the base separator / literal
                     }
+                }
+                Some('<') if comments && self.peek_at(1) == Some('<') && self.peek_at(2) != Some('<') => {
+                    // A real heredoc introducer, only where `comments`
+                    // says this is a command-substitution body — `${…}`
+                    // and `$((…))` have no heredoc grammar. `<<<`
+                    // (here-string) is excluded and falls through below
+                    // to the base `<` character-at-a-time arm.
+                    let total_len = self.text.len();
+                    crate::lexer::skip_heredoc_body(&self.chars, &mut self.pos, total_len).map_err(
+                        |e| ArithError::new(e.token.to_string(), group_start..self.byte_pos()),
+                    )?;
                 }
                 Some('$') => {
                     let nested_start = self.pos;

@@ -2316,6 +2316,55 @@ fn collect_heredoc_bodies(
     Ok(())
 }
 
+/// Skip a `<<[-]delimiter` heredoc introducer and its body, starting at
+/// `chars[*i]` (the first `<` of `<<`), through the line that terminates
+/// it. Advances `*i` past the whole heredoc — introducer line, body, and
+/// delimiter line — and returns; the body's bytes, including any `(` or
+/// `)` in it, are never inspected as structure.
+///
+/// A thin wrapper around the same [`scan_heredoc_introducer`] +
+/// [`collect_heredoc_bodies`] pair `scan`'s own dispatch drives, for a
+/// caller that only needs the boundary — `arithmetic::Tokenizer::skip_group`,
+/// scanning a `$(...)` command-substitution body nested inside `$(( ))` —
+/// not a registered [`HeredocExtract`] or a rewritten buffer. Scratch
+/// buffers stand in for `scan`'s bookkeeping and are discarded; this is
+/// still the one heredoc-parsing implementation, not a second one.
+///
+/// Only the single heredoc at `chars[*i]` is handled: a second `<<` later
+/// on the SAME introducer line (`cat <<A <<B`) is not queued the way
+/// `scan`'s own loop queues it when it drives the whole dispatch. A
+/// command substitution nested in `$(( ))` with a multi-heredoc-per-line
+/// body is a known residual, not silently accepted as handled.
+pub(crate) fn skip_heredoc_body(
+    chars: &[(usize, char)],
+    i: &mut usize,
+    total_len: usize,
+) -> Result<(), Spanned<LexerError>> {
+    let intro_start = chars[*i].0;
+    let mut out = String::new();
+    let mut pending = Vec::new();
+    let mut replacements = Vec::new();
+    scan_heredoc_introducer(chars, i, intro_start, &mut out, &mut pending, &mut replacements, 0);
+    if pending.is_empty() {
+        // No delimiter word followed `<<` — not a real heredoc; `scan`
+        // leaves it for logos to report, and so does this caller.
+        return Ok(());
+    }
+    let n = chars.len();
+    while *i < n && chars[*i].1 != '\n' && chars[*i].1 != '\r' {
+        *i += 1;
+    }
+    if *i < n {
+        let terminator = chars[*i].1;
+        *i += 1;
+        if terminator == '\r' && *i < n && chars[*i].1 == '\n' {
+            *i += 1;
+        }
+    }
+    let mut heredocs = Vec::new();
+    collect_heredoc_bodies(chars, i, total_len, out.len(), &mut pending, &mut heredocs, &mut replacements)
+}
+
 /// Rewrite `$((expr))` inside an interpolated heredoc body to
 /// `${__ARITH:expr__}`. `\$((` stays literal (minus nothing — the
 /// backslash is preserved for the interpolation parser). An unterminated
