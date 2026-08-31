@@ -18,7 +18,9 @@ struct PrintfArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Format string followed by arguments substituted into it.
+    /// Format string followed by arguments substituted into it. A numeric
+    /// conversion (%d, %f, %x, %o, %c) needs a number: `0xff` and `007` are
+    /// errors naming the spelling that works, and a missing argument is 0.
     format_args: Vec<String>,
 }
 
@@ -37,32 +39,141 @@ impl FormatArg for Value {
         }
     }
 
-    fn as_format_int(&self) -> i64 {
+    fn as_format_int(&self) -> Result<i64, String> {
         match self {
-            Value::Int(i) => *i,
-            Value::Float(f) => *f as i64,
-            Value::String(s) => s.parse().unwrap_or(0),
-            Value::Bool(b) => i64::from(*b),
-            _ => 0,
+            Value::Int(i) => Ok(*i),
+            Value::Bool(b) => Ok(i64::from(*b)),
+            Value::Float(f) => float_as_int(*f, &f.to_string()),
+            Value::String(s) => match string_as_number(s)? {
+                Number::Int(i) => Ok(i),
+                Number::Float(f) => float_as_int(f, s),
+            },
+            other => Err(not_a_number(other)),
         }
     }
 
-    fn as_format_float(&self) -> f64 {
+    fn as_format_float(&self) -> Result<f64, String> {
         match self {
-            Value::Float(f) => *f,
-            Value::Int(i) => *i as f64,
-            Value::String(s) => s.parse().unwrap_or(0.0),
-            _ => 0.0,
+            Value::Float(f) => Ok(*f),
+            Value::Int(i) => Ok(*i as f64),
+            Value::Bool(b) => Ok(f64::from(u8::from(*b))),
+            Value::String(s) => match string_as_number(s)? {
+                Number::Int(i) => Ok(i as f64),
+                Number::Float(f) => Ok(f),
+            },
+            other => Err(not_a_number(other)),
         }
     }
 
-    fn as_format_char(&self) -> Option<char> {
+    fn as_format_char(&self) -> Result<Option<char>, String> {
         match self {
-            Value::String(s) => s.chars().next(),
-            Value::Int(i) => char::from_u32(*i as u32),
-            _ => None,
+            Value::String(s) => Ok(s.chars().next()),
+            Value::Int(i) => {
+                let code = u32::try_from(*i)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| format!("`{i}` is not a character code"))?;
+                Ok(Some(code))
+            }
+            Value::Null => Ok(None),
+            other => Err(not_a_number(other)),
         }
     }
+}
+
+/// A number printf read out of an operand.
+enum Number {
+    Int(i64),
+    Float(f64),
+}
+
+/// Read an operand's text as a number, or say why it is not one.
+///
+/// The rule is JSON's, the same one `fromjson` reads, so `1e3` is a number
+/// while `0xff` and `007` are not. Each refusal names the spelling that
+/// works, because a model that reads `$(( 0xff ))` gets it right next turn.
+fn string_as_number(s: &str) -> Result<Number, String> {
+    // Checked before the JSON parse: `"007".parse::<i64>()` succeeds and
+    // would answer 7 for text kaish reads as text everywhere else.
+    if crate::lexer::is_leading_zero_numeral(s) {
+        let decimal = crate::arithmetic::leading_zero_decimal(s)
+            .unwrap_or_else(|| "0".to_string());
+        let sign = if s.starts_with('-') { "-" } else { "" };
+        let digits = s.trim_start_matches('-').trim_start_matches('0');
+        let digits = if digits.is_empty() { "0" } else { digits };
+        return Err(format!(
+            "`{s}` has a leading zero — kaish reads no octal; \
+             write `{sign}8#{digits}` for octal or `{decimal}` for decimal"
+        ));
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(Number::Int(n));
+    }
+    match serde_json::from_str::<serde_json::Number>(s) {
+        Ok(n) => match n.as_i64() {
+            Some(i) => Ok(Number::Int(i)),
+            // A JSON number too wide or too precise for i64 — `1e3` lands
+            // here, and so does `1e19`, which `float_as_int` then refuses.
+            None => n
+                .as_f64()
+                .map(Number::Float)
+                .ok_or_else(|| format!("`{s}` is outside the 64-bit range")),
+        },
+        Err(_) => Err(base_aware_refusal(s)),
+    }
+}
+
+/// Name the fix for text that is shaped like a number in another base.
+///
+/// `$(( ))` is where kaish reads a base, so that is what the message points
+/// at rather than leaving the reader to guess.
+fn base_aware_refusal(s: &str) -> String {
+    let unsigned = s.strip_prefix('-').unwrap_or(s);
+    let based = unsigned.strip_prefix("0x").or_else(|| unsigned.strip_prefix("0X"));
+    if let Some(digits) = based
+        && let Ok(v) = i64::from_str_radix(digits, 16)
+    {
+        let sign = if s.starts_with('-') { "-" } else { "" };
+        return format!(
+            "`{s}` is not a number; write `{sign}{v}`, or `$(( {s} ))` to read the base"
+        );
+    }
+    if unsigned.contains('#') {
+        return format!("`{s}` is not a number; `$(( {s} ))` reads a based numeral");
+    }
+    format!("`{s}` is not a number")
+}
+
+/// Convert a float to an integer, or say why it will not convert.
+fn float_as_int(f: f64, text: &str) -> Result<i64, String> {
+    if !f.is_finite() {
+        return Err(format!("`{text}` is not a finite number"));
+    }
+    if f.fract() != 0.0 {
+        return Err(format!(
+            "`{text}` is not a whole number; an integer conversion needs one"
+        ));
+    }
+    // The bounds are compared in f64 because `i64::MAX as f64` rounds up:
+    // testing `f <= i64::MAX as f64` would admit 2^63 itself.
+    if f < -(2f64.powi(63)) || f >= 2f64.powi(63) {
+        return Err(format!("`{text}` is outside the 64-bit range"));
+    }
+    Ok(f as i64)
+}
+
+/// Name a value that has no numeric reading at all.
+fn not_a_number(value: &Value) -> String {
+    let kind = match value {
+        Value::Null => "null",
+        Value::Json(serde_json::Value::Array(_)) => "a list",
+        Value::Json(serde_json::Value::Object(_)) => "a record",
+        Value::Json(_) => "a JSON value",
+        Value::Bytes(_) => "binary data",
+        // The scalar arms are handled by the callers above.
+        _ => "this value",
+    };
+    format!("{kind} is not a number")
 }
 
 #[async_trait]
@@ -127,7 +238,13 @@ impl Tool for Printf {
             }
         }
         // POSIX printf reuses the format until all operands are consumed.
-        let output = format_string::format_string_cycling(&format, &format_args);
+        // A numeric conversion that cannot read its operand refuses here
+        // rather than printing 0 — nothing partial is emitted, so a caller
+        // never reads half a line as a whole answer.
+        let output = match format_string::format_string_cycling(&format, &format_args) {
+            Ok(text) => text,
+            Err(e) => return ExecResult::failure(1, format!("printf: {e}")),
+        };
 
         ExecResult::with_output(OutputData::text(output))
     }
@@ -136,9 +253,9 @@ impl Tool for Printf {
 /// FormatArg impl for references (used by printf which collects &Value)
 impl FormatArg for &Value {
     fn as_format_string(&self) -> String { (*self).as_format_string() }
-    fn as_format_int(&self) -> i64 { (*self).as_format_int() }
-    fn as_format_float(&self) -> f64 { (*self).as_format_float() }
-    fn as_format_char(&self) -> Option<char> { (*self).as_format_char() }
+    fn as_format_int(&self) -> Result<i64, String> { (*self).as_format_int() }
+    fn as_format_float(&self) -> Result<f64, String> { (*self).as_format_float() }
+    fn as_format_char(&self) -> Result<Option<char>, String> { (*self).as_format_char() }
 }
 
 #[cfg(test)]
