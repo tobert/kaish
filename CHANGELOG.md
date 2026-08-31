@@ -67,6 +67,15 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
+- **`${path:-default}` inside `$(( ))` follows the ordinary `:-` contract** —
+  unset, null, an empty string, a missing key, and an out-of-bounds index select
+  the default; a shape error stays loud instead of quietly running the fallback.
+- **`$((-16#$digits))` reaches `i64::MIN`** — the sign applies before the range
+  check, as it already did for the literal `-16#8000000000000000`.
+- **A refused numeral keeps its sign in the fix it names** — `$((-007))` names
+  `-8#7` and `-7`, not the positive spellings that change the value.
+- **`ArithError.span` carries byte offsets**, so a source with a multi-byte
+  character before the error slices as the type promises.
 - **LocalFs sandbox escapes**: a write under a non-existent `..` chain
   (`../sibling/x`) created a directory beside the mount root, and a write
   through a dangling link whose target lay outside the root created that
