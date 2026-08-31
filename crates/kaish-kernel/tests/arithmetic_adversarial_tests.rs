@@ -394,3 +394,74 @@ async fn cmdsubst_quoted_paren_balances_and_works() {
     )
     .await;
 }
+
+// ── Region-aware `extract_arithmetic`: the flat depth counter used to read
+// a quoted `(` inside a nested `$(…)` as arithmetic grouping, so the real
+// `))` was never found. Fixed by handing `$(…)` to the same region-stack
+// scanner `scan`'s double-quoted-string arm already uses. ──────────────────
+
+/// The bug report: a double-quoted `(` inside a nested `$(…)` used to
+/// increment the OUTER arithmetic depth counter, so the real `))` read as
+/// a depth-close and the expansion never terminated.
+#[tokio::test]
+async fn dquote_open_paren_in_nested_cmdsubst_no_longer_confuses_depth() {
+    ok(r#"echo $(( $(echo "(" >/dev/null; echo 5) + 1 ))"#, "6").await;
+}
+
+#[tokio::test]
+async fn squote_open_paren_in_nested_cmdsubst_no_longer_confuses_depth() {
+    ok("echo $(( $(echo '(' >/dev/null; echo 5) + 1 ))", "6").await;
+}
+
+/// Same defect, bare `(( ))` condition form: the quoted `(` used to strand
+/// the scanner before it ever reached the real `))`.
+#[tokio::test]
+async fn bare_arith_dquote_open_paren_in_nested_cmdsubst() {
+    let (code, _, _) = run(r#"(( $(echo "(" >/dev/null; echo 5) > 1 ))"#).await;
+    assert_eq!(code, 0);
+}
+
+/// Two levels of `$(…)` nested inside `$(( ))`, with the quoted paren at
+/// the innermost level — the hand-off to the region-aware scanner must
+/// recurse, not just handle one level.
+#[tokio::test]
+async fn two_levels_of_nested_cmdsubst_with_quoted_paren() {
+    ok(
+        r#"echo $(( $(echo $(echo "(" >/dev/null; echo 3)) + 1 ))"#,
+        "4",
+    )
+    .await;
+}
+
+/// An escaped `\(`/`\)` written directly in the arithmetic body (not inside
+/// a nested substitution) used to count as real grouping too: `\(` alone
+/// consumed one of the real `))` characters looking for its match and left
+/// the expansion unterminated; `\)` immediately before a real `)` read as
+/// the `))` pair and closed the expansion early, leaking the remainder as
+/// program text. Escaping now takes both characters out of the depth
+/// count, so the boundary lands correctly and the arithmetic *grammar* is
+/// what refuses the stray backslash — not the scanner.
+#[tokio::test]
+async fn escaped_open_paren_in_body_reaches_the_real_close() {
+    errs(r"echo $(( \( 1 + 1 ))", "cannot start a value").await;
+}
+
+#[tokio::test]
+async fn escaped_close_paren_in_body_does_not_close_early() {
+    errs(r"echo $(( 1 \)) + 1 ))", "cannot start a value").await;
+}
+
+// ── Controls: region-awareness must not become permissiveness ──────────────
+
+/// No `))` anywhere: still unterminated, not silently evaluated.
+#[tokio::test]
+async fn control_genuinely_unterminated_arithmetic_still_errors() {
+    errs("echo $(( 1 + 2", "unterminated arithmetic").await;
+}
+
+/// A real unquoted, unescaped `(` with no matching close still consumes
+/// the trailing `))` as its own, leaving nothing to end the expansion.
+#[tokio::test]
+async fn control_genuinely_unbalanced_paren_still_errors() {
+    errs("echo $(( ( 1 + 2 ))", "unterminated arithmetic").await;
+}
