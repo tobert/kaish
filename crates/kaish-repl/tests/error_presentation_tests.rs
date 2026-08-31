@@ -113,29 +113,45 @@ fn cli_nonzero_exit_is_unchanged() {
 }
 
 #[test]
-fn cli_validation_error_keeps_the_anyhow_chain() {
+fn cli_validation_error_leads_with_its_diagnostic() {
     // Validation runs *after* a successful parse and produces the same
-    // `line:col [code]: message` diagnostic shape as a parse error — but
-    // it is a separate `Err` site in `execute_streaming_inner`
-    // ("validation failed:\n…") that this fix does not touch. Pinning it
-    // here records the scope boundary: only parse/lexer failures were
-    // moved out of the wrapper.
+    // `line:col [code]: message` diagnostic shape as a parse error. It used
+    // to arrive under `Error: execution failed` / `Caused by:` because only
+    // parse/lexer failures had been moved out of the generic wrapper. The
+    // wrapper named the phase and nothing else, so it displaced the one line
+    // that identified the problem.
     let (stdout, stderr, code) = run_kaish(&["-c", "v=1; for x in $v; do echo $x; done"]);
     assert_eq!(code, 1);
     assert_eq!(stdout, "");
+    assert_no_wrapper_noise(&stderr);
     assert!(
-        stderr.starts_with("Error: execution failed"),
-        "validation failures are out of this fix's scope and must keep the old wrapper, got: {stderr:?}"
+        stderr.contains("E012"),
+        "the validator's own diagnostic must survive: {stderr:?}"
     );
-    assert!(stderr.contains("Caused by:"), "got: {stderr:?}");
-    assert!(stderr.contains("validation failed:"), "got: {stderr:?}");
+}
+
+/// A runtime fault — an operand that cannot be compared — reaches the same
+/// render path. Its message is the only thing that tells the reader what to
+/// fix, so it must not arrive under a generic headline either.
+#[test]
+fn cli_runtime_fault_leads_with_its_message() {
+    let (stdout, stderr, code) = run_kaish(&["-c", r#"x=abc; if [[ "$x" -eq 1 ]]; then echo T; fi"#]);
+    assert_eq!(code, 1);
+    assert_eq!(stdout, "");
+    assert_no_wrapper_noise(&stderr);
+    assert!(
+        stderr.contains("abc") && stderr.contains("numeric"),
+        "the fault must name the value and the rule: {stderr:?}"
+    );
 }
 
 #[test]
-fn cli_missing_script_keeps_the_anyhow_chain() {
-    // A non-parse `Err` path (the script file itself can't be read) must
-    // stay exactly as it was — proof the fix is scoped to parse/lexer
-    // failures, not every `Err` this binary can return.
+fn cli_missing_script_keeps_its_specific_context() {
+    // The boundary that remains: a SPECIFIC context line is not wrapper
+    // noise. "Failed to read script: <path>" names the file and the action,
+    // which the io error underneath ("No such file or directory") does not.
+    // Only the generic `execution failed` headline was removed — a context
+    // that carries information stays.
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("does-not-exist.kai");
     let (stdout, stderr, code) = run_kaish(&[missing.to_str().expect("utf8 path")]);
