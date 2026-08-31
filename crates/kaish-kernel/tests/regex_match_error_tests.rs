@@ -3,12 +3,18 @@
 //! Three cases matter:
 //!  1. Valid regex that matches   → exit 0, no error
 //!  2. Valid regex that mismatches → exit 1 ("false"), no error
-//!  3. Invalid / uncompilable regex → LOUD error (Err return from kernel.execute)
+//!  3. Invalid / uncompilable regex → LOUD error (exit 2, message on stderr)
 //!
 //! The P1 bug was that case 3 silently returned false (exit 1, no error
-//! message), indistinguishable from case 2. After the fix, case 3 must
-//! return `Err` from `kernel.execute()` and the error text must name the
-//! regex problem.
+//! message), indistinguishable from case 2. What these tests protect is that
+//! distinction, so they assert it directly: case 3 is exit 2, never case 2's
+//! exit 1, and its text names the regex problem.
+//!
+//! Case 3 used to leave `kernel.execute()` as `Err`. It is now a result like
+//! any other `[[ ]]` fault — the same exit 2 a bad numeric operand gets, and
+//! the same shape `(( ))` and `test` already used. That is a strictly louder
+//! report than the old one, whose message reached a user only under a generic
+//! "execution failed" wrapper.
 //!
 //! Tests route through `kernel.execute()` so the full dispatch chain runs
 //! (lex → parse → validate → eval_test_async → eval_expr).
@@ -42,12 +48,13 @@ async fn regex_match_valid_nonmatching_pattern_exits_one() {
 async fn regex_match_uncompilable_pattern_is_loud_error() {
     let kernel = Kernel::transient().unwrap();
     // "(" is an unbalanced paren — regex::Regex::new will reject it.
-    let result = kernel.execute(r#"[[ "abc" =~ "(" ]]"#).await;
-    assert!(result.is_err(), "uncompilable regex must return Err, not silent false");
-    let msg = format!("{:#}", result.unwrap_err());
+    let result = kernel.execute(r#"[[ "abc" =~ "(" ]]"#).await.expect("a fault is a result");
+    assert_eq!(result.code, 2, "uncompilable regex is a fault, not a false reading");
+    assert_ne!(result.code, 1, "it must not collapse into the non-match code");
+    let msg = result.err.to_lowercase();
     assert!(
-        msg.to_lowercase().contains("regex") || msg.to_lowercase().contains("pattern") || msg.to_lowercase().contains("paren"),
-        "error message must name the regex problem: {msg}"
+        msg.contains("regex") || msg.contains("pattern") || msg.contains("paren"),
+        "error message must name the regex problem: {:?}", result.err
     );
 }
 
@@ -56,17 +63,13 @@ async fn regex_match_uncompilable_pattern_is_loud_error() {
 #[tokio::test]
 async fn regex_notmatch_uncompilable_pattern_is_loud_error() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ "abc" != "(" ]]"#).await;
-    // Note: "!=" is string-not-equal, not regex-not-match.
-    // We need the actual !~ / NotMatch operator.
-    // kaish uses "!~" for regex not-match:
-    drop(result);
-    let result2 = kernel.execute(r#"[[ "abc" !~ "(" ]]"#).await;
-    assert!(result2.is_err(), "uncompilable regex in !~ must return Err, not silent true");
-    let msg = format!("{:#}", result2.unwrap_err());
+    let result = kernel.execute(r#"[[ "abc" !~ "(" ]]"#).await.expect("a fault is a result");
+    assert_eq!(result.code, 2, "uncompilable regex in !~ is a fault, not a true reading");
+    assert_ne!(result.code, 0, "it must not collapse into the no-match-is-true code");
+    let msg = result.err.to_lowercase();
     assert!(
-        msg.to_lowercase().contains("regex") || msg.to_lowercase().contains("pattern") || msg.to_lowercase().contains("paren"),
-        "error message must name the regex problem: {msg}"
+        msg.contains("regex") || msg.contains("pattern") || msg.contains("paren"),
+        "error message must name the regex problem: {:?}", result.err
     );
 }
 
@@ -74,11 +77,12 @@ async fn regex_notmatch_uncompilable_pattern_is_loud_error() {
 #[tokio::test]
 async fn regex_match_unclosed_bracket_is_loud_error() {
     let kernel = Kernel::transient().unwrap();
-    let result = kernel.execute(r#"[[ "abc" =~ "[" ]]"#).await;
-    assert!(result.is_err(), "unclosed bracket regex must return Err, not silent false");
-    let msg = format!("{:#}", result.unwrap_err());
+    let result = kernel.execute(r#"[[ "abc" =~ "[" ]]"#).await.expect("a fault is a result");
+    assert_eq!(result.code, 2, "unclosed bracket is a fault, not a false reading");
+    assert_ne!(result.code, 1, "it must not collapse into the non-match code");
+    let msg = result.err.to_lowercase();
     assert!(
-        msg.to_lowercase().contains("regex") || msg.to_lowercase().contains("pattern") || msg.to_lowercase().contains("bracket") || msg.to_lowercase().contains("class"),
-        "error message must name the regex problem: {msg}"
+        msg.contains("regex") || msg.contains("pattern") || msg.contains("bracket") || msg.contains("class"),
+        "error message must name the regex problem: {:?}", result.err
     );
 }

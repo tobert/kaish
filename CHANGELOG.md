@@ -86,6 +86,12 @@ breaking entries are marked **BREAKING**.
   that says what to fix, including the validator's suggested rewrite. A
   context that carries information, like `Failed to read script: <path>`,
   stays.
+- **A `[[ ]]` type error is exit 2, not a false reading** — `[[ $x -eq 1 ]]`
+  with a non-numeric `$x` now reports code 2 with the message, matching
+  `(( ))` and `test`. It was leaving `Kernel::execute` as an error, which
+  collapsed the code to 1 and made a bad operand look like a false comparison.
+  A fault in an `if`/`while` CONDITION still aborts, where there is no
+  exit-code channel to report through.
 - **LocalFs sandbox escapes**: a write under a non-existent `..` chain
   (`../sibling/x`) created a directory beside the mount root, and a write
   through a dangling link whose target lay outside the root created that
