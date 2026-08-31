@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: removed plan-side confirm-key redaction** — `PlannedValue::Redacted`,
+  `StatementPlan::presented_keys`, `strip_confirm_tokens`, and `redact_keys` are
+  gone. The credential they protected was removed in 0.14.0; `--confirm=<key>`
+  now plans and renders like any other argument.
+
 - `ExecContext` carries `kill_grace` and `background_job`, so a tool holding only
   an `ExecContext` can spawn a child with the kernel's external-command
   discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
@@ -62,6 +67,15 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
+- **`${path:-default}` inside `$(( ))` follows the ordinary `:-` contract** —
+  unset, null, an empty string, a missing key, and an out-of-bounds index select
+  the default; a shape error stays loud instead of quietly running the fallback.
+- **`$((-16#$digits))` reaches `i64::MIN`** — the sign applies before the range
+  check, as it already did for the literal `-16#8000000000000000`.
+- **A refused numeral keeps its sign in the fix it names** — `$((-007))` names
+  `-8#7` and `-7`, not the positive spellings that change the value.
+- **`ArithError.span` carries byte offsets**, so a source with a multi-byte
+  character before the error slices as the type promises.
 - **`$(( ))` reads a nested `$(...)` the way an ordinary `$(...)` does** — a
   quoted or escaped parenthesis, a `#` comment, and a heredoc body no longer
   close the arithmetic scan early. `<<` inside a bare `(( ))` stays the shift

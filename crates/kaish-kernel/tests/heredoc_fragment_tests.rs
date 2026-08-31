@@ -305,6 +305,51 @@ fn a_nested_command_substitution_still_blocks() {
     );
 }
 
+/// A `$(...)` reached only through `$(( ))` blocks too, and names the
+/// command it would run. `part_holes` used to have no `StringPart::Arithmetic`
+/// arm at all, so this substitution was never collected as a hole — and
+/// `arithmetic_state`'s character scan saw `$(` and reported it as
+/// unsuppliable session state instead of a hole to resolve.
+#[test]
+fn a_command_substitution_inside_arithmetic_blocks_and_names_its_command() {
+    let expansion = expand("python3 <<PY\nn = $((1 + $(echo 2)))\nPY", 0, &[]);
+    let Expansion::Blocked { holes } = expansion else {
+        panic!("a $(...) inside $(( )) must not expand to text: {expansion:?}");
+    };
+    assert_eq!(holes.len(), 1);
+    assert_eq!(holes[0].source, "$(echo 2)");
+    assert_eq!(holes[0].plans[0].commands[0].name, "echo");
+}
+
+/// A `$(...)` reached through an arithmetic `${x:-...}` default blocks too —
+/// the same nesting `a_nested_command_substitution_still_blocks` covers for a
+/// plain interpolation, one level deeper inside `$(( ))`.
+#[test]
+fn a_command_substitution_inside_an_arithmetic_default_blocks() {
+    let expansion = expand("python3 <<PY\nn = $((${x:-$(cmd)}))\nPY", 0, &[]);
+    let Expansion::Blocked { holes } = expansion else {
+        panic!("expected a hole for the nested substitution: {expansion:?}");
+    };
+    assert_eq!(holes.len(), 1);
+    assert_eq!(holes[0].plans[0].commands[0].name, "cmd");
+}
+
+/// Controls for the fix above: `$?` and a positional parameter inside
+/// `$(( ))` must still refuse as session state, with the same name the old
+/// character scan reported, now derived from the real parsed tree instead.
+#[test]
+fn arithmetic_session_state_still_refuses_with_the_right_name() {
+    for (body, name) in [("n = $((  $? + 1 ))", "$?"), ("n = $(( $1 + 1 ))", "$1")] {
+        let source = format!("python3 <<PY\n{body}\nPY");
+        let err = expand_fragment(&source, FragmentAddr::new(0, 0), &[])
+            .expect_err("session state must not expand");
+        let FragmentError::NeedsSessionState { what } = err else {
+            panic!("{body} expanded instead of refusing: {err:?}");
+        };
+        assert_eq!(what, name, "body: {body}");
+    }
+}
+
 // ───────────────────────── Addressing failures are loud ────────────────────
 
 /// An address past the end names what it found instead of expanding nothing.
@@ -525,18 +570,27 @@ fn a_leading_comment_does_not_shift_the_addresses() {
     }
 }
 
-/// Whitespace does not hide session state: the arithmetic evaluator skips it
-/// before every token, so `$( ( $ ? ) )` reads the exit code exactly as
-/// `$(($?))` does.
+/// A space between `$` and what follows it is not session state hiding
+/// behind whitespace — it is a syntax error. This used to assert
+/// `NeedsSessionState`, on the claim that "the arithmetic evaluator skips
+/// whitespace before every token"; that claim was never true of the real
+/// tokenizer (only of the character scan `arithmetic_state` used to run
+/// instead of parsing), and `a_spaced_variable_inside_arithmetic_is_refused`
+/// below already documents the real rule the 0.16 rewrite settled on:
+/// whitespace never splits a token inside `$(( ))`. Now that session state is
+/// read off the parsed tree, a body that fails to parse reports no session
+/// state (the same posture `arithmetic_holes` and `ast::plan::read_arithmetic`
+/// take) and falls through to evaluation, which surfaces the same syntax
+/// error `a_spaced_variable_inside_arithmetic_is_refused` pins.
 #[test]
-fn spaced_session_state_inside_arithmetic_still_refuses() {
+fn a_spaced_dollar_form_is_a_syntax_error_not_session_state() {
     for body in ["n = $(( $ ? ))", "n = $(( ${ ? } ))", "n = $(( $ $ ))", "n = $(( $ 1 ))"] {
         let source = format!("python3 <<PY\n{body}\nPY");
         let err = expand_fragment(&source, FragmentAddr::new(0, 0), &[])
-            .expect_err("spacing must not hide session state");
+            .expect_err("a split `$` token must not expand");
         assert!(
-            matches!(err, FragmentError::NeedsSessionState { .. }),
-            "{body} expanded instead of refusing: {err}"
+            matches!(err, FragmentError::Eval { .. }),
+            "{body} did not surface as a syntax error: {err}"
         );
     }
 }

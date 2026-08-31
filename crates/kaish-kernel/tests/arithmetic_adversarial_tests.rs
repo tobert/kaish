@@ -116,6 +116,29 @@ async fn min_magnitude_positive_is_out_of_range() {
     errs("echo $((0X8000000000000000))", "64-bit").await;
 }
 
+/// Defect 6: `based_value` hardcoded `negative: false`, so `mag ==
+/// i64::MIN`'s magnitude was checked against the POSITIVE range and
+/// refused before the unary minus above it ever applied. The direct
+/// literal (`-16#8000000000000000`) worked because the parser special-
+/// cases a `Number` token at exactly `MIN_MAGNITUDE`; the same digits
+/// arriving through `$digits` never reach that special case.
+#[tokio::test]
+async fn min_magnitude_via_based_expansion_every_base() {
+    ok("digits=8000000000000000; echo $((-16#$digits))", "-9223372036854775808").await;
+    ok(r#"digits="9223372036854775808"; echo $((-10#$digits))"#, "-9223372036854775808").await;
+    ok("digits=5cbfjia3fh26ja8; echo $((-20#$digits))", "-9223372036854775808").await;
+}
+
+#[tokio::test]
+async fn min_magnitude_via_based_expansion_positive_is_out_of_range() {
+    errs("digits=8000000000000000; echo $((16#$digits))", "64-bit").await;
+}
+
+#[tokio::test]
+async fn one_past_min_magnitude_via_based_expansion_is_out_of_range() {
+    errs("digits=8000000000000001; echo $((-16#$digits))", "64-bit").await;
+}
+
 #[tokio::test]
 async fn parens_break_the_direct_unary_minus_exception() {
     errs("echo $((-(9223372036854775808)))", "64-bit").await;
