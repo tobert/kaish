@@ -1621,7 +1621,15 @@ pub(crate) fn expansion_label(e: &Expansion) -> (String, &'static str) {
 /// no sign, whether the `#` came with the sign in source text or the sign
 /// arrived inside an expansion's value. `label`/`verb` name where the value
 /// came from (see `expansion_label`) for that refusal's message.
-pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Result<i64, ArithError> {
+///
+/// `negative` carries the unary minus that may sit above this expansion in
+/// the tree (`-16#$digits`) into the range check itself — mirroring the
+/// direct-literal path, where the parser special-cases `Number(mag)` at
+/// exactly `Parser::MIN_MAGNITUDE`. `based_value` can't special-case at
+/// parse time (the digits are only known once the expansion resolves), so
+/// the caller passes `negative` in; evaluating positive-then-negating would
+/// refuse `i64::MIN`'s magnitude before the minus ever applied.
+pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str, negative: bool) -> Result<i64, ArithError> {
     let trimmed = text.trim();
     if let Some(stripped) = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')) {
         let sign = &trimmed[..1];
@@ -1655,7 +1663,7 @@ pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Res
             .and_then(|m| m.checked_add(digit_val as u64))
             .ok_or_else(|| ArithError::new(format!("`{text}` {INTEGER_OUT_OF_RANGE}"), 0..0))?;
     }
-    match int_from_magnitude(mag, false, 0..0)? {
+    match int_from_magnitude(mag, negative, 0..0)? {
         ArithExpr::Int(n) => Ok(n),
         _ => unreachable!(),
     }
@@ -1753,10 +1761,10 @@ pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String
     }
 }
 
-fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope) -> Result<i64, ArithError> {
+fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope, negative: bool) -> Result<i64, ArithError> {
     let text = expansion_text_sync(e, scope)?;
     let (label, verb) = expansion_label(e);
-    based_value(base, &text, &label, verb)
+    based_value(base, &text, &label, verb, negative)
 }
 
 pub(crate) fn eval_sync(expr: &ArithExpr, scope: &Scope) -> Result<i64, ArithError> {
@@ -1770,7 +1778,16 @@ pub(crate) fn eval_sync(expr: &ArithExpr, scope: &Scope) -> Result<i64, ArithErr
             }
             resolve_subscript_sync(scope, root, &idx_vals)
         }
-        ArithExpr::BasedExpansion { base, expansion } => resolve_based_sync(*base, expansion, scope),
+        ArithExpr::BasedExpansion { base, expansion } => resolve_based_sync(*base, expansion, scope, false),
+        // `-base#$expansion`: resolve with the sign folded into the range
+        // check (see `based_value`'s doc comment) instead of evaluating
+        // positive then negating, which can never reach i64::MIN.
+        ArithExpr::Unary { op: UnOp::Neg, operand } if matches!(operand.as_ref(), ArithExpr::BasedExpansion { .. }) => {
+            let ArithExpr::BasedExpansion { base, expansion } = operand.as_ref() else {
+                unreachable!("guarded by the match arm's pattern")
+            };
+            resolve_based_sync(*base, expansion, scope, true)
+        }
         ArithExpr::Unary { op, operand } => apply_unary(*op, eval_sync(operand, scope)?),
         ArithExpr::Binary { op: BinOp::And, left, right } => {
             let l = eval_sync(left, scope)?;
