@@ -118,6 +118,115 @@ async fn the_integer_bounds_convert_exactly() {
 }
 
 #[tokio::test]
+async fn a_string_operand_one_past_the_negative_bound_refuses() {
+    // The regression this guard exists for. `-9223372036854775809` is not
+    // an i64, and reading it as f64 rounds it to EXACTLY i64::MIN, which
+    // the range check then accepts — a silent wrong answer wearing a
+    // plausible face. It must refuse before any float ever sees it.
+    let msg = refused(r#"printf '%d' '-9223372036854775809'"#).await;
+    assert!(msg.contains("64-bit"), "must name the limit: {msg}");
+
+    // The control: one step inside the bound still converts, so the guard
+    // cannot pass by refusing the whole neighborhood.
+    assert_eq!(
+        ok(r#"printf '%d' '-9223372036854775808'"#).await,
+        "-9223372036854775808"
+    );
+}
+
+#[tokio::test]
+async fn a_string_operand_past_the_positive_bound_refuses() {
+    let msg = refused(r#"printf '%d' '9223372036854775808'"#).await;
+    assert!(msg.contains("64-bit"), "must name the limit: {msg}");
+    assert_eq!(
+        ok(r#"printf '%d' '9223372036854775807'"#).await,
+        "9223372036854775807"
+    );
+}
+
+#[tokio::test]
+async fn a_quoted_string_operand_takes_the_json_reading() {
+    // Unquoted, `1e3` and `42` arrive already typed, so these are the cases
+    // that actually exercise the string reader.
+    assert_eq!(ok(r#"printf '%d' '1e3'"#).await, "1000");
+    assert_eq!(ok(r#"printf '%d' '42'"#).await, "42");
+    assert_eq!(ok(r#"printf '%.1f' '1.5'"#).await, "1.5");
+}
+
+#[tokio::test]
+async fn an_explicit_plus_is_read_and_does_not_dodge_the_rules() {
+    // `is_leading_zero_numeral` knows `-` and not `+`, so `+007` could slip
+    // past the leading-zero rule and answer 7.
+    assert_eq!(ok(r#"printf '%d' '+7'"#).await, "7");
+    let msg = refused(r#"printf '%d' '+007'"#).await;
+    assert!(msg.contains("8#7"), "must still name the octal spelling: {msg}");
+}
+
+#[tokio::test]
+async fn the_non_kaish_base_spellings_name_the_kaish_ones() {
+    let binary = refused("printf '%d' 0b101").await;
+    assert!(binary.contains("2#101"), "must name the binary spelling: {binary}");
+    let octal = refused("printf '%d' 0o17").await;
+    assert!(octal.contains("8#17"), "must name the octal spelling: {octal}");
+}
+
+#[tokio::test]
+async fn a_fractional_leading_zero_is_not_offered_an_octal_fix() {
+    // `8#7.5` is not a numeral in any base — offering it would be advice
+    // that fails when followed.
+    let msg = refused(r#"printf '%d' '007.5'"#).await;
+    assert!(msg.contains("7.5"), "must name the decimal: {msg}");
+    assert!(!msg.contains("8#7.5"), "must not invent a fractional octal: {msg}");
+}
+
+#[tokio::test]
+async fn a_magnitude_past_f64_names_the_range_but_a_word_does_not() {
+    let big = refused(r#"printf '%d' '1e999'"#).await;
+    assert!(big.contains("64-bit"), "must name the range: {big}");
+    // `"inf".parse::<f64>()` also yields a non-finite float; it must not
+    // borrow the range message, because `inf` is not a numeral at all.
+    let word = refused("printf '%d' inf").await;
+    assert!(!word.contains("64-bit"), "a word is not a range problem: {word}");
+}
+
+// ---------------------------------------------------------------------------
+// Nothing is printed before a refusal is discovered
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_refusal_discards_text_already_formatted_before_it() {
+    // Every other refusal test has an empty buffer at the moment it
+    // refuses, so none of them can catch a partial write. These do: the
+    // literal `x`, and a good operand, are already formatted when the bad
+    // operand is reached.
+    let msg = refused("printf 'x%d' abc").await;
+    assert!(msg.contains("abc"), "{msg}");
+    let msg = refused("printf '%d-%d' 1 abc").await;
+    assert!(msg.contains("abc"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_refusal_in_a_later_cycling_pass_discards_the_earlier_passes() {
+    // printf reuses the format until the operands run out, so the first
+    // pass has already written `1` when the second pass refuses.
+    let msg = refused("printf '%d\\n' 1 abc").await;
+    assert!(msg.contains("abc"), "{msg}");
+}
+
+// ---------------------------------------------------------------------------
+// Missing operands default for every numeric conversion, not just %d
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn every_numeric_conversion_defaults_a_missing_operand() {
+    assert_eq!(ok("printf '%x'").await, "0");
+    assert_eq!(ok("printf '%o'").await, "0");
+    assert_eq!(ok("printf '%.1f'").await, "0.0");
+    // %c with nothing to print emits nothing rather than a NUL.
+    assert_eq!(ok("printf '%c'").await, "");
+}
+
+#[tokio::test]
 async fn a_character_conversion_past_the_range_is_refused() {
     // `*i as u32` truncated a wide integer into some other character.
     let msg = refused("printf '%c' 4294967296").await;

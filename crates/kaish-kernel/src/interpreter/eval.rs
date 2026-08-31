@@ -641,9 +641,10 @@ pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
 }
 
 /// True for a string shaped like `-?[0-9]+` — the only shape whose `i64`
-/// parse can fail exclusively by overflow. Shared by `value_to_exit_code`
-/// and `value_to_num` so both name the same 64-bit limit the same way.
-fn is_i64_overflow_shape(t: &str) -> bool {
+/// parse can fail exclusively by overflow. Shared by `value_to_exit_code`,
+/// `value_to_num` and printf's operand reader so all three name the same
+/// 64-bit limit the same way.
+pub(crate) fn is_i64_overflow_shape(t: &str) -> bool {
     let digits = t.strip_prefix('-').unwrap_or(t);
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }

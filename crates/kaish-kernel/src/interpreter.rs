@@ -44,4 +44,4 @@ pub use result::{apply_output_format, hex_dump, json_to_value, json_to_value_no_
 pub use scope::{PathError, Scope};
 // Crate-internal: the reduced sync evaluator (scheduler/pipeline.rs) reuses the
 // resolver error-message shape without widening the public API.
-pub(crate) use eval::format_path;
+pub(crate) use eval::{format_path, is_i64_overflow_shape};

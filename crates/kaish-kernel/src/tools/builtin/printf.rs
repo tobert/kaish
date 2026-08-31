@@ -100,52 +100,112 @@ fn string_as_number(s: &str) -> Result<Number, String> {
     if s.is_empty() {
         return Err("an empty operand is not a number".to_string());
     }
-    // Checked before the JSON parse: `"007".parse::<i64>()` succeeds and
-    // would answer 7 for text kaish reads as text everywhere else.
-    if crate::lexer::is_leading_zero_numeral(s) {
-        let decimal = crate::arithmetic::leading_zero_decimal(s)
-            .unwrap_or_else(|| "0".to_string());
-        let sign = if s.starts_with('-') { "-" } else { "" };
-        let digits = s.trim_start_matches('-').trim_start_matches('0');
-        let digits = if digits.is_empty() { "0" } else { digits };
-        return Err(format!(
-            "`{s}` has a leading zero — kaish reads no octal; \
-             write `{sign}8#{digits}` for octal or `{decimal}` for decimal"
-        ));
+
+    // printf's operand grammar takes an explicit sign, so split it off before
+    // the shape checks: `is_leading_zero_numeral` and `is_i64_overflow_shape`
+    // both know `-` and neither knows `+`, and a `+007` that slipped past the
+    // leading-zero rule would answer 7 where `007` refuses. A `+` is dropped
+    // from the suggestions because `+7` and `7` are the same number; a `-` is
+    // carried into every one of them, because dropping it changes the value.
+    let (sign, magnitude) = match s.strip_prefix('+') {
+        Some(rest) => ("", rest),
+        None => match s.strip_prefix('-') {
+            Some(rest) => ("-", rest),
+            None => ("", s),
+        },
+    };
+    if magnitude.is_empty() {
+        return Err(format!("`{s}` is not a number"));
+    }
+
+    // Checked before any parse: `"007".parse::<i64>()` succeeds and would
+    // answer 7 for text kaish reads as text everywhere else.
+    if crate::lexer::is_leading_zero_numeral(magnitude) {
+        return Err(leading_zero_refusal(s, sign, magnitude));
     }
     if let Ok(n) = s.parse::<i64>() {
         return Ok(Number::Int(n));
     }
+    // An integer-shaped operand can only have failed that parse by
+    // overflowing. It must refuse HERE: `serde_json` would read it as f64,
+    // and `-9223372036854775809` rounds to exactly `i64::MIN`, which the
+    // range guard then accepts — a silent wrong answer, the very shape this
+    // whole conversion exists to refuse. `value_to_num` guards the same way.
+    if crate::interpreter::is_i64_overflow_shape(magnitude) {
+        return Err(format!("`{s}` {}", crate::lexer::INTEGER_OUT_OF_RANGE));
+    }
+
+    // A JSON number is the rule, the same one `fromjson` reads.
     match serde_json::from_str::<serde_json::Number>(s) {
         Ok(n) => match n.as_i64() {
             Some(i) => Ok(Number::Int(i)),
-            // A JSON number too wide or too precise for i64 — `1e3` lands
-            // here, and so does `1e19`, which `float_as_int` then refuses.
-            None => n
-                .as_f64()
-                .map(Number::Float)
-                .ok_or_else(|| format!("`{s}` is outside the 64-bit range")),
+            // A float spelling: `1e3` lands here, and so does `1e19`, which
+            // `float_as_int` then refuses. The integer-too-wide case cannot
+            // reach this arm — the overflow-shape guard above took it.
+            None => match n.as_f64() {
+                Some(f) => Ok(Number::Float(f)),
+                None => Err(format!("`{s}` is outside the 64-bit range")),
+            },
         },
-        Err(_) => Err(base_aware_refusal(s)),
+        // serde_json refuses a magnitude that overflows f64 (`1e999`). That
+        // is a range problem, not unreadable text, so it says so — but only
+        // for something actually shaped like a number, or the word `inf`
+        // would borrow the message.
+        Err(_) => {
+            if magnitude.starts_with(|c: char| c.is_ascii_digit())
+                && s.parse::<f64>().is_ok_and(|f| !f.is_finite())
+            {
+                return Err(format!("`{s}` is outside the 64-bit range"));
+            }
+            Err(base_aware_refusal(s, sign, magnitude))
+        }
     }
 }
 
-/// Name the fix for text that is shaped like a number in another base.
+/// Name the octal and decimal spellings for a numeral with a leading zero.
+fn leading_zero_refusal(s: &str, sign: &str, magnitude: &str) -> String {
+    let trimmed = magnitude.trim_start_matches('0');
+    let decimal = if trimmed.is_empty() { "0" } else { trimmed };
+    // `8#7.5` is not a numeral in any base, so a fractional value is offered
+    // only its decimal spelling. Octal is a whole-number question.
+    if magnitude.contains('.') {
+        return format!(
+            "`{s}` has a leading zero — kaish reads no octal; write `{sign}{decimal}`"
+        );
+    }
+    format!(
+        "`{s}` has a leading zero — kaish reads no octal; \
+         write `{sign}8#{decimal}` for octal or `{sign}{decimal}` for decimal"
+    )
+}
+
+/// Name the fix for text shaped like a number in another base.
 ///
 /// `$(( ))` is where kaish reads a base, so that is what the message points
-/// at rather than leaving the reader to guess.
-fn base_aware_refusal(s: &str) -> String {
-    let unsigned = s.strip_prefix('-').unwrap_or(s);
-    let based = unsigned.strip_prefix("0x").or_else(|| unsigned.strip_prefix("0X"));
-    if let Some(digits) = based
+/// at rather than leaving the reader to guess. `0b`/`0o` are not kaish
+/// spellings at all, so those name `2#`/`8#` the way the arithmetic lexer
+/// does rather than pointing at a `$(( ))` that would refuse them too.
+fn base_aware_refusal(s: &str, sign: &str, magnitude: &str) -> String {
+    if let Some(digits) = magnitude
+        .strip_prefix("0x")
+        .or_else(|| magnitude.strip_prefix("0X"))
         && let Ok(v) = i64::from_str_radix(digits, 16)
     {
-        let sign = if s.starts_with('-') { "-" } else { "" };
         return format!(
             "`{s}` is not a number; write `{sign}{v}`, or `$(( {s} ))` to read the base"
         );
     }
-    if unsigned.contains('#') {
+    let radix_prefix = magnitude.get(..2).map(str::to_ascii_lowercase);
+    if let Some(prefix) = radix_prefix.as_deref()
+        && matches!(prefix, "0b" | "0o")
+    {
+        let digits = &magnitude[2..];
+        let (base, word) = if prefix == "0b" { (2, "binary") } else { (8, "octal") };
+        return format!(
+            "`{s}` is not a kaish base spelling; write `{sign}{base}#{digits}` for {word}"
+        );
+    }
+    if magnitude.contains('#') {
         return format!("`{s}` is not a number; `$(( {s} ))` reads a based numeral");
     }
     format!("`{s}` is not a number")
