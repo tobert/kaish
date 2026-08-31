@@ -76,6 +76,10 @@ breaking entries are marked **BREAKING**.
   `-8#7` and `-7`, not the positive spellings that change the value.
 - **`ArithError.span` carries byte offsets**, so a source with a multi-byte
   character before the error slices as the type promises.
+- **`$(( ))` reads a nested `$(...)` the way an ordinary `$(...)` does** — a
+  quoted or escaped parenthesis, a `#` comment, and a heredoc body no longer
+  close the arithmetic scan early. `<<` inside a bare `(( ))` stays the shift
+  operator.
 - **A `[[ ]]` type error is exit 2, not a false reading** — `[[ $x -eq 1 ]]`
   with a non-numeric `$x` now reports code 2 with the message, matching
   `(( ))` and `test`. It was leaving `Kernel::execute` as an error, which

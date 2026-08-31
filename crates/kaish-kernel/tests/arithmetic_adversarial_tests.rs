@@ -373,8 +373,14 @@ async fn bare_true_false_are_variable_names_not_literals() {
 //     not close. Fixed (`skip_group` honors `#`).
 //   * quoted `}` in a `${x:-$(…)}` default → bash `6`; the `}` inside `"}"`
 //     must not close the brace. Fixed (`skip_group` skips nested quotes).
-//   * heredoc in `$(…)` → bash itself mishandles it (errors, empty, exit 0),
-//     so kaish keeps the loud error. Pinned.
+//   * heredoc in `$(…)` → bash mishandles this exact construct itself
+//     (`bash: 1: command not found`, exit 0, verified directly) rather
+//     than reading it as a nested `$(( ))`, so it is not a usable oracle
+//     here. `skip_group` used to have no heredoc grammar either, and read
+//     a `)` inside the heredoc BODY as the substitution's own close — the
+//     same defect class `#` and `}` above were already fixed for. Fixed
+//     the same way ordinary `$(...)` already handles it: the substitution
+//     evaluates to whatever the command prints, heredoc body included.
 //   * quoted `)` in `$(…)` → bash `3`; the control, already correct.
 
 /// `#` inside `$(…)` is a comment, so the `)` on its line does not close:
@@ -384,14 +390,93 @@ async fn cmdsubst_comment_inside_arith_should_be_honored() {
     ok("echo $(( $(true # )\necho 1) ))", "1").await;
 }
 
-/// A heredoc inside `$(…)` inside `$(( ))`: the `)` on the heredoc body line
-/// would close the substitution early, so kaish refuses it loudly. bash does
-/// not handle this cleanly either, so the error is kept rather than matched.
+/// A heredoc inside `$(…)` inside `$(( ))`: the `)` on the heredoc body
+/// line used to close the substitution early, reporting a truncated,
+/// unparseable `cmd_text` ("syntax error in command substitution"). The
+/// heredoc body (`)`) is discarded to `/dev/null`; the substitution's
+/// real value is `echo 1`'s output, so `$(( 1 + 1 ))` is `2`.
 #[tokio::test]
-async fn cmdsubst_heredoc_inside_arith_errors_loud_by_design() {
-    errs(
+async fn cmdsubst_heredoc_inside_arith_is_honored() {
+    ok(
         "echo $(( $(cat <<'EOF' > /dev/null\n)\nEOF\necho 1)\n+ 1 ))",
-        "syntax error in command substitution",
+        "2",
+    )
+    .await;
+}
+
+/// A `))` sequence — not just a lone `)` — inside the heredoc BODY: still
+/// discarded whole, never read as the arithmetic expansion's own close.
+#[tokio::test]
+async fn cmdsubst_heredoc_body_with_double_close_paren_is_honored() {
+    ok(
+        "echo $(( $(cat <<'EOF' > /dev/null\na )) b\nEOF\necho 5)\n+ 1 ))",
+        "6",
+    )
+    .await;
+}
+
+/// A quoted heredoc delimiter (`<<'EOF'`) makes the body literal: `$x`
+/// inside it is text, not an expansion, matching ordinary `$(cat <<'EOF')`.
+#[tokio::test]
+async fn cmdsubst_heredoc_quoted_delimiter_body_is_literal() {
+    ok(
+        "x=WRONG; echo $(( $(cat <<'EOF' > /dev/null\n$x )\nEOF\necho 5)\n+ 1 ))",
+        "6",
+    )
+    .await;
+}
+
+/// An unquoted heredoc delimiter (`<<EOF`) interpolates the body: `$x`
+/// inside it expands, matching ordinary `$(cat <<EOF)`.
+#[tokio::test]
+async fn cmdsubst_heredoc_unquoted_delimiter_body_is_interpolated() {
+    ok(
+        "x=3; echo $(( $(cat <<EOF > /dev/null\nvalue is $x )\nEOF\necho 5)\n+ 1 ))",
+        "6",
+    )
+    .await;
+}
+
+/// A bare `(( ))` reached through `$(…)` is arithmetic, so `<<` inside it
+/// is the SHIFT operator, never a heredoc introducer. Teaching the scanner
+/// heredoc grammar taught it only the `$((` spelling; a bare `((` kept the
+/// enclosing `$(…)`'s heredoc grammar and read `<< 2` as a heredoc whose
+/// delimiter was `2`. bash yields `9`.
+#[tokio::test]
+async fn bare_arith_condition_shift_inside_cmdsubst_is_not_a_heredoc() {
+    ok("echo $(( $( (( 1 << 2 )) && echo 9 ) ))", "9").await;
+}
+
+/// Control for the case above: the same shape WITHOUT `<<` was never
+/// affected, so a passing `bare_arith_condition_shift_inside_cmdsubst…`
+/// means the shift operator specifically, not the nesting.
+#[tokio::test]
+async fn control_bare_arith_condition_without_shift_inside_cmdsubst() {
+    ok("echo $(( $( (( 1 + 2 )) && echo 9 ) ))", "9").await;
+}
+
+/// A real heredoc in the `$(…)` that CONTAINS a bare `(( ))` still works:
+/// suppressing heredoc grammar inside `((` must not suppress it outside.
+#[tokio::test]
+async fn heredoc_beside_a_bare_arith_condition_still_parses() {
+    ok(
+        "echo $(( $(cat <<'EOF' > /dev/null
+)
+EOF
+(( 1 << 2 )) && echo 9) ))",
+        "9",
+    )
+    .await;
+}
+
+/// Control: a heredoc that genuinely never finds its closing delimiter is
+/// still a loud, specific error — heredoc-awareness must not become
+/// permissiveness toward a real author mistake.
+#[tokio::test]
+async fn control_cmdsubst_heredoc_truly_unterminated_still_errors() {
+    errs(
+        "echo $(( $(cat <<EOF\nno closing delimiter\n) + 1 ))",
+        "unterminated heredoc",
     )
     .await;
 }
@@ -416,4 +501,75 @@ async fn cmdsubst_quoted_paren_balances_and_works() {
         "3",
     )
     .await;
+}
+
+// ── Region-aware `extract_arithmetic`: the flat depth counter used to read
+// a quoted `(` inside a nested `$(…)` as arithmetic grouping, so the real
+// `))` was never found. Fixed by handing `$(…)` to the same region-stack
+// scanner `scan`'s double-quoted-string arm already uses. ──────────────────
+
+/// The bug report: a double-quoted `(` inside a nested `$(…)` used to
+/// increment the OUTER arithmetic depth counter, so the real `))` read as
+/// a depth-close and the expansion never terminated.
+#[tokio::test]
+async fn dquote_open_paren_in_nested_cmdsubst_no_longer_confuses_depth() {
+    ok(r#"echo $(( $(echo "(" >/dev/null; echo 5) + 1 ))"#, "6").await;
+}
+
+#[tokio::test]
+async fn squote_open_paren_in_nested_cmdsubst_no_longer_confuses_depth() {
+    ok("echo $(( $(echo '(' >/dev/null; echo 5) + 1 ))", "6").await;
+}
+
+/// Same defect, bare `(( ))` condition form: the quoted `(` used to strand
+/// the scanner before it ever reached the real `))`.
+#[tokio::test]
+async fn bare_arith_dquote_open_paren_in_nested_cmdsubst() {
+    let (code, _, _) = run(r#"(( $(echo "(" >/dev/null; echo 5) > 1 ))"#).await;
+    assert_eq!(code, 0);
+}
+
+/// Two levels of `$(…)` nested inside `$(( ))`, with the quoted paren at
+/// the innermost level — the hand-off to the region-aware scanner must
+/// recurse, not just handle one level.
+#[tokio::test]
+async fn two_levels_of_nested_cmdsubst_with_quoted_paren() {
+    ok(
+        r#"echo $(( $(echo $(echo "(" >/dev/null; echo 3)) + 1 ))"#,
+        "4",
+    )
+    .await;
+}
+
+/// An escaped `\(`/`\)` written directly in the arithmetic body (not inside
+/// a nested substitution) used to count as real grouping too: `\(` alone
+/// consumed one of the real `))` characters looking for its match and left
+/// the expansion unterminated; `\)` immediately before a real `)` read as
+/// the `))` pair and closed the expansion early, leaking the remainder as
+/// program text. Escaping now takes both characters out of the depth
+/// count, so the boundary lands correctly and the arithmetic *grammar* is
+/// what refuses the stray backslash — not the scanner.
+#[tokio::test]
+async fn escaped_open_paren_in_body_reaches_the_real_close() {
+    errs(r"echo $(( \( 1 + 1 ))", "cannot start a value").await;
+}
+
+#[tokio::test]
+async fn escaped_close_paren_in_body_does_not_close_early() {
+    errs(r"echo $(( 1 \)) + 1 ))", "cannot start a value").await;
+}
+
+// ── Controls: region-awareness must not become permissiveness ──────────────
+
+/// No `))` anywhere: still unterminated, not silently evaluated.
+#[tokio::test]
+async fn control_genuinely_unterminated_arithmetic_still_errors() {
+    errs("echo $(( 1 + 2", "unterminated arithmetic").await;
+}
+
+/// A real unquoted, unescaped `(` with no matching close still consumes
+/// the trailing `))` as its own, leaving nothing to end the expansion.
+#[tokio::test]
+async fn control_genuinely_unbalanced_paren_still_errors() {
+    errs("echo $(( ( 1 + 2 ))", "unterminated arithmetic").await;
 }
