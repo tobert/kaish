@@ -14,18 +14,6 @@
 //! The same walk collects the statement's variables: the names it reads
 //! (`free_variables`) and the names it writes (`bound_variables`). A name
 //! that is both lands bound, never free.
-//!
-//! The collection walk also lifts out any literal `--confirm=<key>` the
-//! statement's argv carries ([`StatementPlan::presented_keys`]) — the same
-//! spellings the rendering redacts. One predicate decides all three of lift,
-//! redact, and render, so they cannot disagree about what the statement
-//! presented.
-//!
-//! Redaction is the `--confirm=<key>` flag spelling and nothing else — that
-//! spelling carries a confirmation credential, and a credential must never
-//! ride into a stored plan. kaish ships no secret detector — a shell cannot
-//! define what a secret is — so an embedder that wants more redacts the
-//! plans it holds.
 
 use std::collections::BTreeSet;
 
@@ -77,17 +65,10 @@ pub const KAISH_BUILD_DATE: &str = match option_env!("KAISH_BUILD_DATE") {
     None => "unknown",
 };
 
-/// One statement's plan, plus the redemption credentials its argv presented.
+/// One statement's plan.
 pub struct StatementPlan {
-    /// What the statement was asked to run, with every credential redacted.
+    /// What the statement was asked to run.
     pub plan: Plan,
-    /// Every literal `--confirm=<key>` (or `confirm=<key>`) the statement's
-    /// argv carries, in source order.
-    ///
-    /// **Literal only.** A plan is unexpanded, so `--confirm=${key}` reads as
-    /// `${key}` here and nothing is lifted — what the plan cannot see, the
-    /// plan cannot leak, and nothing is stripped from the argv that executes.
-    pub presented_keys: Vec<String>,
 }
 
 /// One statement of a planned program: its [`Plan`] and where it sits among
@@ -120,10 +101,6 @@ pub struct PlannedStatement {
 /// plan a statement, look up what it depends on, and decide with the values
 /// in hand.
 ///
-/// Every literal `--confirm=<key>` is redacted from the plans and **not
-/// returned**: the caller holds `source` and can read its own credentials;
-/// this function adds no second copy.
-///
 /// # Errors
 ///
 /// Returns the parse errors when `source` does not parse. Each error's
@@ -149,9 +126,7 @@ pub fn plan_program(
         .collect())
 }
 
-/// Build the plan for one top-level statement. Every value is
-/// [`PlannedValue::Plain`] except a presented confirm key, which the kernel
-/// redacts unconditionally.
+/// Build the plan for one top-level statement.
 pub(crate) fn plan_statement(stmt: &Stmt) -> StatementPlan {
     let collected = collect(stmt);
     // Free = read and never written in-statement. A name that is both read
@@ -171,48 +146,7 @@ pub(crate) fn plan_statement(stmt: &Stmt) -> StatementPlan {
             collected.commands,
         )
         .with_variables(free, bound),
-        presented_keys: collected.keys,
     }
-}
-
-/// Remove every `--confirm=` (or `confirm=`) token from rendered plan text,
-/// whatever it carries.
-///
-/// An embedder computing a content identity over rendered text (see
-/// `PlanDigest` in kaish-types) wants the identity to cover the operation,
-/// not any credential presented with it — `rm x` and
-/// `rm --confirm=<confirm-key> x` should digest the same.
-///
-/// Unlike [`redact_keys`], this does not need to know the key: it removes the
-/// whole token whether it carries a literal credential, the `<confirm-key>`
-/// marker a rendered plan shows, or an unexpanded `${key}` the plan could not
-/// lift.
-pub fn strip_confirm_tokens(rendered: &str) -> String {
-    rendered
-        .split_whitespace()
-        .filter(|word| {
-            !word.starts_with(&format!("--{CONFIRM_KEY}=")) && !word.starts_with(&format!("{CONFIRM_KEY}="))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Remove every one of `keys` from captured source text — for an embedder
-/// storing source alongside plans, so the stored text never carries a
-/// credential. The whole `--confirm=<key>` token goes, not just its value,
-/// so re-running the stored text cannot re-present a spent key.
-pub fn redact_keys(source: &str, keys: &[String]) -> String {
-    let mut out = source.to_string();
-    for key in keys {
-        for spelling in [format!("--{CONFIRM_KEY}={key}"), format!("{CONFIRM_KEY}={key}")] {
-            // Take the separating space with the token so the surrounding
-            // words stay one space apart; fall back to the bare token for a
-            // spelling that opens its line.
-            out = out.replace(&format!(" {spelling}"), "");
-            out = out.replace(&spelling, "");
-        }
-    }
-    out
 }
 
 /// Cut a rendering to [`PLAN_RENDER_LIMIT`] bytes, naming the cut.
@@ -239,12 +173,19 @@ fn truncate_rendering(rendered: String) -> String {
 
 // ───────────────────────── Command collection ─────────────────────────
 
-/// What one collection walk produces: the statement's commands, the
-/// credentials their argv presented, and its variable analysis.
+/// What one collection walk produces: the statement's commands and its
+/// variable analysis.
+///
+/// Every field is owned, not borrowed — a `$(...)` reached through `$((…))`
+/// is parsed from a temporary `Vec<Stmt>` that lives only for the duration
+/// of `read_arithmetic`, so nothing this struct holds can borrow from it.
+/// That is what lets [`Collected::read_arith_expansion`]'s `CommandSubst` arm
+/// walk straight into the SAME collector the rest of the statement uses,
+/// instead of building a throwaway one and keeping only its `reads` — the
+/// bug this type exists to rule out by construction.
 #[derive(Default)]
-struct Collected<'a> {
+struct Collected {
     commands: Vec<PlannedCommand>,
-    keys: Vec<String>,
     /// Every variable name the statement reads, anywhere — `${x}`, a
     /// `"${x}"` interpolation, `${#x}`, a `[$k]` dynamic subscript, an
     /// identifier inside `$((…))`. kaish has no `eval` and no indirect
@@ -261,17 +202,20 @@ struct Collected<'a> {
     /// Kept here rather than re-derived by a second walk. An address that
     /// resolves to a *different* body than the one it published is the worst
     /// failure this surface can have, and two traversals that have to agree
-    /// is how you get one — this walk descends into redirect targets and
-    /// interpolated strings, and a resolver written to match would have to
-    /// remember to. `heredoc_targets[i]` is the target of the heredoc
-    /// published with `index == i`, by construction.
-    heredoc_targets: Vec<&'a Expr>,
+    /// is how you get one — this walk descends into redirect targets,
+    /// interpolated strings, AND `$((…))` command substitutions, and a
+    /// resolver written to match would have to remember to. `heredoc_targets[i]`
+    /// is the target of the heredoc published with `index == i`, by
+    /// construction. Cloned at the push site rather than borrowed, so a
+    /// heredoc reached only through arithmetic's temporary parse tree still
+    /// lands here.
+    heredoc_targets: Vec<Expr>,
 }
 
-impl<'a> Collected<'a> {
+impl Collected {
     /// Publish every heredoc one command declares, numbering them in the
     /// order this walk reaches them.
-    fn take_heredocs(&mut self, cmd: &'a Command) -> Vec<PlannedHeredoc> {
+    fn take_heredocs(&mut self, cmd: &Command) -> Vec<PlannedHeredoc> {
         cmd.redirects
             .iter()
             .filter_map(|r| match &r.kind {
@@ -280,7 +224,7 @@ impl<'a> Collected<'a> {
             })
             .map(|(meta, target)| {
                 let index = self.heredoc_targets.len();
-                self.heredoc_targets.push(target);
+                self.heredoc_targets.push(target.clone());
                 // The body's own reads, not the statement's: an embedder
                 // asking what plugs into *this* program wants the answer
                 // scoped to it. A literal body reads nothing whatever it
@@ -338,10 +282,10 @@ impl<'a> Collected<'a> {
     /// `Ref` name — bare or `$`-prefixed, a bare subscript's root AND its
     /// index expression (`xs[i]` reads both `xs` and `i` — Decision B, the
     /// index is itself arithmetic) — plus a `${...}`/`base#$var`/nested
-    /// `$((...))` operand's own reads, and a `$(...)` operand's reads (via
-    /// `collect_block`, the same walker a bare `$(...)` already goes
-    /// through, so the two agree by construction rather than by two
-    /// implementations staying in sync by hand). `$?`/`$$`/a positional
+    /// `$((...))` operand's own reads, and a `$(...)` operand's commands,
+    /// binds, and heredocs (via `collect_block`, the same walker a
+    /// bare `$(...)` already goes through, so the two agree by construction
+    /// rather than by two implementations staying in sync by hand). `$?`/`$$`/a positional
     /// parameter are not session variables, matching every other reader of
     /// them in this file. Parses the text with the real arithmetic parser
     /// rather than scanning for identifier-shaped substrings — the old
@@ -350,39 +294,43 @@ impl<'a> Collected<'a> {
     /// arithmetic to runtime — an unparsable body is syntactically valid
     /// shell — so a syntax error here reads no variables rather than
     /// failing the plan; the statement itself still fails loudly when it
-    /// runs.
-    fn read_arithmetic(&mut self, expr: &str) {
+    /// runs. `background` is the enclosing pipeline's `&`, threaded through
+    /// so a `$(...)` reached this way plans backgrounded exactly like a
+    /// bare `$(...)` does.
+    fn read_arithmetic(&mut self, expr: &str, background: bool) {
         if let Ok(parsed) = crate::arithmetic::parse(expr) {
-            self.read_arith_expr(&parsed);
+            self.read_arith_expr(&parsed, background);
         }
     }
 
-    fn read_arith_expr(&mut self, expr: &crate::arithmetic::ArithExpr) {
+    fn read_arith_expr(&mut self, expr: &crate::arithmetic::ArithExpr, background: bool) {
         use crate::arithmetic::ArithExpr;
         match expr {
             ArithExpr::Int(_) => {}
-            ArithExpr::Expansion(e) => self.read_arith_expansion(e),
+            ArithExpr::Expansion(e) => self.read_arith_expansion(e, background),
             ArithExpr::Subscript { root, indices } => {
                 self.reads.insert(root.clone());
                 for index in indices {
-                    self.read_arith_expr(index);
+                    self.read_arith_expr(index, background);
                 }
             }
-            ArithExpr::BasedExpansion { expansion, .. } => self.read_arith_expansion(expansion),
-            ArithExpr::Unary { operand, .. } => self.read_arith_expr(operand),
+            ArithExpr::BasedExpansion { expansion, .. } => {
+                self.read_arith_expansion(expansion, background)
+            }
+            ArithExpr::Unary { operand, .. } => self.read_arith_expr(operand, background),
             ArithExpr::Binary { left, right, .. } => {
-                self.read_arith_expr(left);
-                self.read_arith_expr(right);
+                self.read_arith_expr(left, background);
+                self.read_arith_expr(right, background);
             }
             ArithExpr::Ternary { cond, then_branch, else_branch } => {
-                self.read_arith_expr(cond);
-                self.read_arith_expr(then_branch);
-                self.read_arith_expr(else_branch);
+                self.read_arith_expr(cond, background);
+                self.read_arith_expr(then_branch, background);
+                self.read_arith_expr(else_branch, background);
             }
         }
     }
 
-    fn read_arith_expansion(&mut self, e: &crate::arithmetic::Expansion) {
+    fn read_arith_expansion(&mut self, e: &crate::arithmetic::Expansion, background: bool) {
         use crate::arithmetic::Expansion;
         match e {
             // A bare `$1` is a positional parameter, not a session
@@ -401,16 +349,18 @@ impl<'a> Collected<'a> {
                 let raw = format!("${{{root}{brackets}}}");
                 self.read_path(&crate::parser::parse_varpath(&raw));
                 if let Ok(parsed) = crate::arithmetic::parse(default) {
-                    self.read_arith_expr(&parsed);
+                    self.read_arith_expr(&parsed, background);
                 }
             }
             Expansion::LastExitCode | Expansion::CurrentPid => {}
-            Expansion::CommandSubst(stmts) => {
-                let mut inner = Collected::default();
-                collect_block(stmts, false, &mut inner);
-                self.reads.extend(inner.reads);
-            }
-            Expansion::Nested(inner) => self.read_arith_expr(inner),
+            // Walk straight into `self` — commands, binds, and
+            // heredocs all land in the one flat walk, not just `reads`. A
+            // `$(...)` inside `$((…))` is a command this statement runs,
+            // same as a bare `$(...)` in an argument. `background` is the
+            // enclosing pipeline's `&`, threaded from the caller rather
+            // than hardcoded, so it plans the same as a bare `$(...)`.
+            Expansion::CommandSubst(stmts) => collect_block(stmts, background, self),
+            Expansion::Nested(inner) => self.read_arith_expr(inner, background),
         }
     }
 }
@@ -421,7 +371,7 @@ impl<'a> Collected<'a> {
 /// A `for` body's commands, an `if` condition's command, and a `$(…)`
 /// substitution's commands are all in here: each is a command this statement
 /// would run, so each is a `cmd` resource a standing grant has to cover.
-fn collect<'a>(stmt: &'a Stmt) -> Collected<'a> {
+fn collect(stmt: &Stmt) -> Collected {
     let mut out = Collected::default();
     collect_stmt(stmt, false, &mut out);
     out
@@ -433,7 +383,7 @@ fn collect<'a>(stmt: &'a Stmt) -> Collected<'a> {
 /// This is the **same walk** that numbers them, not a second one that agrees
 /// with it — `heredoc_targets(stmt)[i]` is the target of the heredoc the plan
 /// published with `index == i`, by construction rather than by test.
-pub(crate) fn heredoc_targets(stmt: &Stmt) -> Vec<&Expr> {
+pub(crate) fn heredoc_targets(stmt: &Stmt) -> Vec<Expr> {
     collect(stmt).heredoc_targets
 }
 
@@ -442,7 +392,7 @@ pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
     collect(stmt).commands
 }
 
-fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
+fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
     match stmt {
         Stmt::Assignment(a) => {
             out.bind_path(&a.path);
@@ -502,10 +452,10 @@ fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
             collect_block(&def.body, background, out)
         }
         Stmt::Test(t) => collect_test(t, background, out),
-        // Mirrors `Expr::Arithmetic`: free-variable reads only, same as a
-        // bare `$(( ))` — a `$(...)` operand inside is not walked into
-        // `PlannedCommand`s (a narrower surface than `Test`'s).
-        Stmt::Arith(expr) => out.read_arithmetic(expr),
+        // Same walk as `Expr::Arithmetic`: reads its variables, and any
+        // `$(...)` operand inside walks into `PlannedCommand`s, binds,
+        // and heredocs too — `(( $(cmd) ))` plans `cmd`.
+        Stmt::Arith(expr) => out.read_arithmetic(expr, background),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             collect_stmt(left, background, out);
             collect_stmt(right, background, out);
@@ -521,13 +471,13 @@ fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
     }
 }
 
-fn collect_block<'a>(stmts: &'a [Stmt], background: bool, out: &mut Collected<'a>) {
+fn collect_block(stmts: &[Stmt], background: bool, out: &mut Collected) {
     for stmt in stmts {
         collect_stmt(stmt, background, out);
     }
 }
 
-fn collect_command<'a>(cmd: &'a Command, background: bool, out: &mut Collected<'a>) {
+fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     let args: Vec<PlannedValue> = cmd.args.iter().map(|arg| plan_arg(arg).1).collect();
     let redirects = cmd
         .redirects
@@ -539,14 +489,6 @@ fn collect_command<'a>(cmd: &'a Command, background: bool, out: &mut Collected<'
         PlannedCommand::new(cmd.name.clone(), args, redirects, background)
             .with_heredocs(heredocs),
     );
-    // Lift any literal credential out of the argv on the same pass that
-    // redacts it from the rendering — one walk, one truth about what this
-    // statement presented.
-    for arg in &cmd.args {
-        if let Some(key) = presented_key(arg) {
-            out.keys.push(key);
-        }
-    }
     // Substitutions nested inside this command's own arguments and redirect
     // targets are commands too, and they run before it does.
     for arg in &cmd.args {
@@ -563,7 +505,7 @@ fn collect_command<'a>(cmd: &'a Command, background: bool, out: &mut Collected<'
     }
 }
 
-fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
+fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
     match expr {
         Expr::Command(cmd) => collect_command(cmd, background, out),
         Expr::CommandSubst(stmts) => collect_block(stmts, background, out),
@@ -600,8 +542,8 @@ fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
             }
         }
         Expr::VarRef(path) | Expr::VarLength(path) => out.read_path(path),
-        Expr::Arithmetic(e) => out.read_arithmetic(e),
-        Expr::Arith(e) => out.read_arithmetic(e),
+        Expr::Arithmetic(e) => out.read_arithmetic(e, background),
+        Expr::Arith(e) => out.read_arithmetic(e, background),
         // Special forms ($1, $@, $#, $?, $$) are not session variables; an
         // embedder cannot peek them with `get_var`, so they are not listed.
         Expr::Literal(_)
@@ -615,13 +557,13 @@ fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
     }
 }
 
-fn collect_parts<'a>(parts: &'a [StringPart], background: bool, out: &mut Collected<'a>) {
+fn collect_parts(parts: &[StringPart], background: bool, out: &mut Collected) {
     for part in parts {
         collect_part(part, background, out);
     }
 }
 
-fn collect_part<'a>(part: &'a StringPart, background: bool, out: &mut Collected<'a>) {
+fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
     match part {
         StringPart::CommandSubst(stmts) => collect_block(stmts, background, out),
         StringPart::VarWithDefault { path, default } => {
@@ -629,7 +571,7 @@ fn collect_part<'a>(part: &'a StringPart, background: bool, out: &mut Collected<
             collect_parts(default, background, out)
         }
         StringPart::Var(path) | StringPart::VarLength(path) => out.read_path(path),
-        StringPart::Arithmetic(e) => out.read_arithmetic(e),
+        StringPart::Arithmetic(e) => out.read_arithmetic(e, background),
         // See the identical special-forms note in `collect_expr`.
         StringPart::Literal(_)
         | StringPart::Positional(_)
@@ -640,7 +582,7 @@ fn collect_part<'a>(part: &'a StringPart, background: bool, out: &mut Collected<
     }
 }
 
-fn collect_test<'a>(test: &'a TestExpr, background: bool, out: &mut Collected<'a>) {
+fn collect_test(test: &TestExpr, background: bool, out: &mut Collected) {
     match test {
         TestExpr::FileTest { path, .. } => collect_expr(path, background, out),
         TestExpr::StringTest { value, .. } => collect_expr(value, background, out),
@@ -728,93 +670,22 @@ pub(crate) fn render_command(cmd: &Command) -> String {
     parts.join(" ")
 }
 
-/// The one argument whose value never reaches a plan unredacted:
-/// `--confirm=<token>` carries a confirmation credential, and a plan is
-/// built to be stored and shown. This is kaish's own, unconditional
-/// redaction — possible exactly because the flag spelling is kaish's
-/// convention and needs no secret detector to recognize.
-const CONFIRM_KEY: &str = "confirm";
-
-/// The [`PlannedValue::Redacted`] `kind` the kernel's confirm-key redaction
-/// marks a value with, so an auditor reading `Plan::commands` can tell the
-/// kernel's own redaction apart from an embedder's.
-const CONFIRM_KEY_KIND: &str = "confirm-key";
-
-/// The literal credential this argument presents, if it is a `confirm`
-/// argument carrying one.
-///
-/// A non-literal value (`--confirm=${key}`, `--confirm=$(cat key)`) yields
-/// `None`: the plan is unexpanded, so the value is not knowable here. That
-/// costs nothing — what the plan cannot see, it cannot leak, and the argv
-/// that executes is untouched.
-fn presented_key(arg: &Arg) -> Option<String> {
-    let value = match arg {
-        Arg::Named { key, value } | Arg::WordAssign { key, value } if key == CONFIRM_KEY => value,
-        _ => return None,
-    };
-    match value {
-        Expr::Literal(Value::String(s)) => Some(s.clone()),
-        _ => None,
-    }
-}
-
 /// Plan one argument: its flat text (for [`render_command`]) and its
 /// [`PlannedValue`] (for [`PlannedCommand::args`]), derived together so the
 /// two representations cannot disagree about what this argument was.
-///
-/// A `confirm` argument carrying a *literal* is a credential and is redacted
-/// unconditionally; every other value's flag/key prefix (if any) stays
-/// visible even when its value is redacted, so the plan still shows *that* a
-/// value was presented at that flag, never *what*.
 fn plan_arg(arg: &Arg) -> (String, PlannedValue) {
-    if presented_key(arg).is_some() {
-        let value = PlannedValue::redacted(CONFIRM_KEY_KIND, None);
-        let text = match arg {
-            // `dd` takes its operands as bare `key=value`, so `confirm=<key>`
-            // is a second spelling of the same credential.
-            Arg::WordAssign { key, .. } => format!("{key}={}", value.display()),
-            _ => format!("--{CONFIRM_KEY}={}", value.display()),
-        };
-        return (text, value);
-    }
-    let (text, value) = match arg {
-        Arg::Positional(e) => {
-            let value = PlannedValue::Plain(render_expr(e));
-            (value.display(), value)
-        }
-        Arg::Named { key, value: e } => {
-            let value = PlannedValue::Plain(render_expr(e));
-            (format!("--{key}={}", value.display()), value)
-        }
-        Arg::WordAssign { key, value: e } => {
-            let value = PlannedValue::Plain(render_expr(e));
-            (format!("{key}={}", value.display()), value)
-        }
-        Arg::ShortFlag(f) => {
-            let text = format!("-{f}");
-            (text.clone(), PlannedValue::Plain(text))
-        }
-        Arg::LongFlag(f) => {
-            let text = format!("--{f}");
-            (text.clone(), PlannedValue::Plain(text))
-        }
-        Arg::DoubleDash => ("--".to_string(), PlannedValue::Plain("--".to_string())),
+    let text = match arg {
+        Arg::Positional(e) => render_expr(e),
+        Arg::Named { key, value } => format!("--{key}={}", render_expr(value)),
+        Arg::WordAssign { key, value } => format!("{key}={}", render_expr(value)),
+        Arg::ShortFlag(f) => format!("-{f}"),
+        Arg::LongFlag(f) => format!("--{f}"),
+        Arg::DoubleDash => "--".to_string(),
     };
-    // A redacted `--key=value` loses its `key=` prefix in the *structured*
-    // value (`PlannedValue::Redacted` has nowhere to put one) but keeps it
-    // in the flat text above; a plain value keeps the full composed text in
-    // both, so `PlannedCommand::args` round-trips into `render_command`'s
-    // output unless something was actually judged secret.
-    let structured = if value.is_redacted() {
-        value
-    } else {
-        PlannedValue::Plain(text.clone())
-    };
-    (text, structured)
+    (text.clone(), PlannedValue::Plain(text))
 }
 
-/// Plan one redirect's target: rendered unexpanded, always plain — a
-/// redirect target is never the kernel's confirm key.
+/// Plan one redirect's target: rendered unexpanded, always plain.
 ///
 /// A heredoc's target is its delimiter word, which is what stands after `<<`
 /// in the source. Rendering the *body* here would repeat what
@@ -1272,64 +1143,43 @@ mod tests {
         assert_eq!(plan.rendered, "echo hi");
     }
 
-    // ── The presented credential (spec §A.2, §C.6) ──
+    // ── `--confirm=` is an ordinary argument, not a credential ──
+    //
+    // kaish removed the confirmation latch in 0.14.0; no tool parses
+    // `--confirm=<token>` any more. The plan-side lift/redaction that used
+    // to treat it as a secret protected a credential that no longer exists,
+    // and is gone too — `confirm=` now renders exactly like any other named
+    // argument, direct or reached through `$(( ))`.
 
     #[test]
-    fn a_literal_key_is_lifted_and_redacted() {
-        let planned = planned_of("rm --confirm=deadbeef target.txt");
-        assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
-        assert_eq!(planned.plan.rendered, "rm --confirm=<confirm-key> target.txt");
+    fn confirm_renders_as_an_ordinary_argument() {
+        let plan = plan_of("rm --confirm=deadbeef target.txt");
+        assert_eq!(plan.rendered, "rm --confirm=deadbeef target.txt");
         assert_eq!(
-            planned.plan.commands[0].args,
+            plan.commands[0].args,
             vec![
-                PlannedValue::redacted("confirm-key", None),
+                PlannedValue::Plain("--confirm=deadbeef".to_string()),
                 PlannedValue::Plain("target.txt".to_string()),
             ]
         );
     }
 
     #[test]
-    fn the_bare_word_assign_spelling_is_lifted_too() {
-        // `dd` takes its operands as `key=value`, so this is the same
-        // credential wearing the other spelling.
-        let planned = planned_of("dd if=a of=b confirm=deadbeef");
-        assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
-        assert!(
-            planned.plan.rendered.ends_with("confirm=<confirm-key>"),
-            "got: {}",
-            planned.plan.rendered
-        );
-    }
-
-    #[test]
-    fn a_variable_carried_key_is_neither_lifted_nor_redacted() {
-        // Nothing to lift and nothing to leak: an unexpanded plan never held
-        // the value, so it renders as written like any other variable.
-        let planned = planned_of("rm --confirm=${key} target.txt");
-        assert!(planned.presented_keys.is_empty());
-        assert_eq!(planned.plan.rendered, "rm --confirm=${key} target.txt");
-    }
-
-    #[test]
-    fn a_key_inside_a_loop_body_is_still_lifted() {
-        let planned = planned_of("for f in a b; do rm --confirm=deadbeef $f; done");
-        assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
-    }
-
-    #[test]
-    fn redaction_takes_the_whole_token_and_leaves_one_space() {
-        let source = "rm --confirm=deadbeef target.txt";
+    fn a_confirm_token_renders_the_same_direct_and_through_arithmetic() {
+        // A cross-model review found the arithmetic form of a `$(...)`
+        // rendering a confirm token in cleartext while the direct form
+        // redacted it — the two disagreeing was the leak. With the
+        // redaction mechanism gone, both forms must render identically,
+        // in cleartext, since there is nothing left to redact.
+        let direct = plan_of("echo $(rm --confirm=secret x)");
+        let via_arith = plan_of("echo $((1 + $(rm --confirm=secret x)))");
+        assert_eq!(direct.rendered, "echo $(rm --confirm=secret x)");
         assert_eq!(
-            redact_keys(source, &["deadbeef".to_string()]),
-            "rm target.txt"
+            via_arith.rendered,
+            "echo $((1 + $(rm --confirm=secret x)))"
         );
-    }
-
-    #[test]
-    fn redaction_leaves_a_source_that_never_presented_a_key_alone() {
-        let source = "rm target.txt";
-        assert_eq!(redact_keys(source, &[]), source);
-        assert_eq!(redact_keys(source, &["deadbeef".to_string()]), source);
+        assert!(direct.rendered.contains("--confirm=secret"));
+        assert!(via_arith.rendered.contains("--confirm=secret"));
     }
 
     // ── Variable analysis ──
@@ -1469,24 +1319,8 @@ mod tests {
     }
 
     #[test]
-    fn plan_program_redacts_a_presented_key_and_returns_no_copy_of_it() {
-        // `PlannedStatement` has no key field by design — the caller holds
-        // the source. What must hold is that the plan itself is redacted.
-        let plans = plan_program("rm --confirm=deadbeef x.txt").expect("parses");
-        assert_eq!(plans[0].plan.rendered, "rm --confirm=<confirm-key> x.txt");
-    }
-
-    #[test]
     fn plan_program_returns_the_parse_errors_for_a_broken_source() {
         let errors = plan_program("echo 'unclosed").expect_err("must not parse");
         assert!(!errors.is_empty());
-    }
-
-    #[test]
-    fn redaction_covers_both_spellings_across_a_multi_statement_source() {
-        let source = "echo one\ndd if=a confirm=deadbeef\nrm --confirm=deadbeef x";
-        let redacted = redact_keys(source, &["deadbeef".to_string()]);
-        assert!(!redacted.contains("deadbeef"), "got: {redacted}");
-        assert_eq!(redacted, "echo one\ndd if=a\nrm x");
     }
 }
