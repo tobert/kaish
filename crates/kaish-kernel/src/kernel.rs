@@ -3048,17 +3048,21 @@ impl Kernel {
                 }
             }
             Stmt::Test(test_expr) => {
-                let is_true = self.eval_test_async(test_expr).await?;
-                let result = if is_true {
-                    ExecResult::success("")
-                } else {
-                    ExecResult::failure(1, "")
+                // A type error is a RESULT here, not an escape: exit 2 with
+                // the message, matching `(( ))` below and the `test` builtin.
+                // Escaping as `Err` collapsed the code to 1, which made a bad
+                // operand indistinguishable from a false comparison.
+                let result = match self.eval_test_async(test_expr).await {
+                    Ok(true) => ExecResult::success(""),
+                    Ok(false) => ExecResult::failure(1, ""),
+                    Err(e) => ExecResult::failure(2, format!("{e:#}")),
                 };
                 // A bare test writes `$?` and honors `set -e` like any command
                 // (bash: `[[ 1 = 2 ]]; echo $?` → 1). `&&`/`||` operands stay
                 // safe: the chain arms suppress errexit around their left side,
                 // and `if`/`while` conditions evaluate as expressions, never
-                // through this statement arm.
+                // through this statement arm — so a fault in a CONDITION still
+                // aborts, where it has no exit-code channel to report through.
                 self.update_last_result(&result).await;
                 if !result.ok() {
                     let scope = self.scope.read().await;
@@ -3073,11 +3077,10 @@ impl Kernel {
                 }
                 Ok(ControlFlow::ok(result))
             }
-            // `(( expr ))` — the sibling of `Test` above, but an evaluation
-            // fault (division by zero, an unset variable) does not abort
-            // the statement list the way a bad `[[ ]]` comparison does: it
-            // is exit 2 with the arithmetic error as the message, same as
-            // any other command that ran and failed.
+            // `(( expr ))` — the sibling of `Test` above, and it reports an
+            // evaluation fault (division by zero, an unset variable) the same
+            // way: exit 2 with the error as the message, like any other
+            // command that ran and failed.
             Stmt::Arith(expr_str) => {
                 let result = match self.eval_arithmetic_async(expr_str).await {
                     Ok(n) if n != 0 => ExecResult::success(""),
