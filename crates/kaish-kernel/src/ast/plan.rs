@@ -241,8 +241,16 @@ fn truncate_rendering(rendered: String) -> String {
 
 /// What one collection walk produces: the statement's commands, the
 /// credentials their argv presented, and its variable analysis.
+///
+/// Every field is owned, not borrowed — a `$(...)` reached through `$((…))`
+/// is parsed from a temporary `Vec<Stmt>` that lives only for the duration
+/// of `read_arithmetic`, so nothing this struct holds can borrow from it.
+/// That is what lets [`Collected::read_arith_expansion`]'s `CommandSubst` arm
+/// walk straight into the SAME collector the rest of the statement uses,
+/// instead of building a throwaway one and keeping only its `reads` — the
+/// bug this type exists to rule out by construction.
 #[derive(Default)]
-struct Collected<'a> {
+struct Collected {
     commands: Vec<PlannedCommand>,
     keys: Vec<String>,
     /// Every variable name the statement reads, anywhere — `${x}`, a
@@ -261,17 +269,20 @@ struct Collected<'a> {
     /// Kept here rather than re-derived by a second walk. An address that
     /// resolves to a *different* body than the one it published is the worst
     /// failure this surface can have, and two traversals that have to agree
-    /// is how you get one — this walk descends into redirect targets and
-    /// interpolated strings, and a resolver written to match would have to
-    /// remember to. `heredoc_targets[i]` is the target of the heredoc
-    /// published with `index == i`, by construction.
-    heredoc_targets: Vec<&'a Expr>,
+    /// is how you get one — this walk descends into redirect targets,
+    /// interpolated strings, AND `$((…))` command substitutions, and a
+    /// resolver written to match would have to remember to. `heredoc_targets[i]`
+    /// is the target of the heredoc published with `index == i`, by
+    /// construction. Cloned at the push site rather than borrowed, so a
+    /// heredoc reached only through arithmetic's temporary parse tree still
+    /// lands here.
+    heredoc_targets: Vec<Expr>,
 }
 
-impl<'a> Collected<'a> {
+impl Collected {
     /// Publish every heredoc one command declares, numbering them in the
     /// order this walk reaches them.
-    fn take_heredocs(&mut self, cmd: &'a Command) -> Vec<PlannedHeredoc> {
+    fn take_heredocs(&mut self, cmd: &Command) -> Vec<PlannedHeredoc> {
         cmd.redirects
             .iter()
             .filter_map(|r| match &r.kind {
@@ -280,7 +291,7 @@ impl<'a> Collected<'a> {
             })
             .map(|(meta, target)| {
                 let index = self.heredoc_targets.len();
-                self.heredoc_targets.push(target);
+                self.heredoc_targets.push(target.clone());
                 // The body's own reads, not the statement's: an embedder
                 // asking what plugs into *this* program wants the answer
                 // scoped to it. A literal body reads nothing whatever it
@@ -405,11 +416,12 @@ impl<'a> Collected<'a> {
                 }
             }
             Expansion::LastExitCode | Expansion::CurrentPid => {}
-            Expansion::CommandSubst(stmts) => {
-                let mut inner = Collected::default();
-                collect_block(stmts, false, &mut inner);
-                self.reads.extend(inner.reads);
-            }
+            // Walk straight into `self` — commands, keys, binds, and
+            // heredocs all land in the one flat walk, not just `reads`. A
+            // `$(...)` inside `$((…))` is a command this statement runs,
+            // same as a bare `$(...)` in an argument; dropping everything
+            // but its reads is the bug DEFECT 1 exists to fix.
+            Expansion::CommandSubst(stmts) => collect_block(stmts, false, self),
             Expansion::Nested(inner) => self.read_arith_expr(inner),
         }
     }
@@ -421,7 +433,7 @@ impl<'a> Collected<'a> {
 /// A `for` body's commands, an `if` condition's command, and a `$(…)`
 /// substitution's commands are all in here: each is a command this statement
 /// would run, so each is a `cmd` resource a standing grant has to cover.
-fn collect<'a>(stmt: &'a Stmt) -> Collected<'a> {
+fn collect(stmt: &Stmt) -> Collected {
     let mut out = Collected::default();
     collect_stmt(stmt, false, &mut out);
     out
@@ -433,7 +445,7 @@ fn collect<'a>(stmt: &'a Stmt) -> Collected<'a> {
 /// This is the **same walk** that numbers them, not a second one that agrees
 /// with it — `heredoc_targets(stmt)[i]` is the target of the heredoc the plan
 /// published with `index == i`, by construction rather than by test.
-pub(crate) fn heredoc_targets(stmt: &Stmt) -> Vec<&Expr> {
+pub(crate) fn heredoc_targets(stmt: &Stmt) -> Vec<Expr> {
     collect(stmt).heredoc_targets
 }
 
@@ -442,7 +454,7 @@ pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
     collect(stmt).commands
 }
 
-fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
+fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
     match stmt {
         Stmt::Assignment(a) => {
             out.bind_path(&a.path);
@@ -521,13 +533,13 @@ fn collect_stmt<'a>(stmt: &'a Stmt, background: bool, out: &mut Collected<'a>) {
     }
 }
 
-fn collect_block<'a>(stmts: &'a [Stmt], background: bool, out: &mut Collected<'a>) {
+fn collect_block(stmts: &[Stmt], background: bool, out: &mut Collected) {
     for stmt in stmts {
         collect_stmt(stmt, background, out);
     }
 }
 
-fn collect_command<'a>(cmd: &'a Command, background: bool, out: &mut Collected<'a>) {
+fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     let args: Vec<PlannedValue> = cmd.args.iter().map(|arg| plan_arg(arg).1).collect();
     let redirects = cmd
         .redirects
@@ -563,7 +575,7 @@ fn collect_command<'a>(cmd: &'a Command, background: bool, out: &mut Collected<'
     }
 }
 
-fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
+fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
     match expr {
         Expr::Command(cmd) => collect_command(cmd, background, out),
         Expr::CommandSubst(stmts) => collect_block(stmts, background, out),
@@ -615,13 +627,13 @@ fn collect_expr<'a>(expr: &'a Expr, background: bool, out: &mut Collected<'a>) {
     }
 }
 
-fn collect_parts<'a>(parts: &'a [StringPart], background: bool, out: &mut Collected<'a>) {
+fn collect_parts(parts: &[StringPart], background: bool, out: &mut Collected) {
     for part in parts {
         collect_part(part, background, out);
     }
 }
 
-fn collect_part<'a>(part: &'a StringPart, background: bool, out: &mut Collected<'a>) {
+fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
     match part {
         StringPart::CommandSubst(stmts) => collect_block(stmts, background, out),
         StringPart::VarWithDefault { path, default } => {
@@ -640,7 +652,7 @@ fn collect_part<'a>(part: &'a StringPart, background: bool, out: &mut Collected<
     }
 }
 
-fn collect_test<'a>(test: &'a TestExpr, background: bool, out: &mut Collected<'a>) {
+fn collect_test(test: &TestExpr, background: bool, out: &mut Collected) {
     match test {
         TestExpr::FileTest { path, .. } => collect_expr(path, background, out),
         TestExpr::StringTest { value, .. } => collect_expr(value, background, out),

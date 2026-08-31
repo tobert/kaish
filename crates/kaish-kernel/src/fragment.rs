@@ -121,7 +121,7 @@ pub fn expand_fragment(
     // plan published. A second walk that had to agree is how an address comes
     // to name a different body than the one it was read from.
     let targets = heredoc_targets(stmt);
-    let target = *targets.get(addr.heredoc).ok_or(FragmentError::NoSuchHeredoc {
+    let target = targets.get(addr.heredoc).ok_or(FragmentError::NoSuchHeredoc {
         asked: addr.heredoc,
         heredocs: targets.len(),
     })?;
