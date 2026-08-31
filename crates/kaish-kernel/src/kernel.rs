@@ -5001,7 +5001,22 @@ impl Kernel {
                 ArithExpr::BasedExpansion { base, expansion } => {
                     let text = self.eval_arith_expansion_text_async(expansion).await?;
                     let (label, verb) = crate::arithmetic::expansion_label(expansion);
-                    crate::arithmetic::based_value(*base, &text, &label, verb)
+                    crate::arithmetic::based_value(*base, &text, &label, verb, false)
+                        .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
+                }
+                // `-base#$expansion`: fold the sign into the range check
+                // (see `arithmetic::based_value`'s doc comment) instead of
+                // evaluating positive then negating, which can never reach
+                // i64::MIN.
+                ArithExpr::Unary { op: crate::arithmetic::UnOp::Neg, operand }
+                    if matches!(operand.as_ref(), ArithExpr::BasedExpansion { .. }) =>
+                {
+                    let ArithExpr::BasedExpansion { base, expansion } = operand.as_ref() else {
+                        unreachable!("guarded by the match arm's pattern")
+                    };
+                    let text = self.eval_arith_expansion_text_async(expansion).await?;
+                    let (label, verb) = crate::arithmetic::expansion_label(expansion);
+                    crate::arithmetic::based_value(*base, &text, &label, verb, true)
                         .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
                 }
                 ArithExpr::Unary { op, operand } => {
