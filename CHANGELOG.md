@@ -80,6 +80,12 @@ breaking entries are marked **BREAKING**.
   quoted or escaped parenthesis, a `#` comment, and a heredoc body no longer
   close the arithmetic scan early. `<<` inside a bare `(( ))` stays the shift
   operator.
+- **A diagnostic is the first line again** — a validation failure or a runtime
+  fault no longer arrives under `Error: execution failed` / `Caused by:`. The
+  generic wrapper named the phase and nothing else, so it displaced the line
+  that says what to fix, including the validator's suggested rewrite. A
+  context that carries information, like `Failed to read script: <path>`,
+  stays.
 - **A `[[ ]]` type error is exit 2, not a false reading** — `[[ $x -eq 1 ]]`
   with a non-numeric `$x` now reports code 2 with the message, matching
   `(( ))` and `test`. It was leaving `Kernel::execute` as an error, which

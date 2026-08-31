@@ -106,7 +106,12 @@ fn execute_noninteractive(
         )),
         None => rt.block_on(client.execute_with_options_streaming(source, opts, &mut on_output)),
     };
-    result.context("execution failed")
+    // No generic context here. `execution failed` named the phase and
+    // nothing else, and as the outermost context it became the headline —
+    // displacing the one line that says what to fix. The kernel's own
+    // diagnostic leads instead; callers print it directly, the way a
+    // parse diagnostic is printed above.
+    result.map_err(anyhow::Error::from)
 }
 
 fn main() -> ExitCode {
@@ -391,7 +396,16 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish script.kai` traces across the boundary.
     let opts = kaish_repl::trace_options_from_env();
-    let result = execute_noninteractive(&rt, &client, &source, opts)?;
+    let result = match execute_noninteractive(&rt, &client, &source, opts) {
+        Ok(r) => r,
+        Err(e) => {
+            // Print the diagnostic itself, not an anyhow rendering of it:
+            // `main` would prefix `Error:` and split the chain under
+            // `Caused by:`, which is the noise this path exists to avoid.
+            eprintln!("{e:#}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
 
     if result.ok() {
         Ok(ExitCode::SUCCESS)
@@ -426,7 +440,14 @@ fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     // Forward any upstream W3C trace context (TRACEPARENT/TRACESTATE/BAGGAGE)
     // so e.g. `otel-cli exec -- kaish -c '…'` traces across the boundary.
     let opts = kaish_repl::trace_options_from_env();
-    let result = execute_noninteractive(&rt, &client, cmd, opts)?;
+    let result = match execute_noninteractive(&rt, &client, cmd, opts) {
+        Ok(r) => r,
+        Err(e) => {
+            // See `run_script`: the diagnostic is the message, printed as-is.
+            eprintln!("{e:#}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
 
     if result.ok() {
         Ok(ExitCode::SUCCESS)
