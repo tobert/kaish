@@ -17,7 +17,7 @@
 //! `&&`/`||`/`?:` never runs.
 
 use crate::ast::{Stmt, Value, VarPath};
-use crate::interpreter::{value_to_string, Scope};
+use crate::interpreter::{value_defaults_on_emptiness, value_to_string, PathError, Scope};
 use std::ops::Range;
 
 /// An error from tokenizing, parsing, or evaluating `$(( ))`. `message` is
@@ -50,7 +50,14 @@ const MAX_DEPTH: usize = 256;
 /// The decimal a leading-zero numeral was probably meant to be — `010`
 /// becomes `10`, `-007` becomes `-7`. `None` when the text is not one.
 ///
-/// The suggestion keeps the sign: `-007` is not fixed by writing `7`.
+/// Two callers, two shapes of `text`: `value_to_num` (`interpreter/eval.rs`)
+/// hands this a full resolved value, sign and all (`test $x -eq -7` with
+/// `x` holding `-007`) — for that caller, the sign in `text` IS the fix,
+/// and must survive the trim. `Tokenizer::lex_number` hands this only the
+/// unsigned digits (the tokenizer already split a source-level `-`/`+`
+/// into its own token before `007` was ever scanned) and prepends any sign
+/// itself, via `Tokenizer::leading_unary_sign` — for that caller this
+/// function's own sign handling is simply inert, never wrong.
 pub(crate) fn leading_zero_decimal(text: &str) -> Option<String> {
     if !crate::lexer::is_leading_zero_numeral(text) {
         return None;
@@ -231,7 +238,16 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn byte_pos(&self) -> usize {
-        self.chars.get(self.pos).map(|(b, _)| *b).unwrap_or(self.text.len())
+        self.byte_at(self.pos)
+    }
+
+    /// Byte offset for a CHAR index. `self.pos` (and every local `start`
+    /// derived from it) counts chars, not bytes — a multi-byte character
+    /// anywhere before the index makes the two diverge. Every span handed
+    /// to `ArithError::new` must go through this (or `byte_pos()` for the
+    /// current position), never a bare char index.
+    fn byte_at(&self, char_idx: usize) -> usize {
+        self.chars.get(char_idx).map(|(b, _)| *b).unwrap_or(self.text.len())
     }
 
     fn peek(&self) -> Option<char> {
@@ -278,10 +294,9 @@ impl<'a> Tokenizer<'a> {
         loop {
             self.skip_ws();
             let Some(c) = self.peek() else { break };
-            let start = self.pos;
             let start_byte = self.byte_pos();
             let kind = match c {
-                '0'..='9' => self.lex_number()?,
+                '0'..='9' => self.lex_number(&out)?,
                 '$' => self.lex_dollar()?,
                 c if c.is_ascii_alphabetic() || c == '_' => self.lex_ident(),
                 '(' => { self.advance(); TokKind::LParen }
@@ -328,7 +343,7 @@ impl<'a> Tokenizer<'a> {
                         if self.peek() == Some('<') {
                             return Err(ArithError::new(
                                 "`<<<` is a here-string, not an operator; write `<<` to shift",
-                                start..self.pos + 1,
+                                start_byte..self.byte_at(self.pos + 1),
                             ));
                         }
                         TokKind::Op(BinOp::Shl)
@@ -346,7 +361,7 @@ impl<'a> Tokenizer<'a> {
                         if self.peek() == Some('>') {
                             return Err(ArithError::new(
                                 "`>>>` is not an operator; write `>>`",
-                                start..self.pos + 1,
+                                start_byte..self.byte_at(self.pos + 1),
                             ));
                         }
                         TokKind::Op(BinOp::Shr)
@@ -405,13 +420,13 @@ impl<'a> Tokenizer<'a> {
                 ',' => {
                     return Err(ArithError::new(
                         "`,` is not an operator; one expression per `$(( ))`",
-                        start..self.pos + 1,
+                        start_byte..self.byte_at(self.pos + 1),
                     ));
                 }
                 other => {
                     return Err(ArithError::new(
                         format!("`{other}` cannot start a value"),
-                        start..self.pos + 1,
+                        start_byte..self.byte_at(self.pos + 1),
                     ));
                 }
             };
@@ -428,6 +443,40 @@ impl<'a> Tokenizer<'a> {
             Some(Tok { kind: TokKind::Ident(name), span }) => Some((name.clone(), span.start)),
             _ => None,
         }
+    }
+
+    /// The `+`/`-` immediately before the numeral about to be lexed, IF it
+    /// is acting as a unary sign on that numeral rather than a binary
+    /// operator between two operands (`5 - 007`'s `-` is binary; `-007`'s
+    /// is unary). `out.last()` is the candidate sign; the token before
+    /// that decides which — a `+`/`-` is unary except right after
+    /// something that can itself END an expression. Mirrors the
+    /// grammatical position `parse_unary`/`parse_additive` compute later,
+    /// without building a parser: `tokenize` has already refused by the
+    /// time a numeral like `007` would reach the parser at all, so the
+    /// sign has to be read back from the flat token stream here instead.
+    fn leading_unary_sign(out: &[Tok]) -> Option<char> {
+        let sign = match out.last() {
+            Some(Tok { kind: TokKind::Op(BinOp::Sub), .. }) => '-',
+            Some(Tok { kind: TokKind::Op(BinOp::Add), .. }) => '+',
+            _ => return None,
+        };
+        let ends_an_expression = out
+            .len()
+            .checked_sub(2)
+            .and_then(|i| out.get(i))
+            .is_some_and(|tok| {
+                matches!(
+                    tok.kind,
+                    TokKind::Number(_)
+                        | TokKind::Ident(_)
+                        | TokKind::Expansion(_)
+                        | TokKind::BasedExpansion { .. }
+                        | TokKind::RParen
+                        | TokKind::RBracket
+                )
+            });
+        if ends_an_expression { None } else { Some(sign) }
     }
 
     /// The identifier starting at the current position — the `x` in
@@ -512,7 +561,7 @@ impl<'a> Tokenizer<'a> {
             if c == '_' {
                 return Err(ArithError::new(
                     format!("`{}` contains `_`; remove it", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                    lit_start..self.byte_pos() + c.len_utf8(),
+                    self.byte_at(lit_start)..self.byte_pos() + c.len_utf8(),
                 ));
             }
             if !c.is_ascii_alphanumeric() {
@@ -531,7 +580,7 @@ impl<'a> Tokenizer<'a> {
                         "`{c}` is not a digit in `{}`; use digits valid for base {base}",
                         self.slice(lit_start, self.pos)
                     ),
-                    lit_start..self.byte_pos(),
+                    self.byte_at(lit_start)..self.byte_pos(),
                 ));
             }
             mag = mag
@@ -540,7 +589,7 @@ impl<'a> Tokenizer<'a> {
                 .ok_or_else(|| {
                     ArithError::new(
                         format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                        lit_start..self.byte_pos(),
+                        self.byte_at(lit_start)..self.byte_pos(),
                     )
                 })?;
             self.pos += 1;
@@ -560,7 +609,7 @@ impl<'a> Tokenizer<'a> {
             if c == '_' {
                 return Err(ArithError::new(
                     format!("`{}` contains `_`; remove it", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                    lit_start..self.byte_pos() + c.len_utf8(),
+                    self.byte_at(lit_start)..self.byte_pos() + c.len_utf8(),
                 ));
             }
             if !c.is_ascii_digit() {
@@ -570,7 +619,7 @@ impl<'a> Tokenizer<'a> {
             mag = mag.checked_mul(10).and_then(|m| m.checked_add(digit_val)).ok_or_else(|| {
                 ArithError::new(
                     format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                    lit_start..self.byte_pos(),
+                    self.byte_at(lit_start)..self.byte_pos(),
                 )
             })?;
             self.pos += 1;
@@ -578,7 +627,7 @@ impl<'a> Tokenizer<'a> {
         Ok((mag, digits_start))
     }
 
-    fn lex_number(&mut self) -> Result<TokKind, ArithError> {
+    fn lex_number(&mut self, out: &[Tok]) -> Result<TokKind, ArithError> {
         let start = self.pos;
 
         // `0x` / `0X` hex.
@@ -589,7 +638,7 @@ impl<'a> Tokenizer<'a> {
             if digits_start == self.pos {
                 return Err(ArithError::new(
                     format!("`{prefix}` has no digits; add digits after `{prefix}`"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             return Ok(TokKind::Number(mag));
@@ -606,9 +655,14 @@ impl<'a> Tokenizer<'a> {
             let digits = self.slice(digits_start, self.pos);
             let full = self.slice(start, self.pos);
             let (base, word) = if matches!(kind_char, 'b' | 'B') { (2, "binary") } else { (8, "octal") };
+            // The `-`/`+` above this numeral, if any, was already emitted
+            // as its own token before `lex_number` ran — fold it into the
+            // suggestion here, or `-0b101` would suggest `2#101` and
+            // silently flip the sign.
+            let sign = Self::leading_unary_sign(out).map(String::from).unwrap_or_default();
             return Err(ArithError::new(
-                format!("`{full}` is not a kaish base spelling; write `{base}#{digits}` for {word}"),
-                start..self.pos,
+                format!("`{full}` is not a kaish base spelling; write `{sign}{base}#{digits}` for {word}"),
+                self.byte_at(start)..self.byte_pos(),
             ));
         }
 
@@ -645,7 +699,7 @@ impl<'a> Tokenizer<'a> {
             let text = self.slice(start, self.pos);
             return Err(ArithError::new(
                 format!("`{text}` is not an integer; arithmetic is integer-only"),
-                start..self.pos,
+                self.byte_at(start)..self.byte_pos(),
             ));
         }
 
@@ -654,7 +708,7 @@ impl<'a> Tokenizer<'a> {
             if base_text.len() > 1 && base_text.starts_with('0') {
                 return Err(ArithError::new(
                     format!("`{base_text}` is not a base spelling; write the base without a leading zero"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             self.advance(); // consume '#'
@@ -664,7 +718,7 @@ impl<'a> Tokenizer<'a> {
             if !(2..=36).contains(&base_mag) {
                 return Err(ArithError::new(
                     format!("base `{base_mag}` is outside 2..=36"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             let base = base_mag as u32;
@@ -677,7 +731,7 @@ impl<'a> Tokenizer<'a> {
                 let lit = self.slice(start, self.pos);
                 return Err(ArithError::new(
                     format!("`{lit}` puts `{sign}` after `#`; write `{sign}{base}#{}`", self.slice(sign_start + 1, self.pos)),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             if self.peek() == Some('$') {
@@ -689,7 +743,7 @@ impl<'a> Tokenizer<'a> {
             if bdigits_start == self.pos {
                 return Err(ArithError::new(
                     format!("`{prefix}` has no digits; add digits after `{prefix}`"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             return Ok(TokKind::Number(mag));
@@ -697,13 +751,18 @@ impl<'a> Tokenizer<'a> {
 
         let text = self.slice(start, self.pos);
         if crate::lexer::is_leading_zero_numeral(text) {
+            // Same reasoning as the `0b`/`0o` refusal above: the sign, if
+            // any, is a separate token already emitted before this
+            // numeral was lexed — fold it into both suggestions, or
+            // `-007` would suggest positive `8#7`/`7` and flip the sign.
+            let sign_str = Self::leading_unary_sign(out).map(String::from).unwrap_or_default();
             let decimal = leading_zero_decimal(text).unwrap_or_else(|| "0".to_string());
             return Err(ArithError::new(
                 format!(
-                    "`{text}` has a leading zero — kaish reads no octal; write `8#{}` for octal or `{decimal}` for decimal",
+                    "`{text}` has a leading zero — kaish reads no octal; write `{sign_str}8#{}` for octal or `{sign_str}{decimal}` for decimal",
                     text.trim_start_matches('0')
                 ),
-                start..self.pos,
+                self.byte_at(start)..self.byte_pos(),
             ));
         }
         Ok(TokKind::Number(base_mag))
@@ -742,7 +801,7 @@ impl<'a> Tokenizer<'a> {
                     Ok(program) => Ok(Expansion::CommandSubst(program.statements)),
                     Err(_) => Err(ArithError::new(
                         format!("syntax error in command substitution: $({cmd_text})"),
-                        dollar_start..self.byte_pos(),
+                        self.byte_at(dollar_start)..self.byte_pos(),
                     )),
                 }
             }
@@ -751,7 +810,7 @@ impl<'a> Tokenizer<'a> {
                 let body_start = self.pos;
                 let close = self.skip_group('}', false, dollar_start, false)?;
                 let body = self.slice(body_start, close).to_string();
-                parse_braced_body(&body, dollar_start..self.byte_pos())
+                parse_braced_body(&body, self.byte_at(dollar_start)..self.byte_pos())
             }
             // `$1`, `$2`, … — positional parameters. A leading digit is
             // otherwise not a valid identifier start, so it is unambiguous
@@ -766,7 +825,7 @@ impl<'a> Tokenizer<'a> {
             }
             _ => Err(ArithError::new(
                 format!("`{}` cannot start a value", self.slice(dollar_start, self.pos + 1)),
-                dollar_start..self.byte_pos() + 1,
+                self.byte_at(dollar_start)..self.byte_at(self.pos + 1),
             )),
         }
     }
@@ -778,9 +837,13 @@ impl<'a> Tokenizer<'a> {
     /// `slice(body_start, close)`. `double` closes on two `close` chars
     /// (`$((…))`).
     ///
-    /// `comments` true treats `#` as a comment to EOL (command-substitution
-    /// bodies only); false leaves it as the base separator (`$((…))`) or a
-    /// literal (`${…}`). The word boundary reuses `lexer::opens_a_word`.
+    /// `comments` true treats `#` as a comment to EOL and `<<[-]delimiter`
+    /// as a heredoc introducer whose body — through the closing delimiter
+    /// line, via [`crate::lexer::skip_heredoc_body`] — is skipped whole;
+    /// both only apply to command-substitution bodies, matching ordinary
+    /// `$(...)`. `comments` false leaves `#` as the base separator
+    /// (`$((…))`) or a literal (`${…}`), where kaish has no heredoc
+    /// grammar either. The word boundary reuses `lexer::opens_a_word`.
     /// `group_start` is the error span for an unterminated group.
     fn skip_group(
         &mut self,
@@ -797,7 +860,7 @@ impl<'a> Tokenizer<'a> {
                     let close_str = if double { "))" } else if close == '}' { "}" } else { ")" };
                     return Err(ArithError::new(
                         format!("`{}` has no closing `{close_str}`", self.slice(group_start, self.pos)),
-                        group_start..self.byte_pos(),
+                        self.byte_at(group_start)..self.byte_pos(),
                     ));
                 }
                 Some('\\') => {
@@ -856,6 +919,17 @@ impl<'a> Tokenizer<'a> {
                         self.pos += 1; // `#` is the base separator / literal
                     }
                 }
+                Some('<') if comments && self.peek_at(1) == Some('<') && self.peek_at(2) != Some('<') => {
+                    // A real heredoc introducer, only where `comments`
+                    // says this is a command-substitution body — `${…}`
+                    // and `$((…))` have no heredoc grammar. `<<<`
+                    // (here-string) is excluded and falls through below
+                    // to the base `<` character-at-a-time arm.
+                    let total_len = self.text.len();
+                    crate::lexer::skip_heredoc_body(&self.chars, &mut self.pos, total_len).map_err(
+                        |e| ArithError::new(e.token.to_string(), group_start..self.byte_pos()),
+                    )?;
+                }
                 Some('$') => {
                     let nested_start = self.pos;
                     match self.peek_at(1) {
@@ -874,9 +948,19 @@ impl<'a> Tokenizer<'a> {
                         _ => self.pos += 1, // `$name` — the `$` is plain here
                     }
                 }
+                Some('(') if self.peek_at(1) == Some('(') => {
+                    // bare `((…))` is arithmetic, so it carries no heredoc
+                    // or comment grammar: `<<` inside it is the shift
+                    // operator. `$((` already suppresses both; this is the
+                    // other spelling of the same context.
+                    let nested_start = self.pos;
+                    self.pos += 2;
+                    self.skip_group(')', true, nested_start, false)?;
+                }
                 Some('(') => {
-                    // bare `(`: recurse so its `)`/`}` does not close the
-                    // outer group; `comments` propagates.
+                    // bare `(` subshell: recurse so its `)`/`}` does not
+                    // close the outer group. `comments` propagates, because
+                    // a subshell body is ordinary command text.
                     let nested_start = self.pos;
                     self.pos += 1;
                     self.skip_group(')', false, nested_start, comments)?;
@@ -1405,7 +1489,10 @@ enum Numeral {
     Ok(i64),
     Empty,
     ExpressionLike,
-    LeadingZero,
+    /// `digits` is the unsigned digit text (`neg` already carries the
+    /// sign separately) — kept so the caller can build a sign-correct
+    /// suggestion instead of always suggesting a positive fix.
+    LeadingZero { neg: bool, digits: String },
     NotANumber,
     /// The tokenizer refused with a message that already names a fix
     /// (`0b101` → `2#101`, `1_000` → remove the `_`, `1e3` → integer-only).
@@ -1431,7 +1518,7 @@ fn read_numeral(text: &str) -> Numeral {
         return Numeral::NotANumber;
     }
     if crate::lexer::is_leading_zero_numeral(digits) {
-        return Numeral::LeadingZero;
+        return Numeral::LeadingZero { neg, digits: digits.to_string() };
     }
     match tokenize(digits) {
         Ok(toks) if toks.len() == 1 => match &toks[0].kind {
@@ -1456,9 +1543,21 @@ fn parse_numeric_string(s: &str, name: &str) -> Result<i64, ArithError> {
             ),
             0..0,
         )),
-        Numeral::LeadingZero => Err(ArithError::new(
+        // Unsigned: `10#$name`/`8#$name` genuinely works — `based_value`
+        // has no sign in `$name`'s text to refuse. Signed: it never
+        // works, sign or no — `based_value` refuses ANY sign inside the
+        // resolved text, so `$name` itself (holding e.g. `-007`) still
+        // refuses even from `-10#$name`. The only fix that actually
+        // evaluates embeds the known digits literally, sign outside `#`.
+        Numeral::LeadingZero { neg: false, .. } => Err(ArithError::new(
             format!(
                 "`{name}` holds `{s}` (leading zero) — kaish reads no octal; write `10#${name}` for decimal or `8#${name}` for octal"
+            ),
+            0..0,
+        )),
+        Numeral::LeadingZero { neg: true, digits } => Err(ArithError::new(
+            format!(
+                "`{name}` holds `{s}` (leading zero) — kaish reads no octal; write `-10#{digits}` for decimal or `-8#{digits}` for octal"
             ),
             0..0,
         )),
@@ -1486,7 +1585,7 @@ pub(crate) fn parse_command_output(text: &str, cmd: &str) -> Result<i64, ArithEr
         Numeral::ExpressionLike
         | Numeral::NotANumber
         | Numeral::NotANumberWithFix(_)
-        | Numeral::LeadingZero
+        | Numeral::LeadingZero { .. }
         | Numeral::OutOfRange => Err(ArithError::new(
             format!("`{cmd}` printed `{text}`; the command must print one integer"),
             0..0,
@@ -1571,6 +1670,40 @@ pub(crate) fn braced_path_value(scope: &Scope, root: &str, brackets: &str) -> Re
     })
 }
 
+/// The left operand of `${root[brackets]:-default}` inside `$(( ))`, classified
+/// the way ordinary interpolation classifies it (decision A — `resolve_default`
+/// in `interpreter/eval.rs`): `Ok(None)` means "select the default" (an unset
+/// root, a missing key, an out-of-bounds index, `null`, or an empty string);
+/// `Ok(Some(v))` is a present value to use as-is; `Err` is a shape error — a
+/// wrong-typed access — that the default must NOT suppress and whose fallback
+/// must NOT run.
+///
+/// The four `BracedDefault` call sites (sync/async × arithmetic-operand/
+/// `base#`-text) all resolve through this one function so the contract can't
+/// drift between them the way `.ok()` let it drift before.
+pub(crate) fn braced_default_operand(
+    scope: &Scope,
+    root: &str,
+    brackets: &str,
+) -> Result<Option<Value>, ArithError> {
+    let resolved: Result<Value, PathError> = if brackets.is_empty() {
+        scope
+            .get(root)
+            .cloned()
+            .ok_or_else(|| PathError::UndefinedRoot(root.to_string()))
+    } else {
+        let raw = format!("${{{root}{brackets}}}");
+        let path: VarPath = crate::parser::parse_varpath(&raw);
+        scope.resolve_path(&path)
+    };
+    match resolved {
+        Ok(v) if value_defaults_on_emptiness(&v) => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(PathError::UndefinedRoot(_)) | Err(PathError::Absence(_)) => Ok(None),
+        Err(PathError::Shape(msg)) => Err(ArithError::new(msg, 0..0)),
+    }
+}
+
 fn subscript_path(root: &str, indices: &[i64]) -> VarPath {
     let mut raw = format!("${{{root}");
     for idx in indices {
@@ -1621,7 +1754,15 @@ pub(crate) fn expansion_label(e: &Expansion) -> (String, &'static str) {
 /// no sign, whether the `#` came with the sign in source text or the sign
 /// arrived inside an expansion's value. `label`/`verb` name where the value
 /// came from (see `expansion_label`) for that refusal's message.
-pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Result<i64, ArithError> {
+///
+/// `negative` carries the unary minus that may sit above this expansion in
+/// the tree (`-16#$digits`) into the range check itself — mirroring the
+/// direct-literal path, where the parser special-cases `Number(mag)` at
+/// exactly `Parser::MIN_MAGNITUDE`. `based_value` can't special-case at
+/// parse time (the digits are only known once the expansion resolves), so
+/// the caller passes `negative` in; evaluating positive-then-negating would
+/// refuse `i64::MIN`'s magnitude before the minus ever applied.
+pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str, negative: bool) -> Result<i64, ArithError> {
     let trimmed = text.trim();
     if let Some(stripped) = trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')) {
         let sign = &trimmed[..1];
@@ -1655,7 +1796,7 @@ pub(crate) fn based_value(base: u32, text: &str, label: &str, verb: &str) -> Res
             .and_then(|m| m.checked_add(digit_val as u64))
             .ok_or_else(|| ArithError::new(format!("`{text}` {INTEGER_OUT_OF_RANGE}"), 0..0))?;
     }
-    match int_from_magnitude(mag, false, 0..0)? {
+    match int_from_magnitude(mag, negative, 0..0)? {
         ArithExpr::Int(n) => Ok(n),
         _ => unreachable!(),
     }
@@ -1687,11 +1828,8 @@ fn resolve_expansion_sync(e: &Expansion, scope: &Scope) -> Result<i64, ArithErro
             value_to_arith(&v, root)
         }
         Expansion::BracedDefault { root, brackets, default } => {
-            let resolved = if brackets.is_empty() { scope.get(root).cloned() } else {
-                braced_path_value(scope, root, brackets).ok()
-            };
-            match resolved {
-                Some(Value::Null) | None => {
+            match braced_default_operand(scope, root, brackets)? {
+                None => {
                     let default_expr = parse(default)?;
                     eval_sync(&default_expr, scope)
                 }
@@ -1727,19 +1865,14 @@ pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String
             braced_path_value(scope, root, brackets).map(|v| value_to_string(&v))
         }
         Expansion::BracedDefault { root, brackets, default } => {
-            let resolved = if brackets.is_empty() {
-                scope.get(root).cloned()
-            } else {
-                braced_path_value(scope, root, brackets).ok()
-            };
-            match resolved {
+            match braced_default_operand(scope, root, brackets)? {
                 // A default that is itself a single expansion (`$(cmd)`,
                 // `$var`, …) stays in TEXT mode — `10#${m:-$(date +%m)}`
                 // needs the same "read raw digits" treatment `10#$m` gets,
                 // not the leading-zero refusal a full arithmetic operand
                 // would apply. A default with real operators (`1 + 2`) is
                 // genuinely an expression and is evaluated as one.
-                Some(Value::Null) | None => match parse(default)? {
+                None => match parse(default)? {
                     ArithExpr::Expansion(e) => expansion_text_sync(&e, scope),
                     default_expr => Ok(eval_sync(&default_expr, scope)?.to_string()),
                 },
@@ -1753,10 +1886,10 @@ pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String
     }
 }
 
-fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope) -> Result<i64, ArithError> {
+fn resolve_based_sync(base: u32, e: &Expansion, scope: &Scope, negative: bool) -> Result<i64, ArithError> {
     let text = expansion_text_sync(e, scope)?;
     let (label, verb) = expansion_label(e);
-    based_value(base, &text, &label, verb)
+    based_value(base, &text, &label, verb, negative)
 }
 
 pub(crate) fn eval_sync(expr: &ArithExpr, scope: &Scope) -> Result<i64, ArithError> {
@@ -1770,7 +1903,16 @@ pub(crate) fn eval_sync(expr: &ArithExpr, scope: &Scope) -> Result<i64, ArithErr
             }
             resolve_subscript_sync(scope, root, &idx_vals)
         }
-        ArithExpr::BasedExpansion { base, expansion } => resolve_based_sync(*base, expansion, scope),
+        ArithExpr::BasedExpansion { base, expansion } => resolve_based_sync(*base, expansion, scope, false),
+        // `-base#$expansion`: resolve with the sign folded into the range
+        // check (see `based_value`'s doc comment) instead of evaluating
+        // positive then negating, which can never reach i64::MIN.
+        ArithExpr::Unary { op: UnOp::Neg, operand } if matches!(operand.as_ref(), ArithExpr::BasedExpansion { .. }) => {
+            let ArithExpr::BasedExpansion { base, expansion } = operand.as_ref() else {
+                unreachable!("guarded by the match arm's pattern")
+            };
+            resolve_based_sync(*base, expansion, scope, true)
+        }
         ArithExpr::Unary { op, operand } => apply_unary(*op, eval_sync(operand, scope)?),
         ArithExpr::Binary { op: BinOp::And, left, right } => {
             let l = eval_sync(left, scope)?;
@@ -1880,6 +2022,86 @@ mod tests {
         assert!(msg.contains("2#101"), "{msg}");
         let msg = err("0o17");
         assert!(msg.contains("8#17"), "{msg}");
+    }
+
+    // ── Defect 7b: a refused leading-zero/base-spelling numeral must not
+    // drop the unary sign above it from its suggested fixes ──
+    //
+    // `-007` refuses on the `007` token alone — the tokenizer sees the `-`
+    // as an already-emitted, separate `Sub` token, not part of the numeral.
+    // A suggestion built without checking for it is POSITIVE, and
+    // following it silently flips the value's sign. Round-tripping the
+    // suggested text (not just checking the message string) is the real
+    // assertion: a well-formed but wrong-signed suggestion would still
+    // pass a text-only check.
+
+    #[test]
+    fn negative_leading_zero_names_a_signed_fix() {
+        let msg = err("-007");
+        assert!(msg.contains("-8#7"), "{msg}");
+        assert!(msg.contains("-7"), "{msg}");
+        assert_eq!(eval("-8#7"), -7);
+        assert_eq!(eval("-7"), -7);
+    }
+
+    #[test]
+    fn positive_sign_leading_zero_names_a_signed_fix() {
+        let msg = err("+007");
+        assert!(msg.contains("+8#7"), "{msg}");
+        assert!(msg.contains("+7"), "{msg}");
+        assert_eq!(eval("+8#7"), 7);
+        assert_eq!(eval("+7"), 7);
+    }
+
+    #[test]
+    fn unsigned_leading_zero_fix_is_unchanged() {
+        let msg = err("007");
+        assert!(msg.contains("`8#7`"), "{msg}");
+        assert!(!msg.contains("-8#7") && !msg.contains("+8#7"), "{msg}");
+    }
+
+    #[test]
+    fn binary_minus_before_leading_zero_keeps_the_unsigned_fix() {
+        // `5 - 007`: `-` is BINARY subtraction here, not a unary sign on
+        // `007` — the suggestion must stay unsigned, or "fixing" it would
+        // silently change `5 - 7` into `5 - -7`.
+        let msg = err("5 - 007");
+        assert!(msg.contains("`8#7`"), "{msg}");
+        assert!(!msg.contains("-8#7"), "{msg}");
+    }
+
+    #[test]
+    fn negative_binary_base_spelling_names_a_signed_fix() {
+        let msg = err("-0b101");
+        assert!(msg.contains("-2#101"), "{msg}");
+        assert_eq!(eval("-2#101"), -5);
+    }
+
+    #[test]
+    fn negative_octal_o_spelling_names_a_signed_fix() {
+        let msg = err("-0o17");
+        assert!(msg.contains("-8#17"), "{msg}");
+        assert_eq!(eval("-8#17"), -15);
+    }
+
+    #[test]
+    fn based_expansion_holding_a_signed_leading_zero_string_names_a_working_literal() {
+        // `10#$x`/`8#$x` (the unsigned suggestion) can never work here:
+        // `based_value` refuses ANY sign inside the resolved text, so
+        // prepending `-` to `$x` wouldn't help — `$x` itself still reads
+        // as `-007`. The only working fix embeds the digits literally.
+        let msg = err_with("x", |s| s.set("x", Value::String("-007".to_string())));
+        assert!(msg.contains("-10#007"), "{msg}");
+        assert!(msg.contains("-8#007"), "{msg}");
+        assert_eq!(eval("-10#007"), -7);
+        assert_eq!(eval("-8#007"), -7);
+    }
+
+    #[test]
+    fn based_expansion_holding_an_unsigned_leading_zero_string_is_unchanged() {
+        let msg = err_with("x", |s| s.set("x", Value::String("007".to_string())));
+        assert!(msg.contains("10#$x"), "{msg}");
+        assert!(msg.contains("8#$x"), "{msg}");
     }
 
     #[test]
@@ -2310,6 +2532,83 @@ mod tests {
         }
         let msg = err(&src);
         assert!(msg.contains("256"), "{msg}");
+    }
+
+    // ── Defect 7a: `ArithError.span` must be a byte range ──
+    //
+    // The tokenizer's `self.pos` counts CHARS (it indexes a
+    // `Vec<(usize, char)>`), but `ArithError.span` is documented as a byte
+    // range into the source. A raw char index used directly as a byte
+    // offset is correct only while every preceding character is one byte;
+    // a multi-byte character before the error point makes it wrong. The
+    // symptom: `source.get(span)` returns `None` (a non-char-boundary) or
+    // slices the wrong bytes — never merely "a span that looks nonempty".
+
+    fn parse_err(text: &str) -> ArithError {
+        parse(text).expect_err("expected a tokenizer/parse error")
+    }
+
+    /// The real assertion for defect 7a: not just that `span` is nonempty,
+    /// but that it actually slices `source` to `expected`.
+    fn assert_span_slices_to(source: &str, err: &ArithError, expected: &str) {
+        let slice = source.get(err.span.clone());
+        assert!(
+            slice.is_some(),
+            "span {:?} does not slice {source:?} (message: {})",
+            err.span,
+            err.message
+        );
+        assert_eq!(slice.expect("checked above"), expected, "source {source:?}, message {:?}", err.message);
+    }
+
+    // Control: pure ASCII before the error. A fix that zeroes every span
+    // (rather than converting it) would pass the multi-byte tests below by
+    // accident; this one only passes if the span is still real.
+    #[test]
+    fn control_ascii_before_leading_zero_span_is_byte_correct() {
+        let source = "$(echo x) + 008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn ideographic_space_before_leading_zero_span_is_byte_correct() {
+        // U+3000 IDEOGRAPHIC SPACE is 3 bytes, 1 char — `skip_ws` treats it
+        // as whitespace, so `self.pos` (chars) undercounts the true byte
+        // offset of everything after it by 2.
+        let source = "\u{3000}008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn full_width_digit_before_leading_zero_span_is_byte_correct() {
+        // U+FF10 FULLWIDTH DIGIT ZERO is 3 bytes, 1 char, consumed inside
+        // `skip_group`'s generic `Some(_) => self.pos += 1` — same
+        // char/byte divergence, reached through a different path.
+        let source = "$(echo \u{ff10}) + 008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn accented_letter_before_leading_zero_span_is_byte_correct() {
+        // U+00E9 'é' is 2 bytes, 1 char.
+        let source = "$(echo caf\u{e9}) + 008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn accented_letter_before_unterminated_brace_group_span_is_byte_correct() {
+        let source = "\u{3000}${caf\u{e9}";
+        let err = parse_err(source);
+        assert!(err.message.contains("no closing"), "{}", err.message);
+        assert_span_slices_to(source, &err, "${caf\u{e9}");
     }
 }
 

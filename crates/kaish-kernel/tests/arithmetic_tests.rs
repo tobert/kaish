@@ -331,6 +331,111 @@ async fn a_default_may_hold_a_command_substitution() {
     ok(r#"echo $((10#${m:-$(echo 08)}))"#, "8").await;
 }
 
+// ── `${path:-default}` inside `$(( ))` matches ordinary interpolation's
+// decision A: absence and emptiness select the default; a shape error
+// stays loud and its fallback never runs. Every row runs through the plain
+// operand form and the `base#` text form, sync (plain default) and async
+// (default holds `$(...)`, which routes the whole expression through the
+// async evaluator per `contains_command_subst`).
+
+/// Every case ordinary `${path:-default}` selects the default for (see
+/// `resolve_default` in `interpreter/eval.rs`): an unset root (bare and
+/// subscripted), `null`, an empty string, a missing record key, and an
+/// out-of-bounds list index.
+#[tokio::test]
+async fn arith_default_selects_on_absence_and_emptiness() {
+    let cases: &[(&str, &str)] = &[
+        ("", "nope"),
+        ("", "nope[0]"),
+        ("x=$(fromjson null); ", "x"),
+        (r#"x=""; "#, "x"),
+        (r#"r=$(fromjson "{\"a\":1}"); "#, "r[missing]"),
+        (r#"xs=$(fromjson "[1,2]"); "#, "xs[9]"),
+    ];
+    for (setup, path) in cases {
+        ok(&format!("{setup}echo $(( ${{{path}:-9}} ))"), "9").await;
+        ok(&format!("{setup}echo $((10#${{{path}:-9}}))"), "9").await;
+        ok(&format!("{setup}echo $(( ${{{path}:-$(echo 9)}} ))"), "9").await;
+        ok(&format!("{setup}echo $((10#${{{path}:-$(echo 9)}}))"), "9").await;
+    }
+}
+
+/// An integer index on a record and a subscript on a scalar are shape
+/// errors — the default must not suppress them, and they must exit
+/// non-zero naming the value and the fix.
+#[tokio::test]
+async fn arith_default_shape_error_stays_loud() {
+    let cases: &[(&str, &str, &str)] = &[
+        (r#"r=$(fromjson "{\"a\":1}"); "#, "r[0]", "integer index on a record"),
+        ("s=5; ", "s[0]", "cannot subscript"),
+    ];
+    for (setup, path, fragment) in cases {
+        for source in [
+            format!("{setup}echo $(( ${{{path}:-9}} ))"),
+            format!("{setup}echo $((10#${{{path}:-9}}))"),
+            format!("{setup}echo $(( ${{{path}:-$(echo 9)}} ))"),
+            format!("{setup}echo $((10#${{{path}:-$(echo 9)}}))"),
+        ] {
+            let (code, _out, err) = run(&source).await;
+            assert_ne!(code, 0, "{source:?} must fail: {err:?}");
+            assert!(err.contains(fragment), "{source:?}: {err:?}");
+        }
+    }
+}
+
+/// THE CRITICAL ROW: a shape error's fallback command must not run. The
+/// exit code alone is not proof of that — a fallback that ran and then had
+/// its result discarded would also exit non-zero if something later in the
+/// pipeline failed. Assert the marker is ABSENT from stderr.
+#[tokio::test]
+async fn arith_default_shape_error_does_not_run_the_fallback() {
+    let cases: &[(&str, &str, &str)] = &[
+        (r#"r=$(fromjson "{\"a\":1}"); "#, "r[0]", "RECORD_INT_IDX_MARKER_7f2a"),
+        ("s=5; ", "s[0]", "SCALAR_SUBSCRIPT_MARKER_7f2b"),
+    ];
+    for (setup, path, marker) in cases {
+        for source in [
+            format!("{setup}echo $(( ${{{path}:-$(echo {marker} >&2; echo 9)}} ))"),
+            format!("{setup}echo $((10#${{{path}:-$(echo {marker} >&2; echo 9)}}))"),
+        ] {
+            let (code, _out, err) = run(&source).await;
+            assert_ne!(code, 0, "{source:?} must fail: {err:?}");
+            assert!(!err.contains(*marker), "fallback ran, {source:?}: {err:?}");
+        }
+    }
+}
+
+/// The exact regressions reported: an integer index on a record silently ran
+/// its `:-` fallback inside `$(( ))` (Face A), and an empty string did not
+/// select the default the way it does in ordinary interpolation (Face B).
+#[tokio::test]
+async fn arith_default_reported_regressions() {
+    let (code, out, err) = run(
+        r#"cfg=$(fromjson "{\"port\":9000}"); echo $(( ${cfg[0]:-$(echo SHAPE_DEFAULT_RAN >&2; echo 7)} ))"#,
+    )
+    .await;
+    assert_ne!(code, 0, "shape error must fail: {out:?} {err:?}");
+    assert!(!err.contains("SHAPE_DEFAULT_RAN"), "fallback ran: {err:?}");
+    assert!(err.contains("integer index on a record"), "{err:?}");
+
+    ok(r#"x=""; echo $(( ${x:-5} ))"#, "5").await;
+}
+
+/// The control for the two rows above: when the default IS selected, the
+/// fallback runs and its marker DOES reach stderr. Without this, an
+/// assertion that a marker is absent would also pass if the marker could
+/// never appear at all — a stderr check that sees nothing proves nothing.
+#[tokio::test]
+async fn arith_default_fallback_runs_when_the_default_is_selected() {
+    let (code, out, err) = run(
+        r#"r=$(fromjson "{\"a\":1}"); echo $(( ${r[missing]:-$(echo FALLBACK_RAN_MARKER_7f2c >&2; echo 9)} ))"#,
+    )
+    .await;
+    assert_eq!(code, 0, "{out:?} {err:?}");
+    assert_eq!(out.trim(), "9");
+    assert!(err.contains("FALLBACK_RAN_MARKER_7f2c"), "{err:?}");
+}
+
 // ── Nesting ───────────────────────────────────────────────────────────────
 
 #[tokio::test]

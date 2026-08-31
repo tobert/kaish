@@ -1872,10 +1872,6 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
     })
 }
 
-/// Extract `$((expr))` starting at `chars[*i]` (the `$`). Emits a unique
-/// marker into `out` and records the replacement. Single `)` characters
-/// inside the expression are kept (only a `))` pair at depth zero closes),
-/// matching the pre-#95 collector.
 /// Copy a `$(…)` from `chars[*i]` through its balanced `)` into `out`, byte
 /// for byte, advancing `*i` past it.
 ///
@@ -1987,6 +1983,17 @@ struct ScanBuffers<'a> {
     replacements: &'a mut Vec<Replacement>,
 }
 
+/// Extract `$((expr))` starting at `chars[*i]` (the `$`, or the first `(`
+/// for the bare `((` condition form). Emits a unique marker into `out` and
+/// records the replacement.
+///
+/// A `\` escape and a `$(…)` command substitution are read region-aware:
+/// an escaped char is copied without touching `depth`, and a `$(…)` is
+/// handed whole to `copy_substitution_verbatim`, so a quoted or escaped
+/// paren inside either never counts as arithmetic grouping. Everything
+/// else is a flat depth counter over literal `(`/`)`: single `)`
+/// characters inside the expression are kept (only a `))` pair at depth
+/// zero closes), matching the pre-#95 collector.
 fn extract_arithmetic(
     chars: &[(usize, char)],
     i: &mut usize,
@@ -2005,6 +2012,28 @@ fn extract_arithmetic(
 
     while *i < n {
         let c = chars[*i].1;
+
+        // An escape covers the next character; neither is paren structure,
+        // matching every other scanner in this file (`scan`, `lex_string`,
+        // `copy_substitution_verbatim`).
+        if c == '\\' && *i + 1 < n {
+            expr.push(c);
+            expr.push(chars[*i + 1].1);
+            *i += 2;
+            continue;
+        }
+
+        // A `$(…)` here is a command substitution, not arithmetic grouping.
+        // Hand the whole run to the region-aware scanner `scan`'s
+        // double-quoted-string arm already uses, so a quoted or escaped
+        // paren in the substitution's body never reaches `depth` — that
+        // was the bug: a flat counter read a quoted `(` inside `$(…)` as
+        // arithmetic grouping and consumed the real `))` as its close.
+        if c == '$' && *i + 1 < n && chars[*i + 1].1 == '(' {
+            copy_substitution_verbatim(chars, i, &mut expr);
+            continue;
+        }
+
         match c {
             '(' => {
                 depth += 1;
@@ -2285,6 +2314,55 @@ fn collect_heredoc_bodies(
     }
 
     Ok(())
+}
+
+/// Skip a `<<[-]delimiter` heredoc introducer and its body, starting at
+/// `chars[*i]` (the first `<` of `<<`), through the line that terminates
+/// it. Advances `*i` past the whole heredoc — introducer line, body, and
+/// delimiter line — and returns; the body's bytes, including any `(` or
+/// `)` in it, are never inspected as structure.
+///
+/// A thin wrapper around the same [`scan_heredoc_introducer`] +
+/// [`collect_heredoc_bodies`] pair `scan`'s own dispatch drives, for a
+/// caller that only needs the boundary — `arithmetic::Tokenizer::skip_group`,
+/// scanning a `$(...)` command-substitution body nested inside `$(( ))` —
+/// not a registered [`HeredocExtract`] or a rewritten buffer. Scratch
+/// buffers stand in for `scan`'s bookkeeping and are discarded; this is
+/// still the one heredoc-parsing implementation, not a second one.
+///
+/// Only the single heredoc at `chars[*i]` is handled: a second `<<` later
+/// on the SAME introducer line (`cat <<A <<B`) is not queued the way
+/// `scan`'s own loop queues it when it drives the whole dispatch. A
+/// command substitution nested in `$(( ))` with a multi-heredoc-per-line
+/// body is a known residual, not silently accepted as handled.
+pub(crate) fn skip_heredoc_body(
+    chars: &[(usize, char)],
+    i: &mut usize,
+    total_len: usize,
+) -> Result<(), Spanned<LexerError>> {
+    let intro_start = chars[*i].0;
+    let mut out = String::new();
+    let mut pending = Vec::new();
+    let mut replacements = Vec::new();
+    scan_heredoc_introducer(chars, i, intro_start, &mut out, &mut pending, &mut replacements, 0);
+    if pending.is_empty() {
+        // No delimiter word followed `<<` — not a real heredoc; `scan`
+        // leaves it for logos to report, and so does this caller.
+        return Ok(());
+    }
+    let n = chars.len();
+    while *i < n && chars[*i].1 != '\n' && chars[*i].1 != '\r' {
+        *i += 1;
+    }
+    if *i < n {
+        let terminator = chars[*i].1;
+        *i += 1;
+        if terminator == '\r' && *i < n && chars[*i].1 == '\n' {
+            *i += 1;
+        }
+    }
+    let mut heredocs = Vec::new();
+    collect_heredoc_bodies(chars, i, total_len, out.len(), &mut pending, &mut heredocs, &mut replacements)
 }
 
 /// Rewrite `$((expr))` inside an interpolated heredoc body to
@@ -4999,6 +5077,152 @@ mod tests {
         let source = "$((((1 + 2) * 3)))";
         let tokens = lex(source);
         assert_eq!(tokens, vec![Token::Arithmetic("((1 + 2) * 3)".to_string())]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // extract_arithmetic must be region-aware, not a flat paren counter.
+    //
+    // A quoted `(` or `)` inside a `$(…)` nested in `$(( ))` used to
+    // increment/decrement the SAME flat depth counter that decides where
+    // the real `))` is, so `$(( $(echo "(" ) + 1 ))` read the quoted `(`
+    // as arithmetic grouping and never found its true close. These hand
+    // the nested `$(…)` to `copy_substitution_verbatim` — the region-stack
+    // scanner `scan`'s double-quoted-string arm already uses for the same
+    // problem — so its interior never touches `depth`.
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn arithmetic_dquote_open_paren_in_nested_cmdsubst() {
+        let source = r#"$(( $(echo "(" >/dev/null; echo 5) + 1 ))"#;
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(
+                r#" $(echo "(" >/dev/null; echo 5) + 1 "#.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn arithmetic_dquote_close_paren_in_nested_cmdsubst() {
+        let source = r#"$(( $(echo ")" >/dev/null; echo 5) + 1 ))"#;
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(
+                r#" $(echo ")" >/dev/null; echo 5) + 1 "#.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn arithmetic_squote_open_paren_in_nested_cmdsubst() {
+        let source = "$(( $(echo '(' >/dev/null; echo 5) + 1 ))";
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(
+                " $(echo '(' >/dev/null; echo 5) + 1 ".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn arithmetic_squote_close_paren_in_nested_cmdsubst() {
+        let source = "$(( $(echo ')' >/dev/null; echo 5) + 1 ))";
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(
+                " $(echo ')' >/dev/null; echo 5) + 1 ".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn bare_arith_dquote_paren_in_nested_cmdsubst() {
+        // Same defect, bare `(( ))` condition form.
+        let source = r#"(( $(echo "(" >/dev/null; echo 5) > 1 ))"#;
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::ArithCond(
+                r#" $(echo "(" >/dev/null; echo 5) > 1 "#.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn arithmetic_escaped_open_paren_in_body_does_not_count() {
+        // Today's flat counter treats the escaped `(` as a real depth
+        // increment, so the real `))` never arrives and the expression is
+        // reported unterminated.
+        let source = r"$(( \( 1 + 1 ))";
+        let tokens = lex(source);
+        assert_eq!(tokens, vec![Token::Arithmetic(r" \( 1 + 1 ".to_string())]);
+    }
+
+    #[test]
+    fn arithmetic_escaped_close_paren_in_body_does_not_count() {
+        // An escaped `)` immediately followed by a real `)` used to read
+        // as the `))` pair that closes arithmetic, truncating the
+        // expression early and leaking the remainder as program text.
+        let source = r"$(( 1 \)) + 1 ))";
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(r" 1 \)) + 1 ".to_string())]
+        );
+    }
+
+    #[test]
+    fn arithmetic_two_levels_of_nested_cmdsubst_with_quoted_paren() {
+        // $(...) inside $(...) inside $(( )), with the quoted paren at the
+        // innermost level — the hand-off must recurse.
+        let source = r#"$(( $(echo $(echo "(" >/dev/null; echo 3)) + 1 ))"#;
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(
+                r#" $(echo $(echo "(" >/dev/null; echo 3)) + 1 "#.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn arithmetic_comment_paren_in_nested_cmdsubst() {
+        // `#` inside the nested $(...) is a comment; the `)` on its line
+        // is not structure. Matches the kernel-level
+        // `cmdsubst_comment_inside_arith_should_be_honored`.
+        let source = "$(( $(true # )\necho 1) ))";
+        let tokens = lex(source);
+        assert_eq!(
+            tokens,
+            vec![Token::Arithmetic(" $(true # )\necho 1) ".to_string())]
+        );
+    }
+
+    #[test]
+    fn arithmetic_control_still_unterminated_without_close() {
+        // Genuinely unterminated: no `))` anywhere. Must still error —
+        // region-awareness must not make the scanner permissive.
+        let source = "$(( 1 + 2";
+        let result = tokenize(source);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors[0].token, LexerError::UnterminatedArithmetic);
+    }
+
+    #[test]
+    fn arithmetic_control_still_unterminated_with_unbalanced_paren() {
+        // A genuinely unbalanced, unquoted, unescaped `(` still consumes
+        // the trailing `))` as its own close and leaves nothing to end
+        // the expression.
+        let source = "$(( ( 1 + 2 ))";
+        let result = tokenize(source);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors[0].token, LexerError::UnterminatedArithmetic);
     }
 
     // ═══════════════════════════════════════════════════════════════════

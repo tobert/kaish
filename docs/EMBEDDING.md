@@ -1033,7 +1033,7 @@ use kaish_kernel::plan_program;
 
 for planned in plan_program(src).map_err(|_errors| /* parse errors */ ())? {
     for cmd in &planned.plan.commands {
-        // cmd.name, cmd.args (redaction-aware), cmd.redirects, cmd.background
+        // cmd.name, cmd.args, cmd.redirects, cmd.background
     }
     // Decide however your policy needs, keyed by planned.index.
 }
@@ -1070,12 +1070,6 @@ that takes them as arguments — `read`, `export`, `unset`, and `push` write
 session variables that argv-level analysis cannot see. A statement like
 `read TOKEN && curl -H "Authorization: $TOKEN"` reports `TOKEN` as free, and
 the value you peek is the one from *before* the `read`.
-
-**Credentials.** Every literal `--confirm=<key>` is redacted from the plans and
-**not** returned — you hold `source` and need no second copy. That is the only
-redaction kaish performs: it minted that key and knows it outright. kaish
-ships no secret detector, because a shell cannot define what a secret is. Run
-your own pass over the plans if you need more.
 
 **What this is not.** A plan tells you what a statement would run, not what it
 will produce. `rm $(find / -name '*.tmp')` plans as an `rm` whose argument is
