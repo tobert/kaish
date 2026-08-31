@@ -76,6 +76,10 @@ breaking entries are marked **BREAKING**.
   `-8#7` and `-7`, not the positive spellings that change the value.
 - **`ArithError.span` carries byte offsets**, so a source with a multi-byte
   character before the error slices as the type promises.
+- **`$(( ))` reads a nested `$(...)` the way an ordinary `$(...)` does** — a
+  quoted or escaped parenthesis, a `#` comment, and a heredoc body no longer
+  close the arithmetic scan early. `<<` inside a bare `(( ))` stays the shift
+  operator.
 - **A diagnostic is the first line again** — a validation failure or a runtime
   fault no longer arrives under `Error: execution failed` / `Caused by:`. The
   generic wrapper named the phase and nothing else, so it displaced the line
