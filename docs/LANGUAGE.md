@@ -1057,9 +1057,10 @@ echo $((2#$bits))            # a string of binary digits
 
 ### Variables and expansions
 
-A variable name may omit the `$`. An integer works directly; `true` is 1 and
-`false` is 0; a string holding one number in any spelling above is read as
-that number.
+A variable name may omit the `$`. An integer works directly; a variable holding
+`true` reads as 1 and `false` as 0; a string holding one number in any spelling
+above is read as that number. A bare `true` is a variable name, not a literal —
+`$(( true + 1 ))` names `true` as unset unless you set it.
 
 ```sh
 count=4
