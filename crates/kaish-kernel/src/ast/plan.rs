@@ -349,10 +349,10 @@ impl Collected {
     /// `Ref` name — bare or `$`-prefixed, a bare subscript's root AND its
     /// index expression (`xs[i]` reads both `xs` and `i` — Decision B, the
     /// index is itself arithmetic) — plus a `${...}`/`base#$var`/nested
-    /// `$((...))` operand's own reads, and a `$(...)` operand's reads (via
-    /// `collect_block`, the same walker a bare `$(...)` already goes
-    /// through, so the two agree by construction rather than by two
-    /// implementations staying in sync by hand). `$?`/`$$`/a positional
+    /// `$((...))` operand's own reads, and a `$(...)` operand's commands,
+    /// keys, binds, and heredocs (via `collect_block`, the same walker a
+    /// bare `$(...)` already goes through, so the two agree by construction
+    /// rather than by two implementations staying in sync by hand). `$?`/`$$`/a positional
     /// parameter are not session variables, matching every other reader of
     /// them in this file. Parses the text with the real arithmetic parser
     /// rather than scanning for identifier-shaped substrings — the old
@@ -514,9 +514,9 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
             collect_block(&def.body, background, out)
         }
         Stmt::Test(t) => collect_test(t, background, out),
-        // Mirrors `Expr::Arithmetic`: free-variable reads only, same as a
-        // bare `$(( ))` — a `$(...)` operand inside is not walked into
-        // `PlannedCommand`s (a narrower surface than `Test`'s).
+        // Same walk as `Expr::Arithmetic`: reads its variables, and any
+        // `$(...)` operand inside walks into `PlannedCommand`s, keys,
+        // binds, and heredocs too — `(( $(cmd) ))` plans `cmd`.
         Stmt::Arith(expr) => out.read_arithmetic(expr),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             collect_stmt(left, background, out);
