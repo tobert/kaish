@@ -26,6 +26,7 @@
 use kaish_types::plan::{Expansion, FragmentAddr, Hole};
 use kaish_types::Value;
 
+use crate::arithmetic::{ArithExpr, Expansion as ArithExpansion};
 use crate::ast::plan::{heredoc_targets, plan_statement, render_expr};
 use crate::ast::{Expr, Stmt, StringPart, VarPath, VarSegment};
 use crate::interpreter::Evaluator;
@@ -121,7 +122,7 @@ pub fn expand_fragment(
     // plan published. A second walk that had to agree is how an address comes
     // to name a different body than the one it was read from.
     let targets = heredoc_targets(stmt);
-    let target = *targets.get(addr.heredoc).ok_or(FragmentError::NoSuchHeredoc {
+    let target = targets.get(addr.heredoc).ok_or(FragmentError::NoSuchHeredoc {
         asked: addr.heredoc,
         heredocs: targets.len(),
     })?;
@@ -194,7 +195,60 @@ fn part_holes(part: &StringPart, out: &mut Vec<Hole>) {
                 part_holes(part, out);
             }
         }
+        StringPart::Arithmetic(expr) => arithmetic_holes(expr, out),
         _ => {}
+    }
+}
+
+/// Every `$(...)` reachable inside a `$((…))` body, parsed with the real
+/// arithmetic parser rather than scanned for a `$(` substring — the same
+/// class of bug `part_holes` had before this arm existed, just one level
+/// deeper.
+///
+/// An arithmetic body that fails to parse is walked as if it held no holes
+/// at all, the same posture `ast::plan::read_arithmetic` takes for
+/// free-variable collection: arithmetic is deferred to runtime, so a syntax
+/// error here is still syntactically valid shell, and the statement fails
+/// loudly when it actually runs (`expand_target`'s own `Evaluator::eval`
+/// re-parses it and surfaces that error as `FragmentError::Eval`).
+fn arithmetic_holes(expr: &str, out: &mut Vec<Hole>) {
+    if let Ok(parsed) = crate::arithmetic::parse(expr) {
+        arith_expr_holes(&parsed, out);
+    }
+}
+
+fn arith_expr_holes(expr: &ArithExpr, out: &mut Vec<Hole>) {
+    match expr {
+        ArithExpr::Int(_) => {}
+        ArithExpr::Expansion(e) => arith_expansion_holes(e, out),
+        ArithExpr::Subscript { indices, .. } => {
+            for index in indices {
+                arith_expr_holes(index, out);
+            }
+        }
+        ArithExpr::BasedExpansion { expansion, .. } => arith_expansion_holes(expansion, out),
+        ArithExpr::Unary { operand, .. } => arith_expr_holes(operand, out),
+        ArithExpr::Binary { left, right, .. } => {
+            arith_expr_holes(left, out);
+            arith_expr_holes(right, out);
+        }
+        ArithExpr::Ternary { cond, then_branch, else_branch } => {
+            arith_expr_holes(cond, out);
+            arith_expr_holes(then_branch, out);
+            arith_expr_holes(else_branch, out);
+        }
+    }
+}
+
+fn arith_expansion_holes(e: &ArithExpansion, out: &mut Vec<Hole>) {
+    match e {
+        ArithExpansion::CommandSubst(stmts) => {
+            out.push(hole(&Expr::CommandSubst(stmts.clone()), stmts))
+        }
+        ArithExpansion::Nested(inner) => arith_expr_holes(inner, out),
+        ArithExpansion::BracedDefault { default, .. } => arithmetic_holes(default, out),
+        ArithExpansion::Var(_) | ArithExpansion::BracedPath { .. }
+        | ArithExpansion::LastExitCode | ArithExpansion::CurrentPid => {}
     }
 }
 
@@ -258,45 +312,61 @@ fn var_path_state(path: &VarPath) -> Option<String> {
     }
 }
 
-/// The session state an arithmetic expression reads, if any.
+/// The session state a parsed arithmetic expression reads, if any.
 ///
-/// `$((…))` is evaluated by `arithmetic.rs`, which resolves `$?`, `$$`, and a
-/// positional `$N` itself — none of them ever becomes a `StringPart` this
-/// module could see, so the expression text is all there is to go on.
+/// Walks the real `ArithExpr` tree — produced by the same parser
+/// `$((…))` is evaluated with — instead of scanning the source text for a
+/// `$` and guessing at what follows it. The old scan read any `$(` as
+/// session state, which misclassified a `$(...)` operand as unsuppliable
+/// instead of the hole it actually is (`arithmetic_holes` reports those
+/// separately, and `expand_target` checks holes first).
 ///
-/// The rule is deliberately the **complement** of the safe case rather than a
-/// list of the unsafe ones: after `$` (and an optional `{`), an ordinary
-/// variable name starts with a letter or `_`, and a caller can supply those.
-/// Anything else — `?`, `$`, a digit, a spelling nobody has thought of yet —
-/// reads something a supplied scope cannot carry, so it refuses. Enumerating
-/// the unsafe spellings instead would make every one this misses expand
-/// against a fresh session and invent a value.
+/// `Expansion::LastExitCode` is `$?`; `Expansion::CurrentPid` is `$$`; a
+/// `Expansion::Var` whose name parses as a `usize` is a positional
+/// parameter (`$1`, `$10`, …) — none of the three resolve from a session a
+/// caller can supply through `scope`. An ordinary variable name is not
+/// session state and is left to expand normally.
 ///
-/// Whitespace is skipped at both points because the evaluator's own `peek`
-/// skips it, so `$( ( $ ? ) )` reads the exit code exactly as `$(($?))` does.
+/// An arithmetic body that fails to parse reports no session state here —
+/// the same posture `arithmetic_holes` and `ast::plan::read_arithmetic`
+/// take: arithmetic is deferred to runtime, so a syntax error is still
+/// syntactically valid shell, and `expand_target`'s own `Evaluator::eval`
+/// re-parses the body and surfaces the real error as `FragmentError::Eval`
+/// when it actually runs.
 fn arithmetic_state(expr: &str) -> Option<String> {
-    let chars: Vec<char> = expr.chars().collect();
-    let skip_spaces = |mut i: usize| {
-        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
-            i += 1;
+    let parsed = crate::arithmetic::parse(expr).ok()?;
+    arith_expr_state(&parsed)
+}
+
+fn arith_expr_state(expr: &ArithExpr) -> Option<String> {
+    match expr {
+        ArithExpr::Int(_) => None,
+        ArithExpr::Expansion(e) => arith_expansion_state(e),
+        ArithExpr::Subscript { indices, .. } => indices.iter().find_map(arith_expr_state),
+        ArithExpr::BasedExpansion { expansion, .. } => arith_expansion_state(expansion),
+        ArithExpr::Unary { operand, .. } => arith_expr_state(operand),
+        ArithExpr::Binary { left, right, .. } => {
+            arith_expr_state(left).or_else(|| arith_expr_state(right))
         }
-        i
-    };
-    for (i, c) in chars.iter().enumerate() {
-        if *c != '$' {
-            continue;
-        }
-        let mut j = skip_spaces(i + 1);
-        if chars.get(j) == Some(&'{') {
-            j = skip_spaces(j + 1);
-        }
-        match chars.get(j) {
-            // An ordinary name — the caller can supply it.
-            Some(c) if c.is_alphabetic() || *c == '_' => {}
-            // Nothing at all after the `$` is not a read.
-            None => {}
-            Some(c) => return Some(format!("${c}")),
-        }
+        ArithExpr::Ternary { cond, then_branch, else_branch } => arith_expr_state(cond)
+            .or_else(|| arith_expr_state(then_branch))
+            .or_else(|| arith_expr_state(else_branch)),
     }
-    None
+}
+
+fn arith_expansion_state(e: &ArithExpansion) -> Option<String> {
+    match e {
+        ArithExpansion::LastExitCode => Some("$?".to_string()),
+        ArithExpansion::CurrentPid => Some("$$".to_string()),
+        ArithExpansion::Var(name) if name.parse::<usize>().is_ok() => Some(format!("${name}")),
+        ArithExpansion::Var(_) | ArithExpansion::BracedPath { .. } => None,
+        // The default is arithmetic source of its own, walked the same way;
+        // the root itself can never be `?` here — `parse_braced_body`
+        // parses `${?:-...}` as a syntax error, not a `BracedDefault`.
+        ArithExpansion::BracedDefault { default, .. } => arithmetic_state(default),
+        // A `$(...)` operand is a hole, not session state — `arithmetic_holes`
+        // reports it, and `expand_target` checks holes before this function.
+        ArithExpansion::CommandSubst(_) => None,
+        ArithExpansion::Nested(inner) => arith_expr_state(inner),
+    }
 }

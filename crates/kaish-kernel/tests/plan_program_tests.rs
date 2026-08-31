@@ -90,3 +90,108 @@ fn bound_names_never_read_as_free() {
     assert_eq!(plans[0].plan.free_variables, vec!["DIR".to_string()]);
     assert_eq!(plans[0].plan.bound_variables, vec!["f".to_string()]);
 }
+
+// ── A `$(...)` reached only through `$(( ))` still plans its own commands ──
+//
+// `--plan` promises every command a statement may run is present in
+// `Plan::commands` — an embedder approves against that list, so a command
+// missing from it is a command that runs unapproved. `read_arith_expansion`'s
+// `CommandSubst` arm used to keep only `inner.reads` and drop
+// `inner.commands`, so a `$(...)` reached only through arithmetic never
+// reached the plan at all.
+
+#[test]
+fn a_command_substitution_inside_arithmetic_plans_its_own_commands() {
+    let plans = plan_program("echo $((1 + $(touch PROBE; echo 1)))").expect("parses");
+    let names: Vec<&str> = plans[0].plan.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["echo", "touch", "echo"],
+        "both commands inside $(( $(...) )) must be planned, in source order"
+    );
+}
+
+#[test]
+fn a_command_substitution_inside_a_based_expansion_plans_its_own_command() {
+    let plans = plan_program("echo $((10#$(printf 42)))").expect("parses");
+    let names: Vec<&str> = plans[0].plan.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["echo", "printf"]);
+}
+
+#[test]
+fn a_command_substitution_inside_an_arithmetic_default_plans_its_own_command() {
+    let plans = plan_program("echo $((${cnt:-$(printf 9)}))").expect("parses");
+    let names: Vec<&str> = plans[0].plan.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["echo", "printf"]);
+}
+
+/// The heredoc-address invariant across an arithmetic boundary: one
+/// statement carrying heredoc A, then a `$(( ))` holding a `$(...)` with
+/// heredoc B, then heredoc C. The plan must publish flat indices 0/1/2, and
+/// `expand_fragment` must resolve each index to the SAME body the plan
+/// published — an address that resolves to a different body than the one it
+/// published is the worst failure this surface can have.
+#[test]
+fn a_heredoc_reached_through_arithmetic_keeps_the_flat_address_invariant() {
+    let source = "cat <<'A' && echo $((1 + $(cat <<'B'\nbodyB\nB\n))) && cat <<'C'\nbodyA\nA\nbodyC\nC";
+    let plans = plan_program(source).expect("parses");
+    let heredocs: Vec<kaish_types::plan::PlannedHeredoc> = plans[0]
+        .plan
+        .commands
+        .iter()
+        .flat_map(|c| c.heredocs.clone())
+        .collect();
+    assert_eq!(
+        heredocs.iter().map(|h| h.index).collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "flat indices across the arithmetic boundary"
+    );
+    assert_eq!(
+        heredocs.iter().map(|h| h.body.display()).collect::<Vec<_>>(),
+        vec!["bodyA\n".to_string(), "bodyB\n".to_string(), "bodyC\n".to_string()]
+    );
+
+    for heredoc in &heredocs {
+        let addr = kaish_types::plan::FragmentAddr::new(0, heredoc.index);
+        let expanded = kaish_kernel::expand_fragment(source, addr, &[])
+            .unwrap_or_else(|e| panic!("address {addr:?} unresolvable: {e}"));
+        assert_eq!(
+            expanded,
+            kaish_types::plan::Expansion::Complete(heredoc.body.display()),
+            "the resolver must agree with the address the plan published for index {}",
+            heredoc.index
+        );
+    }
+}
+
+/// A backgrounded `$(...)` inside `$(( ))` must plan `background: true` for
+/// the inner command, same as a bare backgrounded `$(...)` does — the outer
+/// pipeline's `&` covers everything it runs, arithmetic included. Asserting
+/// the direct and arithmetic forms agree (rather than pinning a literal
+/// `true`) states the rule; the non-background control at the end catches a
+/// fix that just hardcodes `true` instead of threading the real flag.
+#[test]
+fn background_propagates_through_a_command_substitution_inside_arithmetic() {
+    let direct = plan_program("echo $(echo hi) &").expect("parses");
+    let via_arith = plan_program("echo $((1 + $(echo hi))) &").expect("parses");
+
+    let direct_flags: Vec<bool> =
+        direct[0].plan.commands.iter().map(|c| c.background).collect();
+    let arith_flags: Vec<bool> =
+        via_arith[0].plan.commands.iter().map(|c| c.background).collect();
+
+    assert_eq!(direct_flags, vec![true, true], "direct form: both commands backgrounded");
+    assert_eq!(
+        arith_flags, direct_flags,
+        "the arithmetic form must agree with the direct form on backgrounding"
+    );
+
+    let not_backgrounded = plan_program("echo $((1 + $(echo hi)))").expect("parses");
+    let control_flags: Vec<bool> =
+        not_backgrounded[0].plan.commands.iter().map(|c| c.background).collect();
+    assert_eq!(
+        control_flags,
+        vec![false, false],
+        "without `&` neither command is backgrounded — control for a hardcoded `true`"
+    );
+}
