@@ -421,6 +421,21 @@ async fn arith_default_reported_regressions() {
     ok(r#"x=""; echo $(( ${x:-5} ))"#, "5").await;
 }
 
+/// The control for the two rows above: when the default IS selected, the
+/// fallback runs and its marker DOES reach stderr. Without this, an
+/// assertion that a marker is absent would also pass if the marker could
+/// never appear at all — a stderr check that sees nothing proves nothing.
+#[tokio::test]
+async fn arith_default_fallback_runs_when_the_default_is_selected() {
+    let (code, out, err) = run(
+        r#"r=$(fromjson "{\"a\":1}"); echo $(( ${r[missing]:-$(echo FALLBACK_RAN_MARKER_7f2c >&2; echo 9)} ))"#,
+    )
+    .await;
+    assert_eq!(code, 0, "{out:?} {err:?}");
+    assert_eq!(out.trim(), "9");
+    assert!(err.contains("FALLBACK_RAN_MARKER_7f2c"), "{err:?}");
+}
+
 // ── Nesting ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
