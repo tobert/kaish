@@ -48,20 +48,23 @@ impl std::error::Error for ArithError {}
 const MAX_DEPTH: usize = 256;
 
 /// The decimal a leading-zero numeral was probably meant to be — `010`
-/// becomes `10`. `None` when the text is not one.
+/// becomes `10`, `-007` becomes `-7`. `None` when the text is not one.
 ///
-/// Takes unsigned text: the tokenizer always splits a source-level
-/// `-`/`+` into its own token before a numeral like `007` ever reaches
-/// this, so `text` never carries one. The caller (`Tokenizer::lex_number`,
-/// via `Tokenizer::leading_unary_sign`) prepends the sign to the built
-/// suggestion separately — `-007` must not be "fixed" into a positive
-/// `7`.
+/// Two callers, two shapes of `text`: `value_to_num` (`interpreter/eval.rs`)
+/// hands this a full resolved value, sign and all (`test $x -eq -7` with
+/// `x` holding `-007`) — for that caller, the sign in `text` IS the fix,
+/// and must survive the trim. `Tokenizer::lex_number` hands this only the
+/// unsigned digits (the tokenizer already split a source-level `-`/`+`
+/// into its own token before `007` was ever scanned) and prepends any sign
+/// itself, via `Tokenizer::leading_unary_sign` — for that caller this
+/// function's own sign handling is simply inert, never wrong.
 pub(crate) fn leading_zero_decimal(text: &str) -> Option<String> {
     if !crate::lexer::is_leading_zero_numeral(text) {
         return None;
     }
-    let digits = text.trim_start_matches('0');
-    Some(if digits.is_empty() { "0".to_string() } else { digits.to_string() })
+    let sign = if text.starts_with('-') { "-" } else { "" };
+    let digits = text.trim_start_matches('-').trim_start_matches('0');
+    Some(format!("{sign}{}", if digits.is_empty() { "0" } else { digits }))
 }
 
 // ═══════════════════════════════════════════════════════════════════
