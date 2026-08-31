@@ -80,6 +80,12 @@ breaking entries are marked **BREAKING**.
   quoted or escaped parenthesis, a `#` comment, and a heredoc body no longer
   close the arithmetic scan early. `<<` inside a bare `(( ))` stays the shift
   operator.
+- **A diagnostic is the first line again** — a validation failure or a runtime
+  fault no longer arrives under `Error: execution failed` / `Caused by:`. The
+  generic wrapper named the phase and nothing else, so it displaced the line
+  that says what to fix, including the validator's suggested rewrite. A
+  context that carries information, like `Failed to read script: <path>`,
+  stays.
 - **A comparison kaish cannot make is a fault, not `false`** — `[[ ]]`, `test`,
   and `(( ))` now agree: exit 2 where nothing reads the result as a boolean, and
   an abort where something does (`if`/`while`, `!`, the left operand of
