@@ -17,7 +17,7 @@
 //! `&&`/`||`/`?:` never runs.
 
 use crate::ast::{Stmt, Value, VarPath};
-use crate::interpreter::{value_to_string, Scope};
+use crate::interpreter::{value_defaults_on_emptiness, value_to_string, PathError, Scope};
 use std::ops::Range;
 
 /// An error from tokenizing, parsing, or evaluating `$(( ))`. `message` is
@@ -1571,6 +1571,40 @@ pub(crate) fn braced_path_value(scope: &Scope, root: &str, brackets: &str) -> Re
     })
 }
 
+/// The left operand of `${root[brackets]:-default}` inside `$(( ))`, classified
+/// the way ordinary interpolation classifies it (decision A — `resolve_default`
+/// in `interpreter/eval.rs`): `Ok(None)` means "select the default" (an unset
+/// root, a missing key, an out-of-bounds index, `null`, or an empty string);
+/// `Ok(Some(v))` is a present value to use as-is; `Err` is a shape error — a
+/// wrong-typed access — that the default must NOT suppress and whose fallback
+/// must NOT run.
+///
+/// The four `BracedDefault` call sites (sync/async × arithmetic-operand/
+/// `base#`-text) all resolve through this one function so the contract can't
+/// drift between them the way `.ok()` let it drift before.
+pub(crate) fn braced_default_operand(
+    scope: &Scope,
+    root: &str,
+    brackets: &str,
+) -> Result<Option<Value>, ArithError> {
+    let resolved: Result<Value, PathError> = if brackets.is_empty() {
+        scope
+            .get(root)
+            .cloned()
+            .ok_or_else(|| PathError::UndefinedRoot(root.to_string()))
+    } else {
+        let raw = format!("${{{root}{brackets}}}");
+        let path: VarPath = crate::parser::parse_varpath(&raw);
+        scope.resolve_path(&path)
+    };
+    match resolved {
+        Ok(v) if value_defaults_on_emptiness(&v) => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(PathError::UndefinedRoot(_)) | Err(PathError::Absence(_)) => Ok(None),
+        Err(PathError::Shape(msg)) => Err(ArithError::new(msg, 0..0)),
+    }
+}
+
 fn subscript_path(root: &str, indices: &[i64]) -> VarPath {
     let mut raw = format!("${{{root}");
     for idx in indices {
@@ -1687,11 +1721,8 @@ fn resolve_expansion_sync(e: &Expansion, scope: &Scope) -> Result<i64, ArithErro
             value_to_arith(&v, root)
         }
         Expansion::BracedDefault { root, brackets, default } => {
-            let resolved = if brackets.is_empty() { scope.get(root).cloned() } else {
-                braced_path_value(scope, root, brackets).ok()
-            };
-            match resolved {
-                Some(Value::Null) | None => {
+            match braced_default_operand(scope, root, brackets)? {
+                None => {
                     let default_expr = parse(default)?;
                     eval_sync(&default_expr, scope)
                 }
@@ -1727,19 +1758,14 @@ pub(crate) fn expansion_text_sync(e: &Expansion, scope: &Scope) -> Result<String
             braced_path_value(scope, root, brackets).map(|v| value_to_string(&v))
         }
         Expansion::BracedDefault { root, brackets, default } => {
-            let resolved = if brackets.is_empty() {
-                scope.get(root).cloned()
-            } else {
-                braced_path_value(scope, root, brackets).ok()
-            };
-            match resolved {
+            match braced_default_operand(scope, root, brackets)? {
                 // A default that is itself a single expansion (`$(cmd)`,
                 // `$var`, …) stays in TEXT mode — `10#${m:-$(date +%m)}`
                 // needs the same "read raw digits" treatment `10#$m` gets,
                 // not the leading-zero refusal a full arithmetic operand
                 // would apply. A default with real operators (`1 + 2`) is
                 // genuinely an expression and is evaluated as one.
-                Some(Value::Null) | None => match parse(default)? {
+                None => match parse(default)? {
                     ArithExpr::Expansion(e) => expansion_text_sync(&e, scope),
                     default_expr => Ok(eval_sync(&default_expr, scope)?.to_string()),
                 },

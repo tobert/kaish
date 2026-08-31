@@ -5062,14 +5062,11 @@ impl Kernel {
                 Expansion::BracedDefault { root, brackets, default } => {
                     let resolved = {
                         let scope = self.scope.read().await;
-                        if brackets.is_empty() {
-                            scope.get(root).cloned()
-                        } else {
-                            crate::arithmetic::braced_path_value(&scope, root, brackets).ok()
-                        }
+                        crate::arithmetic::braced_default_operand(&scope, root, brackets)
+                            .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?
                     };
                     match resolved {
-                        Some(Value::Null) | None => {
+                        None => {
                             let default_expr = crate::arithmetic::parse(default)
                                 .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
                             self.eval_arith_expr_async(&default_expr).await
@@ -5132,17 +5129,14 @@ impl Kernel {
                 Expansion::BracedDefault { root, brackets, default } => {
                     let resolved = {
                         let scope = self.scope.read().await;
-                        if brackets.is_empty() {
-                            scope.get(root).cloned()
-                        } else {
-                            crate::arithmetic::braced_path_value(&scope, root, brackets).ok()
-                        }
+                        crate::arithmetic::braced_default_operand(&scope, root, brackets)
+                            .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?
                     };
                     match resolved {
                         // Stays in TEXT mode when the default is itself a
                         // single expansion — see the sync twin,
                         // `expansion_text_sync`, for why.
-                        Some(Value::Null) | None => {
+                        None => {
                             let default_expr = crate::arithmetic::parse(default)
                                 .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
                             match default_expr {
