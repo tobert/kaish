@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: removed plan-side confirm-key redaction** — `PlannedValue::Redacted`,
+  `StatementPlan::presented_keys`, `strip_confirm_tokens`, and `redact_keys` are
+  gone. The credential they protected was removed in 0.14.0; `--confirm=<key>`
+  now plans and renders like any other argument.
+
 - `ExecContext` carries `kill_grace` and `background_job`, so a tool holding only
   an `ExecContext` can spawn a child with the kernel's external-command
   discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
