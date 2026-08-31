@@ -163,3 +163,35 @@ fn a_heredoc_reached_through_arithmetic_keeps_the_flat_address_invariant() {
         );
     }
 }
+
+/// A backgrounded `$(...)` inside `$(( ))` must plan `background: true` for
+/// the inner command, same as a bare backgrounded `$(...)` does — the outer
+/// pipeline's `&` covers everything it runs, arithmetic included. Asserting
+/// the direct and arithmetic forms agree (rather than pinning a literal
+/// `true`) states the rule; the non-background control at the end catches a
+/// fix that just hardcodes `true` instead of threading the real flag.
+#[test]
+fn background_propagates_through_a_command_substitution_inside_arithmetic() {
+    let direct = plan_program("echo $(echo hi) &").expect("parses");
+    let via_arith = plan_program("echo $((1 + $(echo hi))) &").expect("parses");
+
+    let direct_flags: Vec<bool> =
+        direct[0].plan.commands.iter().map(|c| c.background).collect();
+    let arith_flags: Vec<bool> =
+        via_arith[0].plan.commands.iter().map(|c| c.background).collect();
+
+    assert_eq!(direct_flags, vec![true, true], "direct form: both commands backgrounded");
+    assert_eq!(
+        arith_flags, direct_flags,
+        "the arithmetic form must agree with the direct form on backgrounding"
+    );
+
+    let not_backgrounded = plan_program("echo $((1 + $(echo hi)))").expect("parses");
+    let control_flags: Vec<bool> =
+        not_backgrounded[0].plan.commands.iter().map(|c| c.background).collect();
+    assert_eq!(
+        control_flags,
+        vec![false, false],
+        "without `&` neither command is backgrounded — control for a hardcoded `true`"
+    );
+}

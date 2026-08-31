@@ -361,39 +361,43 @@ impl Collected {
     /// arithmetic to runtime — an unparsable body is syntactically valid
     /// shell — so a syntax error here reads no variables rather than
     /// failing the plan; the statement itself still fails loudly when it
-    /// runs.
-    fn read_arithmetic(&mut self, expr: &str) {
+    /// runs. `background` is the enclosing pipeline's `&`, threaded through
+    /// so a `$(...)` reached this way plans backgrounded exactly like a
+    /// bare `$(...)` does.
+    fn read_arithmetic(&mut self, expr: &str, background: bool) {
         if let Ok(parsed) = crate::arithmetic::parse(expr) {
-            self.read_arith_expr(&parsed);
+            self.read_arith_expr(&parsed, background);
         }
     }
 
-    fn read_arith_expr(&mut self, expr: &crate::arithmetic::ArithExpr) {
+    fn read_arith_expr(&mut self, expr: &crate::arithmetic::ArithExpr, background: bool) {
         use crate::arithmetic::ArithExpr;
         match expr {
             ArithExpr::Int(_) => {}
-            ArithExpr::Expansion(e) => self.read_arith_expansion(e),
+            ArithExpr::Expansion(e) => self.read_arith_expansion(e, background),
             ArithExpr::Subscript { root, indices } => {
                 self.reads.insert(root.clone());
                 for index in indices {
-                    self.read_arith_expr(index);
+                    self.read_arith_expr(index, background);
                 }
             }
-            ArithExpr::BasedExpansion { expansion, .. } => self.read_arith_expansion(expansion),
-            ArithExpr::Unary { operand, .. } => self.read_arith_expr(operand),
+            ArithExpr::BasedExpansion { expansion, .. } => {
+                self.read_arith_expansion(expansion, background)
+            }
+            ArithExpr::Unary { operand, .. } => self.read_arith_expr(operand, background),
             ArithExpr::Binary { left, right, .. } => {
-                self.read_arith_expr(left);
-                self.read_arith_expr(right);
+                self.read_arith_expr(left, background);
+                self.read_arith_expr(right, background);
             }
             ArithExpr::Ternary { cond, then_branch, else_branch } => {
-                self.read_arith_expr(cond);
-                self.read_arith_expr(then_branch);
-                self.read_arith_expr(else_branch);
+                self.read_arith_expr(cond, background);
+                self.read_arith_expr(then_branch, background);
+                self.read_arith_expr(else_branch, background);
             }
         }
     }
 
-    fn read_arith_expansion(&mut self, e: &crate::arithmetic::Expansion) {
+    fn read_arith_expansion(&mut self, e: &crate::arithmetic::Expansion, background: bool) {
         use crate::arithmetic::Expansion;
         match e {
             // A bare `$1` is a positional parameter, not a session
@@ -412,17 +416,18 @@ impl Collected {
                 let raw = format!("${{{root}{brackets}}}");
                 self.read_path(&crate::parser::parse_varpath(&raw));
                 if let Ok(parsed) = crate::arithmetic::parse(default) {
-                    self.read_arith_expr(&parsed);
+                    self.read_arith_expr(&parsed, background);
                 }
             }
             Expansion::LastExitCode | Expansion::CurrentPid => {}
             // Walk straight into `self` — commands, keys, binds, and
             // heredocs all land in the one flat walk, not just `reads`. A
             // `$(...)` inside `$((…))` is a command this statement runs,
-            // same as a bare `$(...)` in an argument; dropping everything
-            // but its reads is the bug DEFECT 1 exists to fix.
-            Expansion::CommandSubst(stmts) => collect_block(stmts, false, self),
-            Expansion::Nested(inner) => self.read_arith_expr(inner),
+            // same as a bare `$(...)` in an argument. `background` is the
+            // enclosing pipeline's `&`, threaded from the caller rather
+            // than hardcoded, so it plans the same as a bare `$(...)`.
+            Expansion::CommandSubst(stmts) => collect_block(stmts, background, self),
+            Expansion::Nested(inner) => self.read_arith_expr(inner, background),
         }
     }
 }
@@ -517,7 +522,7 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
         // Same walk as `Expr::Arithmetic`: reads its variables, and any
         // `$(...)` operand inside walks into `PlannedCommand`s, keys,
         // binds, and heredocs too — `(( $(cmd) ))` plans `cmd`.
-        Stmt::Arith(expr) => out.read_arithmetic(expr),
+        Stmt::Arith(expr) => out.read_arithmetic(expr, background),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             collect_stmt(left, background, out);
             collect_stmt(right, background, out);
@@ -612,8 +617,8 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
             }
         }
         Expr::VarRef(path) | Expr::VarLength(path) => out.read_path(path),
-        Expr::Arithmetic(e) => out.read_arithmetic(e),
-        Expr::Arith(e) => out.read_arithmetic(e),
+        Expr::Arithmetic(e) => out.read_arithmetic(e, background),
+        Expr::Arith(e) => out.read_arithmetic(e, background),
         // Special forms ($1, $@, $#, $?, $$) are not session variables; an
         // embedder cannot peek them with `get_var`, so they are not listed.
         Expr::Literal(_)
@@ -641,7 +646,7 @@ fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
             collect_parts(default, background, out)
         }
         StringPart::Var(path) | StringPart::VarLength(path) => out.read_path(path),
-        StringPart::Arithmetic(e) => out.read_arithmetic(e),
+        StringPart::Arithmetic(e) => out.read_arithmetic(e, background),
         // See the identical special-forms note in `collect_expr`.
         StringPart::Literal(_)
         | StringPart::Positional(_)
