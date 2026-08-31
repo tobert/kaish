@@ -62,6 +62,12 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
+- **A comparison kaish cannot make is a fault, not `false`** — `[[ ]]`, `test`,
+  and `(( ))` now agree: exit 2 where nothing reads the result as a boolean, and
+  an abort where something does (`if`/`while`, `!`, the left operand of
+  `&&`/`||`). `[[ $x -eq 1 ]] || echo no` no longer prints a conclusion drawn
+  from a comparison that never happened. A command that merely failed is
+  unaffected.
 - **A `[[ ]]` type error is exit 2, not a false reading** — `[[ $x -eq 1 ]]`
   with a non-numeric `$x` now reports code 2 with the message, matching
   `(( ))` and `test`. It was leaving `Kernel::execute` as an error, which

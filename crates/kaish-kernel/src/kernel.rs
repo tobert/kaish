@@ -2960,6 +2960,17 @@ impl Kernel {
                     ControlFlow::Normal(mut left_result) => {
                         self.drain_stderr_into(&mut left_result).await;
                         self.update_last_result(&left_result).await;
+                        // The left operand is consumed as a boolean to
+                        // decide whether the right one runs, and a fault has
+                        // no boolean to give. Abort instead of reading it as
+                        // failure — a fallback chosen from a comparison that
+                        // never happened is a wrong conclusion, not a
+                        // recovery. The RIGHT operand is not guarded: its
+                        // value becomes the chain's value, so nothing
+                        // consumes it as a boolean and it reports exit 2.
+                        if left_result.fault {
+                            return Err(anyhow::anyhow!("{}", left_result.err.trim_end()));
+                        }
                         // Pending is not failure (spec §I.5) — see the
                         // `OrChain` twin. The stash check matters here for a
                         // hold swallowed into an apparent success below.
@@ -3011,6 +3022,17 @@ impl Kernel {
                     ControlFlow::Normal(mut left_result) => {
                         self.drain_stderr_into(&mut left_result).await;
                         self.update_last_result(&left_result).await;
+                        // The left operand is consumed as a boolean to
+                        // decide whether the right one runs, and a fault has
+                        // no boolean to give. Abort instead of reading it as
+                        // failure — a fallback chosen from a comparison that
+                        // never happened is a wrong conclusion, not a
+                        // recovery. The RIGHT operand is not guarded: its
+                        // value becomes the chain's value, so nothing
+                        // consumes it as a boolean and it reports exit 2.
+                        if left_result.fault {
+                            return Err(anyhow::anyhow!("{}", left_result.err.trim_end()));
+                        }
                         // Pending is not failure (spec §I.5): a fallback
                         // written for failure must not run on a decision
                         // nobody has made yet — and running it would also
@@ -3055,7 +3077,7 @@ impl Kernel {
                 let result = match self.eval_test_async(test_expr).await {
                     Ok(true) => ExecResult::success(""),
                     Ok(false) => ExecResult::failure(1, ""),
-                    Err(e) => ExecResult::failure(2, format!("{e:#}")),
+                    Err(e) => ExecResult::failure(2, format!("{e:#}")).into_fault(),
                 };
                 // A bare test writes `$?` and honors `set -e` like any command
                 // (bash: `[[ 1 = 2 ]]; echo $?` → 1). `&&`/`||` operands stay
@@ -3085,7 +3107,7 @@ impl Kernel {
                 let result = match self.eval_arithmetic_async(expr_str).await {
                     Ok(n) if n != 0 => ExecResult::success(""),
                     Ok(_) => ExecResult::failure(1, ""),
-                    Err(e) => ExecResult::failure(2, e.to_string()),
+                    Err(e) => ExecResult::failure(2, e.to_string()).into_fault(),
                 };
                 self.update_last_result(&result).await;
                 if !result.ok() {
@@ -4039,6 +4061,14 @@ impl Kernel {
                     // the spill contract can remap it. A capped `if seq 1
                     // 100000` succeeded; only its output was too big to keep,
                     // and reading the remapped 3 would send it to `else`.
+                    // A fault has no boolean to give. Aborting here is the
+                    // rule `[[ ]]` and `(( ))` already follow in this position;
+                    // reading it as false would let `else` run on a comparison
+                    // that never happened.
+                    if result.fault {
+                        self.emit_cmdsubst_stderr(&result.err).await;
+                        return Err(anyhow::anyhow!("{}", result.err.trim_end()));
+                    }
                     let truthy = result.code == 0;
                     // Carrying the stdout made this arm one of the surfaces
                     // that produce a raw `ExecResult`, and it reaches
@@ -7364,6 +7394,10 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // bug this mechanism exists to fix, re-entering through a side door).
     accumulated.data = new.data.clone();
     accumulated.data_is_value = new.data_is_value;
+    // Assign, like `code`: the combined result IS `new`'s value, so it is a
+    // fault exactly when `new` is. This lets an outer chain see a fault that
+    // arrived through an inner chain's right operand.
+    accumulated.fault = new.fault;
     // OR, not assign. `did_spill` is a fact about the OUTPUT — this block's
     // text was truncated — and an ordinary statement running afterwards does
     // not untruncate it. Assigning let `seq …; echo after` report

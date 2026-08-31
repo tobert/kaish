@@ -146,13 +146,13 @@ impl Tool for Test {
         };
         let argv = match args.to_argv() {
             Ok(v) => v,
-            Err(e) => return ExecResult::failure(2, format!("test: {e}")),
+            Err(e) => return ExecResult::failure(2, format!("test: {e}")).into_fault(),
         };
         let parsed = match TestArgs::try_parse_from(
             std::iter::once("test".to_string()).chain(argv),
         ) {
             Ok(p) => p,
-            Err(e) => return ExecResult::failure(2, format!("test: {e}")),
+            Err(e) => return ExecResult::failure(2, format!("test: {e}")).into_fault(),
         };
         parsed.global.apply(ctx);
 
@@ -160,7 +160,11 @@ impl Tool for Test {
         match eval_test(ctx, &args.positional).await {
             Ok(true) => ExecResult::success(""),
             Ok(false) => ExecResult::failure(1, ""),
-            Err(msg) => ExecResult::failure(2, msg),
+            // A fault, not a false reading: an operand that cannot be
+            // compared leaves nothing to report as a boolean. In a condition,
+            // or as a chain's left operand, the kernel aborts on this rather
+            // than reading false — the same rule `[[ ]]` follows.
+            Err(msg) => ExecResult::failure(2, msg).into_fault(),
         }
     }
 }
