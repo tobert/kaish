@@ -4,21 +4,12 @@
 //! rendered back **unexpanded**, every [`PlannedCommand`] it would run, and
 //! the variables it reads and writes. An embedder reads a plan to decide
 //! whether to run a statement; nothing here decides anything itself.
-//!
-//! [`PlannedValue`] is the one place redaction appears. The kernel redacts
-//! exactly one thing — the `--confirm=<key>` flag spelling, kaish's own
-//! convention for a confirmation credential — and a redacted value keeps a
-//! *kind*, never the credential. kaish ships no secret detector, because a
-//! shell cannot define what a secret is; an embedder that wants more redacts
-//! the plans it holds.
 
 use serde::{Deserialize, Serialize};
 
-/// A content identity for a plan — a digest over its rendered text with any
-/// presented credential stripped, so `rm x` and `rm --confirm=<key> x`
-/// digest the same. The embedder computes it (e.g. SHA-256 over the
-/// kernel's `strip_confirm_tokens(rendered)`); this type only carries the
-/// value, so `kaish-types` stays dependency-light.
+/// A content identity for a plan — a digest over its rendered text, computed
+/// by the embedder (e.g. SHA-256). This type only carries the value, so
+/// `kaish-types` stays dependency-light.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlanDigest(String);
@@ -35,60 +26,27 @@ impl PlanDigest {
     }
 }
 
-// ───────────────────────── Redaction ─────────────────────────
+// ───────────────────────── Values ─────────────────────────
 
 /// One value inside a rendered plan. A sink serializes `PlannedValue`, never
-/// a bare `String`, so a value reaches a sink only after something decided
-/// whether it was a secret.
-///
-/// The kernel builds every `PlannedValue` at one normalization point
-/// (`kaish-kernel`'s `ast::plan::plan_statement`), before the plan reaches
-/// any consumer. A consumer added later reads the same already-decided
-/// values instead of re-deriving its own redaction.
+/// a bare `String` — kaish carries no built-in redaction today, but the
+/// `#[non_exhaustive]` vocabulary is the seam an embedder-side redaction pass
+/// writes its own variant into, without every consumer needing to switch
+/// from reading a `String` first.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlannedValue {
-    /// Not judged secret. Holds the literal text, exactly as it would render
-    /// on the command line.
+    /// The literal text, exactly as it would render on the command line.
     Plain(String),
-    /// Judged secret — today only by the kernel's own confirm-key check;
-    /// the original text never reaches this variant or anything built from
-    /// it. The variant is the vocabulary an embedder-side redaction pass can
-    /// also produce over plans it holds.
-    Redacted {
-        /// What kind of secret — `"confirm-key"` for the kernel's one
-        /// built-in redaction. The kernel does not interpret this string.
-        kind: String,
-        /// Stable salted digest prefix, when the producer supplied one, so an
-        /// auditor can ask "the same credential as last time?" without
-        /// holding it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        fingerprint: Option<String>,
-    },
 }
 
 impl PlannedValue {
-    /// Build a value the kernel judged secret.
-    pub fn redacted(kind: impl Into<String>, fingerprint: Option<String>) -> Self {
-        Self::Redacted {
-            kind: kind.into(),
-            fingerprint,
-        }
-    }
-
-    /// The text a sink should show: the literal for `Plain`, or `<kind>` for
-    /// `Redacted` — never the redacted content itself.
+    /// The text a sink should show: the literal, for `Plain`.
     pub fn display(&self) -> String {
         match self {
             Self::Plain(s) => s.clone(),
-            Self::Redacted { kind, .. } => format!("<{kind}>"),
         }
-    }
-
-    /// Whether this value was judged secret.
-    pub fn is_redacted(&self) -> bool {
-        matches!(self, Self::Redacted { .. })
     }
 }
 
@@ -178,12 +136,9 @@ impl Plan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedCommand {
     /// argv0 as written — never resolved through aliases, `PATH`, or the
-    /// tool registry. Never a [`PlannedValue`]: a command name is structural,
-    /// never a credential.
+    /// tool registry. Never a [`PlannedValue`]: a command name is structural.
     pub name: String,
-    /// The arguments, rendered unexpanded — a presented confirm key reads as
-    /// `PlannedValue::Redacted` here rather than as its literal text
-    /// (spec §A.8).
+    /// The arguments, rendered unexpanded (spec §A.8).
     pub args: Vec<PlannedValue>,
     /// The redirections this command declares.
     pub redirects: Vec<PlannedRedirect>,
@@ -441,18 +396,6 @@ mod tests {
         let back: Plan = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.free_variables, vec!["LOG".to_string()]);
         assert_eq!(back.bound_variables, vec!["OUT".to_string()]);
-    }
-
-    #[test]
-    fn a_redacted_value_keeps_no_text() {
-        // The kernel redacts its own confirm key and nothing else; the
-        // variant carries a kind, never the credential it replaced.
-        let json = serde_json::to_value(PlannedValue::redacted("confirm-key", None))
-            .expect("serialize");
-        assert!(
-            !json.to_string().contains("secret"),
-            "a redacted value must not carry text: {json}"
-        );
     }
 
     #[test]
