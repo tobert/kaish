@@ -231,7 +231,16 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn byte_pos(&self) -> usize {
-        self.chars.get(self.pos).map(|(b, _)| *b).unwrap_or(self.text.len())
+        self.byte_at(self.pos)
+    }
+
+    /// Byte offset for a CHAR index. `self.pos` (and every local `start`
+    /// derived from it) counts chars, not bytes — a multi-byte character
+    /// anywhere before the index makes the two diverge. Every span handed
+    /// to `ArithError::new` must go through this (or `byte_pos()` for the
+    /// current position), never a bare char index.
+    fn byte_at(&self, char_idx: usize) -> usize {
+        self.chars.get(char_idx).map(|(b, _)| *b).unwrap_or(self.text.len())
     }
 
     fn peek(&self) -> Option<char> {
@@ -278,7 +287,6 @@ impl<'a> Tokenizer<'a> {
         loop {
             self.skip_ws();
             let Some(c) = self.peek() else { break };
-            let start = self.pos;
             let start_byte = self.byte_pos();
             let kind = match c {
                 '0'..='9' => self.lex_number()?,
@@ -328,7 +336,7 @@ impl<'a> Tokenizer<'a> {
                         if self.peek() == Some('<') {
                             return Err(ArithError::new(
                                 "`<<<` is a here-string, not an operator; write `<<` to shift",
-                                start..self.pos + 1,
+                                start_byte..self.byte_at(self.pos + 1),
                             ));
                         }
                         TokKind::Op(BinOp::Shl)
@@ -346,7 +354,7 @@ impl<'a> Tokenizer<'a> {
                         if self.peek() == Some('>') {
                             return Err(ArithError::new(
                                 "`>>>` is not an operator; write `>>`",
-                                start..self.pos + 1,
+                                start_byte..self.byte_at(self.pos + 1),
                             ));
                         }
                         TokKind::Op(BinOp::Shr)
@@ -405,13 +413,13 @@ impl<'a> Tokenizer<'a> {
                 ',' => {
                     return Err(ArithError::new(
                         "`,` is not an operator; one expression per `$(( ))`",
-                        start..self.pos + 1,
+                        start_byte..self.byte_at(self.pos + 1),
                     ));
                 }
                 other => {
                     return Err(ArithError::new(
                         format!("`{other}` cannot start a value"),
-                        start..self.pos + 1,
+                        start_byte..self.byte_at(self.pos + 1),
                     ));
                 }
             };
@@ -512,7 +520,7 @@ impl<'a> Tokenizer<'a> {
             if c == '_' {
                 return Err(ArithError::new(
                     format!("`{}` contains `_`; remove it", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                    lit_start..self.byte_pos() + c.len_utf8(),
+                    self.byte_at(lit_start)..self.byte_pos() + c.len_utf8(),
                 ));
             }
             if !c.is_ascii_alphanumeric() {
@@ -531,7 +539,7 @@ impl<'a> Tokenizer<'a> {
                         "`{c}` is not a digit in `{}`; use digits valid for base {base}",
                         self.slice(lit_start, self.pos)
                     ),
-                    lit_start..self.byte_pos(),
+                    self.byte_at(lit_start)..self.byte_pos(),
                 ));
             }
             mag = mag
@@ -540,7 +548,7 @@ impl<'a> Tokenizer<'a> {
                 .ok_or_else(|| {
                     ArithError::new(
                         format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                        lit_start..self.byte_pos(),
+                        self.byte_at(lit_start)..self.byte_pos(),
                     )
                 })?;
             self.pos += 1;
@@ -560,7 +568,7 @@ impl<'a> Tokenizer<'a> {
             if c == '_' {
                 return Err(ArithError::new(
                     format!("`{}` contains `_`; remove it", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                    lit_start..self.byte_pos() + c.len_utf8(),
+                    self.byte_at(lit_start)..self.byte_pos() + c.len_utf8(),
                 ));
             }
             if !c.is_ascii_digit() {
@@ -570,7 +578,7 @@ impl<'a> Tokenizer<'a> {
             mag = mag.checked_mul(10).and_then(|m| m.checked_add(digit_val)).ok_or_else(|| {
                 ArithError::new(
                     format!("`{}` {INTEGER_OUT_OF_RANGE}", self.slice(lit_start, self.numeral_run_end(self.pos))),
-                    lit_start..self.byte_pos(),
+                    self.byte_at(lit_start)..self.byte_pos(),
                 )
             })?;
             self.pos += 1;
@@ -589,7 +597,7 @@ impl<'a> Tokenizer<'a> {
             if digits_start == self.pos {
                 return Err(ArithError::new(
                     format!("`{prefix}` has no digits; add digits after `{prefix}`"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             return Ok(TokKind::Number(mag));
@@ -608,7 +616,7 @@ impl<'a> Tokenizer<'a> {
             let (base, word) = if matches!(kind_char, 'b' | 'B') { (2, "binary") } else { (8, "octal") };
             return Err(ArithError::new(
                 format!("`{full}` is not a kaish base spelling; write `{base}#{digits}` for {word}"),
-                start..self.pos,
+                self.byte_at(start)..self.byte_pos(),
             ));
         }
 
@@ -645,7 +653,7 @@ impl<'a> Tokenizer<'a> {
             let text = self.slice(start, self.pos);
             return Err(ArithError::new(
                 format!("`{text}` is not an integer; arithmetic is integer-only"),
-                start..self.pos,
+                self.byte_at(start)..self.byte_pos(),
             ));
         }
 
@@ -654,7 +662,7 @@ impl<'a> Tokenizer<'a> {
             if base_text.len() > 1 && base_text.starts_with('0') {
                 return Err(ArithError::new(
                     format!("`{base_text}` is not a base spelling; write the base without a leading zero"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             self.advance(); // consume '#'
@@ -664,7 +672,7 @@ impl<'a> Tokenizer<'a> {
             if !(2..=36).contains(&base_mag) {
                 return Err(ArithError::new(
                     format!("base `{base_mag}` is outside 2..=36"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             let base = base_mag as u32;
@@ -677,7 +685,7 @@ impl<'a> Tokenizer<'a> {
                 let lit = self.slice(start, self.pos);
                 return Err(ArithError::new(
                     format!("`{lit}` puts `{sign}` after `#`; write `{sign}{base}#{}`", self.slice(sign_start + 1, self.pos)),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             if self.peek() == Some('$') {
@@ -689,7 +697,7 @@ impl<'a> Tokenizer<'a> {
             if bdigits_start == self.pos {
                 return Err(ArithError::new(
                     format!("`{prefix}` has no digits; add digits after `{prefix}`"),
-                    start..self.pos,
+                    self.byte_at(start)..self.byte_pos(),
                 ));
             }
             return Ok(TokKind::Number(mag));
@@ -703,7 +711,7 @@ impl<'a> Tokenizer<'a> {
                     "`{text}` has a leading zero — kaish reads no octal; write `8#{}` for octal or `{decimal}` for decimal",
                     text.trim_start_matches('0')
                 ),
-                start..self.pos,
+                self.byte_at(start)..self.byte_pos(),
             ));
         }
         Ok(TokKind::Number(base_mag))
@@ -742,7 +750,7 @@ impl<'a> Tokenizer<'a> {
                     Ok(program) => Ok(Expansion::CommandSubst(program.statements)),
                     Err(_) => Err(ArithError::new(
                         format!("syntax error in command substitution: $({cmd_text})"),
-                        dollar_start..self.byte_pos(),
+                        self.byte_at(dollar_start)..self.byte_pos(),
                     )),
                 }
             }
@@ -751,7 +759,7 @@ impl<'a> Tokenizer<'a> {
                 let body_start = self.pos;
                 let close = self.skip_group('}', false, dollar_start, false)?;
                 let body = self.slice(body_start, close).to_string();
-                parse_braced_body(&body, dollar_start..self.byte_pos())
+                parse_braced_body(&body, self.byte_at(dollar_start)..self.byte_pos())
             }
             // `$1`, `$2`, … — positional parameters. A leading digit is
             // otherwise not a valid identifier start, so it is unambiguous
@@ -766,7 +774,7 @@ impl<'a> Tokenizer<'a> {
             }
             _ => Err(ArithError::new(
                 format!("`{}` cannot start a value", self.slice(dollar_start, self.pos + 1)),
-                dollar_start..self.byte_pos() + 1,
+                self.byte_at(dollar_start)..self.byte_at(self.pos + 1),
             )),
         }
     }
@@ -797,7 +805,7 @@ impl<'a> Tokenizer<'a> {
                     let close_str = if double { "))" } else if close == '}' { "}" } else { ")" };
                     return Err(ArithError::new(
                         format!("`{}` has no closing `{close_str}`", self.slice(group_start, self.pos)),
-                        group_start..self.byte_pos(),
+                        self.byte_at(group_start)..self.byte_pos(),
                     ));
                 }
                 Some('\\') => {
@@ -2327,6 +2335,83 @@ mod tests {
         }
         let msg = err(&src);
         assert!(msg.contains("256"), "{msg}");
+    }
+
+    // ── Defect 7a: `ArithError.span` must be a byte range ──
+    //
+    // The tokenizer's `self.pos` counts CHARS (it indexes a
+    // `Vec<(usize, char)>`), but `ArithError.span` is documented as a byte
+    // range into the source. A raw char index used directly as a byte
+    // offset is correct only while every preceding character is one byte;
+    // a multi-byte character before the error point makes it wrong. The
+    // symptom: `source.get(span)` returns `None` (a non-char-boundary) or
+    // slices the wrong bytes — never merely "a span that looks nonempty".
+
+    fn parse_err(text: &str) -> ArithError {
+        parse(text).expect_err("expected a tokenizer/parse error")
+    }
+
+    /// The real assertion for defect 7a: not just that `span` is nonempty,
+    /// but that it actually slices `source` to `expected`.
+    fn assert_span_slices_to(source: &str, err: &ArithError, expected: &str) {
+        let slice = source.get(err.span.clone());
+        assert!(
+            slice.is_some(),
+            "span {:?} does not slice {source:?} (message: {})",
+            err.span,
+            err.message
+        );
+        assert_eq!(slice.expect("checked above"), expected, "source {source:?}, message {:?}", err.message);
+    }
+
+    // Control: pure ASCII before the error. A fix that zeroes every span
+    // (rather than converting it) would pass the multi-byte tests below by
+    // accident; this one only passes if the span is still real.
+    #[test]
+    fn control_ascii_before_leading_zero_span_is_byte_correct() {
+        let source = "$(echo x) + 008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn ideographic_space_before_leading_zero_span_is_byte_correct() {
+        // U+3000 IDEOGRAPHIC SPACE is 3 bytes, 1 char — `skip_ws` treats it
+        // as whitespace, so `self.pos` (chars) undercounts the true byte
+        // offset of everything after it by 2.
+        let source = "\u{3000}008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn full_width_digit_before_leading_zero_span_is_byte_correct() {
+        // U+FF10 FULLWIDTH DIGIT ZERO is 3 bytes, 1 char, consumed inside
+        // `skip_group`'s generic `Some(_) => self.pos += 1` — same
+        // char/byte divergence, reached through a different path.
+        let source = "$(echo \u{ff10}) + 008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn accented_letter_before_leading_zero_span_is_byte_correct() {
+        // U+00E9 'é' is 2 bytes, 1 char.
+        let source = "$(echo caf\u{e9}) + 008";
+        let err = parse_err(source);
+        assert!(err.message.contains("leading zero"), "{}", err.message);
+        assert_span_slices_to(source, &err, "008");
+    }
+
+    #[test]
+    fn accented_letter_before_unterminated_brace_group_span_is_byte_correct() {
+        let source = "\u{3000}${caf\u{e9}";
+        let err = parse_err(source);
+        assert!(err.message.contains("no closing"), "{}", err.message);
+        assert_span_slices_to(source, &err, "${caf\u{e9}");
     }
 }
 
