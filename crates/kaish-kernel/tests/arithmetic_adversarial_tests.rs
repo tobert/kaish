@@ -414,6 +414,38 @@ async fn cmdsubst_heredoc_unquoted_delimiter_body_is_interpolated() {
     .await;
 }
 
+/// A bare `(( ))` reached through `$(…)` is arithmetic, so `<<` inside it
+/// is the SHIFT operator, never a heredoc introducer. Teaching the scanner
+/// heredoc grammar taught it only the `$((` spelling; a bare `((` kept the
+/// enclosing `$(…)`'s heredoc grammar and read `<< 2` as a heredoc whose
+/// delimiter was `2`. bash yields `9`.
+#[tokio::test]
+async fn bare_arith_condition_shift_inside_cmdsubst_is_not_a_heredoc() {
+    ok("echo $(( $( (( 1 << 2 )) && echo 9 ) ))", "9").await;
+}
+
+/// Control for the case above: the same shape WITHOUT `<<` was never
+/// affected, so a passing `bare_arith_condition_shift_inside_cmdsubst…`
+/// means the shift operator specifically, not the nesting.
+#[tokio::test]
+async fn control_bare_arith_condition_without_shift_inside_cmdsubst() {
+    ok("echo $(( $( (( 1 + 2 )) && echo 9 ) ))", "9").await;
+}
+
+/// A real heredoc in the `$(…)` that CONTAINS a bare `(( ))` still works:
+/// suppressing heredoc grammar inside `((` must not suppress it outside.
+#[tokio::test]
+async fn heredoc_beside_a_bare_arith_condition_still_parses() {
+    ok(
+        "echo $(( $(cat <<'EOF' > /dev/null
+)
+EOF
+(( 1 << 2 )) && echo 9) ))",
+        "9",
+    )
+    .await;
+}
+
 /// Control: a heredoc that genuinely never finds its closing delimiter is
 /// still a loud, specific error — heredoc-awareness must not become
 /// permissiveness toward a real author mistake.

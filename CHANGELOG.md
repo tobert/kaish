@@ -64,7 +64,8 @@ breaking entries are marked **BREAKING**.
 ### Fixed
 - **`$(( ))` reads a nested `$(...)` the way an ordinary `$(...)` does** — a
   quoted or escaped parenthesis, a `#` comment, and a heredoc body no longer
-  close the arithmetic scan early.
+  close the arithmetic scan early. `<<` inside a bare `(( ))` stays the shift
+  operator.
 - **LocalFs sandbox escapes**: a write under a non-existent `..` chain
   (`../sibling/x`) created a directory beside the mount root, and a write
   through a dangling link whose target lay outside the root created that

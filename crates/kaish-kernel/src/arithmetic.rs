@@ -889,9 +889,19 @@ impl<'a> Tokenizer<'a> {
                         _ => self.pos += 1, // `$name` — the `$` is plain here
                     }
                 }
+                Some('(') if self.peek_at(1) == Some('(') => {
+                    // bare `((…))` is arithmetic, so it carries no heredoc
+                    // or comment grammar: `<<` inside it is the shift
+                    // operator. `$((` already suppresses both; this is the
+                    // other spelling of the same context.
+                    let nested_start = self.pos;
+                    self.pos += 2;
+                    self.skip_group(')', true, nested_start, false)?;
+                }
                 Some('(') => {
-                    // bare `(`: recurse so its `)`/`}` does not close the
-                    // outer group; `comments` propagates.
+                    // bare `(` subshell: recurse so its `)`/`}` does not
+                    // close the outer group. `comments` propagates, because
+                    // a subshell body is ordinary command text.
                     let nested_start = self.pos;
                     self.pos += 1;
                     self.skip_group(')', false, nested_start, comments)?;
