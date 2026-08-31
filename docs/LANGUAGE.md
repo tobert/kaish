@@ -745,6 +745,25 @@ test -f a && test -f b          # compound: chain with shell && / ||
 if test -f "$path"; then …; fi  # the usual home, an `if`/`while` condition
 ```
 
+A comparison kaish cannot make is a **fault**, not a false reading, and the
+three spellings — `[[ ]]`, `test`, and `(( ))` — treat one identically. Where
+nothing consumes the result as a boolean, a fault is exit `2` with its message
+and the script continues. Where something does — an `if`/`while` condition, a
+`!`, or the **left** operand of `&&`/`||` — the statement aborts, because there
+is no true or false to give it:
+
+```sh
+x=abc
+test "$x" -eq 1                 # exit 2, message, execution continues
+test "$x" -eq 1 || echo "no"    # aborts — it never prints "no"
+if test "$x" -eq 1; then …; fi  # aborts — it never takes `else`
+true && test "$x" -eq 1         # exit 2: the right operand is the chain's value
+```
+
+Reading a fault as `false` would print a conclusion drawn from a comparison
+that never happened. A command that ran and *failed* is not a fault: `grep`
+matching nothing still selects `else` and still drives `||`.
+
 `test` follows `[[`'s semantics, with a few deliberate, predictable differences:
 
 - **Numbers are kaish (JSON) numbers**, so `test 1.5 -gt 1` compares (it does not

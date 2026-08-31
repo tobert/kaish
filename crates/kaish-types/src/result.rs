@@ -132,6 +132,20 @@ pub struct ExecResult {
     /// capture buffer evicted its head with no spill file at all. All cases
     /// remap the exit code to 3.
     pub did_spill: bool,
+    /// The command could not decide, as opposed to deciding `false`.
+    ///
+    /// A non-numeric operand in `[[ ]]`, `test`, or `(( ))` is a fault: there
+    /// is no true or false to report, only a malformed comparison. Where
+    /// nothing consumes the result as a boolean this rides along with exit 2
+    /// and is ignored. Where something DOES — an `if`/`while` condition, a
+    /// `!`, or the left operand of `&&`/`||` — the kernel aborts rather than
+    /// coerce a fault into a boolean, which would let a wrong conclusion be
+    /// drawn from a comparison that never happened.
+    ///
+    /// A command that ran and failed is NOT a fault. `grep` matching nothing
+    /// and a missing file still select `else` and still drive `||`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fault: bool,
     /// The command's original exit code before spill logic overwrote it with 2 or 3.
     /// Present only when `did_spill` is true and `code` was changed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,6 +191,7 @@ impl ExecResult {
             data: None,
             output: None,
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
@@ -200,6 +215,7 @@ impl ExecResult {
                 data: None,
                 output: Some(Box::new(output)),
                 did_spill: false,
+                fault: false,
                 original_code: None,
                 content_type: None,
                 baggage: BTreeMap::new(),
@@ -237,6 +253,7 @@ impl ExecResult {
             data: Some(data),
             output: None,
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
@@ -260,6 +277,7 @@ impl ExecResult {
             data: Some(data),
             output: None,
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
@@ -270,6 +288,14 @@ impl ExecResult {
     ///
     /// The message is normalized to the stderr line contract: it ends with
     /// exactly one newline (unless empty), so renderers print it verbatim.
+    /// Mark this result as a fault: it could not decide, rather than
+    /// deciding `false`. See [`Self::fault`].
+    #[must_use]
+    pub fn into_fault(mut self) -> Self {
+        self.fault = true;
+        self
+    }
+
     pub fn failure(code: i64, err: impl Into<String>) -> Self {
         Self {
             code,
@@ -279,6 +305,7 @@ impl ExecResult {
             data: None,
             output: None,
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
@@ -299,6 +326,7 @@ impl ExecResult {
             data: None,
             output: None,
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
@@ -318,6 +346,7 @@ impl ExecResult {
             data: None,
             output: Some(Box::new(output)),
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
@@ -339,6 +368,7 @@ impl ExecResult {
             data,
             output: None,
             did_spill: false,
+            fault: false,
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
