@@ -388,6 +388,30 @@ impl KernelBackend for VirtualOverlayBackend {
         }
     }
 
+    /// The same three-way split every other operation here uses: a
+    /// kaish-owned virtual path canonicalizes through `self.vfs`; a shared
+    /// ancestor (`/v`, `/`, …) is a directory this backend synthesizes,
+    /// never a symlink, so it canonicalizes to itself; everything else
+    /// canonicalizes through the embedder's own backend.
+    ///
+    /// Delegating rather than inheriting the trait default matters here
+    /// specifically: the default's per-hop walk calls `lstat`/`read_link` on
+    /// this type for every component, re-running `is_virtual_path` /
+    /// `is_shared_ancestor` at each hop instead of asking the owning side
+    /// once for the whole path. A symlink that lives entirely under the
+    /// embedder's backend must resolve — and be contained — through that one
+    /// backend's own resolver, not be re-routed through this split hop by
+    /// hop.
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> BackendResult<PathBuf> {
+        if self.is_virtual_path(path) {
+            Ok(self.vfs.canonicalize(path, allow_missing_final).await?)
+        } else if self.is_shared_ancestor(path) {
+            Ok(path.to_path_buf())
+        } else {
+            self.inner.canonicalize(path, allow_missing_final).await
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Tool Dispatch
     // ═══════════════════════════════════════════════════════════════════════════

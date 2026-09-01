@@ -406,6 +406,39 @@ impl Filesystem for VfsRouter {
         fs.read_link(&relative).await
     }
 
+    /// Delegates to the mount that owns `path`, translating VFS-absolute to
+    /// mount-relative going in and back going out — the mount answers in
+    /// its own namespace, same as every other `Filesystem` method here.
+    ///
+    /// `.` and `..` are folded lexically before routing, so a `..` that
+    /// walks from one mount into another (or into a synthesized ancestor)
+    /// resolves against the right one, the way `symlink`'s absolute-target
+    /// rewrite already folds before it picks a mount.
+    ///
+    /// Falls back the way `stat` does: a synthesized ancestor of a mount
+    /// (`/v` above `/v/jobs`) is a directory the router creates, never a
+    /// symlink, so it canonicalizes to itself.
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> io::Result<PathBuf> {
+        let normalized = lexical_absolute(path);
+        if normalized == Path::new("/") {
+            return Ok(PathBuf::from("/"));
+        }
+
+        let answer = match self.mount_of(&normalized) {
+            Ok((mount_path, fs, relative)) => {
+                let mount_path = mount_path.to_path_buf();
+                fs.canonicalize(&relative, allow_missing_final)
+                    .await
+                    .map(|resolved| mount_path.join(resolved))
+            }
+            Err(e) => Err(e),
+        };
+        match answer {
+            Ok(resolved) => Ok(resolved),
+            Err(e) => self.or_synthesized_ancestor(&normalized, e, || normalized.clone()),
+        }
+    }
+
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         let (link_mount, fs, relative_link) = self.mount_of(link)?;
         // A backend refuses an absolute target: it has no namespace to read

@@ -689,6 +689,80 @@ pub async fn remove_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> 
     Ok(())
 }
 
+/// `canonicalize` on a symlink whose target walks far enough above the root
+/// via `..` must never leak an out-of-namespace answer: a rooted backend
+/// (`LocalFs`) refuses it, and a backend with no boundary to enforce
+/// (`MemoryFs`, `OverlayFs`) has nowhere to escape to, so it must answer
+/// with an ordinary in-namespace path — never one still carrying a `..`
+/// above this filesystem's own root.
+pub async fn canonicalize_of_an_escaping_symlink_stays_in_bounds(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.symlink(
+        Path::new("../../../../../../../../../../outside"),
+        Path::new("escape"),
+    )
+    .await
+    .map_err(|e| format!("symlink: {e}"))?;
+
+    match fs.canonicalize(Path::new("escape"), true).await {
+        Err(_) => Ok(()), // refused — the correct answer for a rooted backend
+        Ok(resolved) => {
+            if resolved
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                Err(format!(
+                    "canonicalize(escape) returned a path that still walks \
+                     above the root: {}",
+                    resolved.display()
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A missing FINAL path component is allowed only when the caller asks for
+/// it; a missing INTERMEDIATE component is always an error, whichever way
+/// that flag is set.
+pub async fn canonicalize_allows_a_missing_final_component_only(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.mkdir(Path::new("d")).await.map_err(|e| format!("mkdir d: {e}"))?;
+
+    let resolved = fs
+        .canonicalize(Path::new("d/missing"), true)
+        .await
+        .map_err(|e| format!("canonicalize(d/missing, allow_missing_final=true): {e}"))?;
+    if resolved != Path::new("d/missing") {
+        return Err(format!(
+            "expected canonicalize(d/missing) == d/missing, got {}",
+            resolved.display()
+        ));
+    }
+
+    if fs.canonicalize(Path::new("d/missing"), false).await.is_ok() {
+        return Err(
+            "expected canonicalize(d/missing, allow_missing_final=false) to error".to_string(),
+        );
+    }
+
+    if fs
+        .canonicalize(Path::new("d/missing/deeper"), true)
+        .await
+        .is_ok()
+    {
+        return Err(
+            "expected a missing intermediate component to error even with \
+             allow_missing_final=true"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub async fn rename_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> {
     fs.write(Path::new("keep"), b"K")
         .await
@@ -742,6 +816,8 @@ pub const CASES: &[(&str, Case)] = &[
     case!(rename_to_itself_spelled_with_dotdot_keeps_the_file),
     case!(remove_refuses_the_root),
     case!(rename_refuses_the_root),
+    case!(canonicalize_of_an_escaping_symlink_stays_in_bounds),
+    case!(canonicalize_allows_a_missing_final_component_only),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

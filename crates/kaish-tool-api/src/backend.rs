@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use kaish_types::backend::{
-    BackendResult, MountInfo, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
+    BackendError, BackendResult, MountInfo, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
 };
 use kaish_types::{DirEntry, PathAccess, ToolArgs};
 
@@ -99,6 +99,44 @@ pub trait KernelBackend: Send + Sync {
     /// mount, and refused when they are not.
     async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()>;
 
+    /// Resolve `path` to its canonical form: follow every symlink hop, fold
+    /// `.` and `..` lexically. The final component may be missing when
+    /// `allow_missing_final` is true (GNU `readlink -f` semantics); a
+    /// missing INTERMEDIATE component is always an error. Symlink hops are
+    /// capped at 40, matching Linux `MAXSYMLINKS`; exceeding the cap is an
+    /// error, never a silent stop.
+    ///
+    /// The default walks component by component through
+    /// [`KernelBackend::lstat`] and [`KernelBackend::read_link`], so it
+    /// inherits whatever containment those already give. `LocalBackend`
+    /// overrides this to delegate straight to the VFS layer's single-shot
+    /// resolver instead of one round trip per hop.
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> BackendResult<PathBuf> {
+        let components: Vec<_> = path.components().collect();
+        let total = components.len();
+        let mut current = PathBuf::new();
+
+        for (idx, component) in components.iter().enumerate() {
+            let is_last = idx + 1 == total;
+            match component {
+                std::path::Component::RootDir => {}
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    current.pop();
+                }
+                std::path::Component::Normal(_) => {
+                    current.push(component);
+                    current =
+                        resolve_symlink_hop(self, current, is_last && allow_missing_final).await?;
+                }
+                std::path::Component::Prefix(_) => {
+                    current.push(component);
+                }
+            }
+        }
+        Ok(current)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Tool Dispatch
     // ═══════════════════════════════════════════════════════════════════════
@@ -164,4 +202,57 @@ pub trait KernelBackend: Send + Sync {
     /// LocalFs), or `None` if the path is virtual (like MemoryFs). Tools like
     /// `git` that hand paths to external C libraries need the real path.
     fn resolve_real_path(&self, path: &Path) -> Option<PathBuf>;
+}
+
+/// Symlink hops [`KernelBackend::canonicalize`]'s default walk follows
+/// before refusing, matching Linux's `MAXSYMLINKS`.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Follow the symlink chain starting at `path`, if any, to the entry it
+/// names. `allow_missing` permits `path` itself to be absent; every hop
+/// short of it must exist.
+async fn resolve_symlink_hop<B: KernelBackend + ?Sized>(
+    backend: &B,
+    path: PathBuf,
+    allow_missing: bool,
+) -> BackendResult<PathBuf> {
+    let mut current = path;
+    for _ in 0..MAX_SYMLINK_HOPS {
+        match backend.lstat(&current).await {
+            Ok(entry) if entry.is_symlink() => {
+                let target = backend.read_link(&current).await?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    let parent = current.parent().unwrap_or(Path::new(""));
+                    parent.join(target)
+                };
+                current = fold_dots(current);
+            }
+            Ok(_) => return Ok(current),
+            Err(BackendError::NotFound(_)) if allow_missing => return Ok(current),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(BackendError::InvalidOperation(format!(
+        "too many levels of symbolic links: {}",
+        current.display()
+    )))
+}
+
+/// Collapse `.` and `..` lexically in a path: `..` past the start is
+/// dropped, not accumulated, matching the VFS layer's own clamp-at-root
+/// rule for a root-relative path.
+fn fold_dots(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
