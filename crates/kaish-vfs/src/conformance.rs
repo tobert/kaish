@@ -706,7 +706,14 @@ pub async fn canonicalize_of_an_escaping_symlink_stays_in_bounds(
     .map_err(|e| format!("symlink: {e}"))?;
 
     match fs.canonicalize(Path::new("escape"), true).await {
-        Err(_) => Ok(()), // refused — the correct answer for a rooted backend
+        // Refused: the correct answer for a rooted backend, and no answer
+        // can leak. `Unsupported` is not that — it is a backend that never
+        // implemented the method, which would pass this case without ever
+        // deciding anything.
+        Err(error) if error.kind() != std::io::ErrorKind::Unsupported => Ok(()),
+        Err(error) => Err(format!(
+            "canonicalize(escape) is unimplemented, so this case proved nothing: {error}"
+        )),
         Ok(resolved) => {
             if resolved
                 .components()
