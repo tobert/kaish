@@ -125,7 +125,7 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
     // constraints in their descriptions — was invisible to `help`.
     if !schema.subcommands.is_empty() {
         output.push_str("\nSubcommands:\n");
-        push_subcommand_roster(&mut output, "", &schema.subcommands);
+        output.push_str(&subcommand_roster(&schema.subcommands));
     }
 
     if !schema.examples.is_empty() {
@@ -159,7 +159,8 @@ fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent:
     }
 }
 
-/// One flat roster line per subcommand at any depth, plus its parameters.
+/// The roster lines naming every subcommand at any depth, plus each one's
+/// parameters. The caller writes its own `Subcommands:` header.
 ///
 /// `ToolSchema::subcommands` is recursive — a node (`worktree`) can hold a
 /// leaf (`list`) that holds another node — but the roster stays flat: every
@@ -168,10 +169,18 @@ fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent:
 /// by column: exactly two spaces, then the ` — ` (space, em-dash, space)
 /// separator. A nested indent or a different separator breaks that reader.
 ///
-/// `pub` so `kaish-tools <name>` (`kaish-kernel`'s
-/// `tools::builtin::introspect::format_tool_detail`) renders the same
-/// roster as `help <tool>` instead of a second, drifting implementation.
-pub fn push_subcommand_roster(output: &mut String, prefix: &str, subs: &[ToolSchema]) {
+/// Public so `help <tool>` and `kaish-tools <name>` render one roster from
+/// one implementation instead of drifting into two spellings of a tool's
+/// grammar.
+pub fn subcommand_roster(subs: &[ToolSchema]) -> String {
+    let mut output = String::new();
+    push_subcommand_roster(&mut output, "", subs);
+    output
+}
+
+/// The recursion behind [`subcommand_roster`]. `prefix` is the path accumulated
+/// so far and is a detail of the walk, which is why callers never supply it.
+fn push_subcommand_roster(output: &mut String, prefix: &str, subs: &[ToolSchema]) {
     for sub in subs {
         let path = if prefix.is_empty() {
             sub.name.clone()

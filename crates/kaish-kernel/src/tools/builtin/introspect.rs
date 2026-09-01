@@ -118,7 +118,7 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
             // tool's grammar.
             if !s.subcommands.is_empty() {
                 output.push_str("Subcommands:\n");
-                kaish_help::topic::push_subcommand_roster(&mut output, "", &s.subcommands);
+                output.push_str(&kaish_help::topic::subcommand_roster(&s.subcommands));
             }
 
             if !s.operations.is_empty() {
