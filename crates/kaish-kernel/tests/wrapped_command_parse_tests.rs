@@ -804,3 +804,150 @@ fn a_forwarding_verb_is_marked_in_the_published_schema() {
         .expect("the verb is published");
     assert_eq!(clippy.description, "forwards undeclared flags");
 }
+
+// ── 10. Nested verbs ────────────────────────────────────────────────────
+//
+// `git worktree` is undeclarable with one flat level of verbs: `worktree`
+// selects among `add`, `list`, `lock`, `prune`, `remove`, and only those
+// leaves run. `status` sits alongside `worktree` at the top level so a
+// node-scoped refusal has a real top-level name to leak, if it were going
+// to leak one.
+
+fn git_nested() -> Fixture {
+    build(|path| {
+        WrappedCommand::new("git")
+            .executable(path)
+            .lead(["--no-pager"])
+            .verb(Verb::new("status"))
+            .verb(
+                Verb::new("worktree")
+                    .verb(Verb::new("add").positional(Positional::one("path").required()))
+                    .verb(Verb::new("list").flag(Flag::switch("porcelain")))
+                    .verb(Verb::new("lock").positional(Positional::one("path").required()))
+                    .verb(Verb::new("prune"))
+                    .verb(Verb::new("remove").positional(Positional::one("path").required())),
+            )
+    })
+}
+
+#[test]
+fn git_worktree_list_renders_the_full_path_in_order() {
+    assert_eq!(
+        git_nested().argv(&["worktree", "list", "--porcelain"]),
+        vec!["--no-pager", "worktree", "list", "--porcelain"]
+    );
+}
+
+#[test]
+fn lead_concatenates_down_the_path_in_path_order() {
+    let fixture = build(|path| {
+        WrappedCommand::new("probe")
+            .executable(path)
+            .lead(["--cmd-lead"])
+            .verb(
+                Verb::new("outer").lead(["--outer-lead"]).verb(
+                    Verb::new("inner")
+                        .lead(["--inner-lead"])
+                        .positional(Positional::many("rest")),
+                ),
+            )
+    });
+    assert_eq!(
+        fixture.argv(&["outer", "inner", "x"]),
+        vec!["--cmd-lead", "outer", "--outer-lead", "inner", "--inner-lead", "x"]
+    );
+}
+
+#[test]
+fn a_bare_node_refuses_exit_two_and_names_its_children() {
+    let fixture = git_nested();
+    let message = fixture.refuse(&["worktree"]);
+    assert_eq!(
+        message,
+        "git: 'git worktree' needs a verb. Allowed: add, list, lock, prune, remove"
+    );
+
+    let mut args = ToolArgs::new();
+    args.positional.push(Value::String("worktree".to_string()));
+    let error = fixture.tool.plan_call(&args).expect_err("a node cannot run bare");
+    assert_eq!(error.exit_code(), 2);
+}
+
+#[test]
+fn an_unknown_leaf_under_a_node_names_the_nodes_children_not_the_top_level() {
+    let message = git_nested().refuse(&["worktree", "frobnicate"]);
+    assert_eq!(
+        message,
+        "git: unknown verb 'frobnicate' for 'git worktree'. Allowed: add, list, lock, prune, remove"
+    );
+    // The assertion that actually discriminates: a node-scoped refusal must
+    // not leak the top level's own verb names.
+    assert!(
+        !message.contains("status"),
+        "the top-level verb 'status' must not appear in a node-scoped error: {message}"
+    );
+}
+
+#[test]
+fn an_unknown_leaf_at_the_top_level_still_names_the_top_level() {
+    // `git frobnicate` (no node involved) keeps the original, unscoped shape.
+    assert_eq!(
+        git_nested().refuse(&["frobnicate"]),
+        "git: unknown verb 'frobnicate'. Allowed: status, worktree"
+    );
+}
+
+#[test]
+fn three_levels_deep_renders_and_scopes_correctly() {
+    let fixture = build(|path| {
+        WrappedCommand::new("tool").executable(path).verb(
+            Verb::new("a").verb(
+                Verb::new("b").verb(
+                    Verb::new("c")
+                        .flag(Flag::switch("x"))
+                        .positional(Positional::many("rest")),
+                ),
+            ),
+        )
+    });
+
+    assert_eq!(
+        fixture.argv(&["a", "b", "c", "-x", "y"]),
+        vec!["a", "b", "c", "-x", "y"]
+    );
+    assert_eq!(
+        fixture.refuse(&["a", "b", "zzz"]),
+        "tool: unknown verb 'zzz' for 'tool a b'. Allowed: c"
+    );
+    assert_eq!(
+        fixture.refuse(&["a", "b"]),
+        "tool: 'tool a b' needs a verb. Allowed: c"
+    );
+}
+
+#[test]
+fn a_leaf_under_a_node_still_enforces_its_own_grammar() {
+    let fixture = git_nested();
+    assert_eq!(
+        fixture.refuse(&["worktree", "add"]),
+        "git: required argument 'path' not given for 'git worktree add'."
+    );
+    assert_eq!(
+        fixture.argv(&["worktree", "add", "/tmp/wt"]),
+        vec!["--no-pager", "worktree", "add", "/tmp/wt"]
+    );
+}
+
+#[test]
+fn one_level_declarations_are_unaffected_by_nesting_support() {
+    // `git`'s own flat declaration renders and refuses exactly as it always
+    // has; nesting is opt-in per verb.
+    assert_eq!(
+        git().argv(&["log", "-n", "5"]),
+        vec!["--no-pager", "log", "--max-count=5"]
+    );
+    assert_eq!(
+        git().refuse(&["comit", "-m", "x"]),
+        "git: unknown verb 'comit'. Allowed: commit, diff, log, push, status"
+    );
+}

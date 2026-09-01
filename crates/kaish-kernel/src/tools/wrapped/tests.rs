@@ -881,3 +881,148 @@ async fn a_variable_is_opaque_to_validation_and_refused_at_execution() {
         "git: unknown flag '--output' for 'git log'. Allowed: -n/--max-count, --oneline, --since"
     );
 }
+
+// ── Nested verbs: build()-time node restrictions ───────────────────────
+
+#[test]
+fn build_refuses_a_flag_declared_on_a_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("git")
+        .executable(&path)
+        .verb(
+            Verb::new("worktree")
+                .flag(Flag::switch("bad"))
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect_err("a node cannot run, so it cannot declare a flag");
+    let message = error.to_string();
+    assert!(message.contains("git worktree"), "{message}");
+    assert!(message.contains("--bad"), "{message}");
+}
+
+#[test]
+fn build_refuses_a_positional_declared_on_a_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("git")
+        .executable(&path)
+        .verb(
+            Verb::new("worktree")
+                .positional(Positional::one("path"))
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect_err("a node cannot run, so it cannot declare a positional");
+    let message = error.to_string();
+    assert!(message.contains("git worktree"), "{message}");
+    assert!(message.contains("path"), "{message}");
+}
+
+#[test]
+fn build_refuses_a_tail_declared_on_a_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("git")
+        .executable(&path)
+        .verb(
+            Verb::new("worktree")
+                .tail(Tail::Forward)
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect_err("a node cannot run, so it cannot declare a tail");
+    assert!(error.to_string().contains("git worktree"), "{error}");
+}
+
+#[test]
+fn build_refuses_a_stdin_posture_declared_on_a_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("git")
+        .executable(&path)
+        .verb(
+            Verb::new("worktree")
+                .stdin(Stdin::Pipe)
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect_err("a node cannot run, so it cannot declare a stdin posture");
+    assert!(error.to_string().contains("git worktree"), "{error}");
+}
+
+#[test]
+fn build_refuses_children_declared_on_the_root_verb() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("probe")
+        .executable(&path)
+        .root(Verb::root().verb(Verb::new("list")))
+        .build()
+        .expect_err("root nesting is not supported; use named verb() calls");
+    assert!(error.to_string().contains("root"), "{error}");
+}
+
+#[test]
+fn build_refuses_a_duplicate_name_among_a_nodes_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("git")
+        .executable(&path)
+        .verb(
+            Verb::new("worktree")
+                .verb(Verb::new("list"))
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect_err("two children cannot share a name");
+    assert!(error.to_string().contains("'list' twice"), "{error}");
+}
+
+// ── Nested verbs: the schema recurses ───────────────────────────────────
+
+#[test]
+fn the_schema_recurses_nested_verbs_as_nested_subcommands() {
+    let schema = tool(
+        WrappedCommand::new("git").verb(
+            Verb::new("worktree")
+                .verb(Verb::new("add"))
+                .verb(Verb::new("list")),
+        ),
+    )
+    .schema();
+    let worktree = &schema.subcommands[0];
+    assert_eq!(worktree.name, "worktree");
+    let names: Vec<&str> = worktree.subcommands.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["add", "list"]);
+}
+
+#[test]
+fn typed_substitution_walks_through_a_node_to_its_leaves() {
+    let all_json = tool(WrappedCommand::new("git").verb(Verb::new("worktree").verb(Verb::new("list").json_output())))
+        .schema();
+    assert!(all_json.typed_substitution, "every leaf under the node is JSON");
+
+    let mixed = tool(
+        WrappedCommand::new("git").verb(
+            Verb::new("worktree")
+                .verb(Verb::new("list").json_output())
+                .verb(Verb::new("add")),
+        ),
+    )
+    .schema();
+    assert!(!mixed.typed_substitution, "a text leaf keeps the root off");
+}
+
+// ── Nested verbs: plan_call ─────────────────────────────────────────────
+
+#[test]
+fn plan_call_reports_only_the_leafs_own_name() {
+    let declaration = WrappedCommand::new("git").verb(Verb::new("worktree").verb(Verb::new("list")));
+    let planned = tool(declaration)
+        .plan_call(&args(&["worktree", "list"]))
+        .expect("a two-level call should plan");
+    assert_eq!(planned.verb.as_deref(), Some("list"));
+    assert_eq!(planned.scope, "git worktree list");
+}

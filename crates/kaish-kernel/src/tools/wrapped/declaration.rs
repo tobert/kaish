@@ -278,6 +278,11 @@ pub struct Verb {
     /// Usage examples, published through the tool schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) examples: Vec<(String, String)>,
+    /// Child verbs. A verb with children is a node: it selects among them
+    /// and is never itself callable. Empty for a leaf, which is the verb
+    /// that actually runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) verbs: Vec<Verb>,
 }
 
 impl Verb {
@@ -350,9 +355,25 @@ impl Verb {
         self
     }
 
+    /// Declare a child verb, making this verb a node: `git worktree list`
+    /// declares `list` as a child of `worktree`. A node selects among its
+    /// children and is never itself callable — `build()` refuses one that
+    /// also declares flags, positionals, a tail, or a stdin posture, since
+    /// those belong on the leaf that actually runs.
+    pub fn verb(mut self, verb: Verb) -> Self {
+        self.verbs.push(verb);
+        self
+    }
+
     /// The verb's name, or the empty string for the root.
     pub(crate) fn name_or_root(&self) -> &str {
         self.name.as_deref().unwrap_or("")
+    }
+
+    /// True when this verb has children — it selects among them and is
+    /// never itself callable.
+    pub(crate) fn is_node(&self) -> bool {
+        !self.verbs.is_empty()
     }
 }
 
@@ -462,43 +483,101 @@ impl WrappedCommand {
                 self.name
             );
         }
-        if let Some(root) = &self.root
-            && root.name.is_some()
-        {
-            bail!(
-                "wrapped command '{}' passed a named verb to root(); use Verb::root()",
-                self.name
-            );
-        }
-
-        let mut seen: Vec<&str> = Vec::new();
-        for verb in &self.verbs {
-            let Some(name) = verb.name.as_deref() else {
+        if let Some(root) = &self.root {
+            if root.name.is_some() {
                 bail!(
-                    "wrapped command '{}' passed an unnamed verb to verb(); use root()",
-                    self.name
-                );
-            };
-            if name.is_empty() {
-                bail!("wrapped command '{}' declares a verb with no name", self.name);
-            }
-            if seen.contains(&name) {
-                bail!(
-                    "wrapped command '{}' declares the verb '{name}' twice",
+                    "wrapped command '{}' passed a named verb to root(); use Verb::root()",
                     self.name
                 );
             }
-            seen.push(name);
+            if root.is_node() {
+                bail!(
+                    "wrapped command '{}' declares children on the root verb; nest with \
+                     named verb() calls instead of under root()",
+                    self.name
+                );
+            }
         }
 
-        for verb in self.root.iter().chain(self.verbs.iter()) {
-            self.check_verb(verb)?;
+        self.check_verb_list(&self.name, &self.verbs)?;
+        if let Some(root) = &self.root {
+            self.check_verb(&self.name, root)?;
         }
         Ok(())
     }
 
-    fn check_verb(&self, verb: &Verb) -> Result<()> {
-        let scope = self.scope_of(verb);
+    /// Check one sibling list under `scope` — the command name at the top
+    /// level, or a node's full scope (`git worktree`) one level down: every
+    /// verb is named and none share a name, then each verb's own grammar and
+    /// its own children, recursively.
+    fn check_verb_list(&self, scope: &str, verbs: &[Verb]) -> Result<()> {
+        let mut seen: Vec<&str> = Vec::new();
+        for verb in verbs {
+            let Some(name) = verb.name.as_deref() else {
+                if scope == self.name {
+                    bail!(
+                        "wrapped command '{}' passed an unnamed verb to verb(); use root()",
+                        self.name
+                    );
+                }
+                bail!(
+                    "wrapped command '{}' passed an unnamed verb to '{scope}''s verb(); a \
+                     nested verb must be named",
+                    self.name
+                );
+            };
+            if name.is_empty() {
+                bail!("'{scope}' declares a verb with no name");
+            }
+            if seen.contains(&name) {
+                bail!("'{scope}' declares the verb '{name}' twice");
+            }
+            seen.push(name);
+        }
+        for verb in verbs {
+            self.check_verb(scope, verb)?;
+        }
+        Ok(())
+    }
+
+    fn check_verb(&self, parent_scope: &str, verb: &Verb) -> Result<()> {
+        let scope = match &verb.name {
+            Some(name) => format!("{parent_scope} {name}"),
+            None => parent_scope.to_string(),
+        };
+
+        // A node selects among its children and never runs itself, so a
+        // flag, positional, tail, or stdin posture on it would describe a
+        // call that never happens. Refuse loudly rather than binding it
+        // silently to whichever leaf the agent picks.
+        if verb.is_node() {
+            if let Some(flag) = verb.flags.first() {
+                bail!(
+                    "'{scope}' declares the flag '{}' and child verbs; a node cannot run, \
+                     so a flag belongs on the leaf verb that does",
+                    flag.written_name()
+                );
+            }
+            if let Some(positional) = verb.positionals.first() {
+                bail!(
+                    "'{scope}' declares the positional '{}' and child verbs; a node cannot \
+                     run, so a positional belongs on the leaf verb that does",
+                    positional.name
+                );
+            }
+            if verb.tail != Tail::default() {
+                bail!(
+                    "'{scope}' declares a tail and child verbs; a node cannot run, so tail \
+                     belongs on the leaf verb that does"
+                );
+            }
+            if verb.stdin != Stdin::default() {
+                bail!(
+                    "'{scope}' declares a stdin posture and child verbs; a node cannot run, \
+                     so stdin belongs on the leaf verb that does"
+                );
+            }
+        }
 
         let mut spellings: Vec<String> = Vec::new();
         for flag in &verb.flags {
@@ -567,6 +646,10 @@ impl WrappedCommand {
                 );
             }
         }
+
+        if verb.is_node() {
+            self.check_verb_list(&scope, &verb.verbs)?;
+        }
         Ok(())
     }
 
@@ -616,6 +699,35 @@ impl WrappedCommand {
             Some(name) => format!("{} {name}", self.name),
             None => self.name.clone(),
         }
+    }
+
+    /// The full scope of a resolved verb path: `git worktree list` for a
+    /// two-deep call, `git` for the root or for an empty path. Every level
+    /// on the way down contributes its name, mirroring [`scope_of`] for a
+    /// path more than one verb deep.
+    pub(crate) fn scope_of_path(&self, path: &[usize]) -> String {
+        let mut scope = self.name.clone();
+        let Some((&first, rest)) = path.split_first() else {
+            return scope;
+        };
+        let Some(mut verb) = self.verbs.get(first) else {
+            return scope;
+        };
+        if let Some(name) = &verb.name {
+            scope.push(' ');
+            scope.push_str(name);
+        }
+        for &index in rest {
+            let Some(child) = verb.verbs.get(index) else {
+                break;
+            };
+            verb = child;
+            if let Some(name) = &verb.name {
+                scope.push(' ');
+                scope.push_str(name);
+            }
+        }
+        scope
     }
 }
 
