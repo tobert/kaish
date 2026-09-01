@@ -56,7 +56,8 @@ breaking entries are marked **BREAKING**.
 - **Wrapped commands** (`kaish_kernel::tools::wrapped`, `subprocess` feature):
   register an external program as a tool with a declared grammar. Verbs and flags
   are deny-by-default, refused with exit 2 before any spawn; the kernel renders
-  argv. Runs with `allow_external_commands` off. See `docs/wrapped_command.md`.
+  argv. It narrows rather than widens: `allow_external_commands = false` plus
+  named wrappers is the intended shape. See `docs/wrapped_command.md`.
 - **`ValidationIssue::command`** — the command an issue concerns, when one is
   genuinely known (`UndefinedCommand`'s name, a builtin's own regex/schema
   failure), so an embedder can route on it instead of parsing `message`.

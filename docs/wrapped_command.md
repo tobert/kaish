@@ -430,9 +430,13 @@ and the two names that collide:
   optional slot without it.
 - A relative `path_under(root)` — the root must be an absolute path.
 
-A wrapped command is a registered tool, not an external command. It runs when
-`allow_external_commands` is `false`. It needs the `subprocess` feature; a
-sandbox build has no `wrapped` module.
+A wrapped command is a registered tool, not an external command, so
+`allow_external_commands` does not gate it. That switch is not a lock a wrapper
+picks: it decides whether an arbitrary word becomes a `$PATH` lookup. A wrapper
+is the narrower grant beside it — one pinned executable, one declared grammar.
+Leaving the switch `false` and registering a wrapper is the point.
+
+It needs the `subprocess` feature; a sandbox build has no `wrapped` module.
 
 ## What the kernel owns, and what the embedder owns
 
