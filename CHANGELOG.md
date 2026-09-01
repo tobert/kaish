@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`kaish-help` publishes the pieces of a tool description** — `param_lines`,
+  `examples_section`, `operations_line`, `command_aliases_line`, and
+  `subcommand_roster`. `help` and `kaish-tools` both render from these, so a
+  second surface cannot drift from the first by omission.
+
 ### Fixed
 - **`help <tool>` and `kaish-tools <name>` only rendered one level of
   subcommands** (`kaish-tools` rendered none), hiding a nested verb
