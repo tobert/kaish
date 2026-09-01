@@ -100,29 +100,31 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
 
     match schema {
         Some(s) => {
-            let mut output = format!("{}\n{}\n\n", s.name, s.description);
+            // Every section below calls the same kaish_help::topic renderer
+            // `help <tool>` uses, so the two introspection surfaces cannot
+            // drift into two spellings of a tool's params, subcommands,
+            // examples, operations, or aliases.
+            let mut output = format!("{}\n{}\n", s.name, s.description);
+            output.push_str(&kaish_help::topic::command_aliases_line(&s.aliases));
+            output.push('\n');
 
             if !s.params.is_empty() {
                 output.push_str("Parameters:\n");
-                for p in &s.params {
-                    let required = if p.required { "(required)" } else { "(optional)" };
-                    output.push_str(&format!(
-                        "  {} : {} {}\n    {}\n",
-                        p.name, p.param_type, required, p.description
-                    ));
-                }
+                output.push_str(&kaish_help::topic::param_lines(&s.params, "  "));
             }
 
-            // Same recursive renderer `help <tool>` uses (kaish_help::topic)
-            // — the two introspection surfaces must not disagree about a
-            // tool's grammar.
             if !s.subcommands.is_empty() {
                 output.push_str("Subcommands:\n");
                 output.push_str(&kaish_help::topic::subcommand_roster(&s.subcommands));
             }
 
+            if !s.examples.is_empty() {
+                output.push_str("Examples:\n");
+                output.push_str(&kaish_help::topic::examples_section(&s.examples));
+            }
+
             if !s.operations.is_empty() {
-                output.push_str(&format!("Operations: {}\n", s.operations.join(", ")));
+                output.push_str(&kaish_help::topic::operations_line(&s.operations));
             }
 
             ExecResult::with_output(OutputData::text(output))
@@ -442,6 +444,63 @@ mod tests {
         assert_eq!(
             result.text_out(),
             "cat\nConcatenate files\n\nParameters:\n  path : string (required)\n    File path to read\nOperations: fs.read\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_renders_examples() {
+        // `help <tool>` already named a tool's examples; `kaish-tools
+        // <name>` silently dropped them.
+        let mut ctx = make_ctx();
+        let echo = TS::new("echo", "Print arguments")
+            .example("Print a literal string", "echo hello");
+        ctx.set_tool_schemas(vec![echo]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("echo".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+        assert!(
+            text.contains("Print a literal string") && text.contains("echo hello"),
+            "expected the example to render, got:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_renders_parameter_aliases() {
+        // `help <tool>`'s push_params names a flag's aliases (`-n` for
+        // `--max-count`); `kaish-tools <name>`'s inline loop dropped them.
+        let mut ctx = make_ctx();
+        let head = TS::new("head", "Print the first lines")
+            .param(ParamSchema::optional("lines", "int", Value::Int(10), "Line count").with_aliases(["-n"]));
+        ctx.set_tool_schemas(vec![head]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("head".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+        assert!(
+            text.contains("(also: -n)"),
+            "expected the parameter's alias to render, got:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_renders_command_aliases() {
+        let mut ctx = make_ctx();
+        let list = TS::new("list", "List sessions").with_command_aliases(["ls"]);
+        ctx.set_tool_schemas(vec![list]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("list".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+        assert!(
+            text.contains("Aliases: ls"),
+            "expected the command alias to render, got:\n{text}"
         );
     }
 

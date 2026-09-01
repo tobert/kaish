@@ -5,7 +5,7 @@
 //! tool registry.
 //! Behavior here is intentionally byte-stable — frontends and tests depend on it.
 
-use kaish_types::ToolSchema;
+use kaish_types::{Example, ParamSchema, ToolSchema};
 
 use crate::compose::render_syntax_section;
 use crate::content::{IGNORE, LIMITS, OUTPUT_LIMIT, OVERLAY, OVERVIEW, SCATTER, SYNTAX, VFS};
@@ -110,7 +110,9 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
     let schema = schemas.iter().find(|s| s.name == name)?;
     let mut output = String::new();
 
-    output.push_str(&format!("{} — {}\n\n", schema.name, schema.description));
+    output.push_str(&format!("{} — {}\n", schema.name, schema.description));
+    output.push_str(&command_aliases_line(&schema.aliases));
+    output.push('\n');
 
     if schema.params.is_empty() {
         output.push_str("No parameters.\n");
@@ -130,10 +132,12 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
 
     if !schema.examples.is_empty() {
         output.push_str("\nExamples:\n");
-        for example in &schema.examples {
-            output.push_str(&format!("  # {}\n", example.description));
-            output.push_str(&format!("  {}\n\n", example.code));
-        }
+        output.push_str(&examples_section(&schema.examples));
+    }
+
+    if !schema.operations.is_empty() {
+        output.push('\n');
+        output.push_str(&operations_line(&schema.operations));
     }
 
     Some(output)
@@ -144,7 +148,7 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
 /// Aliases are named here because they are the spelling agents actually
 /// write: a declaration that publishes `-n` for `--max-count` was telling
 /// `help` something it then dropped.
-fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent: &str) {
+fn push_params(output: &mut String, params: &[ParamSchema], indent: &str) {
     for param in params {
         let req = if param.required { " (required)" } else { "" };
         let aliases = if param.aliases.is_empty() {
@@ -156,6 +160,50 @@ fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent:
             "{indent}{} : {}{}{}\n{indent}  {}\n",
             param.name, param.param_type, req, aliases, param.description
         ));
+    }
+}
+
+/// `push_params` as an owned string, for a caller across the crate
+/// boundary that cannot hold the buffer `push_params` writes into
+/// (`kaish-tools <name>` in `kaish-kernel`). `indent` is real per-caller
+/// state — `"  "` for a tool's own parameters, `"    "` for a subcommand's
+/// — unlike the accumulator, so it stays a parameter here.
+pub fn param_lines(params: &[ParamSchema], indent: &str) -> String {
+    let mut output = String::new();
+    push_params(&mut output, params, indent);
+    output
+}
+
+/// The example lines for a tool: a `#`-comment naming what it demonstrates,
+/// then the command, blank-line separated. The caller writes its own
+/// `Examples:` header — the two surfaces place it differently.
+pub fn examples_section(examples: &[Example]) -> String {
+    let mut output = String::new();
+    for example in examples {
+        output.push_str(&format!("  # {}\n", example.description));
+        output.push_str(&format!("  {}\n\n", example.code));
+    }
+    output
+}
+
+/// A tool's declared effect ids (`fs.remove`, `fs.overwrite`, …) as one
+/// line, or empty when it declares none. See `ToolSchema.operations`.
+pub fn operations_line(operations: &[String]) -> String {
+    if operations.is_empty() {
+        String::new()
+    } else {
+        format!("Operations: {}\n", operations.join(", "))
+    }
+}
+
+/// A one-line note naming a tool's command-level aliases (`ls` for
+/// `list`), distinct from a parameter's own aliases (see `push_params`).
+/// Empty when the tool declares none.
+pub fn command_aliases_line(aliases: &[String]) -> String {
+    if aliases.is_empty() {
+        String::new()
+    } else {
+        format!("Aliases: {}\n", aliases.join(", "))
     }
 }
 
@@ -345,12 +393,41 @@ mod tests {
 
     #[test]
     fn test_tool_help_flat_tool_unchanged() {
-        // Control: a tool with no subcommands renders exactly as before —
-        // no "Subcommands:" section at all.
+        // Control: a tool with no subcommands, aliases, examples, or
+        // operations renders byte-identical to before this change.
         let schema = ToolSchema::new("cat", "Read and output file contents")
             .param(ParamSchema::required("path", "string", "File path to read"));
         let content = tool_help("cat", std::slice::from_ref(&schema)).expect("cat is registered");
-        assert!(!content.contains("Subcommands:"));
+        assert_eq!(
+            content,
+            "cat — Read and output file contents\n\nParameters:\n  path : string (required)\n    File path to read\n"
+        );
+    }
+
+    #[test]
+    fn test_tool_help_renders_operations() {
+        // `kaish-tools <name>` already named a tool's declared effects;
+        // `help <tool>` silently dropped them.
+        let mut schema = ToolSchema::new("rm", "Remove files");
+        schema.operations = vec!["fs.remove".to_string()];
+        let content = tool_help("rm", std::slice::from_ref(&schema)).expect("rm is registered");
+        assert!(
+            content.contains("Operations: fs.remove"),
+            "expected declared effects to render, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn test_tool_help_renders_command_aliases() {
+        // Command-level aliases (`ls` for `list`) are real, shipped data —
+        // schema_from_clap reflects them from clap — but neither `help
+        // <tool>` nor `kaish-tools <name>` named them.
+        let schema = ToolSchema::new("list", "List sessions").with_command_aliases(["ls"]);
+        let content = tool_help("list", std::slice::from_ref(&schema)).expect("list is registered");
+        assert!(
+            content.contains("Aliases: ls"),
+            "expected command alias to render, got:\n{content}"
+        );
     }
 
     #[test]
