@@ -125,6 +125,11 @@ pub(crate) enum ExternalCommandOutcome {
 ///
 /// Provides access to the backend (for file operations and tool dispatch),
 /// scope, and other kernel state.
+///
+/// Build one with [`ExecContext::new`] or one of the `with_*` constructors and
+/// set the fields you need. The struct is `#[non_exhaustive]`, so the kernel can
+/// add a field without breaking an embedder that never asked for it.
+#[non_exhaustive]
 pub struct ExecContext {
     /// Kernel backend for I/O operations.
     ///

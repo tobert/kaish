@@ -6,7 +6,7 @@ and output capture.
 
 ## Stability
 
-kaish is pre-1.0 (currently 0.16.x, MSRV 1.85). The language has settled;
+kaish is pre-1.0 (currently 0.17.x, MSRV 1.85). The language has settled;
 the embedding API may still change between minor versions where it improves
 both kaish and its embedders — [kaijutsu](https://github.com/tobert/kaijutsu)
 is the reference embedder. Pin a minor version and read release notes when
@@ -1172,7 +1172,7 @@ PY"
 "redirects":[{"kind":"<<","target":{"plain":"'PY'"}}],"background":false,
 "heredocs":[{"index":0,"delimiter":"PY","literal":true,"strip_tabs":false,
 "body":{"plain":"import os\n"},"body_offset":15}]}]}}],
-"kaish_version":"0.16.0","kaish_git_hash":"b27ea4dd","kaish_build_date":"2026-08-23"}
+"kaish_version":"0.17.0","kaish_git_hash":"4d02cd6b","kaish_build_date":"2026-08-31"}
 ```
 
 **Nothing executes and no kernel is built** — planning is a pure function of the
@@ -1182,7 +1182,7 @@ source text, so it touches no filesystem and needs no capability feature.
 The output is always a JSON object, so a caller parses one shape whatever
 happened: `{"statements": [...]}` and exit **0**, or `{"errors": [...]}` and
 exit **2** — the same usage code a builtin returns for bad argv. Both shapes
-also carry `kaish_version` (bare semver, e.g. `"0.16.0"`), `kaish_git_hash`
+also carry `kaish_version` (bare semver, e.g. `"0.17.0"`), `kaish_git_hash`
 (short hash, or `"unknown"` when kaish was built with no `.git` present — a
 crates.io tarball build, for instance), and `kaish_build_date`
 (`YYYY-MM-DD`) at the top level, so a caller windowing measurements by

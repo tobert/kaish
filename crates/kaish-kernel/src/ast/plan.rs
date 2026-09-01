@@ -82,7 +82,7 @@ pub struct PlannedStatement {
     /// gaps: `plans[i].index == i`, always. Indexing the list by this number
     /// reads the statement it names.
     pub index: usize,
-    /// What the statement was asked to run, with every credential redacted.
+    /// What the statement was asked to run.
     pub plan: Plan,
 }
 

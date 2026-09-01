@@ -10,15 +10,21 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-31
+
 ### Changed
 - **BREAKING: removed plan-side confirm-key redaction** — `PlannedValue::Redacted`,
   `StatementPlan::presented_keys`, `strip_confirm_tokens`, and `redact_keys` are
   gone. The credential they protected was removed in 0.14.0; `--confirm=<key>`
   now plans and renders like any other argument.
 
-- `ExecContext` carries `kill_grace` and `background_job`, so a tool holding only
-  an `ExecContext` can spawn a child with the kernel's external-command
-  discipline. `tools::DEFAULT_KILL_GRACE` is 2s. Only a struct literal changes.
+- **BREAKING: `ExecContext` gained two fields and is now `#[non_exhaustive]`** —
+  it carries `kill_grace` and `background_job`, so a tool holding only an
+  `ExecContext` can spawn a child with the kernel's external-command discipline.
+  `tools::DEFAULT_KILL_GRACE` is 2s. A struct literal outside the crate no longer
+  compiles: build one with `ExecContext::new` or a `with_*` constructor and set
+  the fields you need. `#[non_exhaustive]` is the point — the next field the
+  kernel adds will not break you again.
 
 - **Arithmetic diverges from bash on purpose** — overflow, an unset/empty
   operand, and a leading zero are errors, never a wrap or 0; strings are
@@ -30,8 +36,9 @@ breaking entries are marked **BREAKING**.
   path resolver for a backend rooted at a host directory: sync, std-only,
   containment inside. `Follow::Final` follows the last component;
   `Follow::LinkItself` acts on the link (remove, rename, lstat, symlink).
-- **`kaish_vfs::conformance`** (`conformance` feature) — 19 symlink cases any
-  `Filesystem` backend runs against itself via `run_all(make_root)`.
+- **`kaish_vfs::conformance`** (`conformance` feature) — 20 symlink cases a
+  `Filesystem` backend runs against itself via `run_all(make_root)`. LocalFs,
+  MemoryFs, and OverlayFs run them; DevFs is exempt, having no symlinks.
 - **`[[ -L path ]]`** (alias `-h`) and `test -L` — true when the path is a
   symlink, including a dangling one.
 - **`cp -P`/`-L`**; `cp -r` recreates a symlink as a link with the same
@@ -89,6 +96,10 @@ breaking entries are marked **BREAKING**.
   that says what to fix, including the validator's suggested rewrite. A
   context that carries information, like `Failed to read script: <path>`,
   stays.
+- **The glued-argv error names the word that needs quoting** — `git show
+  HEAD:dir/x.py` blamed `show`, an innocent token three characters earlier.
+  The span now covers the whole pasted run, so the advice points at the word
+  it is about.
 - **A comparison kaish cannot make is a fault, not `false`** — `[[ ]]`, `test`,
   and `(( ))` now agree: exit 2 where nothing reads the result as a boolean, and
   an abort where something does (`if`/`while`, `!`, the left operand of
@@ -2571,7 +2582,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/tobert/kaish/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/tobert/kaish/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/tobert/kaish/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/tobert/kaish/compare/v0.14.0...v0.14.1
