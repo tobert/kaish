@@ -1718,13 +1718,16 @@ impl std::fmt::Display for AwkValue {
     }
 }
 
+// awk never refuses a conversion: in POSIX awk a non-numeric string IS 0, and
+// `to_number` is that rule. These Results are always `Ok` on purpose — the
+// printf refusal must not reach a language whose own spec answers 0.
 impl super::format_string::FormatArg for AwkValue {
     fn as_format_string(&self) -> String { self.to_string() }
-    fn as_format_int(&self) -> i64 { self.to_number() as i64 }
-    fn as_format_float(&self) -> f64 { self.to_number() }
-    fn as_format_char(&self) -> Option<char> {
+    fn as_format_int(&self) -> Result<i64, String> { Ok(self.to_number() as i64) }
+    fn as_format_float(&self) -> Result<f64, String> { Ok(self.to_number()) }
+    fn as_format_char(&self) -> Result<Option<char>, String> {
         let n = self.to_number() as u32;
-        char::from_u32(n)
+        Ok(char::from_u32(n))
     }
 }
 
@@ -2841,7 +2844,8 @@ impl AwkRuntime {
     }
 
     fn sprintf(&self, format: &str, args: &[AwkValue]) -> Result<String, String> {
-        Ok(super::format_string::format_string(format, args))
+        // Always `Ok` in practice: `AwkValue`'s conversions never refuse.
+        super::format_string::format_string(format, args)
     }
 }
 

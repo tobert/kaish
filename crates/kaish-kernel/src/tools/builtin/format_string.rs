@@ -7,11 +7,20 @@
 use unicode_width::UnicodeWidthStr;
 
 /// Trait for values that can be formatted by printf-style specifiers.
+///
+/// The numeric conversions are fallible because the two callers disagree
+/// about what a non-numeric value means. `printf` refuses it and names the
+/// fix; awk answers 0, which is POSIX awk's own coercion rule and correct
+/// there. The trait carries the question, not the answer.
 pub trait FormatArg {
     fn as_format_string(&self) -> String;
-    fn as_format_int(&self) -> i64;
-    fn as_format_float(&self) -> f64;
-    fn as_format_char(&self) -> Option<char>;
+    /// This value as an integer, or the reason it is not one.
+    fn as_format_int(&self) -> Result<i64, String>;
+    /// This value as a float, or the reason it is not one.
+    fn as_format_float(&self) -> Result<f64, String>;
+    /// This value as a character, `None` when there is none to print, or
+    /// the reason it is not one.
+    fn as_format_char(&self) -> Result<Option<char>, String>;
 }
 
 /// Parsed format specifier: `%[flags][width][.precision]conversion`.
@@ -35,13 +44,15 @@ struct FormatSpec {
 /// Backslash escapes: `\n`, `\t`, `\r`, `\\`, `\0`, `\NNN` (octal)
 ///
 /// This is a single pass: each conversion consumes one argument in order, and
-/// missing arguments fall back to defaults (`""`, `0`, `0.0`). awk's `sprintf`
+/// a MISSING argument falls back to a default (`""`, `0`, `0.0`), which POSIX
+/// requires. A present argument that a numeric conversion cannot read is an
+/// error instead, and the caller decides what that means. awk's `sprintf`
 /// uses this directly. POSIX `printf` reuses the format until all operands are
 /// consumed — see [`format_string_cycling`].
-pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> String {
+pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> Result<String, String> {
     let mut output = String::new();
-    let _ = format_pass(format, args, &mut output);
-    output
+    format_pass(format, args, &mut output)?;
+    Ok(output)
 }
 
 /// POSIX `printf` cycling: reuse the format string until all operands are
@@ -51,31 +62,35 @@ pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> String {
 /// specifiers. A format with no conversions is printed exactly once (extra
 /// operands are ignored, matching bash) — this also guards against an infinite
 /// loop. The final pass may run short on operands; the missing ones default.
-pub fn format_string_cycling<A: FormatArg>(format: &str, args: &[A]) -> String {
+pub fn format_string_cycling<A: FormatArg>(format: &str, args: &[A]) -> Result<String, String> {
     let mut output = String::new();
     // The first pass always runs, so a zero-operand call still prints the
     // literal text and an all-default conversion line.
-    let (per_pass, stop) = format_pass(format, args, &mut output);
+    let (per_pass, stop) = format_pass(format, args, &mut output)?;
     if stop || per_pass == 0 {
-        return output;
+        return Ok(output);
     }
     let mut start = per_pass;
     while start < args.len() {
         let end = (start + per_pass).min(args.len());
-        let (_, stop) = format_pass(format, &args[start..end], &mut output);
+        let (_, stop) = format_pass(format, &args[start..end], &mut output)?;
         if stop {
             break;
         }
         start = end;
     }
-    output
+    Ok(output)
 }
 
 /// Run one formatting pass, appending to `output`. Returns the number of
 /// conversion specifiers applied (i.e. operand slots consumed this pass) and
 /// whether output should stop entirely (a `\c` was reached, in the format
 /// literal or via a `%b` argument).
-fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> (usize, bool) {
+fn format_pass<A: FormatArg>(
+    format: &str,
+    args: &[A],
+    output: &mut String,
+) -> Result<(usize, bool), String> {
     let mut arg_index = 0;
     let mut chars = format.chars().peekable();
 
@@ -84,10 +99,10 @@ fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> (
             match parse_specifier(&mut chars) {
                 Some(spec) => {
                     let arg = args.get(arg_index);
-                    let stop = apply_specifier(&spec, arg, output);
+                    let stop = apply_specifier(&spec, arg, output)?;
                     arg_index += 1;
                     if stop {
-                        return (arg_index, true);
+                        return Ok((arg_index, true));
                     }
                 }
                 None => {
@@ -98,7 +113,7 @@ fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> (
         } else if c == '\\' {
             // `\c` in the format literal stops all output (GNU printf).
             if chars.peek() == Some(&'c') {
-                return (arg_index, true);
+                return Ok((arg_index, true));
             }
             parse_backslash_escape(&mut chars, output);
         } else {
@@ -106,7 +121,7 @@ fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> (
         }
     }
 
-    (arg_index, false)
+    Ok((arg_index, false))
 }
 
 /// Parse and emit a backslash escape sequence, starting after the `\`.
@@ -279,7 +294,11 @@ fn parse_specifier(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Opti
 ///
 /// Returns `true` if output should stop entirely (a `%b` argument contained
 /// `\c`), so the caller can abandon the rest of the format and any cycling.
-fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mut String) -> bool {
+fn apply_specifier<A: FormatArg>(
+    spec: &FormatSpec,
+    arg: Option<&A>,
+    output: &mut String,
+) -> Result<bool, String> {
     match spec.conversion {
         's' => {
             let val = arg.map(|a| a.as_format_string()).unwrap_or_default();
@@ -294,19 +313,19 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_string_padding(spec, &val, output);
         }
         'd' | 'i' => {
-            let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
+            let val = arg.map(|a| a.as_format_int()).transpose()?.unwrap_or(0);
             apply_int_format(spec, val, output, IntBase::Decimal);
         }
         'u' => {
             // Unsigned decimal: reinterpret the i64 bits as u64.
-            let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
+            let val = arg.map(|a| a.as_format_int()).transpose()?.unwrap_or(0);
             let unsigned = val as u64;
             let raw = format!("{unsigned}");
             let with_sign = apply_sign_and_prefix(spec, false, false, &raw);
             apply_padded(spec, false, &with_sign, spec.precision, false, output);
         }
         'f' => {
-            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let val = arg.map(|a| a.as_format_float()).transpose()?.unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6);
             let formatted = format!("{:.prec$}", val, prec = precision);
             let negative = val.is_sign_negative() && val != 0.0 || formatted.starts_with('-');
@@ -315,7 +334,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_padded(spec, false, &with_sign, None, false, output);
         }
         'e' => {
-            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let val = arg.map(|a| a.as_format_float()).transpose()?.unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6);
             let formatted = format_scientific(val, precision, false);
             let negative = val.is_sign_negative();
@@ -324,7 +343,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_padded(spec, false, &with_sign, None, false, output);
         }
         'E' => {
-            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let val = arg.map(|a| a.as_format_float()).transpose()?.unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6);
             let formatted = format_scientific(val, precision, true);
             let negative = val.is_sign_negative();
@@ -333,7 +352,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_padded(spec, false, &with_sign, None, false, output);
         }
         'g' => {
-            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let val = arg.map(|a| a.as_format_float()).transpose()?.unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6).max(1);
             let formatted = format_g(val, precision, false);
             let negative = val.is_sign_negative();
@@ -342,7 +361,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_padded(spec, false, &with_sign, None, false, output);
         }
         'G' => {
-            let val = arg.map(|a| a.as_format_float()).unwrap_or(0.0);
+            let val = arg.map(|a| a.as_format_float()).transpose()?.unwrap_or(0.0);
             let precision = spec.precision.unwrap_or(6).max(1);
             let formatted = format_g(val, precision, true);
             let negative = val.is_sign_negative();
@@ -351,20 +370,20 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             apply_padded(spec, false, &with_sign, None, false, output);
         }
         'x' => {
-            let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
+            let val = arg.map(|a| a.as_format_int()).transpose()?.unwrap_or(0);
             apply_int_format(spec, val, output, IntBase::LowerHex);
         }
         'X' => {
-            let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
+            let val = arg.map(|a| a.as_format_int()).transpose()?.unwrap_or(0);
             apply_int_format(spec, val, output, IntBase::UpperHex);
         }
         'o' => {
-            let val = arg.map(|a| a.as_format_int()).unwrap_or(0);
+            let val = arg.map(|a| a.as_format_int()).transpose()?.unwrap_or(0);
             apply_int_format(spec, val, output, IntBase::Octal);
         }
         'c' => {
             // %c honors width and the left-align flag (`printf '%5c' x` → `    x`).
-            if let Some(ch) = arg.and_then(|a| a.as_format_char()) {
+            if let Some(ch) = arg.map(|a| a.as_format_char()).transpose()?.flatten() {
                 apply_string_padding(spec, &ch.to_string(), output);
             }
         }
@@ -374,7 +393,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             let raw = arg.map(|a| a.as_format_string()).unwrap_or_default();
             let (val, stop) = interpret_backslash_escapes(&raw);
             apply_string_padding(spec, &val, output);
-            return stop;
+            return Ok(stop);
         }
         other => {
             // Unknown conversion — output literally
@@ -382,7 +401,7 @@ fn apply_specifier<A: FormatArg>(spec: &FormatSpec, arg: Option<&A>, output: &mu
             output.push(other);
         }
     }
-    false
+    Ok(false)
 }
 
 enum IntBase {
@@ -655,93 +674,95 @@ mod tests {
                 TestVal::Float(f) => f.to_string(),
             }
         }
-        fn as_format_int(&self) -> i64 {
-            match self {
+        // This fixture exercises the format PARSER, not either caller's
+        // number rule, so it keeps the permissive coercion awk uses.
+        fn as_format_int(&self) -> Result<i64, String> {
+            Ok(match self {
                 TestVal::Int(i) => *i,
                 TestVal::Float(f) => *f as i64,
                 TestVal::Str(s) => s.parse().unwrap_or(0),
-            }
+            })
         }
-        fn as_format_float(&self) -> f64 {
-            match self {
+        fn as_format_float(&self) -> Result<f64, String> {
+            Ok(match self {
                 TestVal::Float(f) => *f,
                 TestVal::Int(i) => *i as f64,
                 TestVal::Str(s) => s.parse().unwrap_or(0.0),
-            }
+            })
         }
-        fn as_format_char(&self) -> Option<char> {
-            match self {
+        fn as_format_char(&self) -> Result<Option<char>, String> {
+            Ok(match self {
                 TestVal::Str(s) => s.chars().next(),
                 TestVal::Int(i) => char::from_u32(*i as u32),
                 _ => None,
-            }
+            })
         }
     }
 
     #[test]
     fn test_bare_specifiers() {
         let args = vec![TestVal::Str("hello".into()), TestVal::Int(42)];
-        assert_eq!(format_string("%s %d", &args), "hello 42");
+        assert_eq!(format_string("%s %d", &args).unwrap(), "hello 42");
     }
 
     #[test]
     fn test_left_align() {
         let args = vec![TestVal::Str("hi".into())];
-        assert_eq!(format_string("%-10s|", &args), "hi        |");
+        assert_eq!(format_string("%-10s|", &args).unwrap(), "hi        |");
     }
 
     #[test]
     fn test_right_align() {
         let args = vec![TestVal::Str("hi".into())];
-        assert_eq!(format_string("%10s|", &args), "        hi|");
+        assert_eq!(format_string("%10s|", &args).unwrap(), "        hi|");
     }
 
     #[test]
     fn test_zero_pad_int() {
         let args = vec![TestVal::Int(42)];
-        assert_eq!(format_string("%08d", &args), "00000042");
+        assert_eq!(format_string("%08d", &args).unwrap(), "00000042");
     }
 
     #[test]
     fn test_zero_pad_hex() {
         let args = vec![TestVal::Int(255)];
-        assert_eq!(format_string("%08x", &args), "000000ff");
+        assert_eq!(format_string("%08x", &args).unwrap(), "000000ff");
     }
 
     #[test]
     fn test_precision_float() {
         let args = vec![TestVal::Float(3.14159)];
-        assert_eq!(format_string("%.2f", &args), "3.14");
+        assert_eq!(format_string("%.2f", &args).unwrap(), "3.14");
     }
 
     #[test]
     fn test_width_and_precision_float() {
         let args = vec![TestVal::Float(3.14)];
-        assert_eq!(format_string("%10.2f", &args), "      3.14");
+        assert_eq!(format_string("%10.2f", &args).unwrap(), "      3.14");
     }
 
     #[test]
     fn test_percent_escape() {
         let args: Vec<TestVal> = vec![];
-        assert_eq!(format_string("100%%", &args), "100%");
+        assert_eq!(format_string("100%%", &args).unwrap(), "100%");
     }
 
     #[test]
     fn test_backslash_escapes() {
         let args: Vec<TestVal> = vec![];
-        assert_eq!(format_string("a\\nb\\tc", &args), "a\nb\tc");
+        assert_eq!(format_string("a\\nb\\tc", &args).unwrap(), "a\nb\tc");
     }
 
     #[test]
     fn test_width_int() {
         let args = vec![TestVal::Int(42)];
-        assert_eq!(format_string("%6d", &args), "    42");
+        assert_eq!(format_string("%6d", &args).unwrap(), "    42");
     }
 
     #[test]
     fn test_left_align_int() {
         let args = vec![TestVal::Int(42)];
-        assert_eq!(format_string("%-6d|", &args), "42    |");
+        assert_eq!(format_string("%-6d|", &args).unwrap(), "42    |");
     }
 
     #[test]
@@ -752,7 +773,7 @@ mod tests {
             TestVal::Str("b".into()),
             TestVal::Str("c".into()),
         ];
-        assert_eq!(format_string_cycling("%s\\n", &args), "a\nb\nc\n");
+        assert_eq!(format_string_cycling("%s\\n", &args).unwrap(), "a\nb\nc\n");
     }
 
     #[test]
@@ -764,7 +785,7 @@ mod tests {
             TestVal::Str("c".into()),
             TestVal::Str("d".into()),
         ];
-        assert_eq!(format_string_cycling("%s-%s ", &args), "a-b c-d ");
+        assert_eq!(format_string_cycling("%s-%s ", &args).unwrap(), "a-b c-d ");
     }
 
     #[test]
@@ -775,7 +796,7 @@ mod tests {
             TestVal::Str("b".into()),
             TestVal::Str("c".into()),
         ];
-        assert_eq!(format_string_cycling("%s-%s ", &args), "a-b c- ");
+        assert_eq!(format_string_cycling("%s-%s ", &args).unwrap(), "a-b c- ");
     }
 
     #[test]
@@ -783,14 +804,14 @@ mod tests {
         // No conversions: print the format exactly once, ignore extra operands.
         // (Also guards against an infinite loop.)
         let args = vec![TestVal::Str("a".into()), TestVal::Str("b".into())];
-        assert_eq!(format_string_cycling("hello\\n", &args), "hello\n");
+        assert_eq!(format_string_cycling("hello\\n", &args).unwrap(), "hello\n");
     }
 
     #[test]
     fn test_cycling_single_pass_when_args_match() {
         let args = vec![TestVal::Str("Alice".into()), TestVal::Int(30)];
         assert_eq!(
-            format_string_cycling("%s is %d", &args),
+            format_string_cycling("%s is %d", &args).unwrap(),
             "Alice is 30"
         );
     }
@@ -798,7 +819,7 @@ mod tests {
     #[test]
     fn test_cycling_no_args_still_runs_once() {
         let args: Vec<TestVal> = vec![];
-        assert_eq!(format_string_cycling("%s\\n", &args), "\n");
+        assert_eq!(format_string_cycling("%s\\n", &args).unwrap(), "\n");
     }
 
     // --- new tests covering previously broken cases --------------------------
@@ -806,80 +827,80 @@ mod tests {
     #[test]
     fn test_plus_flag() {
         let args = vec![TestVal::Int(5)];
-        assert_eq!(format_string("%+d", &args), "+5");
+        assert_eq!(format_string("%+d", &args).unwrap(), "+5");
     }
 
     #[test]
     fn test_space_flag() {
         let args = vec![TestVal::Int(5)];
-        assert_eq!(format_string("% d", &args), " 5");
+        assert_eq!(format_string("% d", &args).unwrap(), " 5");
     }
 
     #[test]
     fn test_hash_hex() {
         let args = vec![TestVal::Int(255)];
-        assert_eq!(format_string("%#x", &args), "0xff");
+        assert_eq!(format_string("%#x", &args).unwrap(), "0xff");
     }
 
     #[test]
     fn test_hash_octal() {
         let args = vec![TestVal::Int(8)];
-        assert_eq!(format_string("%#o", &args), "010");
+        assert_eq!(format_string("%#o", &args).unwrap(), "010");
     }
 
     #[test]
     fn test_precision_string() {
         let args = vec![TestVal::Str("abcdef".into())];
-        assert_eq!(format_string("%.3s", &args), "abc");
+        assert_eq!(format_string("%.3s", &args).unwrap(), "abc");
     }
 
     #[test]
     fn test_precision_decimal() {
         let args = vec![TestVal::Int(5)];
-        assert_eq!(format_string("%.3d", &args), "005");
+        assert_eq!(format_string("%.3d", &args).unwrap(), "005");
     }
 
     #[test]
     fn test_precision_overrides_zero_flag() {
         // POSIX: precision for integers suppresses the 0 flag.
         let args = vec![TestVal::Int(5)];
-        assert_eq!(format_string("%05.3d", &args), "  005");
+        assert_eq!(format_string("%05.3d", &args).unwrap(), "  005");
     }
 
     #[test]
     fn test_u_conversion() {
         let args = vec![TestVal::Int(5)];
-        assert_eq!(format_string("%u", &args), "5");
+        assert_eq!(format_string("%u", &args).unwrap(), "5");
     }
 
     #[test]
     fn test_big_e_conversion() {
         let args = vec![TestVal::Float(1000.0)];
-        assert_eq!(format_string("%E", &args), "1.000000E+03");
+        assert_eq!(format_string("%E", &args).unwrap(), "1.000000E+03");
     }
 
     #[test]
     fn test_little_e_conversion() {
         let args = vec![TestVal::Float(1000.0)];
-        assert_eq!(format_string("%e", &args), "1.000000e+03");
+        assert_eq!(format_string("%e", &args).unwrap(), "1.000000e+03");
     }
 
     #[test]
     fn test_big_g_large() {
         let args = vec![TestVal::Float(1234567.0)];
-        assert_eq!(format_string("%G", &args), "1.23457E+06");
+        assert_eq!(format_string("%G", &args).unwrap(), "1.23457E+06");
     }
 
     #[test]
     fn test_little_g_large() {
         let args = vec![TestVal::Float(1234567.0)];
-        assert_eq!(format_string("%g", &args), "1.23457e+06");
+        assert_eq!(format_string("%g", &args).unwrap(), "1.23457e+06");
     }
 
     #[test]
     fn test_b_tab() {
         let args = vec![TestVal::Str("\\t".into())];
-        assert_eq!(format_string("%b", &args), "\t");
+        assert_eq!(format_string("%b", &args).unwrap(), "\t");
     }
 
     #[test]
@@ -887,14 +908,14 @@ mod tests {
         // \0NNN: leading 0 is the first of up to 3 octal digits (≤2 more), like
         // GNU/bash/dash. \0101 → octal 010 (BS) + literal '1', NOT 'A'.
         let args: Vec<TestVal> = vec![];
-        assert_eq!(format_string("\\0101", &args), "\u{8}1");
-        assert_eq!(format_string("\\012", &args), "\n");
+        assert_eq!(format_string("\\0101", &args).unwrap(), "\u{8}1");
+        assert_eq!(format_string("\\012", &args).unwrap(), "\n");
     }
 
     #[test]
     fn test_octal_escape_no_zero_prefix() {
         // \101 in format → 'A'
         let args: Vec<TestVal> = vec![];
-        assert_eq!(format_string("\\101", &args), "A");
+        assert_eq!(format_string("\\101", &args).unwrap(), "A");
     }
 }

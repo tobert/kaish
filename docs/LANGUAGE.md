@@ -64,6 +64,13 @@ instead: `$((8#10))` is 8 and `$((10#$x))` reads text with a leading zero as
 decimal (see "Arithmetic"); `printf "%o"` and `printf "%x"` format the other
 way.
 
+`printf` reads a number by the same rules. `printf '%d' 255` and `printf '%d'
+1e3` print `255` and `1000`; `printf '%d' 0xff` and `printf '%d' 007` are
+errors naming the spelling that works, because a conversion that cannot read
+its operand refuses instead of printing `0`. An operand that is missing
+entirely still converts as `0`, which POSIX requires: `printf '%d'` prints
+`0`. `%s` takes any text.
+
 A bare integer must also fit in 64 bits (`-9223372036854775808` to
 `9223372036854775807`); a longer numeral is an error naming the limit, and
 quoting it keeps the text: `echo 9223372036854775808` errors, `echo

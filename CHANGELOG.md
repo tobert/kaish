@@ -67,6 +67,9 @@ breaking entries are marked **BREAKING**.
   existing implementations keep compiling; not breaking.
 
 ### Fixed
+- **`printf` refuses an operand it cannot read as a number** — `printf '%d' 0xff`
+  printed `0`; it now names `255` and `$(( 0xff ))`. `007`, `abc`, a fraction and
+  a 64-bit overflow refuse too. A missing operand is still `0`; awk is unchanged.
 - **`${path:-default}` inside `$(( ))` follows the ordinary `:-` contract** —
   unset, null, an empty string, a missing key, and an out-of-bounds index select
   the default; a shape error stays loud instead of quietly running the fallback.
