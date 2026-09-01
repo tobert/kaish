@@ -237,17 +237,14 @@ fn owning_mount(path: &Path, mounts: &[MountInfo]) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// True when `path` is a strict ancestor of `descendant` (`descendant`
-/// starts with `path` plus a separator). Handles `path == "/"` without
-/// producing a doubled slash.
+/// True when `path` is a strict ancestor of `descendant`.
+///
+/// Component-wise, not textual: `/tmpfoo` is not under `/tmp`, and a path
+/// whose bytes are not UTF-8 compares as itself. A containment check decides
+/// whether a symlink may leave its mount, so a lossy comparison here would be
+/// a lossy comparison there.
 fn is_strict_prefix(path: &Path, descendant: &Path) -> bool {
-    let path_str = path.to_string_lossy();
-    let descendant_str = descendant.to_string_lossy();
-    if path_str == "/" {
-        descendant_str.len() > 1 && descendant_str.starts_with('/')
-    } else {
-        descendant_str.starts_with(&format!("{}/", path_str))
-    }
+    descendant != path && descendant.starts_with(path)
 }
 
 /// Resolve potential symlinks at `path`, following the chain up to

@@ -157,18 +157,34 @@ async fn rooted_readlink_f_link_escaping_root_is_refused() {
     seed(&root);
     let outside = tempfile::tempdir().expect("outside tempdir");
     std::fs::write(outside.path().join("secret.txt"), "s").unwrap();
-    symlink(outside.path().join("secret.txt"), root.join("escape.txt")).unwrap();
+    // The link is NOT named for what it does. The builtin formats a failure as
+    // `readlink: <operand>: <message>`, so an operand containing "escape" makes
+    // every failure — including the ancestor-walk bug this fix removes — satisfy
+    // an assertion looking for that word. The name must not be able to pass the
+    // test on the operand's behalf.
+    symlink(outside.path().join("secret.txt"), root.join("outward.txt")).unwrap();
 
     let k = rooted_kernel(&root);
-    let (out, err, code) = run(&k, "readlink -f escape.txt").await;
+    let (out, err, code) = run(&k, "readlink -f outward.txt").await;
     assert_ne!(
         code, 0,
         "readlink -f through a link escaping the mount root must be refused, got out={out:?}"
     );
-    // Specifically "escape" — not the ancestor-walk bug's "No such file or
-    // directory" wearing a different path, which would pass here for the
-    // wrong reason.
-    assert!(err.contains("escape"), "error should name the escape, got: {err}");
+    assert!(
+        err.contains("path escapes root"),
+        "containment must be what refused it, got: {err}"
+    );
+    // The ancestor-walk bug refused everything with this message. If it is back,
+    // the refusal above is the old bug wearing the new test's clothes.
+    assert!(
+        !err.contains("No such file or directory"),
+        "refused for the wrong reason — this is the ancestor-walk bug, not containment: {err}"
+    );
+    // The target must not leak, whatever the reason for refusal.
+    assert!(
+        !out.contains("secret.txt"),
+        "an escaping target must never be printed, got out={out:?}"
+    );
 }
 
 #[tokio::test]
