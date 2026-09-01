@@ -142,6 +142,34 @@ impl VfsRouter {
     /// (`/v` over mounts `/v/jobs`, `/v/blobs` → `blobs`, `jobs`). `dir` is
     /// expected to be a non-root ancestor with no mount of its own; root is
     /// handled by `list_root`, which also folds in a `/` mount's real contents.
+    /// Recover a mount point's ancestor from a `NotFound`.
+    ///
+    /// A mount at `/a/b/c` implies `/a` and `/a/b` are directories, the way a
+    /// real mount implies its mount point's parents. The router synthesizes
+    /// them because no backend owns them.
+    ///
+    /// Mounting `/` makes `mount_of` match every path, so the backend covering
+    /// `/` is asked for `/a`, answers `NotFound`, and that reaches the caller
+    /// before the ancestor check below the `Err` arm can run. That check is
+    /// therefore unreachable whenever a root mount exists, which is the
+    /// ordinary embedder shape. This runs on the answer instead of on the
+    /// routing.
+    ///
+    /// Only `NotFound` is recovered. Any other error is the backend's answer
+    /// about a path it owns and must reach the caller unchanged.
+    fn or_synthesized_ancestor<T>(
+        &self,
+        path: &Path,
+        error: io::Error,
+        synthesize: impl FnOnce() -> T,
+    ) -> io::Result<T> {
+        if error.kind() == io::ErrorKind::NotFound && self.has_mount_under(path) {
+            Ok(synthesize())
+        } else {
+            Err(error)
+        }
+    }
+
     fn list_mount_children(&self, dir: &Path) -> Vec<DirEntry> {
         let dir = Self::normalize_mount_path(dir.to_path_buf());
         let prefix = format!("{}/", dir.to_string_lossy());
@@ -327,17 +355,15 @@ impl Filesystem for VfsRouter {
             return self.list_root().await;
         }
 
-        match self.find_mount(path) {
+        let answer = match self.find_mount(path) {
             Ok((fs, relative)) => fs.list(&relative).await,
-            // Not covered by a mount, but an ancestor of one (e.g. `/v` above
-            // `/v/jobs`): synthesize its child mount directories rather than 404.
-            Err(e) => {
-                if self.has_mount_under(path) {
-                    Ok(self.list_mount_children(path))
-                } else {
-                    Err(e)
-                }
-            }
+            Err(e) => Err(e),
+        };
+        match answer {
+            Ok(entries) => Ok(entries),
+            // An ancestor of a mount lists the mounts beneath it rather
+            // than 404ing.
+            Err(e) => self.or_synthesized_ancestor(path, e, || self.list_mount_children(path)),
         }
     }
 
@@ -359,16 +385,18 @@ impl Filesystem for VfsRouter {
             return Ok(DirEntry::directory(name));
         }
 
-        match self.find_mount(path) {
+        let answer = match self.find_mount(path) {
             Ok((fs, relative)) => fs.stat(&relative).await,
-            // Intermediate ancestor of a mount (e.g. `/v` above `/v/jobs`)
-            // exists as a synthesized directory.
+            Err(e) => Err(e),
+        };
+        match answer {
+            Ok(entry) => Ok(entry),
+            // An ancestor of a mount (`/v` above `/v/jobs`) is a synthesized
+            // directory, whether the routing missed or the backend did.
             Err(e) => {
-                if self.has_mount_under(path) {
-                    Ok(DirEntry::directory(Self::path_basename(path)))
-                } else {
-                    Err(e)
-                }
+                self.or_synthesized_ancestor(path, e, || {
+                    DirEntry::directory(Self::path_basename(path))
+                })
             }
         }
     }
@@ -425,16 +453,18 @@ impl Filesystem for VfsRouter {
             return Ok(DirEntry::directory(name));
         }
 
-        match self.find_mount(path) {
+        let answer = match self.find_mount(path) {
             Ok((fs, relative)) => fs.lstat(&relative).await,
-            // Intermediate ancestor of a mount (e.g. `/v` above `/v/jobs`)
-            // exists as a synthesized directory.
+            Err(e) => Err(e),
+        };
+        match answer {
+            Ok(entry) => Ok(entry),
+            // A synthesized ancestor is a directory, never a symlink, so
+            // lstat and stat agree about it.
             Err(e) => {
-                if self.has_mount_under(path) {
-                    Ok(DirEntry::directory(Self::path_basename(path)))
-                } else {
-                    Err(e)
-                }
+                self.or_synthesized_ancestor(path, e, || {
+                    DirEntry::directory(Self::path_basename(path))
+                })
             }
         }
     }
@@ -481,18 +511,19 @@ impl Filesystem for VfsRouter {
     /// A synthesized directory is readable and searchable, and never
     /// writable — the router creates nothing in one.
     async fn path_access(&self, path: &Path) -> io::Result<PathAccess> {
-        match self.find_mount(path) {
+        let path_str = path.to_string_lossy();
+        if path_str.is_empty() || path_str == "/" {
+            return Ok(PathAccess::resolve(Some(SYNTHESIZED_DIRECTORY_MODE), true));
+        }
+        let answer = match self.find_mount(path) {
             Ok((fs, relative)) => fs.path_access(&relative).await,
-            Err(e) => {
-                let path_str = path.to_string_lossy();
-                let is_synthesized =
-                    path_str.is_empty() || path_str == "/" || self.has_mount_under(path);
-                if is_synthesized {
-                    Ok(PathAccess::resolve(Some(SYNTHESIZED_DIRECTORY_MODE), true))
-                } else {
-                    Err(e)
-                }
-            }
+            Err(e) => Err(e),
+        };
+        match answer {
+            Ok(access) => Ok(access),
+            Err(e) => self.or_synthesized_ancestor(path, e, || {
+                PathAccess::resolve(Some(SYNTHESIZED_DIRECTORY_MODE), true)
+            }),
         }
     }
 

@@ -17,6 +17,10 @@ breaking entries are marked **BREAKING**.
   second surface cannot drift from the first by omission.
 
 ### Fixed
+- **A mount point's ancestors are navigable again** — with a backend at `/` and
+  another mounted deeper, `stat`, `ls`, `cd`, and the file tests answered "not
+  found" for the directories above the deeper mount. They synthesize as
+  directories, as they already did when no backend covered `/`.
 - **`help <tool>` and `kaish-tools <name>` only rendered one level of
   subcommands** (`kaish-tools` rendered none), hiding a nested verb
   (`worktree list`) and its flags. Both now recurse to any depth, one flat
