@@ -167,7 +167,11 @@ fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent:
 /// indent, never a deeper indent per level. kaish-extras parses this roster
 /// by column: exactly two spaces, then the ` — ` (space, em-dash, space)
 /// separator. A nested indent or a different separator breaks that reader.
-fn push_subcommand_roster(output: &mut String, prefix: &str, subs: &[ToolSchema]) {
+///
+/// `pub` so `kaish-tools <name>` (`kaish-kernel`'s
+/// `tools::builtin::introspect::format_tool_detail`) renders the same
+/// roster as `help <tool>` instead of a second, drifting implementation.
+pub fn push_subcommand_roster(output: &mut String, prefix: &str, subs: &[ToolSchema]) {
     for sub in subs {
         let path = if prefix.is_empty() {
             sub.name.clone()

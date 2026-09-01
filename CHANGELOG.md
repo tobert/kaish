@@ -11,9 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
-- **`help <tool>` only rendered one level of subcommands**, hiding a nested
-  verb (`worktree list`) and its flags. It now recurses to any depth, still
-  one flat two-space line per full path (`worktree list — …`).
+- **`help <tool>` and `kaish-tools <name>` only rendered one level of
+  subcommands** (`kaish-tools` rendered none), hiding a nested verb
+  (`worktree list`) and its flags. Both now recurse to any depth, one flat
+  two-space line per full path (`worktree list — …`).
 
 ## [0.17.0] - 2026-08-31
 
