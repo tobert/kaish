@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- **`readlink -f` / `realpath` failed every operand on a LocalFs mount rooted
+  below `/`** — canonicalization `lstat`'d structural VFS components above
+  the mount, naming the mount's first path segment as missing. Also closed:
+  a symlink target escaping the mount root was returned instead of refused.
+
 ## [0.17.0] - 2026-08-31
 
 ### Changed

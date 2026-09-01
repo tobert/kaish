@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use kaish_types::backend::MountInfo;
 
 /// Maximum symlink hops to prevent infinite loops (matches Linux MAXSYMLINKS).
 const MAX_SYMLINK_HOPS: usize = 40;
@@ -150,6 +151,14 @@ impl Tool for Readlink {
 /// if the last component doesn't exist but its parent does, return the
 /// normalized parent + final component.
 ///
+/// A mount can be rooted below `/` (an embedder mounting `LocalFs` at a deep
+/// VFS path, with another filesystem covering `/`). The components ABOVE that
+/// mount point are structural — the router synthesizes them as directories —
+/// not entries any single backend can `lstat`; querying one against whatever
+/// backend happens to own `/` produced a bogus "No such file or directory"
+/// naming the mount's first path component. `is_structural` recognizes those
+/// components (via `KernelBackend::mounts`) and skips the `lstat`.
+///
 /// Returns an error if any intermediate (non-final) component is missing or
 /// if symlink resolution loops.
 pub async fn canonicalize_path_allow_missing_final(
@@ -163,6 +172,7 @@ pub async fn canonicalize_path_allow_missing_final(
         return Err("empty path".to_string());
     }
 
+    let mounts = ctx.backend.mounts();
     let mut current = PathBuf::new();
 
     for (idx, component) in components.iter().enumerate() {
@@ -178,8 +188,10 @@ pub async fn canonicalize_path_allow_missing_final(
             }
             std::path::Component::Normal(_) => {
                 current.push(component);
-                // Resolve symlinks at this component.
-                current = resolve_symlink_component(ctx, current, is_last).await?;
+                if !is_structural(&current, &mounts) {
+                    // Resolve symlinks at this component.
+                    current = resolve_symlink_component(ctx, &mounts, current, is_last).await?;
+                }
             }
             std::path::Component::Prefix(_) => {
                 current.push(component);
@@ -190,17 +202,79 @@ pub async fn canonicalize_path_allow_missing_final(
     Ok(current)
 }
 
+/// True when `path` is a structural VFS path no single backend owns: a mount
+/// point boundary itself, or a strict ancestor of one (`/tmp` above a mount
+/// at `/tmp/x/fixture`). The router synthesizes both as directories rather
+/// than asking a backend, so they can never be symlinks and never need an
+/// `lstat` call.
+///
+/// A path genuinely covered by a real, more specific (non-`/`) mount is not
+/// structural — that mount's own `lstat` answers for it, containment and all.
+/// Longest-prefix match mirrors `VfsRouter::mount_of`'s own selection so this
+/// agrees with how the router will actually route the path.
+fn is_structural(path: &Path, mounts: &[MountInfo]) -> bool {
+    match owning_mount(path, mounts) {
+        // The path IS a mount point: the router synthesizes it, never
+        // delegates to the mount's own root lstat.
+        Some(m) if m == path => true,
+        // A real, more specific mount covers this path — trust its lstat.
+        Some(m) if m != Path::new("/") => false,
+        // Only `/` (or nothing) covers this path directly. Structural only
+        // if it sits strictly above some other mount's own root.
+        _ => mounts.iter().any(|m| m.path != path && is_strict_prefix(path, &m.path)),
+    }
+}
+
+/// The longest mount path that covers `path` — `path` equals it, or sits
+/// beneath it — mirroring `VfsRouter::mount_of`'s own longest-prefix
+/// selection. `None` when no mount covers `path` at all.
+fn owning_mount(path: &Path, mounts: &[MountInfo]) -> Option<PathBuf> {
+    mounts
+        .iter()
+        .map(|m| m.path.as_path())
+        .filter(|m| *m == path || is_strict_prefix(m, path))
+        .max_by_key(|m| m.as_os_str().len())
+        .map(PathBuf::from)
+}
+
+/// True when `path` is a strict ancestor of `descendant` (`descendant`
+/// starts with `path` plus a separator). Handles `path == "/"` without
+/// producing a doubled slash.
+fn is_strict_prefix(path: &Path, descendant: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    let descendant_str = descendant.to_string_lossy();
+    if path_str == "/" {
+        descendant_str.len() > 1 && descendant_str.starts_with('/')
+    } else {
+        descendant_str.starts_with(&format!("{}/", path_str))
+    }
+}
+
 /// Resolve potential symlinks at `path`, following the chain up to
 /// `MAX_SYMLINK_HOPS`. If `allow_missing` is true and the path doesn't exist,
 /// return `path` unchanged (the caller already knows it's the final component).
 async fn resolve_symlink_component(
     ctx: &ExecContext,
+    mounts: &[MountInfo],
     path: PathBuf,
     allow_missing: bool,
 ) -> Result<PathBuf, String> {
+    // The mount that owns the starting path. A rooted (non-`/`) mount is a
+    // containment boundary: a symlink hop that lands the walk outside it —
+    // an absolute target elsewhere on the host, or enough `..` to climb out
+    // — must be refused, the same guarantee `resolve_beneath` gives a single
+    // `LocalFs`. Root (`/`) draws no such boundary: it's the unrooted case
+    // every existing symlink walks across freely.
+    let start_owner = owning_mount(&path, mounts);
     let mut current = path;
 
     for _ in 0..MAX_SYMLINK_HOPS {
+        // A symlink target can jump onto a structural path (e.g. an absolute
+        // target landing above another mount); re-check every hop, not just
+        // the outer walk's own components.
+        if is_structural(&current, mounts) {
+            return Ok(current);
+        }
         match ctx.backend.lstat(Path::new(&current)).await {
             Ok(entry) if entry.is_symlink() => {
                 let target = ctx
@@ -218,6 +292,17 @@ async fn resolve_symlink_component(
                 }
                 // Normalize out any . and .. introduced by the target.
                 current = normalize_path_buf(current);
+
+                if let Some(start) = &start_owner
+                    && start.as_path() != Path::new("/")
+                    && owning_mount(&current, mounts).as_deref() != Some(start.as_path())
+                {
+                    return Err(format!(
+                        "path escapes root: {} is not under {}",
+                        current.display(),
+                        start.display()
+                    ));
+                }
             }
             Ok(_) => {
                 // Not a symlink — resolved.
