@@ -402,6 +402,39 @@ against any `Filesystem`; `run_all(make_root)` takes a closure that returns a
 fresh empty root per case. A backend that inherits the trait's `lstat`
 default fails the first case rather than passing silently.
 
+### Canonicalizing a path (`canonicalize`)
+
+`readlink -f` and `realpath` both resolve through `Filesystem::canonicalize`
+(and its mirror, `KernelBackend::canonicalize`): follow every symlink hop,
+fold `.` and `..` lexically. The final component may be missing when the
+caller passes `allow_missing_final: true` (GNU `readlink -f` semantics,
+which `realpath` also uses but then requires the answer to exist); a missing
+INTERMEDIATE component is always an error, whichever way that flag is set.
+Symlink hops are capped at 40, matching Linux `MAXSYMLINKS`.
+
+The default walks component by component through `lstat`/`read_link`, so it
+inherits whatever containment those already give — correct for a backend
+with no root to enforce (`MemoryFs`, an unrooted `LocalFs`). `LocalFs`
+overrides it with one `resolve_beneath` call instead of a round trip per
+hop, containment-checked the same way `read`/`write`/`stat` already are: a
+symlink target that walks above the mount's root is refused with
+`path escapes root: {path} is not under {root}`. `VfsRouter` overrides it to
+delegate to the single mount that owns the path, translating VFS-absolute to
+mount-relative and back — a synthesized ancestor of a mount (`/v` above
+`/v/jobs`) is a directory the router creates, never a symlink, so it
+canonicalizes to itself.
+
+**A custom `KernelBackend` composed with `Kernel::with_backend`'s
+`VirtualOverlayBackend` needs the same override**, and for the same reason
+`VfsRouter` does: the trait default's per-hop walk calls `lstat`/`read_link`
+on the overlay itself, re-deciding "virtual, shared-ancestor, or inner" on
+every hop instead of asking the owning side once for the whole path. A
+symlink that lives entirely under the embedder's own backend must resolve —
+and be contained — through that backend's own resolver in one call, not be
+re-routed through the split hop by hop. `VirtualOverlayBackend` already
+overrides it this way; a hand-rolled `KernelBackend` wrapping another one
+should follow the same shape.
+
 ### Reporting file permissions (`path_access`)
 
 `test -r`, `test -w`, and `test -x` ask the mount that owns the path, through

@@ -5,13 +5,10 @@
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
-
-/// Maximum symlink hops to prevent infinite loops (matches Linux MAXSYMLINKS).
-const MAX_SYMLINK_HOPS: usize = 40;
 
 /// Readlink tool: read symlink target or canonicalize a path.
 pub struct Readlink;
@@ -82,15 +79,16 @@ impl Tool for Readlink {
             let resolved = ctx.resolve_path(&path_str);
 
             if canonicalize {
-                // GNU readlink -f: canonicalize through symlinks.
-                // Missing final component is allowed (resolves parents only).
-                match canonicalize_path_allow_missing_final(ctx, &resolved).await {
+                // GNU readlink -f: canonicalize through symlinks. A missing
+                // final component is allowed (the backend resolves parents
+                // only); a missing intermediate component still errors.
+                match ctx.backend.canonicalize(Path::new(&resolved), true).await {
                     Ok(canonical) => {
                         output.push_str(&canonical.to_string_lossy());
                         output.push('\n');
                     }
-                    Err(msg) => {
-                        last_err = Some(format!("readlink: {}: {}", path_str, msg));
+                    Err(e) => {
+                        last_err = Some(format!("readlink: {}: {}", path_str, e));
                         exit_code = 1;
                     }
                 }
@@ -142,157 +140,6 @@ impl Tool for Readlink {
             result = result.with_code(exit_code);
         }
         result
-    }
-}
-
-/// Canonicalize a path through the VFS backend, following symlinks at every
-/// component. Missing final component is allowed (GNU `readlink -f` semantics):
-/// if the last component doesn't exist but its parent does, return the
-/// normalized parent + final component.
-///
-/// Returns an error if any intermediate (non-final) component is missing or
-/// if symlink resolution loops.
-pub async fn canonicalize_path_allow_missing_final(
-    ctx: &ExecContext,
-    path: &Path,
-) -> Result<PathBuf, String> {
-    let components: Vec<_> = path.components().collect();
-    let total = components.len();
-
-    if total == 0 {
-        return Err("empty path".to_string());
-    }
-
-    let mut current = PathBuf::new();
-
-    for (idx, component) in components.iter().enumerate() {
-        let is_last = idx + 1 == total;
-
-        match component {
-            std::path::Component::RootDir => {
-                current.push("/");
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                current.pop();
-            }
-            std::path::Component::Normal(_) => {
-                current.push(component);
-                // Resolve symlinks at this component.
-                current = resolve_symlink_component(ctx, current, is_last).await?;
-            }
-            std::path::Component::Prefix(_) => {
-                current.push(component);
-            }
-        }
-    }
-
-    Ok(current)
-}
-
-/// Resolve potential symlinks at `path`, following the chain up to
-/// `MAX_SYMLINK_HOPS`. If `allow_missing` is true and the path doesn't exist,
-/// return `path` unchanged (the caller already knows it's the final component).
-async fn resolve_symlink_component(
-    ctx: &ExecContext,
-    path: PathBuf,
-    allow_missing: bool,
-) -> Result<PathBuf, String> {
-    let mut current = path;
-
-    for _ in 0..MAX_SYMLINK_HOPS {
-        match ctx.backend.lstat(Path::new(&current)).await {
-            Ok(entry) if entry.is_symlink() => {
-                let target = ctx
-                    .backend
-                    .read_link(Path::new(&current))
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                if target.is_absolute() {
-                    current = target;
-                } else {
-                    // Relative target: resolve from the link's parent directory.
-                    let parent = current.parent().unwrap_or(Path::new("/"));
-                    current = parent.join(target);
-                }
-                // Normalize out any . and .. introduced by the target.
-                current = normalize_path_buf(current);
-            }
-            Ok(_) => {
-                // Not a symlink — resolved.
-                return Ok(current);
-            }
-            Err(e) => {
-                use crate::backend::BackendError;
-                match &e {
-                    BackendError::NotFound(_) if allow_missing => {
-                        // Final component missing — allowed per GNU readlink -f.
-                        return Ok(current);
-                    }
-                    BackendError::NotFound(_) => {
-                        return Err(format!(
-                            "No such file or directory: {}",
-                            current.display()
-                        ));
-                    }
-                    _ => return Err(e.to_string()),
-                }
-            }
-        }
-    }
-
-    Err(format!(
-        "too many levels of symbolic links: {}",
-        current.display()
-    ))
-}
-
-/// Normalize a PathBuf by collapsing `.` and `..` components without
-/// filesystem access. This handles targets injected by symlink resolution.
-fn normalize_path_buf(path: PathBuf) -> PathBuf {
-    let mut components: Vec<std::ffi::OsString> = Vec::new();
-    let is_absolute = path.is_absolute();
-
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => {}
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                // A `..` cancels a preceding *normal* component, but on a
-                // relative path it must ACCUMULATE past the start (and past
-                // other leading `..`s): `../../a` normalizes to `../../a`, not
-                // `a`. Only pop when the last component is a real name.
-                let last_is_parent = components
-                    .last()
-                    .map(|s| s.as_os_str() == std::ffi::OsStr::new(".."))
-                    .unwrap_or(false);
-                if components.is_empty() || last_is_parent {
-                    if !is_absolute {
-                        components.push("..".into());
-                    }
-                    // Absolute: a leading `..` at root is a no-op (stays at /).
-                } else {
-                    components.pop();
-                }
-            }
-            std::path::Component::Normal(s) => {
-                components.push(s.to_os_string());
-            }
-            std::path::Component::Prefix(_) => {}
-        }
-    }
-
-    if is_absolute {
-        let mut result = PathBuf::from("/");
-        for c in components {
-            result.push(c);
-        }
-        result
-    } else if components.is_empty() {
-        PathBuf::from(".")
-    } else {
-        components.iter().collect()
     }
 }
 
@@ -407,45 +254,5 @@ mod tests {
         let result = Readlink.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("No such file"), "got: {}", result.err);
-    }
-
-    #[test]
-    fn test_normalize_path_buf_absolute() {
-        assert_eq!(
-            normalize_path_buf(PathBuf::from("/usr/bin/../lib")),
-            PathBuf::from("/usr/lib")
-        );
-        assert_eq!(
-            normalize_path_buf(PathBuf::from("/usr/./bin")),
-            PathBuf::from("/usr/bin")
-        );
-    }
-
-    #[test]
-    fn test_normalize_path_buf_relative() {
-        assert_eq!(
-            normalize_path_buf(PathBuf::from("a/b/../c")),
-            PathBuf::from("a/c")
-        );
-    }
-
-    #[test]
-    fn test_normalize_path_buf_relative_leading_parents_accumulate() {
-        // Regression (Gemini review): leading/consecutive `..` on a relative
-        // path must accumulate, not cancel each other — `../../a` is `../../a`,
-        // not `a`. A trailing `..` past the start likewise accumulates.
-        assert_eq!(
-            normalize_path_buf(PathBuf::from("../../a")),
-            PathBuf::from("../../a")
-        );
-        assert_eq!(
-            normalize_path_buf(PathBuf::from("../a/../..")),
-            PathBuf::from("../..")
-        );
-        // A `..` still cancels a preceding real component.
-        assert_eq!(
-            normalize_path_buf(PathBuf::from("../a/b/..")),
-            PathBuf::from("../a")
-        );
     }
 }

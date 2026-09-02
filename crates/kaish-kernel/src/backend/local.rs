@@ -336,6 +336,17 @@ impl KernelBackend for LocalBackend {
         Ok(())
     }
 
+    /// Delegates to the router, which delegates to the mount that owns the
+    /// path. The trait default would walk component by component through
+    /// this backend's own `lstat`/`read_link` — each of those a router
+    /// lookup plus, on a rooted `LocalFs` mount, a full `resolve_beneath`
+    /// from its root — turning one canonicalize into an O(n²) walk for an
+    /// n-component path. Routing straight to `VfsRouter::canonicalize`
+    /// keeps it to one resolve per mount crossed.
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> BackendResult<std::path::PathBuf> {
+        Ok(self.vfs.canonicalize(path, allow_missing_final).await?)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Tool Dispatch
     // ═══════════════════════════════════════════════════════════════════════════

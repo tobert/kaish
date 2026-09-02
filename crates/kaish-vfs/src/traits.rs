@@ -241,6 +241,103 @@ pub trait Filesystem: Send + Sync {
         // Default: same as stat (for backends that don't support symlinks)
         self.stat(path).await
     }
+
+    /// Resolve `path` to its canonical form: follow every symlink hop,
+    /// fold `.` and `..` lexically, root-relative in and root-relative out
+    /// — same as every other path this trait takes and returns.
+    ///
+    /// The final component may be missing when `allow_missing_final` is
+    /// true (GNU `readlink -f` semantics). A missing INTERMEDIATE
+    /// component is always an error, whichever way `allow_missing_final`
+    /// is set. Symlink hops are capped at 40, matching Linux
+    /// `MAXSYMLINKS`; exceeding the cap is an error, never a silent stop.
+    ///
+    /// The default walks component by component through [`Filesystem::lstat`]
+    /// and [`Filesystem::read_link`], so it inherits whatever containment
+    /// those already give — correct for a backend with no root to enforce
+    /// (`MemoryFs`, an unrooted `LocalFs`). `LocalFs` overrides this with
+    /// one containment-checked resolve instead of a round trip per hop;
+    /// `VfsRouter` overrides it to delegate to the mount that owns the
+    /// path.
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> io::Result<PathBuf> {
+        let components: Vec<_> = path.components().collect();
+        let total = components.len();
+        let mut current = PathBuf::new();
+
+        for (idx, component) in components.iter().enumerate() {
+            let is_last = idx + 1 == total;
+            match component {
+                std::path::Component::RootDir => {}
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    current.pop();
+                }
+                std::path::Component::Normal(_) => {
+                    current.push(component);
+                    current =
+                        resolve_symlink_hop(self, current, is_last && allow_missing_final).await?;
+                }
+                std::path::Component::Prefix(_) => {
+                    current.push(component);
+                }
+            }
+        }
+        Ok(current)
+    }
+}
+
+/// Symlink hops [`Filesystem::canonicalize`]'s default walk follows before
+/// refusing, matching Linux's `MAXSYMLINKS`.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Follow the symlink chain starting at `path`, if any, to the entry it
+/// names. `allow_missing` permits `path` itself to be absent; every hop
+/// short of it must exist.
+async fn resolve_symlink_hop<F: Filesystem + ?Sized>(
+    fs: &F,
+    path: PathBuf,
+    allow_missing: bool,
+) -> io::Result<PathBuf> {
+    let mut current = path;
+    for _ in 0..MAX_SYMLINK_HOPS {
+        match fs.lstat(&current).await {
+            Ok(entry) if entry.is_symlink() => {
+                let target = fs.read_link(&current).await?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    let parent = current.parent().unwrap_or(Path::new(""));
+                    parent.join(target)
+                };
+                current = fold_dots(current);
+            }
+            Ok(_) => return Ok(current),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && allow_missing => return Ok(current),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(format!(
+        "too many levels of symbolic links: {}",
+        current.display()
+    )))
+}
+
+/// Collapse `.` and `..` lexically in a root-relative path: `..` past the
+/// start is dropped, not accumulated — the same clamp-at-root rule
+/// `MemoryFs`'s own path normalization uses, since a root-relative path has
+/// no "above root" to walk into.
+fn fold_dots(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Whether two paths spell the same name once `.` and `..` are resolved

@@ -392,6 +392,49 @@ impl Filesystem for LocalFs {
         fs::read_link(&full_path).await
     }
 
+    /// A single [`resolve_beneath`] call, containment-checked there, instead
+    /// of the trait default's one round trip per path component.
+    ///
+    /// `resolve_beneath`'s `Follow::Final` alone does not distinguish a
+    /// missing FINAL component from a missing INTERMEDIATE one — it resolves
+    /// to the deepest existing ancestor and appends whatever is missing,
+    /// however many components that is. This checks the resolved answer's
+    /// parent separately: when the answer itself is missing, an existing
+    /// parent means only the final component was absent (honor
+    /// `allow_missing_final`); a missing parent means something deeper was
+    /// missing too, which is always an error.
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> io::Result<PathBuf> {
+        let canonical_root = self.root.canonicalize().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("mount root {}: {error}", self.root.display()),
+            )
+        })?;
+        let full = self.resolve(path, Follow::Final)?;
+
+        if fs::metadata(&full).await.is_err() {
+            let parent_exists = match full.parent() {
+                Some(parent) => fs::metadata(parent).await.is_ok(),
+                None => false,
+            };
+            if !parent_exists || !allow_missing_final {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("No such file or directory: {}", path.display()),
+                ));
+            }
+        }
+
+        let relative = full.strip_prefix(&canonical_root).map_err(|_| {
+            io::Error::other(format!(
+                "canonicalize: {} is not under {} (internal error)",
+                full.display(),
+                canonical_root.display()
+            ))
+        })?;
+        Ok(relative.to_path_buf())
+    }
+
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         self.check_writable()?;
 

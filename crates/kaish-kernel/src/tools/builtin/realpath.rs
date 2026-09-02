@@ -75,13 +75,15 @@ impl Tool for Realpath {
             };
             let resolved = ctx.resolve_path(&path_str);
 
-            match canonicalize_path_full(ctx, &resolved).await {
+            // GNU realpath (no -m): every component, including the final
+            // one, must exist — `allow_missing_final: false`.
+            match ctx.backend.canonicalize(std::path::Path::new(&resolved), false).await {
                 Ok(canonical) => {
                     output.push_str(&canonical.to_string_lossy());
                     output.push('\n');
                 }
-                Err(msg) => {
-                    last_err = Some(format!("realpath: {}: {}", path_str, msg));
+                Err(e) => {
+                    last_err = Some(format!("realpath: {}: {}", path_str, e));
                     exit_code = 1;
                 }
             }
@@ -93,33 +95,6 @@ impl Tool for Realpath {
             result = result.with_code(exit_code);
         }
         result
-    }
-}
-
-/// Canonicalize a path through the VFS, requiring all components including the
-/// final one to exist. Uses the shared symlink-following logic from `readlink`.
-async fn canonicalize_path_full(
-    ctx: &ExecContext,
-    path: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
-    use super::readlink::canonicalize_path_allow_missing_final;
-    use std::path::Path;
-
-    let canonical = canonicalize_path_allow_missing_final(ctx, path).await?;
-
-    // For realpath (no -m), the final resolved path must exist.
-    match ctx.backend.stat(Path::new(&canonical)).await {
-        Ok(_) => Ok(canonical),
-        Err(e) => {
-            use crate::backend::BackendError;
-            Err(match &e {
-                BackendError::NotFound(_) => format!(
-                    "No such file or directory: {}",
-                    canonical.display()
-                ),
-                _ => e.to_string(),
-            })
-        }
     }
 }
 

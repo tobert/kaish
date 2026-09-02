@@ -29,6 +29,10 @@ breaking entries are marked **BREAKING**.
   so `git worktree list` is now declarable. Flags, positionals, tail, and
   stdin stay leaf-only, refused at `build()` on a node. See
   `docs/wrapped_command.md` for the full grammar.
+- **`Filesystem::canonicalize` and `KernelBackend::canonicalize`** — a
+  defaulted, containment-checked path canonicalizer. `LocalFs` and
+  `VfsRouter` override it with `resolve_beneath`; `readlink -f` and
+  `realpath` are now thin callers instead of walking symlinks themselves.
 
 ### Fixed
 - **A mount point's ancestors are navigable again** — with a backend at `/` and
@@ -43,6 +47,10 @@ breaking entries are marked **BREAKING**.
   aliases, declared effects, and command-level aliases** — each rendered on
   one side and silently dropped on the other. Both now render every field
   from one shared implementation.
+- **`readlink -f`/`realpath` no longer leak a path outside a rooted mount** —
+  they walked symlinks by re-routing every hop through the mount table, so a
+  symlink escaping its own mount resolved against whatever else was mounted,
+  including `/`, instead of being refused.
 
 ## [0.17.0] - 2026-08-31
 
