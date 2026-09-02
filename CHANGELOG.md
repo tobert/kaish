@@ -10,6 +10,22 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`kaish-help` publishes the pieces of a tool description** — `param_lines`,
+  `examples_section`, `operations_line`, `command_aliases_line`, and
+  `subcommand_roster`. `help` and `kaish-tools` both render from these, so a
+  second surface cannot drift from the first by omission.
+
+### Fixed
+- **`help <tool>` and `kaish-tools <name>` only rendered one level of
+  subcommands** (`kaish-tools` rendered none), hiding a nested verb
+  (`worktree list`) and its flags. Both now recurse to any depth, one flat
+  two-space line per full path (`worktree list — …`).
+- **The same two surfaces also disagreed on a tool's examples, parameter
+  aliases, declared effects, and command-level aliases** — each rendered on
+  one side and silently dropped on the other. Both now render every field
+  from one shared implementation.
+
 ## [0.17.0] - 2026-08-31
 
 ### Changed

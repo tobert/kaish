@@ -100,21 +100,31 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
 
     match schema {
         Some(s) => {
-            let mut output = format!("{}\n{}\n\n", s.name, s.description);
+            // Every section below calls the same kaish_help::topic renderer
+            // `help <tool>` uses, so the two introspection surfaces cannot
+            // drift into two spellings of a tool's params, subcommands,
+            // examples, operations, or aliases.
+            let mut output = format!("{}\n{}\n", s.name, s.description);
+            output.push_str(&kaish_help::topic::command_aliases_line(&s.aliases));
+            output.push('\n');
 
             if !s.params.is_empty() {
                 output.push_str("Parameters:\n");
-                for p in &s.params {
-                    let required = if p.required { "(required)" } else { "(optional)" };
-                    output.push_str(&format!(
-                        "  {} : {} {}\n    {}\n",
-                        p.name, p.param_type, required, p.description
-                    ));
-                }
+                output.push_str(&kaish_help::topic::param_lines(&s.params, "  "));
+            }
+
+            if !s.subcommands.is_empty() {
+                output.push_str("Subcommands:\n");
+                output.push_str(&kaish_help::topic::subcommand_roster(&s.subcommands));
+            }
+
+            if !s.examples.is_empty() {
+                output.push_str("Examples:\n");
+                output.push_str(&kaish_help::topic::examples_section(&s.examples));
             }
 
             if !s.operations.is_empty() {
-                output.push_str(&format!("Operations: {}\n", s.operations.join(", ")));
+                output.push_str(&kaish_help::topic::operations_line(&s.operations));
             }
 
             ExecResult::with_output(OutputData::text(output))
@@ -272,7 +282,7 @@ mod tests {
     use super::*;
     use crate::ast::Value;
     use crate::interpreter::{apply_output_format, OutputFormat};
-    use crate::tools::ToolSchema as TS;
+    use crate::tools::{ParamSchema, ToolSchema as TS};
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 
@@ -342,6 +352,156 @@ mod tests {
         let result = Tools.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("tool not found"));
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_recurses_into_nested_subcommands() {
+        // Same two-level grammar as help's regression test: a node
+        // (`worktree`) with no params of its own, a leaf (`list`) with one.
+        let leaf = TS::new("list", "List the repository's working trees").param(
+            ParamSchema::optional("porcelain", "bool", Value::Bool(false), "Machine-readable output"),
+        );
+        let node = TS::new("worktree", "Work with the repository's working trees").subcommand(leaf);
+        let git = TS::new("git", "Git plumbing and porcelain").subcommand(node);
+
+        let mut ctx = make_ctx();
+        ctx.set_tool_schemas(vec![git]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("git".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+
+        assert!(
+            text.contains("worktree list — List the repository's working trees"),
+            "expected full-path leaf line, got:\n{text}"
+        );
+        assert!(text.contains("porcelain"), "expected leaf parameter to render, got:\n{text}");
+        assert!(
+            text.contains("Machine-readable output"),
+            "expected leaf parameter description to render, got:\n{text}"
+        );
+
+        // Same flat-roster contract as `help <tool>`: exactly two spaces of
+        // indent, path and description joined by " — ".
+        let roster_start = text.find("Subcommands:\n").expect("Subcommands section") + "Subcommands:\n".len();
+        for line in text[roster_start..].lines() {
+            if line.is_empty() || line.starts_with("    ") || line.starts_with("Operations:") {
+                continue; // param line, or past the roster
+            }
+            assert!(
+                line.starts_with("  ") && !line.starts_with("   "),
+                "roster line must start with exactly two spaces: {line:?}"
+            );
+            assert!(line.contains(" — "), "roster line must use the ' — ' separator: {line:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_recurses_three_levels() {
+        let leaf = TS::new("list", "List sessions in this context").param(ParamSchema::optional(
+            "active",
+            "bool",
+            Value::Bool(false),
+            "Only running sessions",
+        ));
+        let session = TS::new("session", "Session operations").subcommand(leaf);
+        let context = TS::new("context", "Context operations").subcommand(session);
+        let kj = TS::new("kj", "kaijutsu control").subcommand(context);
+
+        let mut ctx = make_ctx();
+        ctx.set_tool_schemas(vec![kj]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("kj".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+
+        assert!(
+            text.contains("context session list — List sessions in this context"),
+            "expected three-level full-path leaf line, got:\n{text}"
+        );
+        assert!(text.contains("active"), "expected leaf parameter to render, got:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_flat_tool_byte_identical() {
+        // Control: a tool with no subcommands must render exactly as it did
+        // before recursion was added — same header, params, operations.
+        let mut cat = TS::new("cat", "Concatenate files")
+            .param(ParamSchema::required("path", "string", "File path to read"));
+        cat.operations = vec!["fs.read".to_string()];
+
+        let mut ctx = make_ctx();
+        ctx.set_tool_schemas(vec![cat]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("cat".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(
+            result.text_out(),
+            "cat\nConcatenate files\n\nParameters:\n  path : string (required)\n    File path to read\nOperations: fs.read\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_renders_examples() {
+        // `help <tool>` already named a tool's examples; `kaish-tools
+        // <name>` silently dropped them.
+        let mut ctx = make_ctx();
+        let echo = TS::new("echo", "Print arguments")
+            .example("Print a literal string", "echo hello");
+        ctx.set_tool_schemas(vec![echo]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("echo".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+        assert!(
+            text.contains("Print a literal string") && text.contains("echo hello"),
+            "expected the example to render, got:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_renders_parameter_aliases() {
+        // `help <tool>`'s push_params names a flag's aliases (`-n` for
+        // `--max-count`); `kaish-tools <name>`'s inline loop dropped them.
+        let mut ctx = make_ctx();
+        let head = TS::new("head", "Print the first lines")
+            .param(ParamSchema::optional("lines", "int", Value::Int(10), "Line count").with_aliases(["-n"]));
+        ctx.set_tool_schemas(vec![head]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("head".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+        assert!(
+            text.contains("(also: -n)"),
+            "expected the parameter's alias to render, got:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_detail_renders_command_aliases() {
+        let mut ctx = make_ctx();
+        let list = TS::new("list", "List sessions").with_command_aliases(["ls"]);
+        ctx.set_tool_schemas(vec![list]);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("list".into()));
+
+        let result = Tools.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let text = result.text_out();
+        assert!(
+            text.contains("Aliases: ls"),
+            "expected the command alias to render, got:\n{text}"
+        );
     }
 
     // ============================

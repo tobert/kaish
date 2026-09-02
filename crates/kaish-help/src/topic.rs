@@ -5,7 +5,7 @@
 //! tool registry.
 //! Behavior here is intentionally byte-stable — frontends and tests depend on it.
 
-use kaish_types::ToolSchema;
+use kaish_types::{Example, ParamSchema, ToolSchema};
 
 use crate::compose::render_syntax_section;
 use crate::content::{IGNORE, LIMITS, OUTPUT_LIMIT, OVERLAY, OVERVIEW, SCATTER, SYNTAX, VFS};
@@ -110,7 +110,9 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
     let schema = schemas.iter().find(|s| s.name == name)?;
     let mut output = String::new();
 
-    output.push_str(&format!("{} — {}\n\n", schema.name, schema.description));
+    output.push_str(&format!("{} — {}\n", schema.name, schema.description));
+    output.push_str(&command_aliases_line(&schema.aliases));
+    output.push('\n');
 
     if schema.params.is_empty() {
         output.push_str("No parameters.\n");
@@ -120,27 +122,22 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
     }
 
     // A subcommand-aware tool (`kj`, every wrapped command) keeps its real
-    // grammar here, one level down. Without this the whole allowlist a
+    // grammar here, at any depth. Without this the whole allowlist a
     // wrapped command publishes — its verbs, their flags, and the
     // constraints in their descriptions — was invisible to `help`.
     if !schema.subcommands.is_empty() {
         output.push_str("\nSubcommands:\n");
-        for sub in &schema.subcommands {
-            if sub.description.is_empty() {
-                output.push_str(&format!("  {}\n", sub.name));
-            } else {
-                output.push_str(&format!("  {} — {}\n", sub.name, sub.description));
-            }
-            push_params(&mut output, &sub.params, "    ");
-        }
+        output.push_str(&subcommand_roster(&schema.subcommands));
     }
 
     if !schema.examples.is_empty() {
         output.push_str("\nExamples:\n");
-        for example in &schema.examples {
-            output.push_str(&format!("  # {}\n", example.description));
-            output.push_str(&format!("  {}\n\n", example.code));
-        }
+        output.push_str(&examples_section(&schema.examples));
+    }
+
+    if !schema.operations.is_empty() {
+        output.push('\n');
+        output.push_str(&operations_line(&schema.operations));
     }
 
     Some(output)
@@ -151,7 +148,7 @@ pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
 /// Aliases are named here because they are the spelling agents actually
 /// write: a declaration that publishes `-n` for `--max-count` was telling
 /// `help` something it then dropped.
-fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent: &str) {
+fn push_params(output: &mut String, params: &[ParamSchema], indent: &str) {
     for param in params {
         let req = if param.required { " (required)" } else { "" };
         let aliases = if param.aliases.is_empty() {
@@ -163,6 +160,90 @@ fn push_params(output: &mut String, params: &[kaish_types::ParamSchema], indent:
             "{indent}{} : {}{}{}\n{indent}  {}\n",
             param.name, param.param_type, req, aliases, param.description
         ));
+    }
+}
+
+/// `push_params` as an owned string, for a caller across the crate
+/// boundary that cannot hold the buffer `push_params` writes into
+/// (`kaish-tools <name>` in `kaish-kernel`). `indent` is real per-caller
+/// state — `"  "` for a tool's own parameters, `"    "` for a subcommand's
+/// — unlike the accumulator, so it stays a parameter here.
+pub fn param_lines(params: &[ParamSchema], indent: &str) -> String {
+    let mut output = String::new();
+    push_params(&mut output, params, indent);
+    output
+}
+
+/// The example lines for a tool: a `#`-comment naming what it demonstrates,
+/// then the command, blank-line separated. The caller writes its own
+/// `Examples:` header — the two surfaces place it differently.
+pub fn examples_section(examples: &[Example]) -> String {
+    let mut output = String::new();
+    for example in examples {
+        output.push_str(&format!("  # {}\n", example.description));
+        output.push_str(&format!("  {}\n\n", example.code));
+    }
+    output
+}
+
+/// A tool's declared effect ids (`fs.remove`, `fs.overwrite`, …) as one
+/// line, or empty when it declares none. See `ToolSchema.operations`.
+pub fn operations_line(operations: &[String]) -> String {
+    if operations.is_empty() {
+        String::new()
+    } else {
+        format!("Operations: {}\n", operations.join(", "))
+    }
+}
+
+/// A one-line note naming a tool's command-level aliases (`ls` for
+/// `list`), distinct from a parameter's own aliases (see `push_params`).
+/// Empty when the tool declares none.
+pub fn command_aliases_line(aliases: &[String]) -> String {
+    if aliases.is_empty() {
+        String::new()
+    } else {
+        format!("Aliases: {}\n", aliases.join(", "))
+    }
+}
+
+/// The roster lines naming every subcommand at any depth, plus each one's
+/// parameters. The caller writes its own `Subcommands:` header.
+///
+/// `ToolSchema::subcommands` is recursive — a node (`worktree`) can hold a
+/// leaf (`list`) that holds another node — but the roster stays flat: every
+/// line renders the full path (`worktree list`) at the same two-space
+/// indent, never a deeper indent per level. kaish-extras parses this roster
+/// by column: exactly two spaces, then the ` — ` (space, em-dash, space)
+/// separator. A nested indent or a different separator breaks that reader.
+///
+/// Public so `help <tool>` and `kaish-tools <name>` render one roster from
+/// one implementation instead of drifting into two spellings of a tool's
+/// grammar.
+pub fn subcommand_roster(subs: &[ToolSchema]) -> String {
+    let mut output = String::new();
+    push_subcommand_roster(&mut output, "", subs);
+    output
+}
+
+/// The recursion behind [`subcommand_roster`]. `prefix` is the path accumulated
+/// so far and is a detail of the walk, which is why callers never supply it.
+fn push_subcommand_roster(output: &mut String, prefix: &str, subs: &[ToolSchema]) {
+    for sub in subs {
+        let path = if prefix.is_empty() {
+            sub.name.clone()
+        } else {
+            format!("{prefix} {}", sub.name)
+        };
+        if sub.description.is_empty() {
+            output.push_str(&format!("  {path}\n"));
+        } else {
+            output.push_str(&format!("  {path} — {}\n", sub.description));
+        }
+        push_params(output, &sub.params, "    ");
+        if !sub.subcommands.is_empty() {
+            push_subcommand_roster(output, &path, &sub.subcommands);
+        }
     }
 }
 
@@ -220,6 +301,134 @@ pub fn list_topics() -> Vec<(&'static str, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaish_types::ParamSchema;
+
+    /// A two-level grammar (`git worktree list --porcelain`) — the node
+    /// (`worktree`) has no params of its own, the leaf (`list`) does.
+    fn nested_tool_schema() -> ToolSchema {
+        let leaf = ToolSchema::new("list", "List the repository's working trees").param(
+            ParamSchema::optional(
+                "porcelain",
+                "bool",
+                kaish_types::Value::Bool(false),
+                "Machine-readable output",
+            ),
+        );
+        let node = ToolSchema::new("worktree", "Work with the repository's working trees").subcommand(leaf);
+        ToolSchema::new("git", "Git plumbing and porcelain").subcommand(node)
+    }
+
+    #[test]
+    fn test_tool_help_recurses_into_nested_subcommands() {
+        let schema = nested_tool_schema();
+        let content = tool_help("git", std::slice::from_ref(&schema)).expect("git is registered");
+
+        // The leaf's full path names the actual verb, not just the node.
+        assert!(
+            content.contains("worktree list — List the repository's working trees"),
+            "expected full-path leaf line, got:\n{content}"
+        );
+        // The leaf's parameter renders too.
+        assert!(
+            content.contains("porcelain"),
+            "expected leaf parameter to render, got:\n{content}"
+        );
+        assert!(
+            content.contains("Machine-readable output"),
+            "expected leaf parameter description to render, got:\n{content}"
+        );
+
+        // Flat-roster contract: every roster line is exactly two spaces of
+        // indent, path and description joined by " — " (space, em-dash,
+        // space) — kaish-extras parses this shape.
+        let roster_start = content.find("Subcommands:\n").expect("Subcommands section") + "Subcommands:\n".len();
+        for line in content[roster_start..].lines() {
+            if line.is_empty() || line.starts_with("    ") || line.starts_with("Examples:") {
+                continue; // param line, or past the roster
+            }
+            assert!(
+                line.starts_with("  ") && !line.starts_with("   "),
+                "roster line must start with exactly two spaces: {line:?}"
+            );
+            assert!(
+                line.contains(" — "),
+                "roster line must use the ' — ' separator: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_help_recurses_three_levels() {
+        // A wrapped command can declare grammar deeper than two levels
+        // (`kj context session list --active`) — depth must not cap at 2.
+        let leaf = ToolSchema::new("list", "List sessions in this context").param(
+            ParamSchema::optional(
+                "active",
+                "bool",
+                kaish_types::Value::Bool(false),
+                "Only running sessions",
+            ),
+        );
+        let session = ToolSchema::new("session", "Session operations").subcommand(leaf);
+        let context = ToolSchema::new("context", "Context operations").subcommand(session);
+        let schema = ToolSchema::new("kj", "kaijutsu control").subcommand(context);
+
+        let content = tool_help("kj", std::slice::from_ref(&schema)).expect("kj is registered");
+        assert!(
+            content.contains("context session list — List sessions in this context"),
+            "expected three-level full-path leaf line, got:\n{content}"
+        );
+        assert!(content.contains("active"), "expected leaf parameter to render, got:\n{content}");
+
+        let roster_start = content.find("Subcommands:\n").expect("Subcommands section") + "Subcommands:\n".len();
+        for line in content[roster_start..].lines() {
+            if line.contains(" — ") {
+                assert!(
+                    line.starts_with("  ") && !line.starts_with("   "),
+                    "roster line must stay at exactly two spaces regardless of depth: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_help_flat_tool_unchanged() {
+        // Control: a tool with no subcommands, aliases, examples, or
+        // operations renders byte-identical to before this change.
+        let schema = ToolSchema::new("cat", "Read and output file contents")
+            .param(ParamSchema::required("path", "string", "File path to read"));
+        let content = tool_help("cat", std::slice::from_ref(&schema)).expect("cat is registered");
+        assert_eq!(
+            content,
+            "cat — Read and output file contents\n\nParameters:\n  path : string (required)\n    File path to read\n"
+        );
+    }
+
+    #[test]
+    fn test_tool_help_renders_operations() {
+        // `kaish-tools <name>` already named a tool's declared effects;
+        // `help <tool>` silently dropped them.
+        let mut schema = ToolSchema::new("rm", "Remove files");
+        schema.operations = vec!["fs.remove".to_string()];
+        let content = tool_help("rm", std::slice::from_ref(&schema)).expect("rm is registered");
+        assert!(
+            content.contains("Operations: fs.remove"),
+            "expected declared effects to render, got:\n{content}"
+        );
+    }
+
+    #[test]
+    fn test_tool_help_renders_command_aliases() {
+        // Command-level aliases (`ls` for `list`) are real, shipped data —
+        // schema_from_clap reflects them from clap — but neither `help
+        // <tool>` nor `kaish-tools <name>` named them.
+        let schema = ToolSchema::new("list", "List sessions").with_command_aliases(["ls"]);
+        let content = tool_help("list", std::slice::from_ref(&schema)).expect("list is registered");
+        assert!(
+            content.contains("Aliases: ls"),
+            "expected command alias to render, got:\n{content}"
+        );
+    }
 
     #[test]
     fn test_topic_parsing() {
