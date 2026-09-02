@@ -106,8 +106,12 @@ pub(crate) enum Item {
 /// A parsed call, ready to render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Call {
-    /// Index into the declaration's `verbs`; `None` selects the root verb.
-    pub(crate) verb_index: Option<usize>,
+    /// The path from the top down to the selected leaf: each entry is an
+    /// index into the previous level's `verbs` (the first into
+    /// `declaration.verbs`, every one after into the previous verb's own
+    /// `verbs`). Empty selects the root verb. The root can never be a node
+    /// (`build()` refuses that), so an empty path always names a leaf.
+    pub(crate) verb_path: Vec<usize>,
     /// Declared flag occurrences, in source order. `items` points into this.
     pub(crate) flags: Vec<FlagUse>,
     /// Every word after the verb, in source order.
@@ -121,7 +125,7 @@ impl Call {
     /// A call the parser declines to describe: the verb itself was opaque.
     fn unjudgeable() -> Self {
         Self {
-            verb_index: None,
+            verb_path: Vec::new(),
             flags: Vec::new(),
             items: Vec::new(),
             uncertain: true,
@@ -130,11 +134,21 @@ impl Call {
 
     /// The selected verb.
     pub(crate) fn verb<'d>(&self, declaration: &'d WrappedCommand) -> Option<&'d Verb> {
-        match self.verb_index {
-            Some(index) => declaration.verbs.get(index),
-            None => declaration.root.as_ref(),
-        }
+        resolve_verb(declaration, &self.verb_path)
     }
+}
+
+/// Walk `path` from the declaration's top-level `verbs` down through each
+/// verb's own `verbs`. An empty path selects the root verb.
+fn resolve_verb<'d>(declaration: &'d WrappedCommand, path: &[usize]) -> Option<&'d Verb> {
+    let Some((&first, rest)) = path.split_first() else {
+        return declaration.root.as_ref();
+    };
+    let mut verb = declaration.verbs.get(first)?;
+    for &index in rest {
+        verb = verb.verbs.get(index)?;
+    }
+    Some(verb)
 }
 
 /// A refusal, plus whether an unjudgeable word preceded it.
@@ -149,19 +163,16 @@ pub(crate) struct ParseError {
 
 /// Parse `words` against `declaration`.
 pub(crate) fn parse(declaration: &WrappedCommand, words: &[Word]) -> Result<Call, ParseError> {
-    let Some((verb_index, mut index)) = select_verb(declaration, words)? else {
+    let Some((verb_path, mut index)) = select_verb(declaration, words)? else {
         return Ok(Call::unjudgeable());
     };
-    let Some(verb) = (match verb_index {
-        Some(i) => declaration.verbs.get(i),
-        None => declaration.root.as_ref(),
-    }) else {
+    let Some(verb) = resolve_verb(declaration, &verb_path) else {
         return Ok(Call::unjudgeable());
     };
-    let scope = declaration.scope_of(verb);
+    let scope = declaration.scope_of_path(&verb_path);
 
     let mut call = Call {
-        verb_index,
+        verb_path,
         flags: Vec::new(),
         items: Vec::new(),
         uncertain: false,
@@ -258,12 +269,17 @@ pub(crate) fn parse(declaration: &WrappedCommand, words: &[Word]) -> Result<Call
 /// Choose the verb and report how many words it consumed.
 /// `Ok(None)` means the verb itself came from an expansion, so no reading of
 /// the rest of the words is worth reporting.
+///
+/// The first word selects a top-level verb, or falls through to the root
+/// exactly as a flat declaration always has. From there, [`descend`] keeps
+/// consuming words for as long as the selected verb has children — a node
+/// is never itself callable, so the next word must select one of them.
 fn select_verb(
     declaration: &WrappedCommand,
     words: &[Word],
-) -> Result<Option<(Option<usize>, usize)>, ParseError> {
+) -> Result<Option<(Vec<usize>, usize)>, ParseError> {
     if declaration.verbs.is_empty() {
-        return Ok(Some((None, 0)));
+        return Ok(Some((Vec::new(), 0)));
     }
     let allowed = allowed_verbs(declaration);
     let missing = |uncertain: bool| ParseError {
@@ -276,7 +292,7 @@ fn select_verb(
 
     let Some(first) = words.first() else {
         return match declaration.root {
-            Some(_) => Ok(Some((None, 0))),
+            Some(_) => Ok(Some((Vec::new(), 0))),
             None => Err(missing(false)),
         };
     };
@@ -288,11 +304,15 @@ fn select_verb(
                 .iter()
                 .position(|v| v.name_or_root() == first.text)
             {
-                Some(index) => Ok(Some((Some(index), 1))),
+                Some(index) => {
+                    let verb = &declaration.verbs[index];
+                    let scope = declaration.scope_of(verb);
+                    descend(declaration, scope, verb, vec![index], words, 1)
+                }
                 // A declaration with both a root and named verbs falls
                 // through: `python etl.py` runs the root, `python json-tool`
                 // runs the verb.
-                None if declaration.root.is_some() => Ok(Some((None, 0))),
+                None if declaration.root.is_some() => Ok(Some((Vec::new(), 0))),
                 None => Err(ParseError {
                     error: WrappedError::UnknownVerb {
                         command: declaration.name.clone(),
@@ -306,15 +326,77 @@ fn select_verb(
         // A flag or `--` where a verb belongs: the root absorbs it if there
         // is one, otherwise no verb was named.
         Known::Literal => match declaration.root {
-            Some(_) => Ok(Some((None, 0))),
+            Some(_) => Ok(Some((Vec::new(), 0))),
             None => Err(missing(false)),
         },
         // The verb itself came from an expansion. Which verb's flags apply is
         // unknowable, so the parser describes nothing.
         Known::Opaque | Known::OpaqueValue => match declaration.root {
-            Some(_) => Ok(Some((None, 0))),
+            Some(_) => Ok(Some((Vec::new(), 0))),
             None => Ok(None),
         },
+    }
+}
+
+/// After `verb` (at `path`, having consumed `consumed` words) is selected,
+/// keep consuming while it has children. A node is never itself callable:
+/// the word at `words[consumed]` must select one of them, or the call
+/// refuses (nothing there, or a flag/`--` where a child belongs) or — for an
+/// opaque word — describes nothing, the same rule a flat declaration already
+/// applies at the top level.
+fn descend(
+    declaration: &WrappedCommand,
+    scope: String,
+    verb: &Verb,
+    path: Vec<usize>,
+    words: &[Word],
+    consumed: usize,
+) -> Result<Option<(Vec<usize>, usize)>, ParseError> {
+    if verb.verbs.is_empty() {
+        return Ok(Some((path, consumed)));
+    }
+    let allowed = allowed_verb_names(&verb.verbs);
+    let bare_node = || ParseError {
+        error: WrappedError::BareNode {
+            command: declaration.name.clone(),
+            scope: scope.clone(),
+            allowed: allowed.clone(),
+        },
+        uncertain: false,
+    };
+
+    let Some(next) = words.get(consumed) else {
+        return Err(bare_node());
+    };
+
+    match next.known {
+        Known::Literal if !next.text.starts_with('-') => {
+            match verb.verbs.iter().position(|v| v.name_or_root() == next.text) {
+                Some(index) => {
+                    let child = &verb.verbs[index];
+                    let child_scope = format!("{scope} {}", next.text);
+                    let mut child_path = path;
+                    child_path.push(index);
+                    descend(declaration, child_scope, child, child_path, words, consumed + 1)
+                }
+                None => Err(ParseError {
+                    error: WrappedError::UnknownChildVerb {
+                        command: declaration.name.clone(),
+                        scope,
+                        word: next.text.clone(),
+                        allowed,
+                    },
+                    uncertain: false,
+                }),
+            }
+        }
+        // A flag or `--` where a child verb belongs: a node has no root to
+        // fall through to, so this is the same refusal as no word at all.
+        Known::Literal => Err(bare_node()),
+        // The child came from an expansion. Which child's grammar applies is
+        // unknowable, so the parser describes nothing — the node-depth
+        // reading of the rule `select_verb` already applies at the top.
+        Known::Opaque | Known::OpaqueValue => Ok(None),
     }
 }
 
@@ -524,13 +606,15 @@ fn fill_positional(
     }
 }
 
-/// Every declared verb name, sorted.
+/// Every declared top-level verb name, sorted.
 pub(crate) fn allowed_verbs(declaration: &WrappedCommand) -> Vec<String> {
-    let mut allowed: Vec<String> = declaration
-        .verbs
-        .iter()
-        .map(|verb| verb.name_or_root().to_string())
-        .collect();
+    allowed_verb_names(&declaration.verbs)
+}
+
+/// Every verb name in `verbs`, sorted — the siblings at one level, never the
+/// top level unless `verbs` is `declaration.verbs` itself.
+fn allowed_verb_names(verbs: &[Verb]) -> Vec<String> {
+    let mut allowed: Vec<String> = verbs.iter().map(|verb| verb.name_or_root().to_string()).collect();
     allowed.sort();
     allowed
 }

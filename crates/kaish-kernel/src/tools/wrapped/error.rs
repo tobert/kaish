@@ -31,6 +31,31 @@ pub enum WrappedError {
         allowed: Vec<String>,
     },
 
+    /// A node (a verb with children) was called with no leaf to run it. A
+    /// node only selects among its children; it is never itself callable.
+    #[error("{command}: '{scope}' needs a verb. Allowed: {}", allowed_list(allowed))]
+    BareNode {
+        /// The wrapped command's name.
+        command: String,
+        /// The node's full path, e.g. `git worktree`.
+        scope: String,
+        /// The node's own children, sorted.
+        allowed: Vec<String>,
+    },
+
+    /// The word after a node names none of its children.
+    #[error("{command}: unknown verb '{word}' for '{scope}'. Allowed: {}", allowed_list(allowed))]
+    UnknownChildVerb {
+        /// The wrapped command's name.
+        command: String,
+        /// The node's full path, e.g. `git worktree`.
+        scope: String,
+        /// The word that named no child.
+        word: String,
+        /// The node's own children, sorted — never the top level's.
+        allowed: Vec<String>,
+    },
+
     /// A word in flag position names no declared flag or alias.
     #[error("{command}: unknown flag '{word}' for '{scope}'. Allowed: {}", allowed_list(allowed))]
     UnknownFlag {
@@ -233,6 +258,8 @@ impl WrappedError {
         match self {
             WrappedError::UnknownVerb { command, .. }
         | WrappedError::MissingVerb { command, .. }
+        | WrappedError::BareNode { command, .. }
+        | WrappedError::UnknownChildVerb { command, .. }
         | WrappedError::UnknownFlag { command, .. }
         | WrappedError::ClusteredShort { command, .. }
         | WrappedError::GluedShortValue { command, .. }

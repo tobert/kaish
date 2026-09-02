@@ -25,6 +25,10 @@ breaking entries are marked **BREAKING**.
   `examples_section`, `operations_line`, `command_aliases_line`, and
   `subcommand_roster`. `help` and `kaish-tools` both render from these, so a
   second surface cannot drift from the first by omission.
+- **Nested verbs for wrapped commands** — `Verb::verb()` declares child verbs,
+  so `git worktree list` is now declarable. Flags, positionals, tail, and
+  stdin stay leaf-only, refused at `build()` on a node. See
+  `docs/wrapped_command.md` for the full grammar.
 
 ### Fixed
 - **A mount point's ancestors are navigable again** — with a backend at `/` and

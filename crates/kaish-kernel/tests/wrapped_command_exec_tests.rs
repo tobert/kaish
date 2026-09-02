@@ -739,3 +739,48 @@ async fn a_relative_path_under_value_reaches_the_child_canonical() {
         "the refusal names the value: {refused}"
     );
 }
+
+// ── Nested verbs ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_nested_verb_spawns_with_the_full_path_and_leads_in_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WrappedCommand::new("wgit2")
+        .executable("/bin/echo")
+        .lead(["--no-pager"])
+        .verb(Verb::new("worktree").verb(Verb::new("list").flag(Flag::switch("porcelain"))))
+        .build()
+        .expect("the nested declaration builds");
+    let kernel = kernel_with(dir.path(), vec![tool]);
+
+    let result = run(&kernel, "wgit2 worktree list --porcelain").await;
+    assert_eq!(result.code, 0, "wgit2 worktree list failed: {}", result.err);
+    assert_eq!(
+        result.text_out().trim(),
+        "--no-pager worktree list --porcelain",
+        "the full path, with every level's lead, must reach the child"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_node_refuses_before_anything_spawns() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WrappedCommand::new("wgit3")
+        .executable("/bin/echo")
+        .verb(
+            Verb::new("worktree")
+                .verb(Verb::new("add"))
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect("the nested declaration builds");
+    let kernel = kernel_with(dir.path(), vec![tool]);
+
+    // A literal bare node is caught at validation, before the script runs —
+    // the same lane an unknown verb is refused from.
+    let refusal = attempt(&kernel, "wgit3 worktree")
+        .await
+        .expect_err("a bare node cannot run and never spawns");
+    assert!(refusal.contains("needs a verb"), "{refusal}");
+    assert!(refusal.contains("add, list"), "{refusal}");
+}

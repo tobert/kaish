@@ -85,8 +85,12 @@ pub struct PathCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedCall {
-    /// The selected verb's declared name; `None` for the root verb.
+    /// The selected verb's own declared name; `None` for the root verb.
+    /// Never the full path — `git worktree list` still reports `list` here.
     pub verb: Option<String>,
+    /// The full path to the selected verb: `git worktree list`, or the
+    /// command name alone for the root verb.
+    pub scope: String,
     /// The child's argv, without the executable.
     pub argv: Vec<String>,
     /// What the child's standard input is connected to.
@@ -179,14 +183,16 @@ impl WrappedTool {
         }
     }
 
+    /// True when every leaf the tool can run declares `json_output()`. A
+    /// node is never callable, so its own `json_output` (if set) does not
+    /// count — only the leaves under it decide this.
     fn every_verb_is_json(&self) -> bool {
-        let mut verbs = self
-            .declaration
-            .root
-            .iter()
-            .chain(self.declaration.verbs.iter())
-            .peekable();
-        verbs.peek().is_some() && verbs.all(|verb| verb.json_output)
+        let mut any = false;
+        let mut all = true;
+        for verb in self.declaration.root.iter().chain(self.declaration.verbs.iter()) {
+            walk_leaf_json(verb, &mut any, &mut all);
+        }
+        any && all
     }
 
     /// Plan a call: parse it, check every constraint, and render the argv.
@@ -228,6 +234,7 @@ impl WrappedTool {
 
         Ok(RenderedCall {
             verb: verb.name.clone(),
+            scope: self.declaration.scope_of_path(&call.verb_path),
             argv,
             stdin: verb.stdin,
             json_output: verb.json_output,
@@ -351,10 +358,7 @@ impl WrappedTool {
             Ok(call) => call,
             Err(error) => return ExecResult::failure(error.exit_code(), error.to_string()),
         };
-        let label = match &call.verb {
-            Some(verb) => format!("{} {verb}", self.declaration.name),
-            None => self.declaration.name.clone(),
-        };
+        let label = call.scope.clone();
 
         // A virtual cwd has no location to spawn in. The same refusal an
         // external command gets, named for this command.
@@ -507,7 +511,22 @@ fn issue(error: &WrappedError, uncertain: bool) -> ValidationIssue {
     }
 }
 
-/// The schema for one named verb.
+/// Visit every leaf under `verb` (a node's own `json_output`, if set, does
+/// not count — only a leaf runs), tracking whether at least one leaf exists
+/// and whether every leaf visited so far declares JSON output.
+fn walk_leaf_json(verb: &Verb, any: &mut bool, all: &mut bool) {
+    if verb.verbs.is_empty() {
+        *any = true;
+        *all = *all && verb.json_output;
+    } else {
+        for child in &verb.verbs {
+            walk_leaf_json(child, any, all);
+        }
+    }
+}
+
+/// The schema for one verb, recursing into its children so a node's schema
+/// carries its own leaves as nested subcommands.
 fn verb_schema(verb: &Verb) -> ToolSchema {
     let description = match verb.tail {
         Tail::Forward => append_clause(&verb.about, "forwards undeclared flags"),
@@ -522,6 +541,9 @@ fn verb_schema(verb: &Verb) -> ToolSchema {
     }
     if verb.json_output {
         schema = schema.with_typed_substitution();
+    }
+    for child in &verb.verbs {
+        schema = schema.subcommand(verb_schema(child));
     }
     schema
 }

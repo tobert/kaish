@@ -25,7 +25,7 @@ pub(crate) fn check(
     verb: &Verb,
     call: &Call,
 ) -> Vec<WrappedError> {
-    let scope = declaration.scope_of(verb);
+    let scope = declaration.scope_of_path(&call.verb_path);
     let mut errors = Vec::new();
 
     for use_ in &call.flags {

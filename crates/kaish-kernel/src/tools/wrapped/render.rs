@@ -3,9 +3,13 @@
 //! ```text
 //! argv = command.lead…
 //!      , verb.name            (omitted for the root verb, and for omit_name)
-//!      , verb.lead…
+//!      , verb.lead…           , repeated for every node on the path, then the leaf
 //!      , every word the agent wrote, in source order
 //! ```
+//!
+//! A node's name and lead render exactly like a leaf's, in path order: `git
+//! worktree list` renders `worktree`, then `list`, with each level's `lead`
+//! spliced in right after its own name.
 //!
 //! The executable itself is not in the rendered argv — the spawn site owns
 //! argv[0].
@@ -40,12 +44,14 @@ pub(crate) struct Rendered {
 pub(crate) fn render(declaration: &WrappedCommand, verb: &Verb, call: &Call) -> Rendered {
     let mut argv: Vec<String> = Vec::new();
     argv.extend(declaration.lead.iter().cloned());
-    if !verb.omit_name
-        && let Some(name) = &verb.name
-    {
-        argv.push(name.clone());
+    for step in verb_chain(declaration, &call.verb_path) {
+        if !step.omit_name
+            && let Some(name) = &step.name
+        {
+            argv.push(name.clone());
+        }
+        argv.extend(step.lead.iter().cloned());
     }
-    argv.extend(verb.lead.iter().cloned());
 
     let mut item_argv_index = Vec::with_capacity(call.items.len());
     for item in &call.items {
@@ -71,6 +77,25 @@ pub(crate) fn render(declaration: &WrappedCommand, verb: &Verb, call: &Call) -> 
         argv,
         item_argv_index,
     }
+}
+
+/// The verb at every step from the top down to the leaf `path` selects.
+/// Empty for the root (`render` then renders nothing but `declaration.lead`
+/// before the agent's own words). Every index in `path` was produced by
+/// `parse::select_verb`'s own walk over these same lists, so it is always
+/// in range.
+fn verb_chain<'d>(declaration: &'d WrappedCommand, path: &[usize]) -> Vec<&'d Verb> {
+    let Some((&first, rest)) = path.split_first() else {
+        return declaration.root.iter().collect();
+    };
+    let mut chain = Vec::with_capacity(rest.len() + 1);
+    let mut verb = &declaration.verbs[first];
+    chain.push(verb);
+    for &index in rest {
+        verb = &verb.verbs[index];
+        chain.push(verb);
+    }
+    chain
 }
 
 /// Render one flag occurrence under its declared name, whichever alias the

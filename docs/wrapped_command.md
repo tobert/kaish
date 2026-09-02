@@ -42,7 +42,7 @@ Five nouns and two enums:
 | Noun | Meaning |
 |---|---|
 | `WrappedCommand` | One executable: pinned path, fixed lead argv, env pins, verbs. |
-| `Verb` | A subcommand, or the root for a verb-less program like `python`. |
+| `Verb` | A subcommand, or the root for a verb-less program like `python`. A verb may itself declare child verbs (`git worktree list`); see "Nested verbs" below. |
 | `Flag` | A switch or a value flag, with its render style. |
 | `Positional` | One or many positional arguments, with optional constraints. |
 | `Stdin` | `Closed` (default) or `Pipe`. Per verb. |
@@ -229,6 +229,57 @@ the verb: `clippy — forwards undeclared flags`. A value that expands to a flag
 reaches the child under `Forward`; that is the override's cost, and the
 declaration shows where it was paid.
 
+### Nested verbs: a subcommand group
+
+`git worktree list`, `docker container ls`, `kubectl get pods` — a subcommand
+group is the ordinary shape of a real program. `Verb::verb()` declares a
+child, the same builder `WrappedCommand::verb()` uses at the top level:
+
+```rust
+let git = WrappedCommand::new("git")
+    .executable("/usr/bin/git")
+    .lead(["--no-pager"])
+    .verb(
+        Verb::new("worktree")
+            .verb(Verb::new("add").positional(Positional::one("path").required()))
+            .verb(Verb::new("list").flag(Flag::switch("porcelain")))
+            .verb(Verb::new("lock").positional(Positional::one("path").required()))
+            .verb(Verb::new("prune"))
+            .verb(Verb::new("remove").positional(Positional::one("path").required())),
+    )
+    .build()?;
+```
+
+A verb with children is a **node**. A node selects among its children and is
+never itself callable — `git worktree` alone is refused, exit 2, before
+anything spawns:
+
+```
+$ git worktree
+git: 'git worktree' needs a verb. Allowed: add, list, lock, prune, remove
+
+$ git worktree frobnicate
+git: unknown verb 'frobnicate' for 'git worktree'. Allowed: add, list, lock, prune, remove
+
+$ git worktree list --porcelain
+  argv: ["/usr/bin/git", "--no-pager", "worktree", "list", "--porcelain"]
+```
+
+The allowed set in a node-scoped refusal names that node's own children,
+never the top level's — `git worktree frobnicate` never lists `commit`,
+`log`, or `push`. That is the property nesting exists to give an agent: the
+next word it should try is always drawn from the set it actually chose into.
+
+`lead` and `omit_name` are meaningful at every level and concatenate down the
+path: the command's `lead`, then each node's `name` (unless `omit_name`) and
+`lead`, then the leaf's, in that order. Every other property — `flags`,
+`positionals`, `tail`, `stdin`, `json_output` — belongs on the leaf that
+actually runs. `build()` refuses a node that declares a flag, a positional, a
+tail, or a stdin posture, naming the node and the property to move onto a
+child. The restriction is deliberate and narrow, kept so it can relax later
+without a declaration having worked around its absence in the meantime. The
+root verb may not declare children — nest with named `verb()` calls instead.
+
 ### The same declaration as data
 
 ```toml
@@ -260,7 +311,10 @@ Rules, in order:
 
 1. The first word selects the verb. A `WrappedCommand` with a `root` verb and
    no named verbs skips this step. A word that names no verb fails: `unknown
-   verb 'X'. Allowed: …`. Verb names match exactly; no prefix matching.
+   verb 'X'. Allowed: …`. Verb names match exactly; no prefix matching. When
+   the selected verb is a node, the next word repeats this step against that
+   node's own children, and keeps repeating for as long as the selected verb
+   has children — see "Nested verbs" above.
 2. Before `--`, a word that starts with `-` is a flag. It must match a declared
    name or alias exactly. `--flag=value` and `--flag value` both bind a value
    flag; `-f value` binds a short alias. Clustered shorts (`-sv`) and glued
@@ -296,7 +350,8 @@ with `x = "--output=f"` is an unknown flag, not a positional. To pass a value
 that starts with `-` as a positional, write `--` before it, as in `sh`.
 
 Every parse failure exits 2 and names the verb, the offending word, and the
-allowed set.
+allowed set. Under a node, the allowed set is that node's own children —
+never the top level's, and never a sibling node's.
 
 ## Rendering
 
@@ -304,7 +359,7 @@ allowed set.
 argv = executable
      , command.lead…
      , verb.name            (omitted for the root verb, and for omit_name)
-     , verb.lead…
+     , verb.lead…           (repeated for every node on the path, then the leaf)
      , every word the agent wrote, in source order
 ```
 
@@ -422,8 +477,13 @@ and the two names that collide:
 - No `root` and no `verbs` — the declaration can accept no call.
 - An empty command name, verb name, flag name, or positional name.
 - A named verb passed to `root()`, or an unnamed verb passed to `verb()`.
-- The same verb name, flag spelling, or positional name declared twice. An
+- The same verb name, flag spelling, or positional name declared twice at
+  one level — a nested level checks only against its own siblings. An
   alias that shadows another flag's name counts.
+- A node (a verb with children) that also declares a flag, a positional, a
+  tail, or a stdin posture — those belong on the leaf that runs.
+- Children declared on the root verb — nest with named `verb()` calls
+  instead.
 - `choices([…])` or `int()` on a switch — a switch binds no value.
 - A `many` positional that is not the last slot.
 - A `required` positional after an optional one — no call could fill the
@@ -489,6 +549,11 @@ kernel in `crates/kaish-kernel/tests/wrapped_command_exec_tests.rs`.
 1. Parse and render. Every flag form; `--` placement; each `Tail` mode;
    repeatable, choices, required, int; unknown verb, verb prefix, flag prefix,
    clustered and glued shorts; case sensitivity; the root-verb program.
+   Nested verbs: a leaf's argv with every level's `lead` concatenated in
+   path order; a bare node's refusal, exit 2, naming its own children; an
+   unknown leaf under a node naming that node's children and never the top
+   level's; three levels deep; a node's flag/positional/tail/stdin refused
+   at `build()`.
 2. Injection corpus. Values that look like flags, via literal and via
    variable; `--` inside a value; empty string; `=` inside a value; unicode;
    NUL.
