@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-09-02
+
 ### Migrating to 0.17.0
 
 - **A zero-padded time or date field in a numeric comparison now fails, and it
@@ -30,9 +32,11 @@ breaking entries are marked **BREAKING**.
   stdin stay leaf-only, refused at `build()` on a node. See
   `docs/wrapped_command.md` for the full grammar.
 - **`Filesystem::canonicalize` and `KernelBackend::canonicalize`** — a
-  defaulted, containment-checked path canonicalizer. `LocalFs` and
-  `VfsRouter` override it with `resolve_beneath`; `readlink -f` and
-  `realpath` are now thin callers instead of walking symlinks themselves.
+  defaulted path canonicalizer; the default inherits whatever containment
+  `lstat`/`read_link` already give. `LocalFs` overrides it with one
+  `resolve_beneath` call, containment-checked; `VfsRouter` delegates to the
+  owning mount. `readlink -f` and `realpath` are now thin callers instead of
+  walking symlinks themselves.
 
 ### Fixed
 - **A mount point's ancestors are navigable again** — with a backend at `/` and
@@ -2625,7 +2629,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/tobert/kaish/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/tobert/kaish/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/tobert/kaish/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/tobert/kaish/compare/v0.14.1...v0.15.0
