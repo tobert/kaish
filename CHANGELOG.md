@@ -16,11 +16,9 @@ breaking entries are marked **BREAKING**.
   `subcommand_roster`. `help` and `kaish-tools` both render from these, so a
   second surface cannot drift from the first by omission.
 - **Nested verbs for wrapped commands** — `Verb::verb()` declares child verbs,
-  so `git worktree list` is now declarable. A verb with children is a node:
-  it is never callable bare, and an unknown or missing leaf names only that
-  node's own children, never the top level. `lead` concatenates down the
-  path; flags, positionals, tail, and stdin stay leaf-only, refused at
-  `build()` on a node.
+  so `git worktree list` is now declarable. Flags, positionals, tail, and
+  stdin stay leaf-only, refused at `build()` on a node. See
+  `docs/wrapped_command.md` for the full grammar.
 
 ### Fixed
 - **`help <tool>` and `kaish-tools <name>` only rendered one level of
