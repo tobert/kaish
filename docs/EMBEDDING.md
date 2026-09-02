@@ -407,9 +407,10 @@ default fails the first case rather than passing silently.
 `readlink -f` and `realpath` both resolve through `Filesystem::canonicalize`
 (and its mirror, `KernelBackend::canonicalize`): follow every symlink hop,
 fold `.` and `..` lexically. The final component may be missing when the
-caller passes `allow_missing_final: true` (GNU `readlink -f` semantics,
-which `realpath` also uses but then requires the answer to exist); a missing
-INTERMEDIATE component is always an error, whichever way that flag is set.
+caller passes `allow_missing_final: true` (GNU `readlink -f` semantics).
+`realpath` passes `false`: the final component, like every intermediate one,
+must exist. A missing INTERMEDIATE component is always an error, whichever
+way that flag is set.
 Symlink hops are capped at 40, matching Linux `MAXSYMLINKS`.
 
 The default walks component by component through `lstat`/`read_link`, so it
