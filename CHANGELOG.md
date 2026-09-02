@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Migrating to 0.17.0
+
+- **A zero-padded time or date field in a numeric comparison now fails, and it
+  fails only part of the day.** `hour=$(date '+%H')` then `[[ "$hour" -lt 6 ]]`
+  is a type error for `00` through `09` and works from `10` on, so it passes a
+  daytime test run and fails overnight. `%H`, `%M`, `%S`, `%d`, and `%m` all
+  pad. Write `date '+%-H'` to get an unpadded field, or `10#$hour` to read the
+  padded one as decimal. Every other leading-zero refusal in 0.17.0 fails
+  immediately; this one waits.
+
 ### Added
 - **`kaish-help` publishes the pieces of a tool description** — `param_lines`,
   `examples_section`, `operations_line`, `command_aliases_line`, and
@@ -203,9 +213,9 @@ breaking entries are marked **BREAKING**.
 ### Added
 
 - **`!` negates a condition** — `if ! cmd; then …` and `while ! cmd; do …` were
-  parse errors. It binds to the command that follows, as in bash, so
-  `! true && true` is `(! true) && true`. `while ! cmd` is how kaish spells
-  `until`, which it deliberately does not have.
+  parse errors. It negates a condition only: `! cmd` as a whole statement is
+  still a parse error. `while ! cmd` is how kaish spells `until`, which it
+  deliberately does not have.
 
 - **`set -o pipefail` and `PIPESTATUS`** — a failed pipeline stage is
   detectable; `cat missing | wc -l` exited 0 with no second way to ask.
