@@ -1876,7 +1876,29 @@ where
     just(Token::For)
         .ignore_then(ident_parser())
         .then_ignore(just(Token::In))
-        .then(expr_parser().repeated().at_least(1).collect::<Vec<_>>())
+        .then(
+            expr_parser()
+                .map_with(|item, extra| -> (Expr, Span) { (item, extra.span()) })
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .validate(|items, _, emitter| {
+                    let mut index = 0;
+                    while index + 1 < items.len() {
+                        let start = index;
+                        while index + 1 < items.len() && items[index].1.end == items[index + 1].1.start {
+                            index += 1;
+                        }
+                        if index > start {
+                            let span = (items[start].1.start..items[index].1.end).into();
+                            emitter.emit(Rich::custom(span,
+                                "for-loop items need a space between them; quote the whole word to join text with interpolation, e.g. \"$(echo foo)/b\""));
+                        }
+                        index += 1;
+                    }
+                    items.into_iter().map(|(item, _)| item).collect::<Vec<_>>()
+                }),
+        )
         .then_ignore(just(Token::Semi).or_not())
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::Do))
@@ -3840,9 +3862,8 @@ fn validate_glued_args(
             end_idx += 1;
         }
         // The scan walks the whole token stream, so it also finds adjacency
-        // in regions the grammar parsed happily — `for x in $a/b; do echo
-        // /tmp/$(echo x).txt; done` has a legal `$a/b` in the loop head and
-        // the real paste in the body. Take the first run at or after the
+        // in regions the grammar parsed happily, such as `$X==1` inside
+        // `[[ ]]`. Take the first run at or after the
         // grammar's own position so the earlier legal run cannot win.
         if units[start_idx].start < from_offset {
             continue;

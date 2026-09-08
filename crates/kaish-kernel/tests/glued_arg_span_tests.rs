@@ -122,6 +122,7 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
     const PASTE: &str = "adjacent words with no space between them are not joined into one";
     let cases = [
         ("cat > $DIR/out.txt", "redirect target"),
+        ("for x in $(echo foo)/b; do echo $x; done", "for-loop items"),
         ("./bin$x", "command name and first argument need a space"),
         ("x={msg: hello world}", "record value: unexpected word"),
         ("echo ${x:1:2}", "kaish slices with brackets"),
@@ -163,7 +164,7 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
 #[test]
 fn parser_custom_guard_count_is_pinned() {
     const PARSER_SOURCE: &str = include_str!("../src/parser.rs");
-    const EXPECTED: usize = 13;
+    const EXPECTED: usize = 14;
     let found = PARSER_SOURCE.matches("Rich::custom(").count();
     assert_eq!(
         found, EXPECTED,
@@ -255,13 +256,13 @@ fn spaced_long_flag_values_parse() {
 /// region of the line to do it.
 ///
 /// The standing error here IS the paste message, so the gate passes and the
-/// scan runs — and `$a/b` in the loop head is legal but reached first.
+/// scan runs — and `$X==1` in the condition is legal but reached first.
 /// Without the `from_offset` gate it won the span and blamed an innocent
 /// word in another clause.
 #[test]
 fn an_earlier_legal_adjacency_does_not_steal_the_span() {
     assert_eq!(
-        glued_span_text("for x in $a/b; do echo /tmp/$(echo x).txt; done"),
+        glued_span_text("if [[ $X==1 ]]; then echo /tmp/$(echo x).txt; fi"),
         "/tmp/$(echo x).txt"
     );
 }
@@ -269,7 +270,7 @@ fn an_earlier_legal_adjacency_does_not_steal_the_span() {
 /// Control for the case above: if this ever fails, that test is asserting
 /// against a program rejected for some other reason and proves nothing.
 #[test]
-fn the_legal_loop_head_really_is_legal() {
-    parse("for x in $a/b; do echo hi; done")
-        .expect("a `for` list may contain an adjacent run the grammar accepts");
+fn the_legal_test_condition_really_is_legal() {
+    parse("if [[ $X==1 ]]; then echo hi; fi")
+        .expect("a test condition may contain adjacent operands and operators");
 }
