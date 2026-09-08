@@ -12,6 +12,10 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- Home-relative assignments such as `p=~/x` now keep the assignment delimiter
+  separate from the path. The `=~` regex operator remains intact inside
+  tests, including tests containing command substitutions with assignments.
+
 - Numeric filenames and versions such as `123.txt` and `1.2.3` now stay
   literal words. Float-prefixed globs such as `1.0*` preserve their exact
   spelling and match filenames without changing scalar number rules.
