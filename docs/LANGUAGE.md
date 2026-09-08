@@ -523,9 +523,20 @@ A name containing `#` is not a valid assignment target: `abc#3=5` is error
 `E018`, because `$abc#3` would not read it back. kaish refuses to create a
 variable nothing can reference.
 
-### Quote to join — kaish does not paste adjacent tokens
+### Quote to join
 
-kaish never concatenates adjacent *unquoted* tokens into one word. `$VAR`,
+```sh
+cat .git/HEAD                 # literal path: one argument
+cat 2026/report               # numeric directory name: still a path
+cat "$dir/HEAD"               # text joined with an expansion: quote the whole word
+```
+
+Literal paths need no quotes when their characters are allowed unquoted.
+This includes `./`, `../`, dot-prefixed directories, and numeric directory
+names. A slash makes the word text: `007/0644` is a path, not a number.
+`HEAD:src/main.rs` is one literal argument too.
+
+kaish does not join separate quoted strings, expansions, or adjacent text. `$VAR`,
 `$(cmd)`, and globs are each their own word; to build a single word from text
 plus interpolation, **quote the whole thing**:
 
@@ -542,8 +553,8 @@ echo /tmp/$(id -u).sock        # error: quote "/tmp/$(id -u).sock"
 
 Rather than silently splat such a word into multiple arguments, kaish rejects it
 at parse time with a "quote the whole word" hint — fail-loud beats wrong argv.
-Single-token words are unaffected: `file.txt`, `a.b.c`, and `v1.2.3` lex as one
-token, so they need no quoting.
+Literal words such as `file.txt`, `a.b.c`, `v1.2.3`, and `.git/HEAD`
+need no quoting.
 
 This is the complement of the no-word-splitting rule: kaish neither splits a
 variable's value **nor** pastes neighbouring words. The "always quote
@@ -1353,6 +1364,8 @@ npm install
 # Absolute and relative paths work directly (no PATH lookup)
 /bin/echo hello                    # absolute path
 ./myscript.sh                      # relative path
+.git/hooks/pre-commit              # dot-prefixed directory
+../bin/check                      # parent directory
 
 # Virtual bin path runs builtins explicitly
 /v/bin/echo hello                  # builtin via virtual path
@@ -1382,6 +1395,9 @@ date --json                        # {"iso":…,"epoch":…,"weekday":…, …}
 ```
 
 **How it works:**
+A command name is literal. Put a space between the command name and its
+first argument; attached text cannot become a separate argument.
+
 1. Kaish parses the command (handling quotes, variables, flags)
 2. If the name contains `/`, it's used as a direct path (absolute or relative)
 3. `/v/bin/name` dispatches to the builtin `name`

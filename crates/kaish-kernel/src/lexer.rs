@@ -436,24 +436,21 @@ pub enum Token {
     Dot,
 
     /// Tilde path: `~/foo`, `~user/bar` - value includes the full string.
-    #[regex(r"~[a-zA-Z0-9_./+#\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
+    #[regex(r"~[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
     TildePath(String),
 
     /// Bare tilde: `~` alone (expands to $HOME)
     #[token("~")]
     Tilde,
 
-    /// Relative path: `../foo/bar`, bare `src/kaish` (ident containing `/`),
-    /// or a directory reference with a trailing slash like `dest/`. The
-    /// trailing-slash form uses `*` (not `+`) after the slash so `dest/`
-    /// lexes as one token instead of `Ident("dest")` + `Path("/")` — the
-    /// latter split silently turned `cp a b dest/` into a 4-operand command.
-    #[regex(r"\.\./[a-zA-Z0-9_./#\-\u{80}-\u{10FFFF}]+", lex_relative_path, priority = 3)]
-    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.#\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./#\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
+    /// Slash-containing relative word: `.git/HEAD`, `2026/report`, `../`.
+    /// A slash makes the whole word text, including a numeric first component.
+    #[regex(r"[a-zA-Z0-9_.\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
     RelativePath(String),
 
-    /// Dot-slash path: `./foo`, `./script.sh`.
-    #[regex(r"\./[a-zA-Z0-9_./#\-\u{80}-\u{10FFFF}]+", lex_dot_slash_path, priority = 3)]
+    /// Dot-slash path: `./`, `./foo`, `./script.sh`.
+    /// Wins ties with RelativePath to retain the existing token category.
+    #[regex(r"\./[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_dot_slash_path, priority = 4)]
     DotSlashPath(String),
 
     /// Dot-prefixed bareword: `.parent`, `.gitignore`, `.foo.bar`.
@@ -711,7 +708,7 @@ pub enum Token {
     /// `date -d @0`), or bare `@`. Mid-word `@` (`user@host`) is handled by
     /// `Ident`; this covers the leading-`@` cases that would otherwise be an
     /// "unexpected character" lexer error.
-    #[regex(r"@[a-zA-Z0-9_./@\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
+    #[regex(r"@[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     AtWord(String),
 
     /// Invalid: float without leading digit (like .5)
@@ -728,7 +725,7 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Absolute path: `/tmp/out`, `/etc/hosts`, `/tmp/日本語`, etc.
-    #[regex(r"/[a-zA-Z0-9_./+#\-\u{80}-\u{10FFFF}]*", lex_path)]
+    #[regex(r"/[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_path)]
     Path(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3183,6 +3180,8 @@ fn is_colon_mergeable(token: &Token) -> bool {
             | Token::DottedIdent(_)
             | Token::Colon
             | Token::Int(_)
+            | Token::RelativePath(_)
+            | Token::DotSlashPath(_)
             | Token::Path(_)
             | Token::Float(_)
     )

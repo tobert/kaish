@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- Literal paths such as `.git/HEAD`, `2026/report`, `./`, and `../` now
+  parse as one word. Relative, absolute, and tilde paths accept `@` and `+`
+  consistently; Git revision paths such as `HEAD:src/main.rs` stay one
+  argument. Text joined with an expansion still requires quoting.
+- Relative executable paths such as `.git/hooks/pre-commit` and `../bin/check`
+  now parse. A command name attached to its first argument is refused instead
+  of silently running a different executable (`./bin$x` as `./bin $x`).
+
 ## [0.17.1] - 2026-09-02
 
 ### Migrating to 0.17.0

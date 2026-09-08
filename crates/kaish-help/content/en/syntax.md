@@ -146,6 +146,10 @@ push services[web][tags] canary   # bracket-path target
 ```sh
 /usr/bin/foo              # absolute
 ../parent/file            # relative with ..
+.git/HEAD                 # dot-prefixed directory
+2026/report               # numeric directory name
+./                        # current directory
+../                       # parent directory
 ./script.sh               # dot-slash (explicit relative)
 ~/src/project             # tilde expands to $HOME
 cd                        # bare cd goes to $HOME
@@ -159,8 +163,7 @@ cd -                      # previous directory
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
 
-# Quote to JOIN text with interpolation — kaish does not paste adjacent
-# unquoted tokens into one word (no implicit concatenation):
+# Quote the whole word to join text with interpolation:
 "$dir/file.txt"           # one path
 "out-$(date +%s).log"     # one filename (text + command substitution)
 echo "/tmp/$(id -u).sock" # one argument
@@ -169,7 +172,7 @@ echo "/tmp/$(id -u).sock" # one argument
 echo $dir/file.txt        # error — quote "$dir/file.txt"
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
-# (single-token words like file.txt or v1.2.3 are fine unquoted)
+# Literal words like file.txt, v1.2.3, and .git/HEAD need no quotes.
 ```
 
 ## Comments

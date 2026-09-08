@@ -40,15 +40,15 @@ fn glued_span_text(source: &str) -> &str {
 fn colon_glued_path_names_the_whole_word() {
     // Used to point at `show` — an innocent, already-fine word.
     assert_eq!(
-        glued_span_text("git show HEAD:training/v9/x.py"),
-        "HEAD:training/v9/x.py"
+        glued_span_text("git show HEAD:training/$version/x.py"),
+        "HEAD:training/$version/x.py"
     );
 }
 
 #[test]
 fn colon_glued_short_path_names_the_whole_word() {
     // Used to point at `fetch`.
-    assert_eq!(glued_span_text("git fetch origin a/b:c"), "a/b:c");
+    assert_eq!(glued_span_text("git fetch origin a/b:$ref"), "a/b:$ref");
 }
 
 #[test]
@@ -122,6 +122,7 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
     const PASTE: &str = "adjacent words with no space between them are not joined into one";
     let cases = [
         ("cat > $DIR/out.txt", "redirect target"),
+        ("./bin$x", "command name and first argument need a space"),
         ("x={msg: hello world}", "record value: unexpected word"),
         ("echo ${x:1:2}", "kaish slices with brackets"),
         ("echo $(foo", "unterminated command substitution"),
@@ -162,7 +163,7 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
 #[test]
 fn parser_custom_guard_count_is_pinned() {
     const PARSER_SOURCE: &str = include_str!("../src/parser.rs");
-    const EXPECTED: usize = 12;
+    const EXPECTED: usize = 13;
     let found = PARSER_SOURCE.matches("Rich::custom(").count();
     assert_eq!(
         found, EXPECTED,
@@ -236,8 +237,8 @@ fn unrelated_failure_keeps_its_own_error_and_span() {
 #[test]
 fn long_flag_value_fusion_keeps_spaced_flags_out_of_the_run() {
     assert_eq!(
-        glued_span_text("foo --a=1 --b=2 HEAD:x/y"),
-        "HEAD:x/y",
+        glued_span_text("foo --a=1 --b=2 HEAD:$dir/y"),
+        "HEAD:$dir/y",
         "spaced --key=value flags must not be mistaken for the pasted word"
     );
 }
