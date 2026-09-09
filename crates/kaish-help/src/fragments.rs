@@ -611,6 +611,10 @@ NOW=$(date)
 for line in $(cat file); do echo $line; done   # per-line iteration
 for x in $(echo "a b c"); do echo $x; done     # one iteration (no \n)
 
+# Quote the whole word to join text with interpolation:
+for x in "$(echo foo)/b"; do echo "$x"; done  # one item: foo/b
+# Separate loop items with whitespace; adjacent fragments are an error.
+
 # Whitespace splitting needs explicit split:
 for x in $(split "a b c"); do echo $x; done
 

@@ -929,6 +929,10 @@ same; the work is not. A command stage still streams.
 combination exits 2 and names the condition. Run the compound on its own and
 pipe its output in.
 
+For a single interpolated loop item, write `for x in "$(echo foo)/b"; do echo "$x"; done`.
+Separate loop items with whitespace. Adjacent text, quotes, and expansions are
+rejected before execution; quote the whole word to join them.
+
 ### Structured Data and Newline Splitting in Command Substitution
 
 Unlike traditional shells, kaish does **not** perform implicit *word* splitting on command substitution results — `$VAR` and `$(cmd)` carry whole strings, spaces and all. In `for`-loop iteration position, two narrower rules take over:

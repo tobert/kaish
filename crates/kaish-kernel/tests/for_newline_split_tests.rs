@@ -17,6 +17,7 @@
 //!   in `shell_bugs_tests.rs`. No hardcoded system paths.
 
 use kaish_kernel::Kernel;
+#[cfg(feature = "localfs")]
 use std::io::Write;
 
 // ---------------------------------------------------------------------------

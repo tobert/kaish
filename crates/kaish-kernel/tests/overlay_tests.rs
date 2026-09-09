@@ -439,12 +439,11 @@ mod overlay_tests {
 
         // Glob should show a.txt + c.txt (union minus whiteout b.txt).
         let (glob_out, code) = run(&kernel, &format!(
-            "for f in \"{}/\"*.txt; do echo $f; done", cwd
+            "for f in $(glob \"{}/*.txt\"); do echo $f; done", cwd
         )).await;
         assert_eq!(code, 0, "glob over merged dir failed: {}", glob_out);
-        assert!(glob_out.contains("a.txt"), "a.txt should be in merged glob: {}", glob_out);
-        assert!(glob_out.contains("c.txt"), "c.txt should be in merged glob: {}", glob_out);
-        assert!(!glob_out.contains("b.txt"), "b.txt should be whiteouted: {}", glob_out);
+        assert_eq!(glob_out.lines().collect::<Vec<_>>(),
+            [format!("{cwd}/a.txt"), format!("{cwd}/c.txt")]);
 
         // Real directory must be untouched: c.txt absent, b.txt still present (finding #4).
         assert!(!root.join("c.txt").exists(),

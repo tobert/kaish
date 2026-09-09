@@ -12,6 +12,10 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- For-loop items now require whitespace between them. Quote a whole word to
+  join text with interpolation; adjacent fragments are refused before the
+  substitution or loop body runs, instead of becoming separate iterations.
+
 - Literal paths such as `.git/HEAD`, `2026/report`, `./`, and `../` now
   parse as one word. Relative, absolute, and tilde paths accept `@` and `+`
   consistently; Git revision paths such as `HEAD:src/main.rs` stay one
