@@ -3203,8 +3203,8 @@ fn split_tilde_assignments(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spa
             next.span.start == token.span.end
                 && (matches!(next.token, Token::Path(_) | Token::RelativePath(_)
                     | Token::DotSlashPath(_) | Token::DottedIdent(_) | Token::Ident(_)
-                    | Token::NumberIdent(_) | Token::Int(_) | Token::Float(_)
-                    | Token::AtWord(_) | Token::PlusFlag(_))
+                    | Token::NumberIdent(_) | Token::DashNumWord(_) | Token::Int(_)
+                    | Token::Float(_) | Token::AtWord(_) | Token::PlusFlag(_))
                     || next.token.is_keyword() || next.token.is_type())
         });
         if let Some(suffix) = suffix {

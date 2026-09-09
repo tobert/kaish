@@ -1311,8 +1311,9 @@ fn parse_tokens(
         // Only when the standing error IS that rejection: this corrects a span
         // and must never author a verdict. The scan is an approximation of the
         // argv grammar and finds adjacency the grammar accepts, so the gate is
-        // load-bearing. Scanning from the grammar's own position forward keeps
-        // it from blaming a legal run in an earlier clause.
+        // load-bearing. Keeping only runs that reach the grammar's own position
+        // keeps it from blaming a legal run in an earlier clause, while still
+        // covering a run the grammar reported at the last fragment of.
         if errs.iter().all(is_glued_args_error)
             && let Some(from_offset) = errs.iter().map(|e| e.span().start).min()
             && let Err(specific) = validate_glued_args(&tokens, from_offset)
@@ -2127,15 +2128,17 @@ where
     // when nothing adjacent fused it into a word — inside brackets and braces
     // the colon is structural (record entries, slices, character classes) and
     // never reaches a command-name position.
+    // The flag records whether the name is an `Ident`, the only token an
+    // assignment lvalue can start with (see `lvalue_path_parser`).
     let command_name = choice((
-        ident_parser(),
-        path_parser(),
-        select! { Token::DotSlashPath(s) => s },
-        select! { Token::RelativePath(s) => s },
-        just(Token::True).to("true".to_string()),
-        just(Token::False).to("false".to_string()),
-        just(Token::Colon).to(":".to_string()),
-        just(Token::Dot).to(".".to_string()),
+        ident_parser().map(|name| (name, true)),
+        path_parser().map(|name| (name, false)),
+        select! { Token::DotSlashPath(s) => (s, false) },
+        select! { Token::RelativePath(s) => (s, false) },
+        just(Token::True).to(("true".to_string(), false)),
+        just(Token::False).to(("false".to_string(), false)),
+        just(Token::Colon).to((":".to_string(), false)),
+        just(Token::Dot).to((".".to_string(), false)),
     ));
 
     // NB: the "at most one stdin source per command" rule is enforced by a
@@ -2148,13 +2151,17 @@ where
     // structurally after parsing, where the message is fully under our control
     // (verified empirically 2026-06-07).
     command_name
-        .map_with(|name, extra| -> (String, Span) { (name, extra.span()) })
-        // An adjacent `=` belongs to assignment parsing, including its errors.
-        .then(just(Token::Eq).map_with(|_, extra| -> Span { extra.span() }).or_not().rewind())
-        .filter(|((_, name_span), equals)| {
-            !equals.is_some_and(|span| name_span.end == span.start)
+        .map_with(|(name, is_identifier), extra| -> (String, bool, Span) {
+            (name, is_identifier, extra.span())
         })
-        .map(|(name, _)| name)
+        // An adjacent `=` belongs to assignment parsing, including its errors.
+        // Only an identifier can start an assignment, so a path name keeps the
+        // command alternative and the glued-word diagnosis that names the fix.
+        .then(just(Token::Eq).map_with(|_, extra| -> Span { extra.span() }).or_not().rewind())
+        .filter(|((_, is_identifier, name_span), equals)| {
+            !(*is_identifier && equals.is_some_and(|span| name_span.end == span.start))
+        })
+        .map(|((name, _, name_span), _)| (name, name_span))
         .then(args_list_parser().map_with(|args, extra| -> (Vec<Arg>, Span) { (args, extra.span()) }))
         .validate(|((name, name_span), (args, args_span)), _, emitter| {
             if !args.is_empty() && name_span.end == args_span.start {
@@ -3749,6 +3756,18 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
             continue;
         }
 
+        // A bare `=` between two adjacent words is part of the run, not a
+        // break in it: a name that cannot start an assignment (`./bin=1`)
+        // reaches argv as word/`=`/word and must be reported as one word.
+        if matches!(tok, Token::Eq)
+            && units.last().is_some_and(|last: &Span| last.end == span.start)
+            && word_unit(tokens, i + 1).is_some_and(|(next, _)| next.start == span.end)
+        {
+            units.push(*span);
+            i += 1;
+            continue;
+        }
+
         i += 1;
     }
     units
@@ -3865,7 +3884,7 @@ fn validate_glued_args(
         // in regions the grammar parsed happily, such as `$X==1` inside
         // `[[ ]]`. Take the first run at or after the
         // grammar's own position so the earlier legal run cannot win.
-        if units[start_idx].start < from_offset {
+        if units[end_idx].end <= from_offset {
             continue;
         }
         let span: Span = (units[start_idx].start..units[end_idx].end).into();
