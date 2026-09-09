@@ -408,6 +408,8 @@ punctuation outside that set is still not a word character: `echo 100%` is an
 error, as it was before.)
 
 ```sh
+echo 123.txt 1.2.3 true:foo a+b # complete literal words
+ls 1.0*                       # glob keeps the written numeric prefix
 echo café
 cd ~/文書
 ls /tmp/日本語

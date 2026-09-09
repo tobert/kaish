@@ -458,7 +458,8 @@ pub enum Token {
     /// (the POSIX `.` source alias) which only matches a bare `.` — the source
     /// alias requires whitespace before its file argument (`. script`), so
     /// `.parent` (no space) is unambiguously a single bareword.
-    #[regex(r"\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.#\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[0-9]+\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     DottedIdent(String),
 
     #[token("{")]
@@ -684,10 +685,10 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Digit-leading bareword: `019dda1c` (SHA prefix), UUIDs, version-ish
-    /// strings. Distinguished from `Int` because at least one alpha character
-    /// follows the leading digits — the lexer commits to "this is a string,
-    /// not a number." Treated as a bareword string in expression position.
-    #[regex(r"[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.#\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
+    /// strings and numeric filenames (`123.txt`, `1.2.3`). A nonnumeric
+    /// suffix or multiple dot-separated numeric components makes the whole
+    /// word text. Complete scalar numerals retain their numeric rules.
+    #[regex(r"[0-9]+(\.[0-9]+)*\.?[a-zA-Z_+@\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*|[0-9]+(\.[0-9]+){2,}[a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
     /// Numeric word containing an embedded hyphen run, or a minus-led numeric
@@ -738,7 +739,7 @@ pub enum Token {
     /// `a@b.com` (bare `@` is an ordinary word character, as in bash). The
     /// leading class excludes digits — `NumberIdent`/`Int` own digit-leading
     /// words — and the ASCII operator/whitespace set.
-    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@#\-\u{80}-\u{10FFFF}]*", lex_ident)]
+    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3171,7 +3172,7 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
 
 /// True for token types that can participate in colon-adjacent merging.
 fn is_colon_mergeable(token: &Token) -> bool {
-    matches!(
+    token.is_keyword() || token.is_type() || matches!(
         token,
         Token::Ident(_)
             | Token::NumberIdent(_)
@@ -3179,6 +3180,7 @@ fn is_colon_mergeable(token: &Token) -> bool {
             | Token::AtWord(_)
             | Token::DottedIdent(_)
             | Token::Colon
+            | Token::TildePath(_)
             | Token::Int(_)
             | Token::RelativePath(_)
             | Token::DotSlashPath(_)
@@ -3272,7 +3274,7 @@ fn flush_colon_run(
 
 /// True for token types that can participate in a glob word.
 fn is_glob_mergeable(token: &Token) -> bool {
-    matches!(
+    token.is_keyword() || token.is_type() || matches!(
         token,
         Token::Star
             | Token::Question
@@ -3285,6 +3287,7 @@ fn is_glob_mergeable(token: &Token) -> bool {
             | Token::DottedIdent(_)
             | Token::Path(_)
             | Token::Int(_)
+            | Token::Float(_)
             | Token::LBracket
             | Token::RBracket
             | Token::Bang
@@ -3739,7 +3742,7 @@ pub(crate) fn is_leading_zero_numeral(word: &str) -> bool {
 ///
 /// Runs as the LAST step of `tokenize_impl`, after every fusion pass:
 /// `is_colon_mergeable` matches `Int` and `Float` directly and
-/// `is_glob_mergeable` matches `Int`, so a numeral must still present its
+/// `is_glob_mergeable` matches both too, so a numeral must still present its
 /// ordinary shape while fusion decides.
 /// Spans are original-source coordinates by now, so `source[span]` is the
 /// exact word the author typed.

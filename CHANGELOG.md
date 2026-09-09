@@ -12,6 +12,13 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- Numeric filenames and versions such as `123.txt` and `1.2.3` now stay
+  literal words. Float-prefixed globs such as `1.0*` preserve their exact
+  spelling and match filenames without changing scalar number rules.
+- Keywords inside colon words and globs (`true:foo`, `do*`) now remain
+  literal text. Embedded `+` and tilde paths containing `:` are accepted
+  consistently; standalone keywords and plus-prefixed flags keep their meaning.
+
 - For-loop items now require whitespace between them. Quote a whole word to
   join text with interpolation; adjacent fragments are refused before the
   substitution or loop body runs, instead of becoming separate iterations.

@@ -471,7 +471,9 @@ echo "/tmp/$(id -u).sock" # one argument
 echo $dir/file.txt        # error — quote "$dir/file.txt"
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
-# Literal words like file.txt, v1.2.3, and .git/HEAD need no quotes.
+# Literal words keep their complete spelling, without quotes:
+echo 123.txt 1.2.3 true:foo a+b .git/HEAD
+ls 1.0*                  # glob keeps the written numeric prefix
 ```"#,
     ),
     syntax_section(
