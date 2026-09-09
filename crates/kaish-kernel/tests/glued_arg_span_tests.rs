@@ -22,6 +22,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kaish_kernel::parser::parse;
+use rstest::rstest;
 
 /// The text the argv-glue error's own span covers, after checking it is
 /// that error and only that error.
@@ -273,4 +274,31 @@ fn an_earlier_legal_adjacency_does_not_steal_the_span() {
 fn the_legal_test_condition_really_is_legal() {
     parse("if [[ $X==1 ]]; then echo hi; fi")
         .expect("a test condition may contain adjacent operands and operators");
+}
+
+/// A command name that is not an identifier cannot start an assignment, so
+/// `name=value` there is glued argv and must name the word to quote — not
+/// fall through to the assignment alternative's generic "expected …" list.
+#[rstest]
+#[case("./bin=1", "./bin=1")]
+#[case("./bin=$x", "./bin=$x")]
+#[case("src/bin=1", "src/bin=1")]
+#[case("2026/report=1", "2026/report=1")]
+#[case("/usr/bin/x=1", "/usr/bin/x=1")]
+#[case("true=1", "true=1")]
+fn non_identifier_name_with_equals_names_the_whole_word(
+    #[case] source: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(glued_span_text(source), expected);
+}
+
+/// An identifier name still hands an adjacent `=` to assignment parsing.
+#[rstest]
+#[case("x=1")]
+#[case("cat=1")]
+#[case("x = 1")]
+#[case("x[0]=1")]
+fn identifier_name_with_equals_stays_an_assignment(#[case] source: &str) {
+    parse(source).expect("must parse as an assignment");
 }

@@ -12,28 +12,31 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
-- Home-relative assignments such as `p=~/x` now keep the assignment delimiter
-  separate from the path. The `=~` regex operator remains intact inside
-  tests, including tests containing command substitutions with assignments.
-
-- Numeric filenames and versions such as `123.txt` and `1.2.3` now stay
-  literal words. Float-prefixed globs such as `1.0*` preserve their exact
-  spelling and match filenames without changing scalar number rules.
-- Keywords inside colon words and globs (`true:foo`, `do*`) now remain
-  literal text. Embedded `+` and tilde paths containing `:` are accepted
-  consistently; standalone keywords and plus-prefixed flags keep their meaning.
-
-- For-loop items now require whitespace between them. Quote a whole word to
-  join text with interpolation; adjacent fragments are refused before the
-  substitution or loop body runs, instead of becoming separate iterations.
-
-- Literal paths such as `.git/HEAD`, `2026/report`, `./`, and `../` now
-  parse as one word. Relative, absolute, and tilde paths accept `@` and `+`
+- Literal paths such as `.git/HEAD`, `2026/report`, `./`, and `../` now parse
+  as one word. Relative, absolute, and tilde paths accept `@` and `+`
   consistently; Git revision paths such as `HEAD:src/main.rs` stay one
   argument. Text joined with an expansion still requires quoting.
 - Relative executable paths such as `.git/hooks/pre-commit` and `../bin/check`
   now parse. A command name attached to its first argument is refused instead
   of silently running a different executable (`./bin$x` as `./bin $x`).
+- For-loop items now require whitespace between them. Quote a whole word to
+  join text with interpolation; adjacent fragments are refused before the
+  substitution or loop body runs, instead of becoming separate iterations.
+- Numeric filenames and versions such as `123.txt` and `1.2.3` now stay
+  literal words. Float-prefixed globs such as `1.0*` preserve their exact
+  spelling and match filenames without changing scalar number rules.
+- Keywords inside colon words and globs (`true:foo`, `do*`) now remain literal
+  text. Embedded `+` and tilde paths containing `:` are accepted consistently;
+  standalone keywords and plus-prefixed flags keep their meaning.
+- Home-relative assignments such as `p=~/x` now keep the assignment delimiter
+  separate from the path. The `=~` regex operator remains intact inside tests,
+  including tests containing command substitutions with assignments.
+- A command name that cannot start an assignment now reports glued words and
+  names the word to quote. `./bin=1` and `2026/report=1` gave a generic
+  "expected" list; they now name `./bin=1` and `2026/report=1`.
+- Home-relative assignments accept a dash-number path: `p=~10-20` and
+  `p=~2024-01-02` parse like `p=~user` instead of failing with an internal
+  token name.
 
 ## [0.17.1] - 2026-09-02
 

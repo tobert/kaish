@@ -16,6 +16,8 @@ use rstest::rstest;
 #[case("~fixture-user/x")]
 #[case("~007")]
 #[case("~1.0")]
+#[case("~10-20")]
+#[case("~2024-01-02")]
 fn tilde_assignment_has_an_assignment_delimiter(#[case] path: &str) {
     let source = format!("p={path}");
     let tokens = tokenize(&source).unwrap();
