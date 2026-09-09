@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-09-09
+
 ### Fixed
 
 - Literal paths such as `.git/HEAD`, `2026/report`, `./`, and `../` now parse
@@ -2657,7 +2659,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/tobert/kaish/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/tobert/kaish/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/tobert/kaish/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/tobert/kaish/compare/v0.15.0...v0.16.0
