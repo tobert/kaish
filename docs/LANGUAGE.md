@@ -410,6 +410,7 @@ error, as it was before.)
 ```sh
 echo 123.txt 1.2.3 true:foo a+b # complete literal words
 ls 1.0*                       # glob keeps the written numeric prefix
+p=~/x; echo "$p"               # assignment followed by a home-relative path
 echo café
 cd ~/文書
 ls /tmp/日本語

@@ -1115,9 +1115,7 @@ fn lex_float(lex: &mut logos::Lexer<Token>) -> Result<f64, LexerError> {
     lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
 }
 
-/// Lex a digit-leading bareword like `019dda1c` or `019dda1c-5b3f-7000`.
-/// Distinguished from `Int` because at least one alpha character follows the
-/// leading digits — the slice is treated as a string, not a number.
+/// Preserve the spelling of a numeric-prefixed literal word.
 fn lex_number_ident(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
@@ -1379,8 +1377,7 @@ impl fmt::Display for Token {
 impl Token {
     /// Returns true if this token is a keyword.
     // Must match the Keyword variants in `Token::category()` (minus the
-    // TypeX variants, which `is_type()` covers separately). Currently
-    // uncalled — kept exhaustive so future callers don't get wrong answers.
+    // TypeX variants, which `is_type()` covers separately).
     pub fn is_keyword(&self) -> bool {
         matches!(
             self,
@@ -2652,6 +2649,10 @@ struct ValueContext {
     /// suppresses colon-merge fusion. Narrower than `in_literal` on
     /// purpose: a plain scalar assignment `x=foo:bar` must keep fusing.
     in_brace: bool,
+    /// Inside a test in the current substitution scope; `=~` is an operator.
+    in_test: bool,
+    /// Immediately after a statement-head assignment target, including subscripts.
+    after_lvalue: bool,
     /// This token is (part of) `push`'s bracket-path TARGET — see
     /// [`PushTarget`]. Lets `flush_glob_run` fuse `services[web][tags]`
     /// verbatim into a single `Ident` (a path to walk) instead of a
@@ -2815,6 +2816,8 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
         ctx[i] = ValueContext {
             in_literal: expect_value || in_open_literal,
             in_brace: matches!(top, Some(Frame::Record)),
+            in_test: frames[floor..].contains(&Frame::Test),
+            after_lvalue: matches!(scopes.last(), Some(StmtHead::Lvalue(_))),
             push_target: false, // set below once this token's transition is known
         };
 
@@ -3124,7 +3127,9 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
                     | Token::Amp
                     | Token::And
                     | Token::Or => {
-                        while frames.len() > floor
+                        // `&&` and `||` inside a test join comparisons.
+                        while !(in_test && matches!(t, Token::And | Token::Or))
+                            && frames.len() > floor
                             && matches!(
                                 frames.last(),
                                 Some(Frame::Test) | Some(Frame::List) | Some(Frame::Record)
@@ -3169,6 +3174,50 @@ fn compute_value_context(tokens: &[Spanned<Token>]) -> Vec<ValueContext> {
 // because marker-derived tokens (`Arithmetic`, `HereDoc`) are not
 // mergeable.
 // ═══════════════════════════════════════════════════════════════════
+
+/// Outside tests, an assignment followed by `~` is not a regex comparison.
+fn split_tilde_assignments(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
+    if !tokens.iter().any(|token| matches!(token.token, Token::Match)) {
+        return tokens;
+    }
+    let contexts = compute_value_context(&tokens);
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let assignment_key = index.checked_sub(1).map(|previous| &tokens[previous]);
+        let after_key = assignment_key.is_some_and(|previous| {
+            previous.span.end == token.span.start
+                && (matches!(previous.token, Token::Ident(_) | Token::LongFlag(_))
+                    || (matches!(previous.token, Token::RBracket) && contexts[index].after_lvalue)
+                    || previous.token.is_keyword() || previous.token.is_type())
+        });
+        if !matches!(token.token, Token::Match) || contexts[index].in_test || !after_key {
+            result.push(token.clone());
+            index += 1;
+            continue;
+        }
+        let tilde_start = token.span.start + 1;
+        result.push(Spanned::new(Token::Eq, token.span.start..tilde_start));
+        let suffix = tokens.get(index + 1).filter(|next| {
+            next.span.start == token.span.end
+                && (matches!(next.token, Token::Path(_) | Token::RelativePath(_)
+                    | Token::DotSlashPath(_) | Token::DottedIdent(_) | Token::Ident(_)
+                    | Token::NumberIdent(_) | Token::Int(_) | Token::Float(_)
+                    | Token::AtWord(_) | Token::PlusFlag(_))
+                    || next.token.is_keyword() || next.token.is_type())
+        });
+        if let Some(suffix) = suffix {
+            let span = tilde_start..suffix.span.end;
+            result.push(Spanned::new(Token::TildePath(source[span.clone()].to_string()), span));
+            index += 2;
+        } else {
+            result.push(Spanned::new(Token::Tilde, tilde_start..token.span.end));
+            index += 1;
+        }
+    }
+    result
+}
 
 /// True for token types that can participate in colon-adjacent merging.
 fn is_colon_mergeable(token: &Token) -> bool {
@@ -3690,7 +3739,7 @@ fn tokenize_impl(
 
     Ok(preserve_numeric_source_text(
         merge_glob_adjacent(
-            merge_colon_adjacent(merge_flag_metachar_adjacent(mapped), source),
+            merge_colon_adjacent(merge_flag_metachar_adjacent(split_tilde_assignments(mapped, source)), source),
             source,
         ),
         source,
