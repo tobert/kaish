@@ -2109,6 +2109,7 @@ where
         ident_parser(),
         path_parser(),
         select! { Token::DotSlashPath(s) => s },
+        select! { Token::RelativePath(s) => s },
         just(Token::True).to("true".to_string()),
         just(Token::False).to("false".to_string()),
         just(Token::Colon).to(":".to_string()),
@@ -2125,7 +2126,23 @@ where
     // structurally after parsing, where the message is fully under our control
     // (verified empirically 2026-06-07).
     command_name
-        .then(args_list_parser())
+        .map_with(|name, extra| -> (String, Span) { (name, extra.span()) })
+        // An adjacent `=` belongs to assignment parsing, including its errors.
+        .then(just(Token::Eq).map_with(|_, extra| -> Span { extra.span() }).or_not().rewind())
+        .filter(|((_, name_span), equals)| {
+            !equals.is_some_and(|span| name_span.end == span.start)
+        })
+        .map(|(name, _)| name)
+        .then(args_list_parser().map_with(|args, extra| -> (Vec<Arg>, Span) { (args, extra.span()) }))
+        .validate(|((name, name_span), (args, args_span)), _, emitter| {
+            if !args.is_empty() && name_span.end == args_span.start {
+                emitter.emit(Rich::custom(
+                    args_span,
+                    "command name and first argument need a space between them",
+                ));
+            }
+            (name, args)
+        })
         .then(redirect_parser(primary_expr_parser()).repeated().collect::<Vec<_>>())
         .map(|((name, args), redirects)| Command {
             name,
