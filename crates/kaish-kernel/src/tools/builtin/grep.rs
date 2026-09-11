@@ -339,7 +339,7 @@ impl Tool for Grep {
             Ok(r) => r,
             Err(e) => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     append_dialect_hint(
                         format!("grep: invalid pattern: {}", e),
                         dialect_rewrote,
@@ -358,7 +358,7 @@ impl Tool for Grep {
             Ok(m) => m,
             Err(e) => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     append_dialect_hint(
                         format!("grep: invalid pattern: {}", e),
                         dialect_rewrote,
@@ -757,6 +757,10 @@ impl Grep {
         let mut reader = BufReader::new(pipe_in);
         let mut match_count = 0usize;
         let mut line_num = 0usize;
+        // A read failure is grep's own trouble and exits 2. A *write* failure
+        // is the downstream stage closing the pipe (`grep x | head -1`), which
+        // is ordinary and keeps the match-based code.
+        let mut read_error: Option<std::io::Error> = None;
 
         let mut line_buf = String::new();
         loop {
@@ -789,13 +793,19 @@ impl Grep {
                         }
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    read_error = Some(e);
+                    break;
+                }
             }
         }
 
         drop(reader);
         let _ = pipe_out.shutdown().await;
 
+        if let Some(e) = read_error {
+            return ExecResult::failure(2, format!("grep: {e}"));
+        }
         if match_count > 0 {
             ExecResult::success("")
         } else {

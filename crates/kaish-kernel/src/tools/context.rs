@@ -1257,6 +1257,8 @@ impl ExecContext {
 /// pipes, dispatcher) through
 /// [`ToolCtx::as_any_mut`](kaish_tool_api::ToolCtx::as_any_mut).
 #[async_trait]
+impl kaish_tool_api::sealed::Sealed for ExecContext {}
+
 impl kaish_tool_api::ToolCtx for ExecContext {
     fn backend(&self) -> &Arc<dyn KernelBackend> {
         &self.backend
@@ -1339,10 +1341,11 @@ fn normalize_path(path: &std::path::Path) -> PathBuf {
 /// Narrow a [`ToolCtx`](crate::tools::ToolCtx) to the kernel's own
 /// [`ExecContext`].
 ///
-/// Kernel builtins are private to this crate — `tools::builtin` exports
-/// `register_builtins` and nothing that would let a caller construct one — so
-/// `execute` is reachable only through the kernel's registry, which always
-/// dispatches with an `ExecContext`. The downcast therefore cannot fail.
+/// [`ToolCtx`](crate::tools::ToolCtx) is sealed, so `ExecContext` is its only
+/// implementor and this downcast cannot fail. Type privacy alone would not be
+/// enough: `ToolRegistry::get` hands out an `Arc<dyn Tool>` and `Tool::execute`
+/// is public, so without the seal an embedder could dispatch a builtin with a
+/// context of its own and reach this branch.
 ///
 /// It is still checked, and a failure panics. Returning an exit code here
 /// would hand a script a number it could only read as an ordinary command
@@ -1369,6 +1372,12 @@ mod tests {
     /// up. The rest of the trait is here to satisfy the compiler, and calling
     /// any of it in a test would be the test itself being wrong.
     struct ForeignCtx;
+
+    // `ToolCtx` is sealed, so this line is what a crate outside kaish cannot
+    // write — it is the seal, stated as code. The test opts in deliberately to
+    // reach a branch that is otherwise unreachable, and its existence here is
+    // the reason `exec_context` may assert instead of returning a code.
+    impl kaish_tool_api::sealed::Sealed for ForeignCtx {}
 
     impl kaish_tool_api::ToolCtx for ForeignCtx {
         fn backend(&self) -> &std::sync::Arc<dyn crate::backend::KernelBackend> {

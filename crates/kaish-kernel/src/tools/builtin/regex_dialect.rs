@@ -83,10 +83,11 @@ pub(crate) fn bre_metas_to_ere(pattern: &str) -> String {
 /// Scans outside-in, honoring backslash escapes and the rule that `]` is a
 /// literal when it opens a class body (`[]a]`). Returns the innermost opener
 /// still waiting at end of input.
-fn unbalanced_opener(pattern: &str) -> Option<char> {
+fn unbalanced_opener(pattern: &str) -> Option<(usize, char)> {
     let mut chars = pattern.char_indices().peekable();
-    let mut open: Vec<char> = Vec::new();
+    let mut open: Vec<(usize, char)> = Vec::new();
     let mut class_body_start: Option<usize> = None;
+    let mut class_open_index = 0usize;
 
     while let Some((index, c)) = chars.next() {
         // A backslash escapes whatever follows, in or out of a class.
@@ -111,12 +112,13 @@ fn unbalanced_opener(pattern: &str) -> Option<char> {
                         None => index + 1,
                     };
                     class_body_start = Some(body);
+                    class_open_index = index;
                 }
-                '(' | '{' => open.push(c),
-                ')' if open.last() == Some(&'(') => {
+                '(' | '{' => open.push((index, c)),
+                ')' if open.last().map(|&(_, o)| o) == Some('(') => {
                     open.pop();
                 }
-                '}' if open.last() == Some(&'{') => {
+                '}' if open.last().map(|&(_, o)| o) == Some('{') => {
                     open.pop();
                 }
                 _ => {}
@@ -125,7 +127,7 @@ fn unbalanced_opener(pattern: &str) -> Option<char> {
     }
 
     if class_body_start.is_some() {
-        return Some('[');
+        return Some((class_open_index, '['));
     }
     open.pop()
 }
@@ -142,12 +144,24 @@ fn unbalanced_opener(pattern: &str) -> Option<char> {
 /// Returns `None` when no single opener explains the failure, leaving the
 /// engine's own message to stand alone.
 pub(crate) fn regex_fix_hint(pattern: &str) -> Option<&'static str> {
-    match unbalanced_opener(pattern)? {
-        '[' => Some(r"write `\[` to match a literal `[`"),
-        '(' => Some("write `[(]` to match a literal `(`"),
-        '{' => Some("write `[{]` to match a literal `{`"),
-        _ => None,
-    }
+    let (index, opener) = unbalanced_opener(pattern)?;
+    let (spelling, hint) = match opener {
+        '[' => (r"\[", r"write `\[` to match a literal `[`"),
+        '(' => ("[(]", "write `[(]` to match a literal `(`"),
+        '{' => ("[{]", "write `[{]` to match a literal `{`"),
+        _ => return None,
+    };
+
+    // An unbalanced opener explains the failure only when escaping it is the
+    // whole fix. `[)` opens a class AND leaves a group unopened, and naming
+    // `\[` there would send the reader back with a pattern that still does not
+    // compile. Apply the spelling at the site the scan found and keep the hint
+    // only if the result compiles.
+    let mut fixed = String::with_capacity(pattern.len() + spelling.len());
+    fixed.push_str(&pattern[..index]);
+    fixed.push_str(spelling);
+    fixed.push_str(&pattern[index + opener.len_utf8()..]);
+    regex::Regex::new(&bre_metas_to_ere(&fixed)).ok().map(|_| hint)
 }
 
 
@@ -182,26 +196,56 @@ mod tests {
         assert_eq!(regex_fix_hint(pattern), expected);
     }
 
-    #[test]
-    fn every_hint_it_gives_actually_compiles() {
-        // A hint that does not produce a valid regex is worse than none.
-        for pattern in ["[cast:", "(unclosed", "a{2"] {
-            let hint = regex_fix_hint(pattern).expect("a hint for an open pattern");
-            let spelling = hint
-                .split('`')
-                .nth(1)
-                .expect("the hint quotes the spelling it recommends");
-            let fixed = pattern.replacen(
-                unbalanced_opener(pattern).expect("an opener").to_string().as_str(),
-                spelling,
-                1,
-            );
-            let rewritten = bre_metas_to_ere(&fixed);
-            assert!(
-                regex::Regex::new(&rewritten).is_ok(),
-                "hint {hint:?} produced {rewritten:?}, which still does not compile",
-            );
-        }
+    #[rstest]
+    // A second unescaped meta after the opener: escaping `[` leaves `)`
+    // unopened, so there is no single spelling to name.
+    #[case("[)")]
+    #[case("[a(b")]
+    // The scan reports the class and never reaches the unclosed group.
+    #[case("(a[")]
+    fn a_pattern_with_two_faults_gets_no_hint(#[case] pattern: &str) {
+        assert!(
+            regex::Regex::new(&bre_metas_to_ere(pattern)).is_err(),
+            "fixture must actually be a broken pattern",
+        );
+        assert_eq!(
+            regex_fix_hint(pattern),
+            None,
+            "naming one fix for a two-fault pattern sends the reader back with \
+             a pattern that still does not compile",
+        );
+    }
+
+    #[rstest]
+    #[case("[cast:")]
+    #[case("[^abc")]
+    #[case("[]")]
+    #[case("(unclosed")]
+    #[case("a{2")]
+    #[case("x[0-9]+(")]
+    #[case("日本[")]
+    fn every_hint_it_gives_actually_compiles(#[case] pattern: &str) {
+        // The hint is applied at the site the scan found, which is what
+        // `regex_fix_hint` itself does — a test that searched for the first
+        // occurrence of the character could pass while the real fix landed
+        // somewhere else.
+        let hint = regex_fix_hint(pattern).expect("an open pattern gets a hint");
+        let spelling = hint
+            .split('`')
+            .nth(1)
+            .expect("the hint quotes the spelling it recommends");
+        let (index, opener) = unbalanced_opener(pattern).expect("an opener");
+        let fixed = format!(
+            "{}{}{}",
+            &pattern[..index],
+            spelling,
+            &pattern[index + opener.len_utf8()..],
+        );
+        let rewritten = bre_metas_to_ere(&fixed);
+        assert!(
+            regex::Regex::new(&rewritten).is_ok(),
+            "hint {hint:?} produced {rewritten:?}, which still does not compile",
+        );
     }
 
     #[rstest]

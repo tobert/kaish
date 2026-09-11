@@ -24,14 +24,24 @@ breaking entries are marked **BREAKING**.
   clean plan the caller cannot run.
 - An invalid regex names the escape that fixes it (`\[` for a literal `[`,
   `[(]` and `[{]` where a backslash would be a BRE operator) instead of
-  linking kaish's regex crate.
+  linking kaish's regex crate. A pattern with two faults gets no hint rather
+  than one that still does not compile.
+- A pattern that arrives through a variable (`p='[cast:'; grep "$p" f`) now
+  exits 2 like a literal one. The validator skips a computed pattern, so the
+  failure surfaced from the regex builders inside `grep` instead.
+- `grep` reading from a pipe no longer discards a read error and reports it as
+  "no lines matched". A read failure exits 2; a downstream close still keeps
+  the match-based code.
 
 ### Changed
 
-- A kernel builtin dispatched with a foreign `ToolCtx` now panics instead of
-  returning exit 1 with an internal message. The downcast is unreachable
-  through the kernel's registry; reaching it means the kernel was built wrong,
-  which a script must not read as an ordinary command failure.
+- **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive a
+  `ToolCtx` and never implement one, so this changes no supported use, but an
+  out-of-tree implementation no longer compiles.
+- A kernel builtin dispatched with a context that is not the kernel's now
+  panics instead of returning exit 1 with an internal message. Sealing
+  `ToolCtx` is what makes that branch unreachable: `ToolRegistry::get` and
+  `Tool::execute` are public, so type privacy alone left it open.
 
 ## [0.17.2] - 2026-09-09
 

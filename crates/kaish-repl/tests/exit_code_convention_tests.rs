@@ -76,6 +76,18 @@ fn grep_exits_2_for_an_unclosed_character_class() {
 }
 
 #[test]
+fn grep_exits_2_for_a_bad_pattern_that_arrives_through_a_variable() {
+    // The validator compiles a *literal* pattern and skips anything holding a
+    // `<dynamic>` marker, so a pattern that arrives through `$p` reaches the
+    // regex builders inside execute() instead. That is the same failure, and
+    // it must not come back as 1 just because the validator could not see it.
+    let dir = fixture();
+    let (code, _, err) = run_c(dir.path(), "p='[cast:'; grep -v \"$p\" lines.txt");
+    assert_eq!(code, 2, "a pattern is no less broken for being computed");
+    assert!(err.contains("invalid pattern"), "stderr was: {err}");
+}
+
+#[test]
 fn grep_exits_2_when_a_file_cannot_be_read() {
     let dir = fixture();
     let (code, _, _) = run_c(dir.path(), "grep alpha no_such_file.txt");
