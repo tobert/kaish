@@ -31,7 +31,7 @@ pub use context::{
     external_commands_unavailable_error, ExecContext, ExternalCommandsUnavailable,
     GateExpectations, OutputContext, OverwriteExpectation, DEFAULT_KILL_GRACE,
 };
-pub(crate) use context::{cas_overwrite, is_trash_excluded, ExternalCommandOutcome};
+pub(crate) use context::{cas_overwrite, exec_context, is_trash_excluded, ExternalCommandOutcome};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
 pub use traits::{ArgBinding, global_flag_value_is_truthy, is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};

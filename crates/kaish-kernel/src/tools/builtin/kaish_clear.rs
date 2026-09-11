@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, Scope};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// kaish-clear: reset session state (variables, cwd).
 pub struct KaishClear;
@@ -39,9 +39,7 @@ impl Tool for KaishClear {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         let argv = match args.to_argv() {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("kaish-clear: {e}")),
@@ -77,6 +75,7 @@ impl Tool for KaishClear {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;

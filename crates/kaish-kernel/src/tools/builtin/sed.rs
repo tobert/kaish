@@ -17,7 +17,7 @@ use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Sed tool: stream editor for text transformations.
@@ -140,9 +140,7 @@ impl Tool for Sed {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         // A structured call (`{"in-place": true}`) binds a bool into args.named,
         // which to_argv renders as `--in-place=true` — and clap's SetTrue rejects
         // a value. Move bool-schema named entries into flags so they render bare.
@@ -1058,6 +1056,7 @@ fn expand_replacement(replacement: &str, captures: &regex::Captures) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

@@ -17,7 +17,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::get_path_string;
-use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Diff tool: compares two files line by line.
@@ -114,9 +114,7 @@ impl Tool for Diff {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         let argv = match args.to_argv() {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("diff: {e}")),
@@ -148,13 +146,13 @@ impl Tool for Diff {
         let file1 = match get_path_string(&args, "file1", 0) {
             Ok(Some(f)) => f,
             Ok(None) => return ExecResult::failure(2, "diff: missing first file"),
-            Err(e) => return ExecResult::failure(1, format!("diff: {e}")),
+            Err(e) => return ExecResult::failure(2, format!("diff: {e}")),
         };
 
         let file2 = match get_path_string(&args, "file2", 1) {
             Ok(Some(f)) => f,
             Ok(None) => return ExecResult::failure(2, "diff: missing second file"),
-            Err(e) => return ExecResult::failure(1, format!("diff: {e}")),
+            Err(e) => return ExecResult::failure(2, format!("diff: {e}")),
         };
 
         let path1 = ctx.resolve_path(&file1);
@@ -349,6 +347,7 @@ fn colorize_unified_output(plain: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

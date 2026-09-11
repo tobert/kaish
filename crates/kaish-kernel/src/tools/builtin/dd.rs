@@ -14,7 +14,7 @@ use crate::ast::Value;
 use crate::backend::ReadRange;
 use crate::interpreter::{value_to_string, ExecResult};
 use crate::operation::KernelOperation;
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 /// dd tool.
 pub struct Dd;
@@ -56,9 +56,7 @@ impl Tool for Dd {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
 
         let mut input: Option<String> = None;
         let mut output: Option<String> = None;
@@ -198,6 +196,7 @@ impl Tool for Dd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{DevFs, Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

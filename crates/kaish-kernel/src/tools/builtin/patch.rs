@@ -19,7 +19,7 @@ use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
 pub struct Patch;
@@ -76,9 +76,7 @@ impl Tool for Patch {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         // Tests poke args.flags.insert("dry-run") and args.named.insert("p", Int(1)).
         // `-R` flag and `--dry-run` flag work directly. The `p=1` form lands as
         // a single-char named entry which to_argv renders as `-p=1`; clap's
@@ -677,6 +675,7 @@ fn apply_hunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

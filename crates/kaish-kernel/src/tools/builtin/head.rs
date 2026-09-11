@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::ReadRange;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Head tool: output the first part of files or stdin.
 pub struct Head;
@@ -52,9 +52,7 @@ impl Tool for Head {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         // Pop the POSIX shorthand `-N` Int before we hand off to clap below.
         // The pop transforms positional[0] = Int(-N) into named lines=N.
         // Handle POSIX shorthand: head -3 file → head -n 3 file

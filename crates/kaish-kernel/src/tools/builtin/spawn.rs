@@ -22,8 +22,8 @@ use tokio::process::Command;
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{
-    schema_from_clap, ExecContext, ExternalCommandsUnavailable, GlobalFlags, Tool, ToolArgs,
+use crate::tools::{exec_context, 
+    schema_from_clap, ExternalCommandsUnavailable, GlobalFlags, Tool, ToolArgs,
     ToolCtx, ToolSchema,
 };
 
@@ -84,9 +84,7 @@ impl Tool for Spawn {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         args.flagify_bool_named(&self.schema());
 
         let argv = match args.to_argv() {
@@ -431,6 +429,7 @@ fn extract_string_object(value: &Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::BackendError;
 use crate::interpreter::ExecResult;
 use crate::operation::KernelOperation;
-use crate::tools::{is_trash_excluded, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, is_trash_excluded, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for rm.
 #[derive(Parser, Debug)]
@@ -112,9 +112,7 @@ impl Tool for Rm {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         args.flagify_bool_named(&self.schema());
 
         let argv = match args.to_argv() {
@@ -233,6 +231,7 @@ impl Tool for Rm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;

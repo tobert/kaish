@@ -10,6 +10,29 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
+  unreadable file, or a missing pattern argument exits 2, so a caller cannot
+  read a broken search as a negative answer. `diff` argument errors exit 2 to
+  match its neighboring operand checks.
+- A program kaish refuses — lex, parse, or validation — now exits 2 from
+  `kaish -c` and from a script file, matching what `kaish --plan` already
+  documented for the same source.
+- `kaish --plan` now runs the validator. A program that parses but the kernel
+  would reject reports `{"errors": [...]}` and exits 2 instead of printing a
+  clean plan the caller cannot run.
+- An invalid regex names the escape that fixes it (`\[` for a literal `[`,
+  `[(]` and `[{]` where a backslash would be a BRE operator) instead of
+  linking kaish's regex crate.
+
+### Changed
+
+- A kernel builtin dispatched with a foreign `ToolCtx` now panics instead of
+  returning exit 1 with an internal message. The downcast is unreachable
+  through the kernel's registry; reaching it means the kernel was built wrong,
+  which a script must not read as an ordinary command failure.
+
 ## [0.17.2] - 2026-09-09
 
 ### Fixed

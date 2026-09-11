@@ -10,7 +10,7 @@ use crate::interpreter::ExecResult;
 use crate::interpreter::OutputData;
 #[cfg(unix)]
 use crate::scheduler::JobId;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Bg tool: resume a stopped job in the background.
 pub struct Bg;
@@ -55,9 +55,7 @@ impl Tool for Bg {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         let argv = match args.to_argv() {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("bg: {e}")),
@@ -189,6 +187,7 @@ impl Tool for Bg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::scheduler::JobManager;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::os::unix::process::CommandExt;
