@@ -128,7 +128,7 @@ impl Tool for Rm {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "rm: missing path argument");
+            return ExecResult::failure(2, "rm: missing path argument");
         }
 
         let recursive = parsed.recursive || parsed.recursive_upper;

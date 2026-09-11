@@ -532,7 +532,7 @@ impl Tool for JqNative {
         // Get filter (required, positional 0)
         let filter_str = match args.get_string("filter", 0) {
             Some(f) => f,
-            None => return ExecResult::failure(1, "jq: filter expression required"),
+            None => return ExecResult::failure(2, "jq: filter expression required"),
         };
 
         // Collect `--arg NAME VALUE` (string) and `--argjson NAME VALUE` (JSON)
@@ -604,7 +604,7 @@ impl Tool for JqNative {
                                         let hint =
                                             jsonl_hint_for_trailing_error(&text, &e).unwrap_or_default();
                                         return ExecResult::failure(
-                                            1,
+                                            2,
                                             format!("jq: invalid JSON in {}: {}{}", path, e, hint),
                                         );
                                     }

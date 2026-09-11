@@ -11,15 +11,15 @@ check "$?" "1" "bg fails in non-interactive mode"
 
 # kill with no args should fail
 kill
-check "$?" "1" "kill requires arguments"
+check "$?" "2" "kill requires arguments"
+
+# an unknown signal is wrong for the whole command, not one target
+kill --signal BOGUS 1
+check "$?" "2" "kill rejects an unknown signal as a usage error"
 
 # kill with invalid job reference should fail
 kill "%999"
 check "$?" "1" "kill fails with nonexistent job"
-
-# kill with invalid signal name should fail
-kill --signal BOGUS 1
-check "$?" "1" "kill fails with unknown signal"
 
 # kill with invalid PID should fail
 kill 999999999

@@ -1317,12 +1317,27 @@ a mistake.**
 A builtin that answers a question spends `1` on the negative answer and nothing
 else. `grep` exits 1 only when it searched and matched nothing; `test` exits 1
 only when the condition was false; `cmp` and `diff` exit 1 only when the inputs
-differ. In those builtins every error — an unreadable file, a missing operand, a
-pattern that does not compile — exits `2`, so a caller branching on 1 never
-reads a broken command as a negative answer.
+differ; `read` exits 1 only at end of input, which is what ends a `while read`
+loop; `glob` exits 1 only when a pattern matched no files. In those builtins
+every error — an unreadable file, a missing operand, a pattern that does not
+compile — exits `2`, so a caller branching on 1 never reads a broken command as
+a negative answer.
+
+```sh
+printf 'a\nb\n' | while read l; do echo "$l"; done   # read's 1 ends the loop
+read                                                  # 2 — no variable named
+```
 
 A builtin where `1` is free keeps the familiar split: `2` for a usage error,
-`1` for an operational failure. `cat missing.txt` exits 1.
+`1` for an operational failure. The split follows what the caller can fix —
+argv, or the world:
+
+```sh
+rm                              # 2 — missing path argument
+rm missing.txt                  # 1 — the path was fine, the file was not
+kaish-trash bogus               # 2 — unknown subcommand
+find . -type x                  # 2 — a flag value find cannot use
+```
 
 A whole program kaish refuses exits `2`. A lex, parse, or validation failure
 means no statement ran, which is the same class of mistake as bad argv:

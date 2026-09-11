@@ -76,7 +76,7 @@ impl Tool for KaishVfs {
 
         let subcmd = match args.get_string("", 0) {
             Some(s) => s,
-            None => return ExecResult::failure(1, format!("kaish-vfs: missing subcommand (status, diff, commit, reset)\n{}", NO_OVERLAY_MSG)),
+            None => return ExecResult::failure(2, format!("kaish-vfs: missing subcommand (status, diff, commit, reset)\n{}", NO_OVERLAY_MSG)),
         };
 
         match subcmd.as_str() {
@@ -103,7 +103,7 @@ impl Tool for KaishVfs {
                     })
                     .collect();
                 if !extra.is_empty() {
-                    return ExecResult::failure(1, format!(
+                    return ExecResult::failure(2, format!(
                         "kaish-vfs reset: too many arguments ({}); \
                          reset takes at most one path — run reset multiple times \
                          or omit the path to reset everything",
@@ -113,7 +113,7 @@ impl Tool for KaishVfs {
                 let path_arg = args.get_string("", 1);
                 cmd_reset(path_arg.as_deref(), ctx).await
             }
-            other => ExecResult::failure(1, format!(
+            other => ExecResult::failure(2, format!(
                 "kaish-vfs: unknown subcommand '{}' (try: status, diff, commit, reset)",
                 other
             )),

@@ -69,7 +69,7 @@ impl Tool for Tokens {
             Some(t) => t,
             None => match ctx.read_stdin_to_text().await {
                 Ok(Some(s)) => s,
-                Ok(None) => return ExecResult::failure(1, "tokens: no input provided"),
+                Ok(None) => return ExecResult::failure(2, "tokens: no input provided"),
                 Err(e) => return ExecResult::failure(2, format!("tokens: {e}")),
             },
         };
@@ -95,7 +95,7 @@ impl Tool for Tokens {
             },
             _ => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!("tokens: unknown encoding '{}' (use cl100k, o200k, or p50k)", encoding),
                 )
             }

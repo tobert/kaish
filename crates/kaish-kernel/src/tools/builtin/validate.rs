@@ -110,7 +110,7 @@ impl Tool for Validate {
                     // stdin (pipe or buffered — `read_stdin_to_text` prefers the pipe).
                     match ctx.read_stdin_to_text().await {
                         Ok(Some(s)) => (s, "<stdin>".to_string()),
-                        Ok(None) => return ExecResult::failure(1, "kaish-validate: no input provided (use path or -e)"),
+                        Ok(None) => return ExecResult::failure(2, "kaish-validate: no input provided (use path or -e)"),
                         Err(e) => return ExecResult::failure(2, format!("kaish-validate: {e}")),
                     }
                 }

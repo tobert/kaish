@@ -180,7 +180,7 @@ impl Tool for Sed {
             Err(msg) => return ExecResult::failure(2, format!("sed: {msg}")),
         };
         if expressions.is_empty() {
-            return ExecResult::failure(1, "sed: missing expression");
+            return ExecResult::failure(2, "sed: missing expression");
         }
 
         // Parse all expressions upfront (fail early). Each expression string may

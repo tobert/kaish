@@ -97,7 +97,7 @@ impl Tool for FromJson {
                 Ok(Some(s)) => s,
                 Ok(None) => {
                     return ExecResult::failure(
-                        1,
+                        2,
                         "fromjson: no input (pass a JSON string or pipe stdin)",
                     )
                 }
@@ -106,7 +106,7 @@ impl Tool for FromJson {
         };
 
         if input.trim().is_empty() {
-            return ExecResult::failure(1, "fromjson: empty input (expected one JSON document)");
+            return ExecResult::failure(2, "fromjson: empty input (expected one JSON document)");
         }
 
         // One document, one value: serde_json::from_str rejects trailing garbage
@@ -114,7 +114,7 @@ impl Tool for FromJson {
         // column C" — a loud, positioned error, never a silent null.
         let json: serde_json::Value = match serde_json::from_str(&input) {
             Ok(j) => j,
-            Err(e) => return ExecResult::failure(1, format!("fromjson: invalid JSON: {e}")),
+            Err(e) => return ExecResult::failure(2, format!("fromjson: invalid JSON: {e}")),
         };
 
         // Envelope-free: an envelope-shaped object stays a record, never Bytes.

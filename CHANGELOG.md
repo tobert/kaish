@@ -12,6 +12,13 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- Usage errors across the builtins now exit 2 instead of 1: a missing operand,
+  an unknown subcommand, a flag value the builtin cannot use. 96 sites in 51
+  builtins. What a caller can fix decides the code — argv is 2, the world is 1,
+  so `rm` exits 2 and `rm missing.txt` still exits 1.
+- `read` and `glob` join the builtins that spend exit 1 on a result. `read`
+  exits 1 at end of input, which is what ends a `while read` loop, and `glob`
+  exits 1 when a pattern matched nothing; neither is a usage error.
 - `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
   unreadable file, or a missing pattern argument exits 2, so a caller cannot
   read a broken search as a negative answer. `diff` argument errors exit 2 to

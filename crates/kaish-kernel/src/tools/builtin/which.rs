@@ -67,7 +67,7 @@ impl Tool for Which {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "which: missing command name");
+            return ExecResult::failure(2, "which: missing command name");
         }
 
         let all_matches = parsed.all;

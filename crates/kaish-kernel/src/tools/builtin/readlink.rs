@@ -61,7 +61,7 @@ impl Tool for Readlink {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "readlink: missing path argument");
+            return ExecResult::failure(2, "readlink: missing path argument");
         }
 
         let canonicalize = parsed.canonicalize;

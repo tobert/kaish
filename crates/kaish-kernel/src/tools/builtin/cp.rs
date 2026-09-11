@@ -99,7 +99,7 @@ impl Tool for Cp {
         // Last positional is the destination.
         let (sources, dest_value) = match args.positional.split_last() {
             Some((last, rest)) if !rest.is_empty() => (rest, last),
-            _ => return ExecResult::failure(1, "cp: missing file operand (need source and destination)"),
+            _ => return ExecResult::failure(2, "cp: missing file operand (need source and destination)"),
         };
         let dest = match crate::interpreter::value_to_text_sink_named(dest_value, "a path") {
             Ok(d) => d,

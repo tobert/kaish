@@ -109,7 +109,7 @@ impl Tool for FromJsonl {
                 // which is legitimate zero-document input) is a usage error.
                 Ok(None) => {
                     return ExecResult::failure(
-                        1,
+                        2,
                         "fromjsonl: no input (pass JSONL text or pipe stdin)",
                     )
                 }

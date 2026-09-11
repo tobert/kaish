@@ -95,7 +95,7 @@ impl Tool for Exec {
         // already guarded, but the command word itself slipped through.
         let command_name = match get_path_string(&args, "command", 0) {
             Ok(Some(cmd)) => cmd,
-            Ok(None) => return ExecResult::failure(1, "exec: missing command"),
+            Ok(None) => return ExecResult::failure(2, "exec: missing command"),
             Err(e) => return ExecResult::failure(1, format!("exec: {e}")),
         };
 

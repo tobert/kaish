@@ -61,11 +61,11 @@ impl Tool for Sleep {
                 Ok(d) => d,
                 Err(e) => return ExecResult::failure(1, format!("sleep: {}", e)),
             },
-            _ => return ExecResult::failure(1, "sleep: missing seconds argument"),
+            _ => return ExecResult::failure(2, "sleep: missing seconds argument"),
         };
 
         if seconds < 0.0 {
-            return ExecResult::failure(1, "sleep: invalid time interval");
+            return ExecResult::failure(2, "sleep: invalid time interval");
         }
 
         let duration = Duration::from_secs_f64(seconds);

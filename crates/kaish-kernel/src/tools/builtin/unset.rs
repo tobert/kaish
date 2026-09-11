@@ -71,7 +71,7 @@ impl Tool for Unset {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "unset: missing variable name");
+            return ExecResult::failure(2, "unset: missing variable name");
         }
 
         for arg in &args.positional {

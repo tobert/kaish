@@ -74,7 +74,7 @@ impl Tool for KaishTrash {
 
         let subcmd = match args.get_string("subcommand", 0) {
             Some(s) => s,
-            None => return ExecResult::failure(1, "kaish-trash: missing subcommand (list, restore, empty, config)"),
+            None => return ExecResult::failure(2, "kaish-trash: missing subcommand (list, restore, empty, config)"),
         };
 
         match subcmd.as_str() {
@@ -82,7 +82,7 @@ impl Tool for KaishTrash {
             "restore" => cmd_restore(&args, ctx).await,
             "empty" => cmd_empty(parsed.confirm, ctx).await,
             "config" => cmd_config(&args, ctx).await,
-            other => ExecResult::failure(1, format!("kaish-trash: unknown subcommand: {}", other)),
+            other => ExecResult::failure(2, format!("kaish-trash: unknown subcommand: {}", other)),
         }
     }
 }
@@ -132,7 +132,7 @@ async fn cmd_list(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
 async fn cmd_restore(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     let name = match args.get_string("arg", 1) {
         Some(n) => n,
-        None => return ExecResult::failure(1, "kaish-trash restore: specify a path/name to restore"),
+        None => return ExecResult::failure(2, "kaish-trash restore: specify a path/name to restore"),
     };
     let trash = match get_backend(ctx, "restore") {
         Ok(t) => t,
@@ -185,9 +185,9 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
                     Value::Int(n) => *n as u64,
                     Value::String(s) => match s.parse::<u64>() {
                         Ok(n) => n,
-                        Err(_) => return ExecResult::failure(1, format!("kaish-trash config: invalid size: {}", s)),
+                        Err(_) => return ExecResult::failure(2, format!("kaish-trash config: invalid size: {}", s)),
                     },
-                    _ => return ExecResult::failure(1, "kaish-trash config: max-size requires a numeric value"),
+                    _ => return ExecResult::failure(2, "kaish-trash config: max-size requires a numeric value"),
                 };
                 ctx.scope.set_trash_max_size(size);
                 return ExecResult::with_output(OutputData::text(format!(
@@ -195,7 +195,7 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
                     format_size(size),
                 )));
             }
-            return ExecResult::failure(1, "kaish-trash config: max-size requires a value in bytes");
+            return ExecResult::failure(2, "kaish-trash config: max-size requires a value in bytes");
         }
     }
 
@@ -291,7 +291,7 @@ mod tests {
         args.positional.push(Value::String("restore".into()));
 
         let result = KaishTrash.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 1);
+        assert_eq!(result.code, 2, "a missing operand is a usage error");
         assert!(result.err.contains("specify a path/name"));
     }
 
@@ -303,7 +303,7 @@ mod tests {
         args.positional.push(Value::String("frobnicate".into()));
 
         let result = KaishTrash.execute(args, &mut ctx).await;
-        assert_eq!(result.code, 1);
+        assert_eq!(result.code, 2, "an unknown subcommand is a usage error");
         assert!(result.err.contains("unknown subcommand"));
     }
 

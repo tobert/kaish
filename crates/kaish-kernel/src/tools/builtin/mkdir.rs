@@ -59,7 +59,7 @@ impl Tool for Mkdir {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "mkdir: missing path argument");
+            return ExecResult::failure(2, "mkdir: missing path argument");
         }
 
         // POSIX: `mkdir a b c` creates each. Continue past errors so users see

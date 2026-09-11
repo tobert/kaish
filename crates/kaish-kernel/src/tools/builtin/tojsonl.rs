@@ -93,7 +93,7 @@ impl Tool for ToJsonl {
                 Ok((Some(data), _)) => data,
                 Ok((None, _)) => {
                     return ExecResult::failure(
-                        1,
+                        2,
                         "tojsonl: no value (pass a list, or pipe .data from an upstream builtin)",
                     )
                 }
@@ -115,7 +115,7 @@ impl Tool for ToJsonl {
             Value::Json(serde_json::Value::Array(items)) => items,
             other => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!(
                         "tojsonl: expected a list, got {} — a record/scalar is one document: \
                          use `tojson`, or wrap it in a list first",
