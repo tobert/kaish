@@ -8,7 +8,7 @@ use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Write tool: write content to a file.
 pub struct Write;
@@ -53,9 +53,7 @@ impl Tool for Write {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         // `--content` is never read off `parsed.content` — see below, it's
         // always read as a raw typed `Value` off `args.named`/`args.positional`
         // specifically so a `Value::Bytes` payload survives untouched. That
@@ -165,6 +163,7 @@ fn value_to_bytes(value: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

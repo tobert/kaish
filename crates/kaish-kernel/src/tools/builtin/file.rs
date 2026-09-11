@@ -14,7 +14,7 @@ use kaish_glob::{FileType, SNIFF_PREFIX_LEN};
 use kaish_types::ReadRange;
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 /// file tool: identify file type from its leading bytes.
 pub struct File;
@@ -59,9 +59,7 @@ impl Tool for File {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         let argv = match args.to_argv() {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("file: {e}")),
@@ -196,6 +194,7 @@ fn render_line(name: &str, desc: &str, brief: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::path::Path;

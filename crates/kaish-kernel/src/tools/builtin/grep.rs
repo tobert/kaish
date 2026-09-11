@@ -16,8 +16,8 @@ use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere, regex_fix_hint};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
     build_file_types, list_file_types, FileWalker, GlobPath, IncludeExclude, WalkOptions,
@@ -190,7 +190,10 @@ impl Tool for Grep {
                             Some("-E"),
                         ),
                     )
-                    .with_suggestion("check regex syntax at https://docs.rs/regex")
+                    .with_suggestion(
+                        regex_fix_hint(&rewritten)
+                            .unwrap_or("escape the literal character the engine could not place"),
+                    )
                     .with_command(self.name()));
                 }
         }
@@ -199,9 +202,7 @@ impl Tool for Grep {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         args.flagify_bool_named(&self.schema());
 
         let argv = match args.to_argv() {
@@ -250,7 +251,7 @@ impl Tool for Grep {
 
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
-            None => return ExecResult::failure(1, "grep: missing pattern argument"),
+            None => return ExecResult::failure(2, "grep: missing pattern argument"),
         };
 
         let ignore_case = args.has_flag("ignore-case") || args.has_flag("i");
@@ -338,7 +339,7 @@ impl Tool for Grep {
             Ok(r) => r,
             Err(e) => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     append_dialect_hint(
                         format!("grep: invalid pattern: {}", e),
                         dialect_rewrote,
@@ -357,7 +358,7 @@ impl Tool for Grep {
             Ok(m) => m,
             Err(e) => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     append_dialect_hint(
                         format!("grep: invalid pattern: {}", e),
                         dialect_rewrote,
@@ -401,7 +402,7 @@ impl Tool for Grep {
             let operands: Vec<String> =
                 match crate::interpreter::values_to_text_sink_named(&args.positional[1..], "a path") {
                     Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
+                    Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
                 };
             // GNU distinguishes a WRITTEN `.` from a defaulted one:
             // `grep -r p .` reports `./d/a.txt` while a bare `grep -r p`
@@ -484,7 +485,7 @@ impl Tool for Grep {
 
                     match walker.collect().await {
                         Ok(f) => files.extend(f),
-                        Err(e) => return ExecResult::failure(1, format!("grep: {}", e)),
+                        Err(e) => return ExecResult::failure(2, format!("grep: {}", e)),
                     }
                 }
 
@@ -546,7 +547,7 @@ impl Tool for Grep {
         let file_operands: Vec<String> =
             match crate::interpreter::values_to_text_sink_named(&args.positional[1..], "a path") {
                 Ok(p) => p,
-                Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
+                Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
             };
         if file_operands.len() > 1 {
             let root = ctx.resolve_path(".");
@@ -624,7 +625,7 @@ impl Tool for Grep {
 
             // I/O error reading the file.
             if let Err(e) = scan_result {
-                return ExecResult::failure(1, format!("grep: {}: {}", path, e));
+                return ExecResult::failure(2, format!("grep: {}: {}", path, e));
             }
 
             // Flush the remaining carry.  `saw_invalid_utf8` is set if any
@@ -665,7 +666,7 @@ impl Tool for Grep {
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => (data, Some(path)),
-                    Err(e) => return ExecResult::failure(1, format!("grep: {}: {}", path, e)),
+                    Err(e) => return ExecResult::failure(2, format!("grep: {}: {}", path, e)),
                 }
             }
             None => {
@@ -693,7 +694,7 @@ impl Tool for Grep {
             filename.as_deref(),
         ) {
             Ok(t) => t,
-            Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
         };
 
         // Quiet mode: just return exit code
@@ -756,6 +757,10 @@ impl Grep {
         let mut reader = BufReader::new(pipe_in);
         let mut match_count = 0usize;
         let mut line_num = 0usize;
+        // A read failure is grep's own trouble and exits 2. A *write* failure
+        // is the downstream stage closing the pipe (`grep x | head -1`), which
+        // is ordinary and keeps the match-based code.
+        let mut read_error: Option<std::io::Error> = None;
 
         let mut line_buf = String::new();
         loop {
@@ -788,13 +793,19 @@ impl Grep {
                         }
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    read_error = Some(e);
+                    break;
+                }
             }
         }
 
         drop(reader);
         let _ = pipe_out.shutdown().await;
 
+        if let Some(e) = read_error {
+            return ExecResult::failure(2, format!("grep: {e}"));
+        }
         if match_count > 0 {
             ExecResult::success("")
         } else {

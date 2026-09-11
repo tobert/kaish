@@ -7,7 +7,7 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::walker::{
     build_file_types, list_file_types, EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions,
 };
@@ -98,9 +98,7 @@ impl Tool for Glob {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         // Tests poke args.named.insert("no-ignore", Value::Bool(true)); promote
         // such bool-typed named entries to flag form so clap accepts them.
         args.flagify_bool_named(&self.schema());
@@ -335,6 +333,7 @@ impl Tool for Glob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::path::Path;
     use std::sync::Arc;

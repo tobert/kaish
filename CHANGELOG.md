@@ -10,6 +10,39 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
+  unreadable file, or a missing pattern argument exits 2, so a caller cannot
+  read a broken search as a negative answer. `diff` argument errors exit 2 to
+  match its neighboring operand checks.
+- A program kaish refuses — lex, parse, or validation — now exits 2 from
+  `kaish -c` and from a script file, matching what `kaish --plan` already
+  documented for the same source.
+- `kaish --plan` now runs the validator. A program that parses but the kernel
+  would reject reports `{"errors": [...]}` and exits 2 instead of printing a
+  clean plan the caller cannot run.
+- An invalid regex names the escape that fixes it (`\[` for a literal `[`,
+  `[(]` and `[{]` where a backslash would be a BRE operator) instead of
+  linking kaish's regex crate. A pattern with two faults gets no hint rather
+  than one that still does not compile.
+- A pattern that arrives through a variable (`p='[cast:'; grep "$p" f`) now
+  exits 2 like a literal one. The validator skips a computed pattern, so the
+  failure surfaced from the regex builders inside `grep` instead.
+- `grep` reading from a pipe no longer discards a read error and reports it as
+  "no lines matched". A read failure exits 2; a downstream close still keeps
+  the match-based code.
+
+### Changed
+
+- **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive a
+  `ToolCtx` and never implement one, so this changes no supported use, but an
+  out-of-tree implementation no longer compiles.
+- A kernel builtin dispatched with a context that is not the kernel's now
+  panics instead of returning exit 1 with an internal message. Sealing
+  `ToolCtx` is what makes that branch unreachable: `ToolRegistry::get` and
+  `Tool::execute` are public, so type privacy alone left it open.
+
 ## [0.17.2] - 2026-09-09
 
 ### Fixed

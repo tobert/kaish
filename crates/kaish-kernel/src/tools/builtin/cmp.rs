@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::backend::ReadRange;
 use crate::interpreter::ExecResult;
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 /// cmp tool.
 pub struct Cmp;
@@ -51,9 +51,7 @@ impl Tool for Cmp {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         args.flagify_bool_named(&self.schema());
         let argv = match args.to_argv() {
             Ok(v) => v,

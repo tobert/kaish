@@ -1257,6 +1257,8 @@ impl ExecContext {
 /// pipes, dispatcher) through
 /// [`ToolCtx::as_any_mut`](kaish_tool_api::ToolCtx::as_any_mut).
 #[async_trait]
+impl kaish_tool_api::sealed::Sealed for ExecContext {}
+
 impl kaish_tool_api::ToolCtx for ExecContext {
     fn backend(&self) -> &Arc<dyn KernelBackend> {
         &self.backend
@@ -1336,10 +1338,98 @@ fn normalize_path(path: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Narrow a [`ToolCtx`](crate::tools::ToolCtx) to the kernel's own
+/// [`ExecContext`].
+///
+/// [`ToolCtx`](crate::tools::ToolCtx) is sealed, so `ExecContext` is its only
+/// implementor and this downcast cannot fail. Type privacy alone would not be
+/// enough: `ToolRegistry::get` hands out an `Arc<dyn Tool>` and `Tool::execute`
+/// is public, so without the seal an embedder could dispatch a builtin with a
+/// context of its own and reach this branch.
+///
+/// It is still checked, and a failure panics. Returning an exit code here
+/// would hand a script a number it could only read as an ordinary command
+/// failure, hiding a kernel that was built wrong behind a value that looks
+/// like data.
+pub(crate) fn exec_context(ctx: &mut dyn crate::tools::ToolCtx) -> &mut ExecContext {
+    match ctx.as_any_mut().downcast_mut::<ExecContext>() {
+        Some(ctx) => ctx,
+        None => panic!(
+            "kernel builtin dispatched with a foreign ToolCtx; \
+             builtins must be registered through register_builtins"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decide_mutation_action, MutationAction};
     use std::path::Path;
+
+    /// A `ToolCtx` that is not the kernel's `ExecContext`.
+    ///
+    /// Only `as_any_mut` is ever reached: `exec_context` downcasts and gives
+    /// up. The rest of the trait is here to satisfy the compiler, and calling
+    /// any of it in a test would be the test itself being wrong.
+    struct ForeignCtx;
+
+    // `ToolCtx` is sealed, so this line is what a crate outside kaish cannot
+    // write — it is the seal, stated as code. The test opts in deliberately to
+    // reach a branch that is otherwise unreachable, and its existence here is
+    // the reason `exec_context` may assert instead of returning a code.
+    impl kaish_tool_api::sealed::Sealed for ForeignCtx {}
+
+    impl kaish_tool_api::ToolCtx for ForeignCtx {
+        fn backend(&self) -> &std::sync::Arc<dyn crate::backend::KernelBackend> {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn cwd(&self) -> &Path {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn resolve_path(&self, _path: &str) -> std::path::PathBuf {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn var(&self, _name: &str) -> Option<crate::ast::Value> {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn set_var(&mut self, _name: &str, _value: crate::ast::Value) {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn set_output_format(&mut self, _format: kaish_types::OutputFormat) {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "foreign ToolCtx")]
+    fn a_foreign_tool_ctx_panics_rather_than_returning_an_exit_code() {
+        // The downcast is unreachable through the kernel's registry, which is
+        // the only way a builtin is dispatched. If it ever does fail, the
+        // kernel was built wrong, and a script must not be able to read that
+        // as an ordinary non-zero exit.
+        let mut ctx = ForeignCtx;
+        let _ = super::exec_context(&mut ctx);
+    }
+
+    #[test]
+    fn the_kernel_s_own_context_downcasts() {
+        // The control: without this, the panic test above would pass even if
+        // `exec_context` panicked unconditionally.
+        use crate::vfs::{MemoryFs, VfsRouter};
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let mut ctx = super::ExecContext::new(std::sync::Arc::new(vfs));
+        let expected = ctx.cwd.clone();
+        let narrowed = super::exec_context(&mut ctx);
+        assert_eq!(narrowed.cwd, expected);
+    }
 
     fn decide(
         trash: bool,

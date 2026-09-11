@@ -49,7 +49,7 @@ fn assert_no_wrapper_noise(text: &str) {
 #[test]
 fn cli_parse_error_prints_diagnostic_directly() {
     let (stdout, stderr, code) = run_kaish(&["-c", "echo $GREET/world.txt"]);
-    assert_eq!(code, 1, "a parse failure must still exit 1: stderr={stderr:?}");
+    assert_eq!(code, 2, "a refused program exits 2: stderr={stderr:?}");
     assert_eq!(stdout, "", "a parse failure must not execute anything");
     assert!(
         stderr.starts_with("1:6 [parse]:"),
@@ -65,7 +65,7 @@ fn cli_parse_error_prints_diagnostic_directly() {
 #[test]
 fn cli_lexer_error_prints_diagnostic_directly() {
     let (stdout, stderr, code) = run_kaish(&["-c", "echo `ls`"]);
-    assert_eq!(code, 1, "a lexer failure must still exit 1: stderr={stderr:?}");
+    assert_eq!(code, 2, "a refused program exits 2: stderr={stderr:?}");
     assert_eq!(stdout, "");
     // `[parse]` here is inherited from `ParseError::format`, which labels
     // every diagnostic `[parse]` regardless of whether the lexer or the
@@ -121,7 +121,7 @@ fn cli_validation_error_leads_with_its_diagnostic() {
     // wrapper named the phase and nothing else, so it displaced the one line
     // that identified the problem.
     let (stdout, stderr, code) = run_kaish(&["-c", "v=1; for x in $v; do echo $x; done"]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 2, "a validator rejection is a refused program");
     assert_eq!(stdout, "");
     assert_no_wrapper_noise(&stderr);
     assert!(
@@ -172,7 +172,7 @@ fn cli_script_parse_error_prints_diagnostic_with_correct_line() {
     let script_path = dir.path().join("bad.kai");
     std::fs::write(&script_path, "echo ok\necho $GREET/world.txt\n").expect("write script");
     let (stdout, stderr, code) = run_kaish(&[script_path.to_str().expect("utf8 path")]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 2, "a refused script exits 2, like a refused -c program");
     assert_eq!(
         stdout, "",
         "the whole script is parsed up front — a later parse failure must run nothing, including line 1"
@@ -195,7 +195,7 @@ fn cli_shebang_script_parse_error_reports_the_source_line() {
     std::fs::write(&script_path, "#!/usr/bin/env kaish\necho ok\necho $GREET/world.txt\n")
         .expect("write script");
     let (stdout, stderr, code) = run_kaish(&[script_path.to_str().expect("utf8 path")]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 2, "a refused script exits 2, like a refused -c program");
     assert_eq!(stdout, "", "a parse failure runs nothing");
     assert!(
         stderr.starts_with("3:6 [parse]:"),
