@@ -2465,12 +2465,16 @@ impl Kernel {
         let result = self
             .run_under_watchdog(timeout, &effective_cancel, self.execute_streaming_inner(input, &mut *cb_ref))
             .await
-            .map(|(result, timeout_diagnostic)| {
+            .map(|(mut result, timeout_diagnostic)| {
                 // A deadline is not a statement, so no statement streamed it.
                 if let Some(diagnostic) = timeout_diagnostic {
                     let mut tail = ExecResult::success("");
                     tail.err = diagnostic;
                     cb_ref(&tail);
+                } else if effective_cancel.is_cancelled() && !result.ok() {
+                    // The token, not the code: a killed child exits 128+signal,
+                    // and `exit 143` alone is not a cancel.
+                    result.code = 130;
                 }
                 result
             });
