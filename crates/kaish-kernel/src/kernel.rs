@@ -1449,19 +1449,8 @@ impl Kernel {
         cancel: tokio_util::sync::CancellationToken,
         job_id: crate::scheduler::JobId,
     ) -> Arc<Self> {
-        self.fork_for_background_with_output(cancel, job_id, true).await
-    }
-
-    /// Fork for a background job whose output is published by its caller at
-    /// statement boundaries instead of by each external child's drain task.
-    async fn fork_for_background_with_output(
-        &self,
-        cancel: tokio_util::sync::CancellationToken,
-        job_id: crate::scheduler::JobId,
-        stream_external_output: bool,
-    ) -> Arc<Self> {
         let fork = self.fork_inner(cancel, Some(job_id)).await;
-        fork.exec_ctx.write().await.background_stream_external_output = stream_external_output;
+        fork.exec_ctx.write().await.background_stream_external_output = true;
         fork
     }
 
@@ -1753,7 +1742,9 @@ impl Kernel {
             // call to mis-take.
             Ok(result)
         };
-        let result = self.run_under_watchdog(timeout, &cancel, work).await?;
+        // The argv door returns one command's result; it has no statement
+        // stream that could miss the timeout diagnostic.
+        let (result, _timeout_diagnostic) = self.run_under_watchdog(timeout, &cancel, work).await?;
         self.update_last_result(&result).await;
         Ok(result)
     }
@@ -1770,12 +1761,17 @@ impl Kernel {
     /// watchdog handle from `exec_ctx` on the way out (a patient hold against a
     /// stale handle would silently suspend nothing). Callers must short-circuit a
     /// `Some(Duration::ZERO)` timeout (return 124 without spawning) before calling.
+    ///
+    /// The second value is the timeout diagnostic when the deadline elapsed,
+    /// so a caller that streams statements can report a timeout that no
+    /// statement produced; an exit code of 124 alone does not mean the
+    /// deadline fired.
     async fn run_under_watchdog<F>(
         &self,
         timeout: Option<Duration>,
         cancel: &tokio_util::sync::CancellationToken,
         work: F,
-    ) -> Result<ExecResult>
+    ) -> Result<(ExecResult, Option<String>)>
     where
         F: std::future::Future<Output = Result<ExecResult>>,
     {
@@ -1795,19 +1791,22 @@ impl Kernel {
             timer.abort();
             match r {
                 Ok(mut res) => {
+                    let mut timed_out = None;
                     if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
+                        let diagnostic =
+                            ExecResult::terminate_diagnostic(format!("timeout: timed out after {:?}", d));
                         res.code = 124;
                         if res.err.is_empty() {
-                            res.err =
-                                ExecResult::terminate_diagnostic(format!("timeout: timed out after {:?}", d));
+                            res.err = diagnostic.clone();
                         }
+                        timed_out = Some(diagnostic);
                     }
-                    Ok(res)
+                    Ok((res, timed_out))
                 }
                 Err(e) => Err(e),
             }
         } else {
-            work.await
+            work.await.map(|res| (res, None))
         };
 
         // The timer task is gone (fired or aborted); drop the stale handle.
@@ -1852,52 +1851,59 @@ impl Kernel {
 
     /// Start a complete kaish program as a background job.
     ///
-    /// The source is parsed and validated before this returns a [`crate::scheduler::JobId`], so
-    /// a receipt always names a runnable program. The job runs in a detached
-    /// fork with the same source and [`ExecuteOptions`] semantics as
-    /// [`Self::execute_with_options`]: per-call variables, working directory,
-    /// tools, and cancellation all remain scoped to that execution.
+    /// The source is parsed and validated on the job's fork before this
+    /// returns a [`crate::scheduler::JobId`]; a rejected program registers no
+    /// job. The fork runs the source with the same [`ExecuteOptions`]
+    /// semantics as [`Self::execute_with_options`].
     ///
-    /// Output is added to the job streams after each top-level statement. This
-    /// preserves one ordered, complete stream for programs that mix builtins
-    /// and external commands. Shell `&` keeps its existing chunk-live external
-    /// output behavior.
+    /// Output reaches the job's streams after each top-level statement
+    /// finishes, not while a statement runs. A runtime error (exit 1), timeout
+    /// (exit 124), or cancellation (exit 130) ends the job's stderr with one
+    /// diagnostic, in the result and in the stream. `JobManager::cancel` and
+    /// `opts.cancel_token` both cancel the job.
     ///
     /// # Errors
     ///
-    /// Returns a parse or validation rejection before registering a job.
+    /// Returns [`KernelError::Parse`] or [`KernelError::Validation`] before
+    /// registering a job.
     pub async fn execute_background_with_options(
         &self,
         source: &str,
         mut opts: ExecuteOptions,
     ) -> Result<crate::scheduler::JobId, KernelError> {
-        // Fork before validation: user tools and scope are copied into a
-        // per-job kernel, so validating the parent would certify a different
-        // command surface from the one that will execute. No job is visible
-        // until this fork-local preflight has succeeded.
-        let preflight_fork = self.fork().await;
-        preflight_fork
-            .preflight_background_program(source)
-            .await
-            .map_err(classify_execute_error)?;
-
         use tokio::sync::{mpsc, oneshot};
+
+        // Validate the fork that will run: it holds its own copy of user
+        // tools and scope, which a later snapshot of the parent could differ
+        // from.
+        // The job parses and validates again when it runs; the cost buys a
+        // rejection before a job exists, without threading a parsed program
+        // through the execute doors. AST mode prints before validating, so it
+        // is not validated here either.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let fork = self.fork_inner(cancel.clone(), None).await;
+        let program = Self::parse_program(source).map_err(classify_execute_error)?;
+        let show_ast = fork.scope.read().await.show_ast();
+        if !show_ast {
+            fork.validate_parsed(&program, source).await.map_err(classify_execute_error)?;
+        }
 
         let (result_tx, result_rx) = oneshot::channel();
         let job_id = self.jobs.register(source.to_owned(), result_rx).await;
-        let cancel = tokio_util::sync::CancellationToken::new();
         self.jobs.set_cancel_token(job_id, cancel.clone()).await;
+        {
+            // This job publishes whole statement results below; a child's
+            // drain task teeing the same bytes would write them twice.
+            let mut ec = fork.exec_ctx.write().await;
+            ec.background_job = Some(job_id);
+            ec.background_stream_external_output = false;
+        }
 
-        // `run_inner` installs its own per-call cancellation token. Make the
-        // job token that token so `JobManager::cancel` reaches builtins as
-        // well as child process groups, and forward any embedder token into
-        // it without replacing the embedder's ownership.
-        let embedder_cancel = opts.cancel_token.take();
-        opts.cancel_token = Some(cancel.clone());
+        // The job token is this call's cancel input, so `JobManager::cancel`
+        // reaches builtins and child process groups. An embedder token
+        // forwards into it.
+        let embedder_cancel = opts.cancel_token.replace(cancel.clone());
 
-        let fork = preflight_fork
-            .fork_for_background_with_output(cancel.clone(), job_id, false)
-            .await;
         let jobs = self.jobs.clone();
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<ExecResult>();
 
@@ -1924,93 +1930,143 @@ impl Kernel {
                     cancel.cancel();
                 })
             });
-            let mut on_output = move |output: &ExecResult| {
-                // This channel is unbounded because the synchronous streaming
-                // callback cannot await a bounded receiver without either
-                // dropping output or blocking kaish execution.
+            // The statements as streamed: a runtime error returns no result,
+            // and the output that ran before it must survive.
+            let mut streamed = ExecResult::success("");
+            let mut on_output = |output: &ExecResult| {
+                accumulate_result(&mut streamed, output);
+                // Unbounded: this synchronous callback cannot await a bounded
+                // channel without dropping output or blocking execution.
                 if output_tx.send(output.clone()).is_err() {
                     tracing::error!(job_id = %job_id, "background job output writer stopped before execution completed");
                 }
             };
-            let mut result = match fork
-                .execute_with_options_streaming(&source, opts, &mut on_output)
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => ExecResult::failure(1, error.to_string()),
-            };
-            drop(on_output);
+            // `run_watched` merges it into an Ok result only.
+            let embedder_baggage = opts.baggage.clone();
+            let outcome = fork.run_watched(&source, opts, None, Some(&mut on_output)).await;
             if let Some(watcher) = embedder_watcher {
                 watcher.abort();
             }
+
+            // A timeout, runtime error, or cancellation is not a statement, so
+            // no callback carried its diagnostic to the stream.
+            let stream_needs_newline = !streamed.err.is_empty() && !streamed.err.ends_with('\n');
+            let mut unstreamed_err = String::new();
+            let mut result = match outcome {
+                Ok((mut result, timeout_diagnostic)) => {
+                    if let Some(diagnostic) = timeout_diagnostic {
+                        // The watchdog already wrote it into an empty `err`.
+                        if !result.err.trim_end().ends_with(diagnostic.trim_end()) {
+                            push_diagnostic(&mut result.err, &diagnostic);
+                        }
+                        unstreamed_err.push_str(&diagnostic);
+                    }
+                    result
+                }
+                Err(error) => {
+                    let diagnostic =
+                        ExecResult::terminate_diagnostic(format!("{:#}", classify_execute_error(error)));
+                    let mut result = streamed;
+                    result.code = 1;
+                    push_diagnostic(&mut result.err, &diagnostic);
+                    unstreamed_err.push_str(&diagnostic);
+                    crate::telemetry::merge_egress_baggage(&mut result, embedder_baggage);
+                    result
+                }
+            };
+            // The token, not the code: a cancelled external exits 128+signal,
+            // and `exit 130` alone is not a cancel. A job that succeeded before
+            // the token tripped keeps its result.
+            if cancel.is_cancelled() && !result.ok() {
+                result.code = 130;
+                let diagnostic = ExecResult::terminate_diagnostic("job cancelled");
+                push_diagnostic(&mut result.err, &diagnostic);
+                unstreamed_err.push_str(&diagnostic);
+            }
+            if !unstreamed_err.is_empty() {
+                let mut tail = ExecResult::success("");
+                if stream_needs_newline {
+                    tail.err.push('\n');
+                }
+                tail.err.push_str(&unstreamed_err);
+                if output_tx.send(tail).is_err() {
+                    tracing::error!(job_id = %job_id, "background job output writer stopped before its final diagnostic");
+                }
+            }
+            drop(output_tx);
+
             if let Err(error) = output_writer.await {
                 result.code = 1;
-                result.err.push_str(&ExecResult::terminate_diagnostic(format!(
-                    "background job output writer failed: {error}"
-                )));
-            }
-            // Statement callbacks already wrote their complete stderr. A
-            // watchdog/cancellation terminal result is not a statement, so
-            // append its own explicit stream diagnostic instead of asking
-            // finalize_streams to replay the aggregate result (which would
-            // duplicate earlier statement output).
-            let terminal = match result.code {
-                124 => Some("background job timed out\n"),
-                130 => Some("background job cancelled\n"),
-                _ => None,
-            };
-            if let Some(terminal) = terminal
-                && let Some(streams) = jobs.streams(job_id).await
-            {
-                streams.stderr.write(terminal.as_bytes()).await;
+                push_diagnostic(
+                    &mut result.err,
+                    &ExecResult::terminate_diagnostic(format!("background job output writer failed: {error}")),
+                );
             }
             jobs.finalize_streams(job_id, &result).await;
+            // The receiver is gone only when the job was removed from the manager.
             let _ = result_tx.send(result);
         }));
 
         Ok(job_id)
     }
 
-    /// Reject invalid background source before allocating a visible job.
-    async fn preflight_background_program(&self, input: &str) -> Result<()> {
-        let program = parse(input).map_err(|errors| {
+    /// Parse kaish source, tagging a failure as [`KernelError::Parse`] so
+    /// `classify_execute_error` can recover the structured rejection at the
+    /// public execute boundary.
+    fn parse_program(input: &str) -> Result<crate::ast::Program> {
+        parse(input).map_err(|errors| {
             let msg = errors
                 .iter()
-                .map(|error| error.format(input))
+                .map(|e| e.format(input))
                 .collect::<Vec<_>>()
                 .join("\n");
-            anyhow::Error::from(KernelError::Parse {
-                errors,
-                message: format!("parse error:\n{msg}"),
-            })
-        })?;
+            let message = format!("parse error:\n{}", msg);
+            anyhow::Error::from(KernelError::Parse { errors, message })
+        })
+    }
 
+    /// Validate a parsed program before it runs. An error-severity issue
+    /// returns [`KernelError::Validation`]. The returned string holds the
+    /// warnings whose code opts into agent surfacing, one per line; other
+    /// warnings stay trace-only (every external command fires an
+    /// `UndefinedCommand` warning).
+    async fn validate_parsed(&self, program: &crate::ast::Program, input: &str) -> Result<String> {
+        let mut surfaced_warnings = String::new();
         if self.skip_validation {
-            return Ok(());
+            return Ok(surfaced_warnings);
         }
 
+        // Catalog first: neither guard should ride the other's await, and
+        // `validate()` is synchronous, so neither rides one after this.
         let catalog = { self.exec_ctx.read().await.tool_schemas.clone() };
         let user_tools = self.user_tools.read().await;
         let validator = Validator::new(&self.tools, &user_tools, &catalog);
-        let issues = validator.validate(&program);
+        let issues = validator.validate(program);
+
         let errors: Vec<_> = issues
             .iter()
-            .filter(|issue| issue.severity == Severity::Error)
-            .cloned()
+            .filter(|i| i.severity == Severity::Error)
             .collect();
-        if errors.is_empty() {
-            return Ok(());
+        if !errors.is_empty() {
+            let error_msg = errors
+                .iter()
+                .map(|e| e.format(input))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let message = format!("validation failed:\n{}", error_msg);
+            let issues: Vec<crate::validator::ValidationIssue> =
+                errors.into_iter().cloned().collect();
+            return Err(anyhow::Error::from(KernelError::Validation { issues, message }));
         }
 
-        let message = errors
-            .iter()
-            .map(|error| error.format(input))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Err(anyhow::Error::from(KernelError::Validation {
-            issues: errors,
-            message: format!("validation failed:\n{message}"),
-        }))
+        for warning in issues.iter().filter(|i| i.severity == Severity::Warning) {
+            tracing::trace!("validation: {}", warning.format(input));
+            if warning.code.surfaces_to_agent() {
+                surfaced_warnings.push_str(&warning.format(input));
+                surfaced_warnings.push('\n');
+            }
+        }
+        Ok(surfaced_warnings)
     }
 
     /// Same as [`Self::execute_with_options`] but with a per-statement output
@@ -2120,6 +2176,20 @@ impl Kernel {
         pipe_stdin: Option<crate::scheduler::PipeReader>,
         on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
     ) -> Result<ExecResult> {
+        self.run_watched(input, opts, pipe_stdin, on_output)
+            .await
+            .map(|(result, _timeout_diagnostic)| result)
+    }
+
+    /// [`Self::run_inner`], also returning the timeout diagnostic when the
+    /// watchdog deadline elapsed (see `run_under_watchdog`).
+    async fn run_watched(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        pipe_stdin: Option<crate::scheduler::PipeReader>,
+        on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
+    ) -> Result<(ExecResult, Option<String>)> {
         use opentelemetry::context::FutureExt;
 
         // Capture the embedder's baggage before `opts` is consumed so it can be
@@ -2134,9 +2204,9 @@ impl Kernel {
             None => self.execute_with_options_inner(input, opts, pipe_stdin, on_output).await,
         };
 
-        result.map(|mut r| {
+        result.map(|(mut r, timeout_diagnostic)| {
             crate::telemetry::merge_egress_baggage(&mut r, embedder_baggage);
-            r
+            (r, timeout_diagnostic)
         })
     }
 
@@ -2150,7 +2220,7 @@ impl Kernel {
         opts: ExecuteOptions,
         pipe_stdin: Option<crate::scheduler::PipeReader>,
         on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
-    ) -> Result<ExecResult> {
+    ) -> Result<(ExecResult, Option<String>)> {
         let _guard = self.acquire_execute_lock().await;
 
         // Always reset to a fresh internal token; this is the kernel's own
@@ -2210,7 +2280,11 @@ impl Kernel {
             if let Some(h) = watcher_handle {
                 h.abort();
             }
-            return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
+            let diagnostic = "timeout: timed out after 0s";
+            return Ok((
+                ExecResult::failure(124, diagnostic.to_string()),
+                Some(ExecResult::terminate_diagnostic(diagnostic)),
+            ));
         }
 
         // Apply per-call vars overlay (push frame + set_exported), wrapped in
@@ -2441,18 +2515,7 @@ impl Kernel {
         input: &str,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
-        let program = parse(input).map_err(|errors| {
-            let msg = errors
-                .iter()
-                .map(|e| e.format(input))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let message = format!("parse error:\n{}", msg);
-            // Tagged so `classify_execute_error` can recover the structured
-            // rejection at the public execute-surface boundary; every other
-            // `?` in this function propagates a plain, untagged `anyhow::Error`.
-            anyhow::Error::from(KernelError::Parse { errors, message })
-        })?;
+        let program = Self::parse_program(input)?;
 
         // AST display mode: show AST instead of executing
         {
@@ -2463,48 +2526,7 @@ impl Kernel {
             }
         }
 
-        // Pre-execution validation. Most warnings stay trace-only (every
-        // external command fires an `UndefinedCommand` warning), but a warning
-        // whose code opts into agent surfacing is collected here and prepended
-        // to the result's stderr at each return point below.
-        let mut surfaced_warnings = String::new();
-        if !self.skip_validation {
-            // Catalog first: neither guard should ride the other's await, and
-            // `validate()` is synchronous, so neither rides one after this.
-            let catalog = { self.exec_ctx.read().await.tool_schemas.clone() };
-            let user_tools = self.user_tools.read().await;
-            let validator = Validator::new(&self.tools, &user_tools, &catalog);
-            let issues = validator.validate(&program);
-
-            // Collect errors (warnings are logged but don't prevent execution)
-            let errors: Vec<_> = issues
-                .iter()
-                .filter(|i| i.severity == Severity::Error)
-                .collect();
-
-            if !errors.is_empty() {
-                let error_msg = errors
-                    .iter()
-                    .map(|e| e.format(input))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let message = format!("validation failed:\n{}", error_msg);
-                let issues: Vec<crate::validator::ValidationIssue> =
-                    errors.into_iter().cloned().collect();
-                // Tagged the same way as the parse rejection above.
-                return Err(anyhow::Error::from(KernelError::Validation { issues, message }));
-            }
-
-            // Log warnings via tracing (trace level to avoid noise); surface the
-            // opted-in ones to the agent so the guidance is actually seen.
-            for warning in issues.iter().filter(|i| i.severity == Severity::Warning) {
-                tracing::trace!("validation: {}", warning.format(input));
-                if warning.code.surfaces_to_agent() {
-                    surfaced_warnings.push_str(&warning.format(input));
-                    surfaced_warnings.push('\n');
-                }
-            }
-        }
+        let surfaced_warnings = self.validate_parsed(&program, input).await?;
 
         // Surface opted-in validation warnings to the streaming frontend once,
         // before any command output. The streaming consumer (`-c`, REPL) prints
@@ -7568,6 +7590,14 @@ fn push_stdout_of(accumulated: &mut ExecResult, new: &ExecResult) {
     }
 }
 
+/// Append a terminated diagnostic to `err` on its own line.
+fn push_diagnostic(err: &mut String, diagnostic: &str) {
+    if !err.is_empty() && !err.ends_with('\n') {
+        err.push('\n');
+    }
+    err.push_str(diagnostic);
+}
+
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     push_stdout_of(accumulated, new);
     accumulated.err.push_str(&new.err);
@@ -10205,6 +10235,57 @@ AFTER="yes"'"#)
             .expect("job result");
         assert_eq!(result.code, 130, "cancellation must report the normal cancellation code: {result:?}");
         assert!(!result.text_out().contains("unreachable"));
+        let stderr = String::from_utf8(jobs.read_stderr(id).await.expect("stderr stream")).expect("utf8");
+        assert!(stderr.ends_with("job cancelled\n"), "job stream must name the cancellation: {stderr:?}");
+        assert!(result.err.ends_with("job cancelled\n"), "result must name the cancellation: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn background_program_cancel_of_external_reports_cancellation() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::repl().with_job_manager(jobs.clone())).expect("kernel");
+        let id = kernel
+            .execute_background_with_options("/usr/bin/sleep 30", ExecuteOptions::new())
+            .await
+            .expect("receipt");
+
+        // Cancel only once the child exists, so the signal reaches it rather
+        // than a program that has not started.
+        let started = tokio::time::timeout(Duration::from_secs(5), async {
+            while jobs.job_pgids(id).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(started.is_ok(), "external child never recorded its process group");
+
+        assert!(jobs.cancel(id).await);
+        let result = tokio::time::timeout(Duration::from_secs(5), jobs.wait(id))
+            .await
+            .expect("cancelled job did not settle")
+            .expect("job result");
+        let stderr = String::from_utf8(jobs.read_stderr(id).await.expect("stderr stream")).expect("utf8");
+        assert_eq!(result.code, 130, "a cancelled external must report cancellation, not its signal: {result:?}");
+        assert!(stderr.ends_with("job cancelled\n"), "job stream must name the cancellation: {stderr:?}");
+    }
+
+    #[tokio::test]
+    async fn background_program_in_ast_mode_matches_foreground() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone())).expect("kernel");
+        let on = kernel.execute("kaish-ast --on").await.expect("ast mode on");
+        assert_eq!(on.text_out(), "AST mode: ON\n", "the control must actually enable AST mode");
+
+        // `break` outside a loop fails validation, but AST mode prints before
+        // validating; the background door must not reject what the foreground shows.
+        let foreground = kernel.execute("break").await.expect("foreground prints the AST");
+        let id = kernel
+            .execute_background_with_options("break", ExecuteOptions::new())
+            .await
+            .expect("AST mode must not reject the program before it runs");
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "{result:?}");
+        assert_eq!(result.text_out(), foreground.text_out());
     }
 
     #[tokio::test]
@@ -10221,12 +10302,58 @@ AFTER="yes"'"#)
         let result = tokio::time::timeout(Duration::from_secs(5), jobs.wait(id))
             .await.expect("timed out job did not settle").expect("job result");
         let stderr = String::from_utf8(jobs.read_stderr(id).await.expect("stderr stream")).expect("utf8");
-        assert!(result.err.contains("early"), "final result lost statement stderr: {result:?}");
-        assert!(stderr.contains("early"), "job stream lost statement stderr: {stderr:?}");
-        assert!(result.code == 124 || result.err.to_lowercase().contains("timeout"),
-            "timeout must survive in final result: {result:?}");
-        assert!(stderr.to_lowercase().contains("timeout") || stderr.contains("timed out"),
-            "job stream must retain terminal timeout diagnostic after statement stderr: {stderr:?}");
+        assert_eq!(result.code, 124, "timeout must report 124: {result:?}");
+        for (name, text) in [("result", result.err.as_str()), ("stream", stderr.as_str())] {
+            let early = text.find("early").unwrap_or_else(|| panic!("{name} lost statement stderr: {text:?}"));
+            let timed_out = text
+                .find("timeout: timed out after")
+                .unwrap_or_else(|| panic!("{name} lost the timeout diagnostic: {text:?}"));
+            assert!(early < timed_out, "{name} must keep statement stderr before the timeout: {text:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_program_runtime_error_keeps_prior_output_and_cause() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone())).expect("kernel");
+        let id = kernel
+            .execute_background_with_options(
+                "echo out; echo early >&2; x=$((1/0)); echo unreachable",
+                ExecuteOptions::new(),
+            )
+            .await
+            .expect("receipt");
+        let result = jobs.wait(id).await.expect("job result");
+        let stdout = String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8");
+        let stderr = String::from_utf8(jobs.read_stderr(id).await.expect("stderr stream")).expect("utf8");
+
+        assert_eq!(result.code, 1, "a runtime fault fails the job: {result:?}");
+        assert_eq!(result.text_out(), "out\n", "output before the fault must survive in the result");
+        assert_eq!(stdout, "out\n");
+        for (name, text) in [("result", result.err.as_str()), ("stream", stderr.as_str())] {
+            let early = text.find("early").unwrap_or_else(|| panic!("{name} lost statement stderr: {text:?}"));
+            let cause = text
+                .find("divides by zero")
+                .unwrap_or_else(|| panic!("{name} lost the fault's cause: {text:?}"));
+            assert!(early < cause, "{name} must keep statement stderr before the fault: {text:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_program_exit_code_alone_is_not_a_terminal_event() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone())).expect("kernel");
+        for code in [124, 130] {
+            let id = kernel
+                .execute_background_with_options(&format!("exit {code}"), ExecuteOptions::new())
+                .await
+                .expect("receipt");
+            let result = jobs.wait(id).await.expect("job result");
+            let stderr = String::from_utf8(jobs.read_stderr(id).await.expect("stderr stream")).expect("utf8");
+            assert_eq!(result.code, code);
+            assert_eq!(stderr, "", "`exit {code}` was neither timed out nor cancelled");
+            assert_eq!(result.err, "", "`exit {code}` was neither timed out nor cancelled");
+        }
     }
 
     #[tokio::test]
