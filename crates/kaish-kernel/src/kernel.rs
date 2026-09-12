@@ -2560,7 +2560,23 @@ impl Kernel {
             // sites. It runs before `execute_stmt_flow`, so a held statement
             // has run *nothing*: no substitution, no redirect opened, no
             let flow_result = self.execute_stmt_flow(&stmt).await;
-            let flow = flow_result?;
+            let flow = match flow_result {
+                Ok(flow) => flow,
+                Err(error) => {
+                    // Earlier statements already streamed; the faulting
+                    // statement's partial output has not.
+                    let mut partial = ExecResult::success("");
+                    partial.err = {
+                        let mut receiver = self.stderr_receiver.lock().await;
+                        receiver.drain_lossy()
+                    };
+                    let error = with_prior_output(partial, error);
+                    if let Some(carrier) = error.downcast_ref::<crate::error::FaultWithOutput>() {
+                        on_output(&carrier.output);
+                    }
+                    return Err(with_prior_output(std::mem::take(&mut result), error));
+                }
+            };
 
             // Drain any stderr written by pipeline stages during this statement.
             // This captures stderr from intermediate pipeline stages that would
@@ -2760,7 +2776,8 @@ impl Kernel {
                 let mut result = ExecResult::success("");
                 let cond_value = self
                     .eval_condition_async(&if_stmt.condition, &mut result)
-                    .await?;
+                    .await
+                    .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
 
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
@@ -2769,7 +2786,13 @@ impl Kernel {
                 };
 
                 for stmt in branch {
-                    let flow = self.execute_stmt_flow(stmt).await?;
+                    let flow = match self.execute_stmt_flow(stmt).await {
+                        Ok(flow) => flow,
+                        Err(error) => {
+                            self.drain_stderr_into(&mut result).await;
+                            return Err(with_prior_output(result, error));
+                        }
+                    };
                     match flow {
                         ControlFlow::Normal(r) => {
                             // Drain BEFORE accumulating, as the `while` arm
@@ -2908,9 +2931,12 @@ impl Kernel {
                         let mut flow = match self.execute_stmt_flow(stmt).await {
                             Ok(f) => f,
                             Err(e) => {
-                                let mut scope = self.scope.write().await;
-                                scope.pop_frame();
-                                return Err(e);
+                                {
+                                    let mut scope = self.scope.write().await;
+                                    scope.pop_frame();
+                                }
+                                self.drain_stderr_into(&mut result).await;
+                                return Err(with_prior_output(result, e));
                             }
                         };
                         self.drain_stderr_into(&mut result).await;
@@ -2994,7 +3020,8 @@ impl Kernel {
                     // the body's rather than arriving in one block up front.
                     let cond_value = self
                         .eval_condition_async(&while_loop.condition, &mut result)
-                        .await?;
+                        .await
+                        .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
 
                     if !is_truthy(&cond_value) {
                         break;
@@ -3002,7 +3029,13 @@ impl Kernel {
 
                     // Execute body
                     for stmt in &while_loop.body {
-                        let mut flow = self.execute_stmt_flow(stmt).await?;
+                        let mut flow = match self.execute_stmt_flow(stmt).await {
+                            Ok(flow) => flow,
+                            Err(error) => {
+                                self.drain_stderr_into(&mut result).await;
+                                return Err(with_prior_output(result, error));
+                            }
+                        };
                         self.drain_stderr_into(&mut result).await;
                         match &mut flow {
                             ControlFlow::Normal(r) => {
@@ -3074,7 +3107,13 @@ impl Kernel {
                         // Execute the branch body
                         let mut result = ExecResult::success("");
                         for stmt in &branch.body {
-                            let flow = self.execute_stmt_flow(stmt).await?;
+                            let flow = match self.execute_stmt_flow(stmt).await {
+                                Ok(flow) => flow,
+                                Err(error) => {
+                                    self.drain_stderr_into(&mut result).await;
+                                    return Err(with_prior_output(result, error));
+                                }
+                            };
                             match flow {
                                 ControlFlow::Normal(r) => {
                                     accumulate_result(&mut result, &r);
@@ -3167,13 +3206,22 @@ impl Kernel {
                         // value becomes the chain's value, so nothing
                         // consumes it as a boolean and it reports exit 2.
                         if left_result.fault {
-                            return Err(anyhow::anyhow!("{}", left_result.err.trim_end()));
+                            // The fault's stderr is its message; its stdout already ran.
+                            let message = std::mem::take(&mut left_result.err);
+                            return Err(with_prior_output(
+                                left_result,
+                                anyhow::anyhow!("{}", message.trim_end()),
+                            ));
                         }
                         // Pending is not failure (spec §I.5) — see the
                         // `OrChain` twin. The stash check matters here for a
                         // hold swallowed into an apparent success below.
                         if left_result.ok() {
-                            let right_flow = self.execute_stmt_flow(right).await?;
+                            let right_flow = match self.execute_stmt_flow(right).await {
+                                Ok(flow) => flow,
+                                // The left side already ran and printed.
+                                Err(error) => return Err(with_prior_output(left_result, error)),
+                            };
                             match right_flow {
                                 ControlFlow::Normal(mut right_result) => {
                                     self.drain_stderr_into(&mut right_result).await;
@@ -3229,7 +3277,12 @@ impl Kernel {
                         // value becomes the chain's value, so nothing
                         // consumes it as a boolean and it reports exit 2.
                         if left_result.fault {
-                            return Err(anyhow::anyhow!("{}", left_result.err.trim_end()));
+                            // The fault's stderr is its message; its stdout already ran.
+                            let message = std::mem::take(&mut left_result.err);
+                            return Err(with_prior_output(
+                                left_result,
+                                anyhow::anyhow!("{}", message.trim_end()),
+                            ));
                         }
                         // Pending is not failure (spec §I.5): a fallback
                         // written for failure must not run on a decision
@@ -3243,7 +3296,11 @@ impl Kernel {
                         // slot's result instead. Do not "fix" this by taking
                         // the slot here: only statement boundaries take it.
                         if !left_result.ok() {
-                            let right_flow = self.execute_stmt_flow(right).await?;
+                            let right_flow = match self.execute_stmt_flow(right).await {
+                                Ok(flow) => flow,
+                                // The left side already ran and printed.
+                                Err(error) => return Err(with_prior_output(left_result, error)),
+                            };
                             match right_flow {
                                 ControlFlow::Normal(mut right_result) => {
                                     self.drain_stderr_into(&mut right_result).await;
@@ -5049,7 +5106,9 @@ impl Kernel {
 
         // 5. Propagate error or exit after cleanup
         if let Some(e) = exec_error {
-            return Err(e);
+            let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
+            prior.err = accumulated_err;
+            return Err(with_prior_output(prior, e));
         }
         let code = exit_code.unwrap_or(last_code);
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
@@ -5144,7 +5203,17 @@ impl Kernel {
         }
 
         for stmt in stmts {
-            let flow = self.execute_stmt_flow(stmt).await?;
+            let flow = match self.execute_stmt_flow(stmt).await {
+                Ok(flow) => flow,
+                Err(error) => {
+                    let drained = {
+                        let mut receiver = self.stderr_receiver.lock().await;
+                        receiver.drain_lossy()
+                    };
+                    accumulated_err.push_str(&drained);
+                    return Err(fault_leaving_capture(accumulated_err, error));
+                }
+            };
 
             // Drain pipeline stderr after each sub-statement (incremental, like
             // the control-structure and function-body executors).
@@ -5607,7 +5676,9 @@ impl Kernel {
                     }
                 }
                 Err(e) => {
-                    return Err(e.context(format!("source: {}", path)));
+                    let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
+                    prior.err = accumulated_err;
+                    return Err(with_prior_output(prior, e).context(format!("source: {}", path)));
                 }
             }
         }
@@ -5808,7 +5879,9 @@ impl Kernel {
 
             // Propagate error or exit after cleanup
             if let Some(e) = exec_error {
-                return Err(e.context(format!("script: {}", script_path.display())));
+                let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
+                prior.err = accumulated_err;
+                return Err(with_prior_output(prior, e).context(format!("script: {}", script_path.display())));
             }
             let code = exit_code.unwrap_or(last_code);
             let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
@@ -7629,6 +7702,35 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     }
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
+}
+
+/// Attach output a block produced before `error` to the error on its way up.
+///
+/// The fault counterpart of `fold_block_output_into_flow`: a fault stops the
+/// block; it does not unprint what already ran. Output the error already
+/// carries ran later, inside the faulting statement, so it follows `prior`.
+fn with_prior_output(prior: ExecResult, mut error: anyhow::Error) -> anyhow::Error {
+    if let Some(carrier) = error.downcast_mut::<crate::error::FaultWithOutput>() {
+        let mut merged = prior;
+        accumulate_result(&mut merged, &carrier.output);
+        carrier.output = merged;
+        return error;
+    }
+    if prior.text_out().is_empty() && prior.err.is_empty() && prior.out_bytes().is_none() {
+        return error;
+    }
+    anyhow::Error::new(crate::error::FaultWithOutput { output: prior, error })
+}
+
+/// A command substitution captures stdout rather than printing it, so a fault
+/// leaving one keeps only stderr: the block's own and what the error carries.
+fn fault_leaving_capture(captured_err: String, mut error: anyhow::Error) -> anyhow::Error {
+    if let Some(carrier) = error.downcast_mut::<crate::error::FaultWithOutput>() {
+        carrier.output.clear_stdout();
+    }
+    let mut prior = ExecResult::success("");
+    prior.err = captured_err;
+    with_prior_output(prior, error)
 }
 
 /// Fold a block's accumulated output into a signal that is leaving the block.

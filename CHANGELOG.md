@@ -19,6 +19,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- A runtime fault keeps the output that ran before it. `echo left &&
+  x=$((1/0))` shows `left`, and a function that faults exits 1 with what it
+  printed and the full cause instead of only the outermost message.
 - `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
   unreadable file, or a missing pattern argument exits 2, so a caller cannot
   read a broken search as a negative answer. `diff` argument errors exit 2 to
@@ -42,6 +45,9 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
+  `Execution { error, output }`. `output` holds what ran before the fault; a
+  `KernelError::Execution(e)` pattern no longer compiles.
 - **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive a
   `ToolCtx` and never implement one, so this changes no supported use, but an
   out-of-tree implementation no longer compiles.

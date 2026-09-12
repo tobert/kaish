@@ -74,6 +74,21 @@ fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat
     }
 }
 
+/// A command that faults becomes its failed result: the output it produced
+/// before the fault, then the full cause chain, exit 1.
+fn fault_result(error: anyhow::Error) -> ExecResult {
+    let mut result = error
+        .downcast_ref::<crate::error::FaultWithOutput>()
+        .map(|carrier| carrier.output.clone())
+        .unwrap_or_default();
+    result.code = 1;
+    if !result.err.is_empty() && !result.err.ends_with('\n') {
+        result.err.push('\n');
+    }
+    result.err.push_str(&ExecResult::terminate_diagnostic(format!("{error:#}")));
+    result
+}
+
 /// Apply redirects to an execution result.
 ///
 /// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
@@ -593,7 +608,7 @@ impl PipelineRunner {
         // Execute via dispatcher (full resolution chain)
         let result = match dispatch_stage(stage, ctx, dispatcher).await {
             Ok(result) => result,
-            Err(e) => ExecResult::failure(1, e.to_string()),
+            Err(e) => fault_result(e),
         };
 
         // Apply post-execution redirects
@@ -743,7 +758,7 @@ impl PipelineRunner {
                 // Execute the stage
                 let mut result = match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
                     Ok(result) => result,
-                    Err(e) => ExecResult::failure(1, e.to_string()),
+                    Err(e) => fault_result(e),
                 };
 
                 // Apply post-execution redirects. Use the stage's own

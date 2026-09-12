@@ -144,11 +144,14 @@ rather than parsing `Display` text:
   `None` when the issue isn't about a command at all (`break` outside a
   loop); narrow by it once `code` alone isn't specific enough, rather than
   parsing `message` to recover a name this field already gives you.
-- **`KernelError::Execution(anyhow::Error)`** — a statement began running and
-  faulted: a builtin, the evaluator, an IO fault, or anything else the
-  interpreter propagated. The original error chain is intact — `{:?}` and
-  `.source()` still walk it — even though `Display` (`{}`) shows only the
-  outermost message, matching `anyhow`'s usual behavior.
+- **`KernelError::Execution { error, output }`** — a statement began running
+  and faulted: a builtin, the evaluator, an IO fault, or anything else the
+  interpreter propagated. `error` is the original chain — `{:?}` and
+  `.source()` walk it, and `{:#}` prints it — while `Display` (`{}`) shows
+  only the outermost message, matching `anyhow`. `output` is what ran before
+  the fault, stdout and stderr: for `echo left && x=$((1/0))` it holds
+  `left`. It is empty when the fault came first. A streaming caller has
+  already received the same output through `on_output`.
 
 `is_rejected()` (and its complement, `is_execution_failure()`) answer the
 coarse question without a match statement. `KernelError` is
