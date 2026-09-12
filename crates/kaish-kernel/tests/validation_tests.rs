@@ -330,10 +330,13 @@ async fn validation_accepts_glob_pattern_ls_star() {
     // `ls *.txt` parses and expands at runtime. In a directory with no match
     // the command fails with exit 1 (docs/LANGUAGE.md, "Glob Expansion"),
     // and `execute` returns `Ok`, not `Err`.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let cd = kernel.execute(&format!("cd {}", dir.path().display())).await.expect("cd");
+    // Made through the kernel, so it exists with or without the localfs backend.
+    let dir = format!("/tmp/kaish-glob-empty-{}", std::process::id());
+    let cd = kernel.execute(&format!("mkdir -p {dir} && cd {dir}")).await.expect("cd");
     assert!(cd.ok(), "cd into the empty directory must succeed: {cd:?}");
     let exec = kernel.execute("ls *.txt").await.expect("execute");
+    let cleanup = kernel.execute(&format!("cd / && rm -r {dir}")).await.expect("cleanup");
+    assert!(cleanup.ok(), "remove the empty directory: {cleanup:?}");
     assert_eq!(exec.code, 1, "{exec:?}");
     assert!(exec.err.contains("no matches"), "{exec:?}");
 }

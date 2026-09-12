@@ -13,11 +13,13 @@ fn process_and_filesystem_suites_are_built() {
     if std::env::var_os("KAISH_ALLOW_REDUCED_TESTS").is_some() {
         return;
     }
-    assert!(
-        cfg!(feature = "subprocess") && cfg!(feature = "localfs"),
-        "kaish-kernel's subprocess and localfs test suites were compiled out. \
-         Run `cargo test -p kaish-kernel --features subprocess,localfs`, or set \
-         KAISH_ALLOW_REDUCED_TESTS=1 for a deliberately reduced build such as \
-         --no-default-features."
-    );
+    let suites_built = cfg!(feature = "subprocess") && cfg!(feature = "localfs");
+    if !suites_built {
+        panic!(
+            "kaish-kernel's subprocess and localfs test suites were compiled out. \
+             Run `cargo test -p kaish-kernel --features subprocess,localfs`, or set \
+             KAISH_ALLOW_REDUCED_TESTS=1 for a deliberately reduced build such as \
+             --no-default-features."
+        );
+    }
 }
