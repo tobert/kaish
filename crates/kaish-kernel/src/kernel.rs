@@ -8421,13 +8421,11 @@ mod tests {
         // Set PATH in kernel to ensure it's available
         kernel.execute(&format!(r#"PATH="{}""#, path_var)).await.expect("set PATH failed");
 
-        // `uname` is itself a builtin (tools/builtin/uname.rs), and builtins
-        // always win over PATH resolution (docs/LANGUAGE.md, "External
-        // Commands"), so this never reaches external dispatch — it
-        // deterministically reports the builtin's "kaish" identity.
-        let result = kernel.execute("uname").await.expect("execution failed");
-        eprintln!("uname result: {:?}", result);
-        assert_eq!(result.code, 0, "uname builtin always succeeds: {:?}", result);
+        // An absolute path skips builtin lookup, so this reaches external
+        // dispatch (`uname` would run the builtin).
+        let result = kernel.execute("/usr/bin/printf external-ok").await.expect("execution failed");
+        assert_eq!(result.code, 0, "{result:?}");
+        assert_eq!(result.text_out(), "external-ok");
     }
 
     #[tokio::test]
@@ -10143,8 +10141,6 @@ AFTER="yes"'"#)
 
     #[tokio::test]
     async fn test_background_job_basic() {
-        use std::time::Duration;
-
         let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
 
         // Run a simple background command, redirecting its output to a
@@ -10154,22 +10150,12 @@ AFTER="yes"'"#)
         assert!(result.ok(), "background command should succeed: {}", result.err);
         assert!(result.err.contains("[1]"), "announcement rides stderr: {:?}", result.err);
 
-        // Give the job time to complete
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        kernel.execute("wait %1").await.expect("wait failed");
 
         // Check job status
         let status = kernel.execute("cat /v/jobs/1/status").await.expect("status check failed");
         assert!(status.ok(), "status should succeed: {}", status.err);
-        // Genuine race, not a hedge of convenience: the fixed 100ms sleep above
-        // races the job's own completion (see grace_escalation_sigkills_term_
-        // trapping_child in cancellation_tests.rs for this suite's documented
-        // case of the same race flipping under CPU oversubscription), so
-        // "running" is a real, if rare, outcome here.
-        assert!(
-            status.text_out().contains("done:") || status.text_out().contains("running"),
-            "should have valid status: {}",
-            status.text_out()
-        );
+        assert_eq!(status.text_out().trim(), "done:0", "{}", status.text_out());
 
         // Check the redirected output
         let stdout = kernel.execute("cat /tmp/basic_out.txt").await.expect("output check failed");

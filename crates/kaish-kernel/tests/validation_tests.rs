@@ -327,18 +327,15 @@ async fn validation_passes_for_valid_seq() {
 #[tokio::test]
 async fn validation_accepts_glob_pattern_ls_star() {
     let kernel = make_kernel().await;
-    // `ls *.txt` parses and expands at runtime, so it never errors at the
-    // kernel level: a zero-match glob fails the COMMAND with exit code 1
-    // (docs/LANGUAGE.md, "Glob Expansion"), so `execute` always
-    // returns `Ok`, never `Err` — see test_bare_glob_no_matches_errors in
-    // kernel.rs for the pinned single-value case.
-    //
-    // `Kernel::transient()` runs with cwd = the real $HOME (kernel.rs
-    // `default_sandbox_root`), so whether any `*.txt` exists there is real,
-    // uncontrolled environment state this test does not own — kept as a
-    // genuine two-value hedge rather than picking one.
+    // `ls *.txt` parses and expands at runtime. In a directory with no match
+    // the command fails with exit 1 (docs/LANGUAGE.md, "Glob Expansion"),
+    // and `execute` returns `Ok`, not `Err`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cd = kernel.execute(&format!("cd {}", dir.path().display())).await.expect("cd");
+    assert!(cd.ok(), "cd into the empty directory must succeed: {cd:?}");
     let exec = kernel.execute("ls *.txt").await.expect("execute");
-    assert!(exec.code == 0 || exec.code == 1, "expected 0 (matched) or 1 (no matches): {exec:?}");
+    assert_eq!(exec.code, 1, "{exec:?}");
+    assert!(exec.err.contains("no matches"), "{exec:?}");
 }
 
 #[tokio::test]
