@@ -10,6 +10,10 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`Kernel::execute_background_with_options`** — embedders can start a parsed and validated whole kaish program on the existing `JobManager` without rewriting source or appending `&`. The returned `JobId` supports the existing wait, cancellation, and stream APIs; statement output is complete and ordered, and timeout/cancellation diagnostics reach stderr before it closes.
+
 ## [0.17.2] - 2026-09-09
 
 ### Fixed

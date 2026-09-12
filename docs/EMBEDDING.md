@@ -1441,6 +1441,26 @@ last kernel built wins for both. A hermetic kernel (`NoLocal`, or any
 that manager. Share a manager between kernels configured alike, or accept
 the last writer.
 
+### Whole-program asynchronous execution
+
+`Kernel::execute_background_with_options(source, options)` starts one complete
+kaish program and returns a `JobId` after parse and validation succeed. It uses
+the kernel's `JobManager`, so an embedder that builds a kernel per request
+supplies a shared manager with `KernelConfig::with_job_manager` first.
+
+```rust
+let id = kernel
+    .execute_background_with_options("echo first; long_task; echo last", ExecuteOptions::new())
+    .await?;
+let result = kernel.jobs().wait(id).await.expect("job remains tracked");
+```
+
+The job executes in a fork with the same options, tools, variables, cwd, and
+cancellation semantics as foreground execution. Its stdout and stderr streams
+preserve complete top-level statement output in order. A timeout or cancellation
+adds a terminal diagnostic to stderr before the stream closes. This API does
+not rewrite source or append `&`; existing `cmd &` behavior is unchanged.
+
 ### JobFs for Background Job Observability
 
 The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background

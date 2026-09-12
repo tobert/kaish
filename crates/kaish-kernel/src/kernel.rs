@@ -1449,7 +1449,20 @@ impl Kernel {
         cancel: tokio_util::sync::CancellationToken,
         job_id: crate::scheduler::JobId,
     ) -> Arc<Self> {
-        self.fork_inner(cancel, Some(job_id)).await
+        self.fork_for_background_with_output(cancel, job_id, true).await
+    }
+
+    /// Fork for a background job whose output is published by its caller at
+    /// statement boundaries instead of by each external child's drain task.
+    async fn fork_for_background_with_output(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+        job_id: crate::scheduler::JobId,
+        stream_external_output: bool,
+    ) -> Arc<Self> {
+        let fork = self.fork_inner(cancel, Some(job_id)).await;
+        fork.exec_ctx.write().await.background_stream_external_output = stream_external_output;
+        fork
     }
 
     /// Shared fork implementation. Caller decides the cancellation token and
@@ -1835,6 +1848,169 @@ impl Kernel {
         opts: ExecuteOptions,
     ) -> Result<ExecResult, KernelError> {
         self.run_inner(input, opts, None, None).await.map_err(classify_execute_error)
+    }
+
+    /// Start a complete kaish program as a background job.
+    ///
+    /// The source is parsed and validated before this returns a [`crate::scheduler::JobId`], so
+    /// a receipt always names a runnable program. The job runs in a detached
+    /// fork with the same source and [`ExecuteOptions`] semantics as
+    /// [`Self::execute_with_options`]: per-call variables, working directory,
+    /// tools, and cancellation all remain scoped to that execution.
+    ///
+    /// Output is added to the job streams after each top-level statement. This
+    /// preserves one ordered, complete stream for programs that mix builtins
+    /// and external commands. Shell `&` keeps its existing chunk-live external
+    /// output behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns a parse or validation rejection before registering a job.
+    pub async fn execute_background_with_options(
+        &self,
+        source: &str,
+        mut opts: ExecuteOptions,
+    ) -> Result<crate::scheduler::JobId, KernelError> {
+        // Fork before validation: user tools and scope are copied into a
+        // per-job kernel, so validating the parent would certify a different
+        // command surface from the one that will execute. No job is visible
+        // until this fork-local preflight has succeeded.
+        let preflight_fork = self.fork().await;
+        preflight_fork
+            .preflight_background_program(source)
+            .await
+            .map_err(classify_execute_error)?;
+
+        use tokio::sync::{mpsc, oneshot};
+
+        let (result_tx, result_rx) = oneshot::channel();
+        let job_id = self.jobs.register(source.to_owned(), result_rx).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.jobs.set_cancel_token(job_id, cancel.clone()).await;
+
+        // `run_inner` installs its own per-call cancellation token. Make the
+        // job token that token so `JobManager::cancel` reaches builtins as
+        // well as child process groups, and forward any embedder token into
+        // it without replacing the embedder's ownership.
+        let embedder_cancel = opts.cancel_token.take();
+        opts.cancel_token = Some(cancel.clone());
+
+        let fork = preflight_fork
+            .fork_for_background_with_output(cancel.clone(), job_id, false)
+            .await;
+        let jobs = self.jobs.clone();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<ExecResult>();
+
+        let output_jobs = jobs.clone();
+        let output_writer = tokio::spawn(crate::telemetry::bind_current_context(async move {
+            let Some(streams) = output_jobs.streams(job_id).await else {
+                return;
+            };
+            while let Some(output) = output_rx.recv().await {
+                match output.out_bytes() {
+                    Some(bytes) => streams.stdout.write(bytes).await,
+                    None => streams.stdout.write(output.text_out().as_bytes()).await,
+                }
+                streams.stderr.write(output.err.as_bytes()).await;
+            }
+        }));
+
+        let source = source.to_owned();
+        tokio::spawn(crate::telemetry::bind_current_context(async move {
+            let embedder_watcher = embedder_cancel.map(|embedder_cancel| {
+                let cancel = cancel.clone();
+                tokio::spawn(async move {
+                    embedder_cancel.cancelled().await;
+                    cancel.cancel();
+                })
+            });
+            let mut on_output = move |output: &ExecResult| {
+                // This channel is unbounded because the synchronous streaming
+                // callback cannot await a bounded receiver without either
+                // dropping output or blocking kaish execution.
+                if output_tx.send(output.clone()).is_err() {
+                    tracing::error!(job_id = %job_id, "background job output writer stopped before execution completed");
+                }
+            };
+            let mut result = match fork
+                .execute_with_options_streaming(&source, opts, &mut on_output)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => ExecResult::failure(1, error.to_string()),
+            };
+            drop(on_output);
+            if let Some(watcher) = embedder_watcher {
+                watcher.abort();
+            }
+            if let Err(error) = output_writer.await {
+                result.code = 1;
+                result.err.push_str(&ExecResult::terminate_diagnostic(format!(
+                    "background job output writer failed: {error}"
+                )));
+            }
+            // Statement callbacks already wrote their complete stderr. A
+            // watchdog/cancellation terminal result is not a statement, so
+            // append its own explicit stream diagnostic instead of asking
+            // finalize_streams to replay the aggregate result (which would
+            // duplicate earlier statement output).
+            let terminal = match result.code {
+                124 => Some("background job timed out\n"),
+                130 => Some("background job cancelled\n"),
+                _ => None,
+            };
+            if let Some(terminal) = terminal
+                && let Some(streams) = jobs.streams(job_id).await
+            {
+                streams.stderr.write(terminal.as_bytes()).await;
+            }
+            jobs.finalize_streams(job_id, &result).await;
+            let _ = result_tx.send(result);
+        }));
+
+        Ok(job_id)
+    }
+
+    /// Reject invalid background source before allocating a visible job.
+    async fn preflight_background_program(&self, input: &str) -> Result<()> {
+        let program = parse(input).map_err(|errors| {
+            let msg = errors
+                .iter()
+                .map(|error| error.format(input))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::Error::from(KernelError::Parse {
+                errors,
+                message: format!("parse error:\n{msg}"),
+            })
+        })?;
+
+        if self.skip_validation {
+            return Ok(());
+        }
+
+        let catalog = { self.exec_ctx.read().await.tool_schemas.clone() };
+        let user_tools = self.user_tools.read().await;
+        let validator = Validator::new(&self.tools, &user_tools, &catalog);
+        let issues = validator.validate(&program);
+        let errors: Vec<_> = issues
+            .iter()
+            .filter(|issue| issue.severity == Severity::Error)
+            .cloned()
+            .collect();
+        if errors.is_empty() {
+            return Ok(());
+        }
+
+        let message = errors
+            .iter()
+            .map(|error| error.format(input))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(anyhow::Error::from(KernelError::Validation {
+            issues: errors,
+            message: format!("validation failed:\n{message}"),
+        }))
     }
 
     /// Same as [`Self::execute_with_options`] but with a per-statement output
@@ -3213,6 +3389,7 @@ impl Kernel {
             kill_children_on_parent_death: ec.kill_children_on_parent_death,
             kill_grace: ec.kill_grace,
             background_job: ec.background_job,
+            background_stream_external_output: ec.background_stream_external_output,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -9962,6 +10139,134 @@ AFTER="yes"'"#)
         let stdout = kernel.execute("cat /tmp/basic_out.txt").await.expect("output check failed");
         assert!(stdout.ok());
         assert!(stdout.text_out().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn background_program_preflights_before_receipt() {
+        let kernel = Kernel::transient().expect("kernel");
+
+        let error = kernel
+            .execute_background_with_options("if then", ExecuteOptions::new())
+            .await
+            .expect_err("invalid source must not receive a job id");
+        assert!(matches!(error, KernelError::Parse { .. }), "unexpected error: {error}");
+        assert!(kernel.jobs.list().await.is_empty(), "rejected source must not register a job");
+    }
+
+    #[tokio::test]
+    async fn background_program_preserves_options_custom_tools_and_statement_output() {
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+
+        let jobs = Arc::new(JobManager::new());
+        let (mock, calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|name| Ok(ToolResult::success(format!("tool:{name}"))));
+        let kernel = Kernel::with_backend(
+            Arc::new(backend),
+            KernelConfig::isolated().with_job_manager(jobs.clone()),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        let id = kernel
+            .execute_background_with_options(
+                "echo before; embedder_tool; echo $WHO; pwd",
+                ExecuteOptions::new()
+                    .with_var("WHO", Value::String("Amy".to_owned()))
+                    .with_cwd(PathBuf::from("/workspace")),
+            )
+            .await
+            .expect("receipt");
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "background program failed: {result:?}");
+        assert_eq!(result.text_out(), "before\ntool:embedder_toolAmy\n/workspace");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "custom tool must run in the fork");
+        assert_eq!(
+            String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8"),
+            result.text_out(),
+            "statement output must be complete and must not duplicate custom-tool output"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_program_cancel_reaches_running_execution() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::repl().with_job_manager(jobs.clone())).expect("kernel");
+        let id = kernel
+            .execute_background_with_options("sleep 30; echo unreachable", ExecuteOptions::new())
+            .await
+            .expect("receipt");
+
+        assert!(jobs.cancel(id).await, "registered job needs a cancellation token");
+        let result = tokio::time::timeout(Duration::from_secs(5), jobs.wait(id))
+            .await
+            .expect("cancelled job did not settle")
+            .expect("job result");
+        assert_eq!(result.code, 130, "cancellation must report the normal cancellation code: {result:?}");
+        assert!(!result.text_out().contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn background_program_timeout_keeps_statement_stderr_and_terminal_diagnostic() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::repl().with_job_manager(jobs.clone())).expect("kernel");
+        let id = kernel
+            .execute_background_with_options(
+                "echo early >&2; sleep 30",
+                ExecuteOptions::new().with_timeout(Duration::from_millis(50)),
+            )
+            .await
+            .expect("receipt");
+        let result = tokio::time::timeout(Duration::from_secs(5), jobs.wait(id))
+            .await.expect("timed out job did not settle").expect("job result");
+        let stderr = String::from_utf8(jobs.read_stderr(id).await.expect("stderr stream")).expect("utf8");
+        assert!(result.err.contains("early"), "final result lost statement stderr: {result:?}");
+        assert!(stderr.contains("early"), "job stream lost statement stderr: {stderr:?}");
+        assert!(result.code == 124 || result.err.to_lowercase().contains("timeout"),
+            "timeout must survive in final result: {result:?}");
+        assert!(stderr.to_lowercase().contains("timeout") || stderr.contains("timed out"),
+            "job stream must retain terminal timeout diagnostic after statement stderr: {stderr:?}");
+    }
+
+    #[tokio::test]
+    async fn background_program_mixed_builtin_and_external_streams_once() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::repl().with_job_manager(jobs.clone())).expect("kernel");
+        let id = kernel
+            .execute_background_with_options(
+                "echo builtin-before; /usr/bin/printf 'external\\n'; echo builtin-after",
+                ExecuteOptions::new(),
+            )
+            .await
+            .expect("receipt");
+
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "background program failed: {result:?}");
+        let stream = String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8");
+        assert_eq!(stream, "builtin-before\nexternal\nbuiltin-after\n");
+        assert_eq!(stream, result.text_out(), "external tee must neither erase builtin output nor duplicate itself");
+    }
+
+    #[tokio::test]
+    async fn background_programs_share_an_embedder_job_manager_across_kernels() {
+        let jobs = Arc::new(JobManager::new());
+        let first = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone()))
+            .expect("first kernel");
+        let second = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone()))
+            .expect("second kernel");
+
+        let first_id = first
+            .execute_background_with_options("echo first", ExecuteOptions::new())
+            .await
+            .expect("first receipt");
+        let second_id = second
+            .execute_background_with_options("echo second", ExecuteOptions::new())
+            .await
+            .expect("second receipt");
+        assert_ne!(first_id, second_id, "the shared manager assigns one job namespace");
+        assert_eq!(jobs.wait(first_id).await.expect("first result").text_out(), "first\n");
+        assert_eq!(jobs.wait(second_id).await.expect("second result").text_out(), "second\n");
     }
 
     #[tokio::test]

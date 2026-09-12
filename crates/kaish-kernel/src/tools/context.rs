@@ -215,6 +215,10 @@ pub struct ExecContext {
     /// job for `kill -<sig> %N` and tees its output into the job's streams.
     /// `None` for foreground execution.
     pub background_job: Option<crate::scheduler::JobId>,
+    /// Whether external child output is copied directly into the background
+    /// job's streams. Shell `&` jobs use this for chunk-live output; the
+    /// whole-program background API writes complete statement results itself.
+    pub background_stream_external_output: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
@@ -441,6 +445,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_external_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -482,6 +487,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_external_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -520,6 +526,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_external_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -558,6 +565,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_external_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -599,6 +607,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_external_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -637,6 +646,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_external_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -933,6 +943,7 @@ impl ExecContext {
             kill_children_on_parent_death: self.kill_children_on_parent_death,
             kill_grace: self.kill_grace,
             background_job: self.background_job,
+            background_stream_external_output: self.background_stream_external_output,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
