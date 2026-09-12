@@ -74,6 +74,17 @@ fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat
     }
 }
 
+/// Whether a stage's redirects send its stdout away from its pipeline
+/// position: to a file (`>`, `>>`, `&>`) or to stderr (`>&2`).
+fn redirects_stdout(stage: &PipelineStage) -> bool {
+    stage.redirects().iter().any(|redirect| {
+        matches!(
+            redirect.kind,
+            RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend | RedirectKind::Both | RedirectKind::MergeStdout
+        )
+    })
+}
+
 /// Apply redirects to an execution result.
 ///
 /// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
@@ -590,11 +601,18 @@ impl PipelineRunner {
         // Set pipeline position for stdio inheritance decisions
         ctx.pipeline_position = PipelinePosition::Only;
 
+        // A redirected stdout goes to its target, not to a job's stream.
+        let stream_output = ctx.background_stream_output;
+        if redirects_stdout(stage) {
+            ctx.background_stream_output = false;
+        }
+
         // Execute via dispatcher (full resolution chain)
         let result = match dispatch_stage(stage, ctx, dispatcher).await {
             Ok(result) => result,
             Err(e) => ExecResult::failure(1, e.to_string()),
         };
+        ctx.background_stream_output = stream_output;
 
         // Apply post-execution redirects
         apply_redirects(result, stage.redirects(), ctx, dispatcher).await
@@ -739,6 +757,11 @@ impl PipelineRunner {
                 // here raced the producer's post-dispatch send and silently
                 // dropped structured data (`seq 1 3 | jq .` → text → parse error).
                 stage_ctx.stdin_data_rx = data_receiver;
+
+                // A redirected stdout goes to its target, not to a job's stream.
+                if redirects_stdout(&stage) {
+                    stage_ctx.background_stream_output = false;
+                }
 
                 // Execute the stage
                 let mut result = match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {

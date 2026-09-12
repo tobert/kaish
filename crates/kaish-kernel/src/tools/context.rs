@@ -215,10 +215,12 @@ pub struct ExecContext {
     /// job for `kill -<sig> %N` and tees its output into the job's streams.
     /// `None` for foreground execution.
     pub background_job: Option<crate::scheduler::JobId>,
-    /// Whether external child output is copied directly into the background
-    /// job's streams. Shell `&` jobs use this for chunk-live output; the
-    /// whole-program background API writes complete statement results itself.
-    pub background_stream_external_output: bool,
+    /// Whether this command's stdout is its background job's stdout, so its
+    /// output is published to the job's stream: an external per chunk, a
+    /// builtin when it returns. False inside `$(...)`, under a stdout
+    /// redirect, in a scatter worker, and for whole-program jobs, which
+    /// publish complete statement results themselves.
+    pub background_stream_output: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
@@ -421,6 +423,27 @@ fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
 }
 
 impl ExecContext {
+    /// Publish `result`'s stdout to this context's background job, when that
+    /// stdout is the job's stdout. For output built outside a dispatched
+    /// command, such as gather's rows; a dispatched command publishes its own.
+    pub(crate) async fn publish_job_stdout(&self, result: &ExecResult) {
+        let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
+            self.background_job,
+            self.background_stream_output,
+            self.pipeline_position,
+            self.job_manager.as_ref(),
+        ) else {
+            return;
+        };
+        let Some(streams) = jobs.streams(job_id).await else {
+            return;
+        };
+        match result.out_bytes() {
+            Some(bytes) => streams.stdout.write(bytes).await,
+            None => streams.stdout.write(result.text_out().as_bytes()).await,
+        }
+    }
+
     /// Create a new execution context with a VFS (uses LocalBackend without tools).
     ///
     /// This constructor is for backward compatibility and tests that don't need tool dispatch.
@@ -445,7 +468,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
-            background_stream_external_output: false,
+            background_stream_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -487,7 +510,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
-            background_stream_external_output: false,
+            background_stream_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -526,7 +549,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
-            background_stream_external_output: false,
+            background_stream_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -565,7 +588,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
-            background_stream_external_output: false,
+            background_stream_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -607,7 +630,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
-            background_stream_external_output: false,
+            background_stream_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -646,7 +669,7 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
-            background_stream_external_output: false,
+            background_stream_output: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -943,7 +966,7 @@ impl ExecContext {
             kill_children_on_parent_death: self.kill_children_on_parent_death,
             kill_grace: self.kill_grace,
             background_job: self.background_job,
-            background_stream_external_output: self.background_stream_external_output,
+            background_stream_output: self.background_stream_output,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
