@@ -28,7 +28,7 @@ use jaq_std::ValT as _;
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::get_path_string;
-use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Native jq tool using jaq (pure Rust jq implementation).
@@ -516,9 +516,7 @@ impl Tool for JqNative {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         let argv = match args.to_argv() {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("jq: {e}")),

@@ -10,7 +10,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{value_to_string, ExecResult};
-use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 
 /// Random tool: print one random integer, uniformly, from a range.
 pub struct Random;
@@ -59,9 +59,7 @@ impl Tool for Random {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
 
         // No positional args; curate the error before clap ever sees one.
         if let Some(v) = args.positional.first() {
@@ -157,6 +155,7 @@ fn map_draw_to_range(draw: u64, min: i64, max: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ExecContext;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

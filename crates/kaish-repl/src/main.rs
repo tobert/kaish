@@ -234,9 +234,11 @@ fn run() -> Result<ExitCode> {
 /// Print `source`'s statement plans as JSON and exit — command analysis for
 /// a consumer that is not written in Rust.
 ///
-/// Nothing executes and no kernel is built: `plan_program` is a pure function
-/// of the source text, so this touches no filesystem and needs no capability.
-/// `--overlay` is therefore irrelevant here and is ignored.
+/// Nothing executes and no kernel is built. `plan_program` is a pure function
+/// of the source text, and the validation pass builds only a registry of the
+/// compiled-in builtins to read their schemas, so this still touches no
+/// filesystem and needs no capability. `--overlay` is therefore irrelevant
+/// here and is ignored.
 ///
 /// The output is always a JSON object, so a caller parses one shape whatever
 /// happened: `{"statements": [...]}` and exit 0, or `{"errors": [...]}` and
@@ -254,6 +256,13 @@ fn print_plan(source: Option<String>) -> ExitCode {
     };
     match kaish_kernel::plan_program(&source) {
         Ok(statements) => {
+            // A plan that parses can still be a program the kernel refuses.
+            // Reporting it as a clean plan makes the dry run worse than
+            // useless — the caller commits to a command that cannot run.
+            let refusals = plan_validation_errors(&source);
+            if !refusals.is_empty() {
+                return print_plan_errors(refusals);
+            }
             let doc = serde_json::json!({
                 "statements": statements,
                 "kaish_version": kaish_kernel::KAISH_VERSION,
@@ -263,8 +272,8 @@ fn print_plan(source: Option<String>) -> ExitCode {
             println!("{doc}");
             ExitCode::SUCCESS
         }
-        Err(errors) => {
-            let errors: Vec<_> = errors
+        Err(errors) => print_plan_errors(
+            errors
                 .iter()
                 .map(|e| {
                     serde_json::json!({
@@ -273,18 +282,54 @@ fn print_plan(source: Option<String>) -> ExitCode {
                         "end": e.span.end,
                     })
                 })
-                .collect();
-            let doc = serde_json::json!({
-                "errors": errors,
-                "kaish_version": kaish_kernel::KAISH_VERSION,
-                "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
-                "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
-            });
-            println!("{doc}");
-            // 2 is the usage/parse code, matching a builtin's argv rejection.
-            ExitCode::from(2)
-        }
+                .collect(),
+        ),
     }
+}
+
+/// The validator's errors for `source`, as plan-error JSON objects.
+///
+/// Warnings are left out: the kernel filters validation to `Error` before it
+/// refuses a program, so anything else would report a plan as unrunnable that
+/// the kernel would have run. A source that does not parse returns nothing —
+/// the caller is already reporting the parse failure.
+fn plan_validation_errors(source: &str) -> Vec<serde_json::Value> {
+    use kaish_kernel::validator::Severity;
+
+    let Ok(issues) = kaish_kernel::validator::validate_program(source) else {
+        return Vec::new();
+    };
+    issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .map(|issue| {
+            let mut object = serde_json::Map::new();
+            object.insert("message".into(), issue.message.clone().into());
+            if let Some(span) = &issue.span {
+                object.insert("start".into(), span.start.into());
+                object.insert("end".into(), span.end.into());
+            }
+            // The suggestion is the fix the caller acts on; dropping it here
+            // would hand back a refusal with no way forward.
+            if let Some(suggestion) = &issue.suggestion {
+                object.insert("suggestion".into(), suggestion.clone().into());
+            }
+            serde_json::Value::Object(object)
+        })
+        .collect()
+}
+
+/// Emit the `{"errors": [...]}` document and the rejection exit code.
+fn print_plan_errors(errors: Vec<serde_json::Value>) -> ExitCode {
+    let doc = serde_json::json!({
+        "errors": errors,
+        "kaish_version": kaish_kernel::KAISH_VERSION,
+        "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
+        "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
+    });
+    println!("{doc}");
+    // 2 is the usage/parse code, matching a builtin's argv rejection.
+    ExitCode::from(REJECTED)
 }
 
 /// Report a plan failure that has no position in a source — a missing
@@ -299,7 +344,7 @@ fn print_plan_error(message: &str) -> ExitCode {
         "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
     });
     println!("{doc}");
-    ExitCode::from(2)
+    ExitCode::from(REJECTED)
 }
 
 /// Read plan source from `path`, or from stdin when `path` is `-`.
@@ -331,7 +376,9 @@ Options:
                                and each heredoc body with its byte offset.
                                Executes nothing and touches no filesystem.
                                Prints {{"statements": [...]}} and exits 0, or
-                               {{"errors": [...]}} and exits 2. Both carry
+                               {{"errors": [...]}} and exits 2 for a program
+                               kaish would refuse to run, whether it failed to
+                               parse or failed validation. Both carry
                                kaish_version, kaish_git_hash, and
                                kaish_build_date at the top level, so a
                                caller can window results by build without
@@ -379,7 +426,7 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     // execution-error wrapper.
     if let Some(diagnostic) = kaish_repl::format_parse_error(&source) {
         eprintln!("{diagnostic}");
-        return Ok(ExitCode::FAILURE);
+        return Ok(ExitCode::from(REJECTED));
     }
 
     // Non-interactive: pipe stdout so command substitution captures output.
@@ -403,7 +450,11 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
             // `main` would prefix `Error:` and split the chain under
             // `Caused by:`, which is the noise this path exists to avoid.
             eprintln!("{e:#}");
-            return Ok(ExitCode::FAILURE);
+            return Ok(if is_rejection(&e) {
+                ExitCode::from(REJECTED)
+            } else {
+                ExitCode::FAILURE
+            });
         }
     };
 
@@ -411,6 +462,28 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::from(result.code as u8))
+    }
+}
+
+/// The exit code for a program kaish refused to run.
+///
+/// A lex, parse, or validation failure means no statement executed. That is
+/// the same class of mistake a builtin reports with 2 for bad argv, and
+/// `kaish --plan` already exits 2 for it, so `-c` and a script file use 2 as
+/// well. The alternative, 1, is a *result* in `grep`, `test`, `cmp`, and
+/// `diff` — a caller branching on it cannot tell "found nothing" from "never
+/// ran".
+const REJECTED: u8 = 2;
+
+/// True when the kernel refused the program outright rather than failing
+/// partway through running it.
+fn is_rejection(error: &anyhow::Error) -> bool {
+    use kaish_client::ClientError;
+    match error.downcast_ref::<ClientError>() {
+        Some(ClientError::Kernel(kernel_error)) => kernel_error.is_rejected(),
+        // Any other client error reached us after dispatch began, or never
+        // reached the kernel at all; neither is a rejection.
+        _ => false,
     }
 }
 
@@ -425,7 +498,7 @@ fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     // execution-error wrapper.
     if let Some(diagnostic) = kaish_repl::format_parse_error(cmd) {
         eprintln!("{diagnostic}");
-        return Ok(ExitCode::FAILURE);
+        return Ok(ExitCode::from(REJECTED));
     }
 
     // Non-interactive: pipe stdout so command substitution captures output.
@@ -445,7 +518,11 @@ fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
         Err(e) => {
             // See `run_script`: the diagnostic is the message, printed as-is.
             eprintln!("{e:#}");
-            return Ok(ExitCode::FAILURE);
+            return Ok(if is_rejection(&e) {
+                ExitCode::from(REJECTED)
+            } else {
+                ExitCode::FAILURE
+            });
         }
     };
 

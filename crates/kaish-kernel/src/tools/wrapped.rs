@@ -52,7 +52,7 @@ use kaish_tool_api::{IssueCode, ValidationIssue};
 use crate::spawn::{
     hermetic_env, spawn_process, OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy,
 };
-use crate::tools::{virtual_cwd_error, ExecContext, Tool, ToolCtx};
+use crate::tools::{exec_context, virtual_cwd_error, ExecContext, Tool, ToolCtx};
 
 pub use declaration::{find_executable, Flag, Positional, Stdin, Style, Tail, Verb, WrappedCommand};
 pub use error::WrappedError;
@@ -340,9 +340,7 @@ impl Tool for WrappedTool {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         self.run(args, ctx).await
     }
 }

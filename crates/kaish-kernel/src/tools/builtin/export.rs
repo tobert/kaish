@@ -14,7 +14,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::ValidationIssue;
 
 /// Export tool: marks variables for export to child processes.
@@ -79,9 +79,7 @@ impl Tool for Export {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
-            return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
-        };
+        let ctx = exec_context(ctx);
         // For export, args.named carries user-defined VAR=value pairs that
         // clap can't know about. Synthesise an argv with just flags so clap
         // parses `-p` / `--json` cleanly; we read VAR=value off args.named

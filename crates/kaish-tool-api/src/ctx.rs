@@ -55,8 +55,25 @@ impl PatientGuard {
 ///
 /// `#[async_trait]` desugars the `async fn`s below into boxed futures; every
 /// already-synchronous method is untouched.
+/// Restricts `ToolCtx` to the kernel's own execution context.
+///
+/// A tool author *receives* a `ToolCtx`; nobody outside the kernel implements
+/// one. Sealing says so in the type system, and the kernel's builtins depend
+/// on it: each one narrows the `&mut dyn ToolCtx` it is handed back to the
+/// concrete `ExecContext` it needs for pipes, jobs, and the dispatcher. With
+/// exactly one implementor that narrowing cannot fail, which is what lets it
+/// assert instead of inventing an exit code for a case that cannot happen.
+///
+/// `#[doc(hidden)]`: reachable for the kernel's own `impl`, kept off the
+/// documented surface so it never reads as an extension point.
+#[doc(hidden)]
+pub mod sealed {
+    /// Implemented only by the kernel's `ExecContext`.
+    pub trait Sealed {}
+}
+
 #[async_trait]
-pub trait ToolCtx: Send + Sync {
+pub trait ToolCtx: sealed::Sealed + Send + Sync {
     /// The backend for file I/O and tool dispatch.
     ///
     /// Tools reach the VFS (and re-dispatch other tools) through this handle.

@@ -1304,6 +1304,37 @@ source utils.kai                # load utilities
 . config.kai                    # dot notation also works
 ```
 
+## Exit Codes
+
+```sh
+grep pat file.txt               # 0 matched · 1 no match · 2 could not search
+kaish -c 'grep "[cast:" f'      # 2 — the program was refused, nothing ran
+```
+
+`0` is success. Past that, kaish keeps one rule: **exit 1 is a result, exit 2 is
+a mistake.**
+
+A builtin that answers a question spends `1` on the negative answer and nothing
+else. `grep` exits 1 only when it searched and matched nothing; `test` exits 1
+only when the condition was false; `cmp` and `diff` exit 1 only when the inputs
+differ. In those builtins every error — an unreadable file, a missing operand, a
+pattern that does not compile — exits `2`, so a caller branching on 1 never
+reads a broken command as a negative answer.
+
+A builtin where `1` is free keeps the familiar split: `2` for a usage error,
+`1` for an operational failure. `cat missing.txt` exits 1.
+
+A whole program kaish refuses exits `2`. A lex, parse, or validation failure
+means no statement ran, which is the same class of mistake as bad argv:
+
+```sh
+kaish -c 'if'                   # 2 — parse error
+kaish --plan 'if'               # 2 — the same source, the same code
+```
+
+`124` (timeout) and `123` (a scatter worker failed) are the documented
+exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".
+
 ## Background Jobs
 
 ```sh
