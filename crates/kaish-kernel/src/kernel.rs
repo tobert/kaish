@@ -3305,7 +3305,11 @@ impl Kernel {
                 let result = match self.eval_arithmetic_async(expr_str).await {
                     Ok(n) if n != 0 => ExecResult::success(""),
                     Ok(_) => ExecResult::failure(1, ""),
-                    Err(e) => ExecResult::failure(2, e.to_string()).into_fault(),
+                    // Same fix as the `Stmt::Test` arm above: `e` is the
+                    // evaluator's `anyhow::Error`, and a `$(...)` operand that
+                    // faults (e.g. `(( $(x=$((1/0))) ))`) carries a real cause
+                    // chain. `e.to_string()` showed only the outermost frame.
+                    Err(e) => ExecResult::failure(2, format!("{e:#}")).into_fault(),
                 };
                 self.update_last_result(&result).await;
                 if !result.ok() {
