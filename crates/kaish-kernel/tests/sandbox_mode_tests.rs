@@ -285,7 +285,7 @@ async fn sandbox_diff() {
         .await.expect("execute failed");
     // diff returns exit code 1 when files differ
     assert_eq!(r.code, 1);
-    assert!(r.text_out().contains("a") || r.text_out().contains("b"));
+    assert_eq!(r.text_out(), "--- /tmp/a.txt\n+++ /tmp/b.txt\n@@ -1 +1 @@\n-a\n+b\n");
 }
 
 #[tokio::test]

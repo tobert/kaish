@@ -8421,12 +8421,13 @@ mod tests {
         // Set PATH in kernel to ensure it's available
         kernel.execute(&format!(r#"PATH="{}""#, path_var)).await.expect("set PATH failed");
 
-        // Now try an external command like /usr/bin/env
-        // But env is also a builtin... let's try uname
+        // `uname` is itself a builtin (tools/builtin/uname.rs), and builtins
+        // always win over PATH resolution (docs/LANGUAGE.md, "External
+        // Commands"), so this never reaches external dispatch — it
+        // deterministically reports the builtin's "kaish" identity.
         let result = kernel.execute("uname").await.expect("execution failed");
         eprintln!("uname result: {:?}", result);
-        // uname should succeed if external commands work
-        assert!(result.ok() || result.code == 127, "uname: {:?}", result);
+        assert_eq!(result.code, 0, "uname builtin always succeeds: {:?}", result);
     }
 
     #[tokio::test]
@@ -10159,6 +10160,11 @@ AFTER="yes"'"#)
         // Check job status
         let status = kernel.execute("cat /v/jobs/1/status").await.expect("status check failed");
         assert!(status.ok(), "status should succeed: {}", status.err);
+        // Genuine race, not a hedge of convenience: the fixed 100ms sleep above
+        // races the job's own completion (see grace_escalation_sigkills_term_
+        // trapping_child in cancellation_tests.rs for this suite's documented
+        // case of the same race flipping under CPU oversubscription), so
+        // "running" is a real, if rare, outcome here.
         assert!(
             status.text_out().contains("done:") || status.text_out().contains("running"),
             "should have valid status: {}",
@@ -10457,17 +10463,13 @@ AFTER="yes"'"#)
     async fn test_bare_glob_no_matches_errors() {
         let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
-        let result = kernel.execute("echo *.nonexistent").await;
-        match &result {
-            Ok(exec) => {
-                // No-match glob should produce a non-zero exit code
-                assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
-                assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
-            }
-            Err(e) => {
-                assert!(e.to_string().contains("no matches"), "error should say no matches: {}", e);
-            }
-        }
+        // docs/LANGUAGE.md, "Glob Expansion": a zero-match glob fails the
+        // COMMAND with exit code 1 rather than passing the literal pattern
+        // through — it is not a kernel-level error, so `execute` returns `Ok`
+        // with a failed `ExecResult`, never `Err`.
+        let exec = kernel.execute("echo *.nonexistent").await.expect("execute");
+        assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
+        assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
     }
 
     #[tokio::test]

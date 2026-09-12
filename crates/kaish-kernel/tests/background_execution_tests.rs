@@ -333,11 +333,9 @@ async fn test_failed_background_job_status() {
     kernel.execute("false &").await.unwrap();
 
     let status = wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
-    assert!(
-        status.starts_with("failed:") || status == "done:1",
-        "expected failed status, got: {}",
-        status
-    );
+    // job.rs status_string(): a non-ok, non-killed job is always "failed:{code}";
+    // "done:{n}" only occurs for n == 0 (the ok() branch), so "done:1" is dead.
+    assert_eq!(status, "failed:1", "expected failed:1, got: {}", status);
 }
 
 /// GH #212: `execute_background` must apply the same spill/exit-3 contract
@@ -381,12 +379,8 @@ async fn test_pipeline_in_background() {
 
     let result = kernel.execute("cat /tmp/pipeline_out.txt").await.unwrap();
     assert!(result.ok(), "cat failed: {}", result.err);
-    // wc -l should output "3"
-    assert!(
-        result.text_out().trim() == "3" || result.text_out().contains("3"),
-        "expected 3 lines, got: {}",
-        result.text_out()
-    );
+    // wc -l is the bare count + newline (see wc_lines_is_bare_number_with_newline).
+    assert_eq!(result.text_out(), "3\n", "expected 3 lines, got: {:?}", result.text_out());
 }
 
 // ============================================================================
