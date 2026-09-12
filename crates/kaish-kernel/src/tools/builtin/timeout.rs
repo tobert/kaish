@@ -174,9 +174,6 @@ impl Tool for Timeout {
                 }
                 result
             }
-            // `e` is the re-dispatched command's `anyhow::Error` — a fault
-            // inside it (e.g. a user tool body's `x=$((1/0))`) carries a real
-            // cause chain. `{:#}` walks it; `{}` showed only the outer frame.
             Err(e) => ExecResult::failure(1, format!("timeout: {e:#}")),
         }
     }

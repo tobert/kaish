@@ -253,10 +253,6 @@ async fn eval_redirect_target(
     if let Expr::NumericLiteral { raw, .. } = expr {
         return Ok(raw.clone());
     }
-    // `e` here is the dispatch chain's `anyhow::Error` (`Kernel::eval_expr`
-    // runs the full async evaluator, including `$(...)`), so a nested fault
-    // (`> $(x=$((1/0)))`) carries a real cause chain. `{:#}` walks it instead
-    // of `to_string()`'s outermost-frame-only Display.
     let value = dispatcher
         .eval_expr(expr, ctx)
         .await
