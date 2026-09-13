@@ -31,6 +31,10 @@ breaking entries are marked **BREAKING**.
 - A runtime fault keeps the output that ran before it. `echo left &&
   x=$((1/0))` shows `left`, and a function that faults exits 1 with what it
   printed and the full cause instead of only the outermost message.
+- A background job's stdout stream (`/v/jobs/N/stdout`) now holds only the
+  job's own output, in order: builtin output is published when each builtin
+  returns, and output captured by `$(...)`, redirected with `>`, or read by
+  `scatter` no longer appears in it.
 - `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
   unreadable file, or a missing pattern argument exits 2, so a caller cannot
   read a broken search as a negative answer. `diff` argument errors exit 2 to

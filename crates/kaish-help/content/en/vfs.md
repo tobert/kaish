@@ -45,11 +45,12 @@ jobs --cleanup             # remove completed jobs
 ```
 
 `stdout` and `stderr` fill as an external command emits. A builtin does not
-stream: it returns its whole output when it finishes, so `echo hi &` fills
-the node in one write at the end — and so does `cargo build | tee log &`,
-because `tee` is a builtin. Drop the `| tee`; the job's stream is the log.
-Only the last stage of a pipeline reaches `stdout` (an earlier stage's output
-is the next stage's stdin); `stderr` takes every stage's.
+stream: it writes its whole output when it returns, so `echo hi &` fills the
+node in one write — and so does `cargo build | tee log &`, because `tee` is a
+builtin. Drop the `| tee`; the job's stream is the log.
+Only the job's own output reaches `stdout`. An earlier pipeline stage's
+output, `$(...)` output, a redirected stdout, and a scatter worker's output do
+not. `stderr` takes every stage's.
 
 Each node holds at most 10MB and evicts its oldest bytes past that. Redirect
 to a file (`cargo build > /tmp/build.log 2>&1 &`) when the whole output

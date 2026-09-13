@@ -172,7 +172,10 @@ impl ScatterGatherRunner {
             };
             (text, data)
         } else {
+            // The stages before `scatter` produce its input, not job output.
+            let stream_output = std::mem::replace(&mut ctx.background_stream_output, false);
             let mut result = runner.run_sequential(pre_scatter, ctx, &*self.sequential_dispatcher).await;
+            ctx.background_stream_output = stream_output;
             // GH #250: `run_sequential` never applies the output-limit spill
             // check or the `did_spill` -> exit-3 remap
             // (`output_limit::apply_spill_contract`) — that seam only
@@ -233,6 +236,9 @@ impl ScatterGatherRunner {
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.
         if post_gather.is_empty() || gathered.code != 0 {
+            // gather's rows are built here rather than by a dispatched
+            // command, so nothing else publishes them to a job stream.
+            ctx.publish_job_stdout(&gathered).await;
             gathered
         } else {
             ctx.set_stdin_with_data(
@@ -293,6 +299,8 @@ impl ScatterGatherRunner {
             // `'static`), so the child MUST be built here and MOVED into the
             // spawn — it cannot be constructed inside the closure.
             let mut worker_ctx = base_ctx.child_for_pipeline();
+            // A worker's stdout is gather's input, not job output.
+            worker_ctx.background_stream_output = false;
             // Per-worker TYPED binding — the same json→Value conversion the
             // for-loop uses for `$(cmd)` items (GH #73), so a record element
             // subscripts as `${ITEM[k]}`.

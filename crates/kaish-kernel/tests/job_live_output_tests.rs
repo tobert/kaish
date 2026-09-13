@@ -297,3 +297,64 @@ async fn reading_an_unknown_job_is_none() {
     assert!(kernel.jobs().read_stdout(JobId(99)).await.is_none());
     assert!(kernel.jobs().read_stderr(JobId(99)).await.is_none());
 }
+
+// ── Routing: only output that is the job's own stdout reaches the stream ──
+//
+// The live tee decides at spawn time, before a capture or redirect takes the
+// bytes, and the completion write fills a stream only when nothing streamed.
+// Each case below mixes a builtin with an external, or gives the external's
+// output a destination other than the job's stdout.
+
+/// Run `program` as job 1 to completion and return its stdout stream.
+async fn job_stdout(kernel: &Kernel, program: &str) -> String {
+    kernel.execute(program).await.expect("spawn failed");
+    let id = JobId(1);
+    assert_eq!(wait_done(kernel, id).await, "done:0");
+    stdout_of(kernel, id).await
+}
+
+#[tokio::test]
+async fn builtin_and_external_output_both_reach_the_stream_in_order() {
+    let kernel = kernel();
+    let out = job_stdout(
+        &kernel,
+        "if true; then echo builtin-a; sh -c 'echo external-b'; echo builtin-c; fi &",
+    )
+    .await;
+    assert_eq!(out, "builtin-a\nexternal-b\nbuiltin-c\n");
+}
+
+#[tokio::test]
+async fn captured_external_output_is_not_job_output() {
+    let kernel = kernel();
+    let out = job_stdout(
+        &kernel,
+        "if true; then x=$(sh -c 'echo captured'); echo \"got $x\"; fi &",
+    )
+    .await;
+    assert_eq!(out, "got captured\n");
+}
+
+#[tokio::test]
+async fn redirected_external_output_is_not_job_output() {
+    let kernel = kernel();
+    let path = std::env::temp_dir().join(format!("kaish-job-redirect-{}.txt", std::process::id()));
+    let program = format!(
+        "if true; then sh -c 'echo to-file' > {}; echo after; fi &",
+        path.display()
+    );
+    let out = job_stdout(&kernel, &program).await;
+    let written = std::fs::read_to_string(&path).expect("redirect target written");
+    std::fs::remove_file(&path).expect("remove redirect target");
+    assert_eq!(written, "to-file\n", "the redirect must still receive the bytes");
+    assert_eq!(out, "after\n");
+}
+
+#[tokio::test]
+async fn scatter_worker_output_is_not_job_output() {
+    let kernel = kernel();
+    let out = job_stdout(&kernel, "seq 1 2 | scatter | sh -c 'echo worker' | gather &").await;
+    assert!(!out.lines().any(|line| line == "worker"), "a worker's raw stdout leaked: {out:?}");
+    assert_eq!(out.lines().count(), 2, "one gather record per worker: {out:?}");
+    assert!(out.contains("\"out\":\"worker\""), "gather's records must reach the stream: {out:?}");
+}

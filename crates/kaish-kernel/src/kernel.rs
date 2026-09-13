@@ -1450,7 +1450,7 @@ impl Kernel {
         job_id: crate::scheduler::JobId,
     ) -> Arc<Self> {
         let fork = self.fork_inner(cancel, Some(job_id)).await;
-        fork.exec_ctx.write().await.background_stream_external_output = true;
+        fork.exec_ctx.write().await.background_stream_output = true;
         fork
     }
 
@@ -1893,11 +1893,11 @@ impl Kernel {
         let job_id = self.jobs.register(source.to_owned(), result_rx).await;
         self.jobs.set_cancel_token(job_id, cancel.clone()).await;
         {
-            // This job publishes whole statement results below; a child's
-            // drain task teeing the same bytes would write them twice.
+            // This job publishes whole statement results below; a command
+            // publishing the same bytes as it runs would write them twice.
             let mut ec = fork.exec_ctx.write().await;
             ec.background_job = Some(job_id);
-            ec.background_stream_external_output = false;
+            ec.background_stream_output = false;
         }
 
         // The job token is this call's cancel input, so `JobManager::cancel`
@@ -3469,7 +3469,7 @@ impl Kernel {
             kill_children_on_parent_death: ec.kill_children_on_parent_death,
             kill_grace: ec.kill_grace,
             background_job: ec.background_job,
-            background_stream_external_output: ec.background_stream_external_output,
+            background_stream_output: ec.background_stream_output,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -4074,6 +4074,20 @@ impl Kernel {
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
         GlobalFlags::apply_from_args(&tool_args, raw_argv, &mut *ctx);
 
+        // A builtin's output is a value until it returns. When that output is
+        // its job's stdout, it is published after `--json` is applied below.
+        // A builtin that re-dispatched (`timeout`) publishes nothing if the
+        // command it ran already reached the stream.
+        let job_stdout = match (ctx.background_job, ctx.background_stream_output, ctx.pipeline_position) {
+            (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last) => {
+                self.jobs.streams(job_id).await.map(|streams| streams.stdout)
+            }
+            _ => None,
+        };
+        let written_before = match &job_stdout {
+            Some(stdout) => stdout.stats().await.total_written,
+            None => 0,
+        };
         let mut result = tool.execute(tool_args, &mut *ctx).await;
         // A command substitution binds `.data` only when it is the result's
         // VALUE. `--json` and the pipeline sideband read `.data` either way,
@@ -4140,6 +4154,14 @@ impl Kernel {
         // tool owns its own output (renders --json itself), in which case we
         // leave its bytes untouched.
         let result = finalize_output(result, ctx.output_format, owns_output);
+        if let Some(stdout) = job_stdout
+            && stdout.stats().await.total_written == written_before
+        {
+            match result.out_bytes() {
+                Some(bytes) => stdout.write(bytes).await,
+                None => stdout.write(result.text_out().as_bytes()).await,
+            }
+        }
 
         Ok(result)
     }
@@ -5187,6 +5209,10 @@ impl Kernel {
 
     async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
         let _depth = self.enter_recursion("command substitution")?;
+        // Captured output is a value, not job output: nothing inside publishes
+        // to a job stream. Restored on every exit from the block below.
+        let stream_output = std::mem::replace(&mut self.exec_ctx.write().await.background_stream_output, false);
+        let outcome: Result<ExecResult> = async {
         // Accumulate stdout as raw bytes so a binary-producing statement
         // (`$(dd …)`, `$(base64 -d …)`) isn't lossy-decoded here before the
         // caller can preserve it. The final result is text iff valid UTF-8.
@@ -5258,6 +5284,10 @@ impl Kernel {
         result.data_is_value = last_data.is_some();
         result.data = last_data;
         Ok(result)
+        }
+        .await;
+        self.exec_ctx.write().await.background_stream_output = stream_output;
+        outcome
     }
 
     /// Evaluate `$(( text ))`'s content. Takes the sync fast path
@@ -6412,6 +6442,8 @@ impl Kernel {
         }
 
         // 1. Sync ctx → self internals
+        // The stream flag is per dispatch; the kernel's own value returns after.
+        let saved_stream_output;
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -6435,6 +6467,14 @@ impl Kernel {
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
             ec.pipeline_position = ctx.pipeline_position;
+            // A command nested in this dispatch runs as its own single-command
+            // pipeline (`Only`), so the flag, not its position, carries whether
+            // this stage's stdout is the job's stdout.
+            saved_stream_output = std::mem::replace(
+                &mut ec.background_stream_output,
+                ctx.background_stream_output
+                    && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
+            );
             ec.cancel = ctx.cancel.clone();
             ec.watchdog = ctx.watchdog.clone();
         }
@@ -6445,7 +6485,9 @@ impl Kernel {
         // the same boundary bash draws by running each stage in a subshell.
         // Whatever output the statement produced before the signal still comes
         // back and still reaches the pipe.
-        let result = match self.execute_stmt_flow(stmt).await? {
+        let flow = self.execute_stmt_flow(stmt).await;
+        self.exec_ctx.write().await.background_stream_output = saved_stream_output;
+        let result = match flow? {
             ControlFlow::Normal(result)
             | ControlFlow::Break { result, .. }
             | ControlFlow::Continue { result, .. }
@@ -6497,6 +6539,8 @@ impl Kernel {
         }
 
         // 1. Sync ctx → self internals
+        // The stream flag is per dispatch; the kernel's own value returns after.
+        let saved_stream_output;
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -6526,6 +6570,14 @@ impl Kernel {
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
             ec.pipeline_position = ctx.pipeline_position;
+            // A command nested in this dispatch runs as its own single-command
+            // pipeline (`Only`), so the flag, not its position, carries whether
+            // this stage's stdout is the job's stdout.
+            saved_stream_output = std::mem::replace(
+                &mut ec.background_stream_output,
+                ctx.background_stream_output
+                    && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
+            );
             // Sync the cancel token from ctx → ec. Builtins like `timeout`
             // swap ctx.cancel to a derived child token before re-dispatching;
             // execute_command's snapshot reads ec.cancel (kept aligned by
@@ -6538,7 +6590,9 @@ impl Kernel {
         }
 
         // 2. Execute via the full dispatch chain
-        let result = self.execute_command(&cmd.name, &cmd.args).await?;
+        let result = self.execute_command(&cmd.name, &cmd.args).await;
+        self.exec_ctx.write().await.background_stream_output = saved_stream_output;
+        let result = result?;
 
         // 3. Sync self → ctx
         {

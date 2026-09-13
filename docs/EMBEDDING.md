@@ -1494,23 +1494,25 @@ cat /v/jobs/1/stdout        # Whatever the build has printed so far
 
 `stdout` and `stderr` are live for an **external** command run by the job:
 its drain task tees each 8 KiB chunk into the node as the child emits it.
-GH #240 had removed both nodes because they filled only once, at completion,
-while four docs promised a live stream — they are back on the terms the docs
-always claimed.
+A builtin publishes its stdout when it returns, so a job mixing both reads
+in order. GH #240 had removed both nodes because they filled only once, at
+completion, while four docs promised a live stream — they are back on the
+terms the docs always claimed.
 
 Three limits, stated because an embedder polling these needs to predict them:
 
 - **A builtin is not a live producer.** A kaish builtin returns its whole
-  output as a value when it finishes, so `echo hi &` fills the node in one
-  write at completion — and so does `cargo build 2>&1 | tee build.log &`,
+  output as a value when it finishes, so `echo hi &` writes the node once,
+  when `echo` returns — and so does `cargo build 2>&1 | tee build.log &`,
   because kaish's `tee` is a builtin. Drop the `| tee`: the job's own stream
   *is* the log.
-- **Only the last stage of a pipeline reaches `stdout`.** An upstream stage's
-  output is the next stage's stdin, not the job's stdout. `stderr` takes every
-  stage's, since stderr is not piped. One consequence: in a job mixing
-  builtins and externals, once any external has written stderr the
-  completion write is skipped, so a builtin stage's stderr stays in the job's
-  `ExecResult` and does not reach the node.
+- **Only the job's own stdout reaches `stdout`.** An upstream stage's output
+  is the next stage's stdin, `$(...)` output is a value, a redirected stdout
+  goes to its target, and a scatter worker's stdout is gather's input; none
+  of it is published. `stderr` takes every external stage's stderr live,
+  since stderr is not piped. A builtin's stderr reaches the node at
+  completion, and only when no external wrote stderr first; otherwise it
+  stays in the job's `ExecResult`.
 - **Each node is a 10 MB ring** that evicts its oldest bytes. A job that
   outruns it loses its head, not its tail; redirect to a file
   (`cmd > /tmp/out.log &`) when the whole output matters.

@@ -35,18 +35,21 @@ pub struct JobStreams {
     ///   command running for this job — but only from the stage whose stdout
     ///   *is* the job's stdout (`Only` or `Last` in the pipeline), so
     ///   `a | b` streams `b` and not `a`'s bytes on their way into `b`.
-    /// * **At completion**, from the job's captured `ExecResult`, and only
-    ///   when nothing was streamed live. That covers a builtin-only job
-    ///   (`echo hi &`): a builtin returns its output as a value when it
-    ///   finishes, so there is no byte stream to tee.
+    /// * **When a builtin returns**, from its result after `--json` is
+    ///   applied, under the same `Only`/`Last` rule. A builtin that
+    ///   re-dispatched (`timeout`) publishes only if the command it ran wrote
+    ///   nothing.
+    ///
+    /// Output with another destination is never published: a `$(...)`
+    /// capture, a stdout redirect, a scatter worker's stdout.
     ///
     /// Whichever fed it, the stream is closed once the job's result is in
     /// ([`JobManager::finalize_streams`]), so a reader can tell "no more
     /// coming" from "nothing yet".
     pub stdout: Arc<BoundedStream>,
-    /// The job's stderr. Same two feeds as [`Self::stdout`], except the live
-    /// one takes **every** stage's stderr, not just the last — stderr is not
-    /// piped between stages. The consequence, stated rather than papered
+    /// The job's stderr. Fed live per chunk by external commands from
+    /// **every** stage — stderr is not piped between stages — and at
+    /// completion from the job's captured `err` when nothing arrived live. The consequence, stated rather than papered
     /// over: in a job mixing builtins and externals, once any external has
     /// written stderr the completion write is skipped, so a builtin stage's
     /// stderr stays in the job's `ExecResult` and does not reach this stream.
@@ -705,15 +708,12 @@ impl JobManager {
         Some(stream.read().await)
     }
 
-    /// Close out a finished job's streams: write the captured result into a
-    /// stream that received nothing live, then close both.
+    /// Close a finished job's streams.
     ///
-    /// The conditional is the no-double-write rule. A stream with live bytes
-    /// in it already holds exactly what the child emitted; writing
-    /// `result.text_out()` on top would repeat all of it. A stream with no
-    /// live bytes belongs to a job with nothing to tee — a builtin returns
-    /// its output as a value, not as a pipe — and would otherwise read empty
-    /// forever.
+    /// stdout is never written here. Every command whose output is the job's
+    /// stdout published it while running, and a whole-program job publishes
+    /// each statement; writing the captured result on top would repeat it.
+    /// stderr takes the captured `err` only when nothing reached it live.
     ///
     /// Called by the background task that owns the job, before it hands the
     /// result over, so a reader that sees a terminal `status` also sees a
@@ -723,14 +723,6 @@ impl JobManager {
             return;
         };
 
-        if streams.stdout.stats().await.total_written == 0 {
-            // Raw bytes when the payload is binary; `text_out` would decode it
-            // lossily and corrupt what a caller reads back out of the node.
-            match result.out_bytes() {
-                Some(bytes) => streams.stdout.write(bytes).await,
-                None => streams.stdout.write(result.text_out().as_bytes()).await,
-            }
-        }
         if streams.stderr.stats().await.total_written == 0 {
             streams.stderr.write(result.err.as_bytes()).await;
         }
