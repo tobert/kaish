@@ -8421,12 +8421,11 @@ mod tests {
         // Set PATH in kernel to ensure it's available
         kernel.execute(&format!(r#"PATH="{}""#, path_var)).await.expect("set PATH failed");
 
-        // Now try an external command like /usr/bin/env
-        // But env is also a builtin... let's try uname
-        let result = kernel.execute("uname").await.expect("execution failed");
-        eprintln!("uname result: {:?}", result);
-        // uname should succeed if external commands work
-        assert!(result.ok() || result.code == 127, "uname: {:?}", result);
+        // An absolute path skips builtin lookup, so this reaches external
+        // dispatch (`uname` would run the builtin).
+        let result = kernel.execute("/usr/bin/printf external-ok").await.expect("execution failed");
+        assert_eq!(result.code, 0, "{result:?}");
+        assert_eq!(result.text_out(), "external-ok");
     }
 
     #[tokio::test]
@@ -10142,8 +10141,6 @@ AFTER="yes"'"#)
 
     #[tokio::test]
     async fn test_background_job_basic() {
-        use std::time::Duration;
-
         let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
 
         // Run a simple background command, redirecting its output to a
@@ -10153,17 +10150,12 @@ AFTER="yes"'"#)
         assert!(result.ok(), "background command should succeed: {}", result.err);
         assert!(result.err.contains("[1]"), "announcement rides stderr: {:?}", result.err);
 
-        // Give the job time to complete
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        kernel.execute("wait %1").await.expect("wait failed");
 
         // Check job status
         let status = kernel.execute("cat /v/jobs/1/status").await.expect("status check failed");
         assert!(status.ok(), "status should succeed: {}", status.err);
-        assert!(
-            status.text_out().contains("done:") || status.text_out().contains("running"),
-            "should have valid status: {}",
-            status.text_out()
-        );
+        assert_eq!(status.text_out().trim(), "done:0", "{}", status.text_out());
 
         // Check the redirected output
         let stdout = kernel.execute("cat /tmp/basic_out.txt").await.expect("output check failed");
@@ -10457,17 +10449,13 @@ AFTER="yes"'"#)
     async fn test_bare_glob_no_matches_errors() {
         let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
-        let result = kernel.execute("echo *.nonexistent").await;
-        match &result {
-            Ok(exec) => {
-                // No-match glob should produce a non-zero exit code
-                assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
-                assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
-            }
-            Err(e) => {
-                assert!(e.to_string().contains("no matches"), "error should say no matches: {}", e);
-            }
-        }
+        // docs/LANGUAGE.md, "Glob Expansion": a zero-match glob fails the
+        // COMMAND with exit code 1 rather than passing the literal pattern
+        // through — it is not a kernel-level error, so `execute` returns `Ok`
+        // with a failed `ExecResult`, never `Err`.
+        let exec = kernel.execute("echo *.nonexistent").await.expect("execute");
+        assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
+        assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
     }
 
     #[tokio::test]

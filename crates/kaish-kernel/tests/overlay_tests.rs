@@ -374,8 +374,14 @@ mod overlay_tests {
         );
         assert!(result.is_err(), "NoLocal + overlay should fail at construction");
         let err_msg = result.map(|_| "ok".to_string()).unwrap_or_else(|e| e.to_string());
-        assert!(err_msg.contains("NoLocal") || err_msg.contains("overlay") || err_msg.contains("virtual"),
-            "error should mention NoLocal or overlay: {}", err_msg);
+        // kernel.rs setup_vfs's fixed message names all three terms at once —
+        // pin the exact text rather than an either/or that any one satisfies.
+        assert_eq!(
+            err_msg,
+            "overlay=true is incompatible with VfsMountMode::NoLocal: everything is \
+             already virtual, there is no real lower layer to wrap. Use \
+             with_overlay(false) or switch to a Passthrough or Sandboxed VFS mode."
+        );
     }
 
     // ------------------------------------------------------------------
@@ -401,12 +407,15 @@ mod overlay_tests {
             "echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > \"{}/big.txt\"",
             cwd
         );
-        let (out, code) = run(&kernel, &big_script).await;
-        // Should fail with a budget error
-        assert_ne!(code, 0, "write exceeding budget should fail: out={}", out);
-        let err = kernel.execute(&big_script).await.expect("execute").err;
-        assert!(err.contains("vfs-memory") || out.contains("vfs-memory"),
-            "error should name 'vfs-memory' budget: err={:?}", err);
+        // The budget error rides `.err` (redirect writes never surface it on
+        // stdout); one execution is enough to see both.
+        let result = kernel.execute(&big_script).await.expect("execute");
+        assert_ne!(result.code, 0, "write exceeding budget should fail: out={}", result.text_out());
+        assert!(
+            result.err.contains("vfs-memory"),
+            "error should name 'vfs-memory' budget: err={:?}",
+            result.err
+        );
     }
 
     // ------------------------------------------------------------------
