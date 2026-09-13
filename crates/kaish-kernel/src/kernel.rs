@@ -1715,10 +1715,9 @@ impl Kernel {
 
     /// [`Self::execute_argv`]'s body, with the execute lock assumed **held**.
     async fn execute_argv_locked(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
-        // Fresh cancel surface for this call: `execute_pipeline` reads
-        // `self.cancel_token`, so a stale cancelled token from a prior call must be
-        // replaced first. The returned clone is the token the watchdog cancels on
-        // an elapsed deadline (it shares state with what `execute_pipeline` reads),
+        // Fresh cancel surface for this call, so a stale cancelled token from a
+        // prior call is replaced first. The watchdog cancels this token on an
+        // elapsed deadline, and the root context carries it to every stage,
         // cascading SIGTERM/SIGKILL to any external child.
         let cancel = self.reset_cancel();
 
@@ -1739,7 +1738,13 @@ impl Kernel {
             background: false,
         };
         let work = async {
-            let result = self.execute_pipeline(&pipeline).await?;
+            // Root context for this call, built once the watchdog is installed.
+            let mut root_ctx = {
+                let ec = self.exec_ctx.read().await;
+                let scope = self.scope.read().await;
+                self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone())
+            };
+            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await?;
             // A gate raised while evaluating inside the dispatched tool — a
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
@@ -2748,7 +2753,7 @@ impl Kernel {
                     stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
                     background: false,
                 };
-                let result = Box::pin(self.execute_pipeline(&pipeline)).await?;
+                let result = Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2767,7 +2772,7 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = Box::pin(self.execute_pipeline(pipeline)).await?;
+                let result = Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2931,7 +2936,7 @@ impl Kernel {
 
                 'outer: for item in items {
                     // Cancellation checkpoint per iteration
-                    if self.is_cancelled() {
+                    if self.is_cancelled() || ctx.cancel.is_cancelled() {
                         {
                             let mut scope = self.scope.write().await;
                             scope.pop_frame();
@@ -3027,7 +3032,7 @@ impl Kernel {
                 'outer: loop {
                     // Evaluate condition - use async to support command substitution
                     // Cancellation checkpoint per iteration
-                    if self.is_cancelled() {
+                    if self.is_cancelled() || ctx.cancel.is_cancelled() {
                         result.code = 130;
                         self.update_last_result(&result).await;
                         return Ok(ControlFlow::ok(result));
@@ -3515,7 +3520,7 @@ impl Kernel {
     }
 
     /// Execute a pipeline.
-    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
+    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ExecResult> {
         if pipeline.stages.is_empty() {
             return Ok(ExecResult::success(""));
         }
@@ -3542,14 +3547,12 @@ impl Kernel {
             // The pipeline runner drives stage 0 with the first stage's stdin
             // seeded from any frontend-supplied input (`ExecuteOptions::stdin`,
             // e.g. `printf … | kaish -c sort`) unless a redirect already set it,
-            // and uses the kernel's own cancel token so a `cancel()` reaches the
-            // stages. See `snapshot_exec_ctx` for why the snapshot is boxed.
-            let cancel = {
-                #[allow(clippy::expect_used)]
-                let token = self.cancel_token.lock().expect("cancel_token poisoned");
-                token.clone()
-            };
-            (self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel), has_pipe_stdin)
+            // and takes the caller's cancel token and watchdog, so a `timeout`
+            // around a function body reaches its stages. See `snapshot_exec_ctx`
+            // for why the snapshot is boxed.
+            let mut stage = self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, caller.cancel.clone());
+            stage.watchdog = caller.watchdog.clone();
+            (stage, has_pipe_stdin)
         }; // locks released
 
         // Consume-once: move/clear the seeded stdin sources from the persistent
@@ -3914,7 +3917,7 @@ impl Kernel {
                 // claimed this name" message can name it, instead of the
                 // fallthrough re-deriving the wrong "command not found".
                 let mut unavailable = None;
-                match Box::pin(self.try_execute_external(name, args)).await? {
+                match Box::pin(self.try_execute_external(name, args, &mut *ctx)).await? {
                     ExternalCommandOutcome::Ran(result) => return Ok(*result),
                     ExternalCommandOutcome::NotFound => {}
                     ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
@@ -4069,12 +4072,12 @@ impl Kernel {
         let mut ctx = {
             let ec = self.exec_ctx.write().await;
             let scope = self.scope.read().await;
-            // Inherit `ec.pipeline_position` and `ec.cancel` (the latter set by
-            // dispatch_command from the runner's ctx.cancel, so a builtin-swapped
-            // child token — e.g. timeout's — reaches the spawned external via
-            // wait_or_kill; it falls back to the kernel's own token on a
-            // non-dispatch path). See `snapshot_exec_ctx` for the boxing rationale.
-            self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, ec.cancel.clone())
+            // Inherit `ec.pipeline_position`, and the caller's cancel token and
+            // watchdog, so a builtin-swapped child token (timeout's) reaches a
+            // spawned external. See `snapshot_exec_ctx` for the boxing rationale.
+            let mut tool_ctx = self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, ctx.cancel.clone());
+            tool_ctx.watchdog = ctx.watchdog.clone();
+            tool_ctx
         }; // both locks released — tool.execute can re-dispatch safely
 
         // Move stdin out of self.exec_ctx into the snapshot (consumed-by-tool
@@ -5985,17 +5988,17 @@ impl Kernel {
     ///   separate capability and is still tried by the caller
     /// - `Err` on execution errors
     #[cfg(not(feature = "subprocess"))]
-    async fn try_execute_external(&self, _name: &str, _args: &[Arg]) -> Result<ExternalCommandOutcome> {
+    async fn try_execute_external(&self, _name: &str, _args: &[Arg], _ctx: &mut ExecContext) -> Result<ExternalCommandOutcome> {
         Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::NotCompiled))
     }
 
     /// Try to execute an external command from PATH.
     #[cfg(feature = "subprocess")]
-    async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<ExternalCommandOutcome> {
+    async fn try_execute_external(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ExternalCommandOutcome> {
         if !self.allow_external_commands {
             return Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff));
         }
-        Ok(match Box::pin(self.try_execute_external_on_path(name, args)).await? {
+        Ok(match Box::pin(self.try_execute_external_on_path(name, args, &mut *ctx)).await? {
             Some(result) => ExternalCommandOutcome::Ran(Box::new(result)),
             None => ExternalCommandOutcome::NotFound,
         })
@@ -6007,8 +6010,8 @@ impl Kernel {
     /// means "bare name, nothing on PATH", the one case where the caller
     /// should keep looking elsewhere.
     #[cfg(feature = "subprocess")]
-    #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
-    async fn try_execute_external_on_path(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+    #[tracing::instrument(level = "debug", skip(self, args, ctx), fields(command = %name))]
+    async fn try_execute_external_on_path(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<Option<ExecResult>> {
         // Get the shell's cwd and its real filesystem location, if any. A
         // `None` real path means the cwd is virtual (a CoW overlay, an
         // in-memory VFS mount, `/dev`, …) — there's nowhere for a child OS
@@ -6105,22 +6108,18 @@ impl Kernel {
         };
         let has_stdin = pipe_stdin.is_some() || stdin_bytes.is_some();
 
-        // The cancel token, the kill grace, and the background job all come
-        // from `self.exec_ctx`, which `dispatch_command` populates from the
-        // inbound ctx on every dispatch. That is what makes the `timeout`
-        // builtin's swapped child token reach the wait_or_kill discipline —
-        // reading `self.cancel_token` would give the kernel-wide token and
-        // miss the timeout's child cascade.
+        // The cancel token comes from the caller's ctx, so the `timeout`
+        // builtin's swapped child token reaches the wait_or_kill discipline.
+        // The kill grace and the background job still come from `self.exec_ctx`.
         //
         // In interactive mode, standalone or last-in-pipeline commands inherit
         // the terminal's stdout/stderr so output streams in real-time.
         // First/middle commands must capture stdout for the pipe — same as bash.
         let (pipeline_position, spawn_ctx) = {
-            let ctx = self.exec_ctx.read().await;
-            (
-                ctx.pipeline_position,
-                crate::spawn::SpawnContext::from_exec_context(&ctx),
-            )
+            let ec = self.exec_ctx.read().await;
+            let mut spawn_ctx = crate::spawn::SpawnContext::from_exec_context(&ec);
+            spawn_ctx.cancel = ctx.cancel.clone();
+            (ec.pipeline_position, spawn_ctx)
         };
         let inherit_output = self.interactive
             && matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
@@ -6514,8 +6513,6 @@ impl Kernel {
                 ctx.background_stream_output
                     && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
             );
-            ec.cancel = ctx.cancel.clone();
-            ec.watchdog = ctx.watchdog.clone();
         }
 
         // 2. Run the statement. A stage is its own execution unit, so a
@@ -6617,15 +6614,6 @@ impl Kernel {
                 ctx.background_stream_output
                     && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
             );
-            // Sync the cancel token from ctx → ec. Builtins like `timeout`
-            // swap ctx.cancel to a derived child token before re-dispatching;
-            // execute_command's snapshot reads ec.cancel (kept aligned by
-            // this sync), so try_execute_external sees the right token.
-            ec.cancel = ctx.cancel.clone();
-            // Same alignment for the watchdog: a fork dispatching through its
-            // own kernel must hand the shared script clock to the snapshot so
-            // patient holds in forked stages suspend the right timer.
-            ec.watchdog = ctx.watchdog.clone();
         }
 
         // 2. Execute via the full dispatch chain
