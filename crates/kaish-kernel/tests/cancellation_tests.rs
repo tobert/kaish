@@ -373,6 +373,34 @@ async fn timeout_builtin_kills_piped_external_inside_function_body() {
     );
 }
 
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_argument_substitution_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ echo $(bash {}); }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in an argument did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the substitution's pid {} alive inside the function body",
+        pid,
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 6. Pipeline cascade: cancel kills both stages of a `sleep | cat`
 // ════════════════════════════════════════════════════════════════════════════
