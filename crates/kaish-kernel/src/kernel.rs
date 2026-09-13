@@ -2520,8 +2520,12 @@ impl Kernel {
         {
             let scope = self.scope.read().await;
             if scope.show_ast() {
+                drop(scope);
                 let output = format!("{:#?}\n", program);
-                return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(output)));
+                let result = ExecResult::with_output(crate::interpreter::OutputData::text(output));
+                // No statement runs, so nothing else publishes it to a background job.
+                self.exec_ctx.read().await.publish_job_stdout(&result).await;
+                return Ok(result);
             }
         }
 
@@ -4043,7 +4047,10 @@ impl Kernel {
             let help_topic = crate::help::HelpTopic::Tool(name.to_string());
             let ctx = self.exec_ctx.read().await;
             let content = crate::help::get_help(&help_topic, &ctx.tool_schemas);
-            return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(content)));
+            let result = ExecResult::with_output(crate::interpreter::OutputData::text(content));
+            // The tool never runs, so no builtin publish reaches a background job.
+            ctx.publish_job_stdout(&result).await;
+            return Ok(result);
         }
 
         // Snapshot exec_ctx into a local context and release the write lock
@@ -10431,6 +10438,37 @@ AFTER="yes"'"#)
     }
 
     #[tokio::test]
+    async fn background_program_publishes_tool_help() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone())).expect("kernel");
+        let id = kernel
+            .execute_background_with_options("ls --help", ExecuteOptions::new())
+            .await
+            .expect("receipt");
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "{result:?}");
+        assert!(!result.text_out().is_empty(), "the control must produce help text");
+        let stream = String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8");
+        assert_eq!(stream, result.text_out(), "help text is the job's stdout");
+    }
+
+    #[tokio::test]
+    async fn background_job_publishes_tool_help() {
+        let jobs = Arc::new(JobManager::new());
+        let kernel = Kernel::new(KernelConfig::isolated().with_job_manager(jobs.clone())).expect("kernel");
+        kernel.execute("ls --help &").await.expect("spawn");
+        let id = crate::scheduler::JobId(1);
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "{result:?}");
+        assert!(!result.text_out().is_empty(), "the control must produce help text");
+        let stream = String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8");
+        assert_eq!(stream, result.text_out(), "help text is the job's stdout");
+    }
+
+    /// Pins "written once": the backend arm and `timeout`'s own publish must
+    /// not both write. `background_job_publishes_custom_tool_stdout` is the
+    /// test that fails when the backend arm stops publishing.
+    #[tokio::test]
     async fn background_job_publishes_redispatched_custom_tool_stdout_once() {
         use crate::backend::testing::MockBackend;
         use crate::backend::ToolResult;
@@ -10525,6 +10563,8 @@ AFTER="yes"'"#)
         let result = jobs.wait(id).await.expect("job result");
         assert!(result.ok(), "{result:?}");
         assert_eq!(result.text_out(), foreground.text_out());
+        let stream = String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8");
+        assert_eq!(stream, result.text_out(), "the AST is the job's stdout");
     }
 
     #[tokio::test]

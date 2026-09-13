@@ -1509,10 +1509,11 @@ Three limits, stated because an embedder polling these needs to predict them:
 - **Only the job's own stdout reaches `stdout`.** An upstream stage's output
   is the next stage's stdin, `$(...)` output is a value, a redirected stdout
   goes to its target, and a scatter worker's stdout is gather's input; none
-  of it is published. `stderr` takes every external stage's stderr live,
-  since stderr is not piped. A builtin's stderr reaches the node at
-  completion, and only when no external wrote stderr first; otherwise it
-  stays in the job's `ExecResult`.
+  of it is published. `stderr` takes an external command's stderr live
+  when the command ends its pipeline. A builtin's stderr, and an earlier
+  stage's, reach the node at completion, and only when nothing arrived live;
+  otherwise they stay in the job's `ExecResult`. A whole-program job writes
+  each top-level statement's stderr when the statement finishes.
 - **Each node is a 10 MB ring** that evicts its oldest bytes. A job that
   outruns it loses its head, not its tail; redirect to a file
   (`cmd > /tmp/out.log &`) when the whole output matters.

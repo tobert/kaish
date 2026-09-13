@@ -713,9 +713,10 @@ impl JobManager {
 
     /// Close a finished job's streams.
     ///
-    /// stdout is never written here. Every command whose output is the job's
-    /// stdout published it while running, and a whole-program job publishes
-    /// each statement; writing the captured result on top would repeat it.
+    /// stdout is never written here. Every producer of a job's stdout
+    /// publishes as it runs: an external per chunk; a builtin, an embedder
+    /// tool, `--help`, or an AST dump when it returns; gather's rows. Writing
+    /// the captured result on top would repeat it.
     /// stderr takes the captured `err` only when nothing reached it live.
     ///
     /// Called by the background task that owns the job, before it hands the

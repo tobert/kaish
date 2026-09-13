@@ -19,9 +19,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
-- An embedder tool's stdout now reaches its background job's stdout stream.
-  `embedder_tool &` left `/v/jobs/N/stdout` empty; the output was only in
-  the job's result.
+- An embedder tool's stdout and a tool's `--help` text now reach a background
+  job's stdout stream. `embedder_tool &` and `ls --help &` left
+  `/v/jobs/N/stdout` empty; the output was only in the job's result.
 - A streaming caller (`kaish -c`, `execute_with_options_streaming`) now
   receives stderr drained during an `exit` statement and the watchdog's
   timeout line. The timeout line follows any stderr the program wrote
