@@ -1441,6 +1441,30 @@ last kernel built wins for both. A hermetic kernel (`NoLocal`, or any
 that manager. Share a manager between kernels configured alike, or accept
 the last writer.
 
+### Whole-program asynchronous execution
+
+`Kernel::execute_background_with_options(source, options)` starts one complete
+kaish program as a job and returns its `JobId`. The source is parsed and
+validated on the job's fork first; a rejected program returns
+`KernelError::Parse` or `KernelError::Validation` and registers no job. It uses
+the kernel's `JobManager`, so an embedder that builds a kernel per request
+supplies a shared manager with `KernelConfig::with_job_manager` first.
+
+```rust
+let id = kernel
+    .execute_background_with_options("echo first; long_task; echo last", ExecuteOptions::new())
+    .await?;
+let result = kernel.jobs().wait(id).await.expect("job remains tracked");
+```
+
+The job runs in a fork with the same options, tools, variables, and cwd as
+foreground execution. `JobManager::cancel` and the options' cancel token both
+stop it with exit 130. Output reaches the job's stdout and stderr streams when
+each top-level statement finishes, not while a statement runs. A runtime error
+(exit 1), a timeout (exit 124), or a cancellation (exit 130) ends stderr with
+one diagnostic line, in both the result and the stream. Shell `cmd &` jobs
+stream external output as it arrives.
+
 ### JobFs for Background Job Observability
 
 The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background

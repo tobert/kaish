@@ -10,6 +10,13 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`Kernel::execute_background_with_options`** — run a whole program as a
+  job and get its `JobId`; a program that fails to parse or validate
+  registers no job. Output reaches the job streams after each top-level
+  statement.
+
 ### Fixed
 
 - `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an

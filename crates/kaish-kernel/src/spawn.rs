@@ -121,6 +121,8 @@ pub(crate) struct SpawnContext {
     pub job_manager: Option<Arc<JobManager>>,
     /// The background job this command runs for, if any.
     pub background_job: Option<JobId>,
+    /// Whether a child process writes its output directly to the job stream.
+    pub background_stream_external_output: bool,
 }
 
 impl SpawnContext {
@@ -133,6 +135,7 @@ impl SpawnContext {
             pipeline_position: ctx.pipeline_position,
             job_manager: ctx.job_manager.clone(),
             background_job: ctx.background_job,
+            background_stream_external_output: ctx.background_stream_external_output,
         }
     }
 }
@@ -322,8 +325,12 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
     // them itself. This is what makes `/v/jobs/{id}/stdout` grow while a
     // `cargo build &` is still building (GH #240 removed the node rather
     // than wire this tee; the tee is the half that was missing).
-    let job_streams = match (&spawn_ctx.job_manager, spawn_ctx.background_job) {
-        (Some(jobs), Some(job_id)) => jobs.streams(job_id).await,
+    let job_streams = match (
+        &spawn_ctx.job_manager,
+        spawn_ctx.background_job,
+        spawn_ctx.background_stream_external_output,
+    ) {
+        (Some(jobs), Some(job_id), true) => jobs.streams(job_id).await,
         _ => None,
     };
 
