@@ -121,8 +121,10 @@ pub(crate) struct SpawnContext {
     pub job_manager: Option<Arc<JobManager>>,
     /// The background job this command runs for, if any.
     pub background_job: Option<JobId>,
-    /// Whether this command's output is its background job's output.
+    /// Whether this command's stdout is its background job's stdout.
     pub background_stream_output: bool,
+    /// Whether this command's stderr also tees into its job's stderr stream.
+    pub background_stream_stderr: bool,
 }
 
 impl SpawnContext {
@@ -136,6 +138,7 @@ impl SpawnContext {
             job_manager: ctx.job_manager.clone(),
             background_job: ctx.background_job,
             background_stream_output: ctx.background_stream_output,
+            background_stream_stderr: ctx.background_stream_stderr,
         }
     }
 }
@@ -543,11 +546,11 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         let stdout_clone = stdout_stream.clone();
         let stderr_clone = stderr_stream.clone();
 
-        // Only the stage whose stdout *is* the job's stdout tees: in
+        // Only the stage whose stdout *is* the job's stdout tees stdout: in
         // `a | b`, `a`'s bytes are `b`'s stdin, and teeing them would put
         // the pipeline's intermediate data into the node alongside its
-        // real output. stderr has no such routing — every stage's stderr
-        // is the job's stderr — so it tees from any position.
+        // real output. stderr tees wherever this command streams, unless
+        // its job writes stderr per statement.
         let stdout_tee = job_streams.as_ref().and_then(|s| {
             matches!(
                 spawn_ctx.pipeline_position,
@@ -555,7 +558,10 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             )
             .then(|| s.stdout.clone())
         });
-        let stderr_tee = job_streams.as_ref().map(|s| s.stderr.clone());
+        let stderr_tee = job_streams
+            .as_ref()
+            .filter(|_| spawn_ctx.background_stream_stderr)
+            .map(|s| s.stderr.clone());
 
         let stdout_task = stdout_pipe.map(|pipe| {
             tokio::spawn(async move {

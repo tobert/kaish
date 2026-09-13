@@ -218,9 +218,13 @@ pub struct ExecContext {
     /// Whether this command's stdout is its background job's stdout, so its
     /// output is published to the job's stream: an external per chunk, a
     /// builtin when it returns. False inside `$(...)`, under a stdout
-    /// redirect, in a scatter worker, and for whole-program jobs, which
-    /// publish complete statement results themselves.
+    /// redirect, and in a scatter worker.
     pub background_stream_output: bool,
+    /// Whether an external command also tees its stderr into the job's stderr
+    /// stream wherever `background_stream_output` is on. Set once per job:
+    /// true for `cmd &`, false for a whole-program job, which writes each
+    /// statement's stderr when the statement finishes.
+    pub background_stream_stderr: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
@@ -424,8 +428,8 @@ fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
 
 impl ExecContext {
     /// Publish `result`'s stdout to this context's background job, when that
-    /// stdout is the job's stdout. For output built outside a dispatched
-    /// command, such as gather's rows; a dispatched command publishes its own.
+    /// stdout is the job's stdout. For output no builtin or external command
+    /// produced: gather's rows and an embedder tool's result.
     pub(crate) async fn publish_job_stdout(&self, result: &ExecResult) {
         let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
             self.background_job,
@@ -469,6 +473,7 @@ impl ExecContext {
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
             background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -511,6 +516,7 @@ impl ExecContext {
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
             background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -550,6 +556,7 @@ impl ExecContext {
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
             background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -589,6 +596,7 @@ impl ExecContext {
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
             background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -631,6 +639,7 @@ impl ExecContext {
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
             background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -670,6 +679,7 @@ impl ExecContext {
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
             background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -967,6 +977,7 @@ impl ExecContext {
             kill_grace: self.kill_grace,
             background_job: self.background_job,
             background_stream_output: self.background_stream_output,
+            background_stream_stderr: self.background_stream_stderr,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),

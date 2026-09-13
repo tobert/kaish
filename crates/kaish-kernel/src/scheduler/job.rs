@@ -47,12 +47,15 @@ pub struct JobStreams {
     /// ([`JobManager::finalize_streams`]), so a reader can tell "no more
     /// coming" from "nothing yet".
     pub stdout: Arc<BoundedStream>,
-    /// The job's stderr. Fed live per chunk by external commands from
-    /// **every** stage — stderr is not piped between stages — and at
-    /// completion from the job's captured `err` when nothing arrived live. The consequence, stated rather than papered
-    /// over: in a job mixing builtins and externals, once any external has
-    /// written stderr the completion write is skipped, so a builtin stage's
-    /// stderr stays in the job's `ExecResult` and does not reach this stream.
+    /// The job's stderr. For a `cmd &` job, fed live per chunk by external
+    /// commands in stages that stream stdout, and at completion from the
+    /// job's captured `err` when nothing arrived live. In a job mixing
+    /// builtins and externals, once any external has written stderr the
+    /// completion write is skipped, so a builtin stage's stderr stays in the
+    /// job's `ExecResult` and does not reach this stream.
+    ///
+    /// A whole-program job writes each top-level statement's stderr when the
+    /// statement finishes.
     pub stderr: Arc<BoundedStream>,
 }
 
@@ -710,9 +713,10 @@ impl JobManager {
 
     /// Close a finished job's streams.
     ///
-    /// stdout is never written here. Every command whose output is the job's
-    /// stdout published it while running, and a whole-program job publishes
-    /// each statement; writing the captured result on top would repeat it.
+    /// stdout is never written here. Every producer of a job's stdout
+    /// publishes as it runs: an external per chunk; a builtin, an embedder
+    /// tool, `--help`, or an AST dump when it returns; gather's rows. Writing
+    /// the captured result on top would repeat it.
     /// stderr takes the captured `err` only when nothing reached it live.
     ///
     /// Called by the background task that owns the job, before it hands the
