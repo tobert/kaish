@@ -3305,7 +3305,7 @@ impl Kernel {
                 let result = match self.eval_arithmetic_async(expr_str).await {
                     Ok(n) if n != 0 => ExecResult::success(""),
                     Ok(_) => ExecResult::failure(1, ""),
-                    Err(e) => ExecResult::failure(2, e.to_string()).into_fault(),
+                    Err(e) => ExecResult::failure(2, format!("{e:#}")).into_fault(),
                 };
                 self.update_last_result(&result).await;
                 if !result.ok() {

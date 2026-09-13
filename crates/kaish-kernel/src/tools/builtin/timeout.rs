@@ -174,7 +174,7 @@ impl Tool for Timeout {
                 }
                 result
             }
-            Err(e) => ExecResult::failure(1, format!("timeout: {}", e)),
+            Err(e) => ExecResult::failure(1, format!("timeout: {e:#}")),
         }
     }
 }

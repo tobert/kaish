@@ -256,7 +256,7 @@ async fn eval_redirect_target(
     let value = dispatcher
         .eval_expr(expr, ctx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     // Decision D: a bare collection can't be a redirect target either — same
     // process-boundary guard as external argv (see `structured_boundary_error`).
     if let Some(msg) = crate::interpreter::structured_boundary_error("a redirect target", &value) {
