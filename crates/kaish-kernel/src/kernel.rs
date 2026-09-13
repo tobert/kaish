@@ -3952,7 +3952,12 @@ impl Kernel {
                     s
                 });
                 let tool_args = self.build_args_async(args, tool_schema.as_ref(), &mut *ctx).await?;
+                // The tool runs on the slot, which no dispatch refreshes, so it gets
+                // this command's cancel token and watchdog first.
+                let (cancel, watchdog) = (ctx.cancel.clone(), ctx.watchdog.clone());
                 let mut ctx = self.exec_ctx.write().await;
+                ctx.cancel = cancel;
+                ctx.watchdog = watchdog;
                 {
                     let scope = self.scope.read().await;
                     ctx.scope = scope.clone();
@@ -10519,6 +10524,33 @@ AFTER="yes"'"#)
             "tool:embedder_tool\n",
             "timeout publishes nothing when the tool it ran already published"
         );
+    }
+
+    /// An embedder tool runs on the kernel's context slot. It must still see the
+    /// call's cancel token, or a tool that waits on cancellation ignores a
+    /// request timeout.
+    #[tokio::test]
+    async fn embedder_tool_sees_the_call_timeout() {
+        use crate::backend::testing::MockBackend;
+
+        let (mock, calls) = MockBackend::new();
+        let backend = mock.waiting_for_cancel(Duration::from_secs(30));
+        let kernel = Kernel::with_backend(Arc::new(backend), KernelConfig::isolated(), |_| {}, |_| {})
+            .expect("kernel");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            kernel.execute_with_options(
+                "embedder_tool",
+                ExecuteOptions::new().with_timeout(Duration::from_millis(200)),
+            ),
+        )
+        .await;
+        let result = outcome
+            .expect("the embedder tool ignored the call's 200ms timeout for 10s")
+            .expect("execute");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the embedder tool must run");
+        assert_eq!(result.code, 124, "the call's timeout must stop the tool: {result:?}");
     }
 
     #[tokio::test]
