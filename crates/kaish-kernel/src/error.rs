@@ -10,6 +10,7 @@
 //! message text.
 
 use std::fmt;
+use crate::interpreter::ExecResult;
 use crate::parser::ParseError;
 use crate::validator::ValidationIssue;
 
@@ -65,9 +66,16 @@ pub enum KernelError {
     },
 
     /// A statement started running and something failed partway through —
-    /// a builtin, the evaluator, dispatch, or an IO fault. Carries the
-    /// original error chain unchanged; `source()` and `{:#}` still walk it.
-    Execution(anyhow::Error),
+    /// a builtin, the evaluator, dispatch, or an IO fault.
+    Execution {
+        /// The original error chain, unchanged; `source()` and `{:#}` walk it.
+        error: anyhow::Error,
+        /// What the program produced before the fault: the statements that
+        /// ran, and the part of the faulting statement that ran (`left` in
+        /// `echo left && x=$((1/0))`), stdout and stderr. Empty when the
+        /// fault came first. Boxed so the error stays small on the `Ok` path.
+        output: Box<ExecResult>,
+    },
 }
 
 // Display is hand-written rather than derived because the derive would drop
@@ -82,11 +90,11 @@ impl fmt::Display for KernelError {
             KernelError::Parse { message, .. } | KernelError::Validation { message, .. } => {
                 f.write_str(message)
             }
-            KernelError::Execution(e) => {
+            KernelError::Execution { error, .. } => {
                 if f.alternate() {
-                    write!(f, "{e:#}")
+                    write!(f, "{error:#}")
                 } else {
-                    write!(f, "{e}")
+                    write!(f, "{error}")
                 }
             }
         }
@@ -99,7 +107,7 @@ impl std::error::Error for KernelError {
             // `anyhow::Error` is not itself a `std::error::Error`, so the
             // chain is reached through its own source rather than by
             // returning it directly.
-            KernelError::Execution(e) => e.source(),
+            KernelError::Execution { error, .. } => error.source(),
             _ => None,
         }
     }
@@ -117,7 +125,40 @@ impl KernelError {
     /// A statement began running and faulted partway through
     /// ([`KernelError::Execution`]). The complement of [`Self::is_rejected`].
     pub fn is_execution_failure(&self) -> bool {
-        matches!(self, KernelError::Execution(_))
+        matches!(self, KernelError::Execution { .. })
+    }
+}
+
+/// An execution fault carrying the output its program produced before it.
+///
+/// The interpreter propagates `anyhow::Error`; a block that faults wraps the
+/// error in this so the output survives each `?` on the way up.
+/// `classify_execute_error` reads it into [`KernelError::Execution`]'s
+/// `output`. It renders exactly as the error it wraps, so no message changes.
+pub(crate) struct FaultWithOutput {
+    pub(crate) output: ExecResult,
+    pub(crate) error: anyhow::Error,
+}
+
+impl fmt::Debug for FaultWithOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.error, f)
+    }
+}
+
+impl fmt::Display for FaultWithOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if f.alternate() {
+            write!(f, "{:#}", self.error)
+        } else {
+            write!(f, "{}", self.error)
+        }
+    }
+}
+
+impl std::error::Error for FaultWithOutput {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
     }
 }
 
@@ -128,15 +169,22 @@ impl KernelError {
 /// validation) by boxing a `KernelError` into the `anyhow::Error` it returns;
 /// everything else it and the deeper interpreter propagate (`?` through
 /// `execute_stmt_flow`, `eval_expr_async`, dispatch, tool bodies, …) stays a
-/// plain `anyhow::Error`, untouched. This is the one place that downcasts: it
-/// recovers a tagged rejection when the chain carries one, and falls back to
-/// [`KernelError::Execution`] for everything else. Every public `execute*`
-/// method applies this at its own return, so the interpreter's internal
-/// `Result<T>` (`anyhow::Result`) never has to change shape.
+/// plain `anyhow::Error`, possibly wrapped in a `FaultWithOutput`. This is the
+/// one place that downcasts: it recovers a tagged rejection when the chain
+/// carries one, and falls back to [`KernelError::Execution`] for everything
+/// else. Every public `execute*` method applies this at its own return, so the
+/// interpreter's internal `Result<T>` (`anyhow::Result`) never has to change
+/// shape.
 pub(crate) fn classify_execute_error(e: anyhow::Error) -> KernelError {
     match e.downcast::<KernelError>() {
         Ok(tagged) => tagged,
-        Err(e) => KernelError::Execution(e),
+        Err(error) => {
+            let output = error
+                .downcast_ref::<FaultWithOutput>()
+                .map(|carrier| carrier.output.clone())
+                .unwrap_or_default();
+            KernelError::Execution { error, output: Box::new(output) }
+        }
     }
 }
 
@@ -144,6 +192,10 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> KernelError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn execution(error: anyhow::Error) -> KernelError {
+        KernelError::Execution { error, output: Box::default() }
+    }
 
     #[test]
     fn is_rejected_true_for_parse_and_validation() {
@@ -158,7 +210,7 @@ mod tests {
 
     #[test]
     fn is_rejected_false_for_execution() {
-        let exec = KernelError::Execution(anyhow::anyhow!("boom"));
+        let exec = execution(anyhow::anyhow!("boom"));
         assert!(!exec.is_rejected());
         assert!(exec.is_execution_failure());
     }
@@ -174,7 +226,25 @@ mod tests {
     #[test]
     fn classify_falls_back_to_execution_for_untagged_errors() {
         let classified = classify_execute_error(anyhow::anyhow!("some deep interpreter error"));
-        assert!(matches!(classified, KernelError::Execution(_)));
+        let KernelError::Execution { output, .. } = classified else {
+            panic!("untagged error must classify as Execution");
+        };
+        assert_eq!(output.text_out(), "", "an unwrapped error carries no output");
+    }
+
+    #[test]
+    fn classify_reads_output_through_added_context() {
+        let carrier = FaultWithOutput {
+            output: ExecResult::success("ran\n"),
+            error: anyhow::anyhow!("inner cause"),
+        };
+        let wrapped = anyhow::Error::new(carrier).context("outer context");
+        let classified = classify_execute_error(wrapped);
+        assert_eq!(format!("{classified:#}"), "outer context: inner cause");
+        let KernelError::Execution { output, .. } = classified else {
+            panic!("carrier must classify as Execution");
+        };
+        assert_eq!(output.text_out(), "ran\n");
     }
 
     #[test]
@@ -183,7 +253,7 @@ mod tests {
         // `?` converts via anyhow's blanket `From<E: std::error::Error>`.
         fn as_anyhow() -> anyhow::Result<()> {
             fn fails() -> Result<(), KernelError> {
-                Err(KernelError::Execution(anyhow::anyhow!("boom")))
+                Err(execution(anyhow::anyhow!("boom")))
             }
             fails()?;
             Ok(())

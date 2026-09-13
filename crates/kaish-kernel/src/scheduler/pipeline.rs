@@ -74,6 +74,21 @@ fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat
     }
 }
 
+/// A command that faults becomes its failed result: the output it produced
+/// before the fault, then the full cause chain, exit 1.
+fn fault_result(error: anyhow::Error) -> ExecResult {
+    let mut result = error
+        .downcast_ref::<crate::error::FaultWithOutput>()
+        .map(|carrier| carrier.output.clone())
+        .unwrap_or_default();
+    result.code = 1;
+    if !result.err.is_empty() && !result.err.ends_with('\n') {
+        result.err.push('\n');
+    }
+    result.err.push_str(&ExecResult::terminate_diagnostic(format!("{error:#}")));
+    result
+}
+
 /// Whether a stage's redirects send its stdout away from its pipeline
 /// position: to a file (`>`, `>>`, `&>`) or to stderr (`>&2`).
 fn redirects_stdout(stage: &PipelineStage) -> bool {
@@ -267,7 +282,7 @@ async fn eval_redirect_target(
     let value = dispatcher
         .eval_expr(expr, ctx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     // Decision D: a bare collection can't be a redirect target either — same
     // process-boundary guard as external argv (see `structured_boundary_error`).
     if let Some(msg) = crate::interpreter::structured_boundary_error("a redirect target", &value) {
@@ -610,7 +625,7 @@ impl PipelineRunner {
         // Execute via dispatcher (full resolution chain)
         let result = match dispatch_stage(stage, ctx, dispatcher).await {
             Ok(result) => result,
-            Err(e) => ExecResult::failure(1, e.to_string()),
+            Err(e) => fault_result(e),
         };
         ctx.background_stream_output = stream_output;
 
@@ -766,7 +781,7 @@ impl PipelineRunner {
                 // Execute the stage
                 let mut result = match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
                     Ok(result) => result,
-                    Err(e) => ExecResult::failure(1, e.to_string()),
+                    Err(e) => fault_result(e),
                 };
 
                 // Apply post-execution redirects. Use the stage's own

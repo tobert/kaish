@@ -273,13 +273,9 @@ async fn kernel_cancel_kills_running_external() {
         .await
         .expect("execute");
 
-    // Cancel returns control with the kernel's "interrupted" path; exit code
-    // is 130 (SIGINT-style) on the cancellation checkpoint.
-    assert!(
-        result.code == 130 || result.code == 143,
-        "expected 130 or 143, got {}",
-        result.code,
-    );
+    // A cancelled call reports 130 whether a checkpoint or the killed child
+    // ended it; the child's own 128+SIGTERM (143) is not the call's status.
+    assert_eq!(result.code, 130, "cancellation must report 130: {result:?}");
 
     let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     assert!(
@@ -404,15 +400,10 @@ async fn grace_escalation_sigkills_term_trapping_child() {
     let (pid, kill_requested) = ready;
     let elapsed = kill_requested.elapsed();
 
-    // 137 is 128 + SIGKILL(9): the child's own wait status, reported straight
-    // through. This is the sharpest evidence the test has — 143 (128 + SIGTERM)
-    // would mean plain SIGTERM did the job and no escalation ever happened.
-    assert_eq!(
-        result.code, 137,
-        "expected 137 (128 + SIGKILL) — the TERM-ignoring child should have been \
-         escalated to SIGKILL; 143 would mean SIGTERM killed it and the escalation \
-         never ran",
-    );
+    // A cancelled call reports 130 whatever signal ended the child, as a
+    // timeout reports 124. The escalation is proven below: the child ignores
+    // SIGTERM, so dying at all means SIGKILL, and not before the grace.
+    assert_eq!(result.code, 130, "a cancelled call must report 130: {result:?}");
 
     assert!(
         wait_for_dead(pid, Duration::from_secs(3)).await,

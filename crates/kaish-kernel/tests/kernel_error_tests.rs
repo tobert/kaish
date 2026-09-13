@@ -72,7 +72,7 @@ async fn arithmetic_division_by_zero_is_matchable_as_failed_while_running() {
     assert!(err.is_execution_failure(), "a runtime fault must be classified as an execution failure: {err:?}");
     assert!(!err.is_rejected());
 
-    let KernelError::Execution(inner) = err else {
+    let KernelError::Execution { error: inner, .. } = err else {
         panic!("division by zero must be KernelError::Execution");
     };
     // `Display` shows only the outermost `.context(...)` — unchanged from
