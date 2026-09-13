@@ -1796,9 +1796,10 @@ impl Kernel {
                         let diagnostic =
                             ExecResult::terminate_diagnostic(format!("timeout: timed out after {:?}", d));
                         res.code = 124;
-                        if res.err.is_empty() {
-                            res.err = diagnostic.clone();
-                        }
+                        // After any stderr the program already wrote, as the
+                        // `timeout` builtin does: `sleep: interrupted` alone
+                        // does not say a deadline fired.
+                        push_diagnostic(&mut res.err, &diagnostic);
                         timed_out = Some(diagnostic);
                     }
                     Ok((res, timed_out))
@@ -1941,28 +1942,20 @@ impl Kernel {
                     tracing::error!(job_id = %job_id, "background job output writer stopped before execution completed");
                 }
             };
-            // `run_watched` merges it into an Ok result only.
+            // `run_inner` merges it into an Ok result only.
             let embedder_baggage = opts.baggage.clone();
-            let outcome = fork.run_watched(&source, opts, None, Some(&mut on_output)).await;
+            let outcome = fork.run_inner(&source, opts, None, Some(&mut on_output)).await;
             if let Some(watcher) = embedder_watcher {
                 watcher.abort();
             }
 
-            // A timeout, runtime error, or cancellation is not a statement, so
-            // no callback carried its diagnostic to the stream.
+            // A runtime error or a cancellation is not a statement, so no
+            // callback carried its diagnostic to the stream. A timeout's
+            // diagnostic arrives through `on_output` like a statement's.
             let stream_needs_newline = !streamed.err.is_empty() && !streamed.err.ends_with('\n');
             let mut unstreamed_err = String::new();
             let mut result = match outcome {
-                Ok((mut result, timeout_diagnostic)) => {
-                    if let Some(diagnostic) = timeout_diagnostic {
-                        // The watchdog already wrote it into an empty `err`.
-                        if !result.err.trim_end().ends_with(diagnostic.trim_end()) {
-                            push_diagnostic(&mut result.err, &diagnostic);
-                        }
-                        unstreamed_err.push_str(&diagnostic);
-                    }
-                    result
-                }
+                Ok(result) => result,
                 Err(error) => {
                     let diagnostic =
                         ExecResult::terminate_diagnostic(format!("{:#}", classify_execute_error(error)));
@@ -2176,20 +2169,6 @@ impl Kernel {
         pipe_stdin: Option<crate::scheduler::PipeReader>,
         on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
     ) -> Result<ExecResult> {
-        self.run_watched(input, opts, pipe_stdin, on_output)
-            .await
-            .map(|(result, _timeout_diagnostic)| result)
-    }
-
-    /// [`Self::run_inner`], also returning the timeout diagnostic when the
-    /// watchdog deadline elapsed (see `run_under_watchdog`).
-    async fn run_watched(
-        &self,
-        input: &str,
-        opts: ExecuteOptions,
-        pipe_stdin: Option<crate::scheduler::PipeReader>,
-        on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
-    ) -> Result<(ExecResult, Option<String>)> {
         use opentelemetry::context::FutureExt;
 
         // Capture the embedder's baggage before `opts` is consumed so it can be
@@ -2204,9 +2183,9 @@ impl Kernel {
             None => self.execute_with_options_inner(input, opts, pipe_stdin, on_output).await,
         };
 
-        result.map(|(mut r, timeout_diagnostic)| {
+        result.map(|mut r| {
             crate::telemetry::merge_egress_baggage(&mut r, embedder_baggage);
-            (r, timeout_diagnostic)
+            r
         })
     }
 
@@ -2220,7 +2199,7 @@ impl Kernel {
         opts: ExecuteOptions,
         pipe_stdin: Option<crate::scheduler::PipeReader>,
         on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
-    ) -> Result<(ExecResult, Option<String>)> {
+    ) -> Result<ExecResult> {
         let _guard = self.acquire_execute_lock().await;
 
         // Always reset to a fresh internal token; this is the kernel's own
@@ -2280,11 +2259,14 @@ impl Kernel {
             if let Some(h) = watcher_handle {
                 h.abort();
             }
-            let diagnostic = "timeout: timed out after 0s";
-            return Ok((
-                ExecResult::failure(124, diagnostic.to_string()),
-                Some(ExecResult::terminate_diagnostic(diagnostic)),
-            ));
+            let result = ExecResult::failure(124, "timeout: timed out after 0s".to_string());
+            if let Some(on_output) = on_output {
+                // No statement ran to carry it.
+                let mut tail = ExecResult::success("");
+                tail.err = result.err.clone();
+                on_output(&tail);
+            }
+            return Ok(result);
         }
 
         // Apply per-call vars overlay (push frame + set_exported), wrapped in
@@ -2481,8 +2463,21 @@ impl Kernel {
         };
 
         let result = self
-            .run_under_watchdog(timeout, &effective_cancel, self.execute_streaming_inner(input, cb_ref))
-            .await;
+            .run_under_watchdog(timeout, &effective_cancel, self.execute_streaming_inner(input, &mut *cb_ref))
+            .await
+            .map(|(mut result, timeout_diagnostic)| {
+                // A deadline is not a statement, so no statement streamed it.
+                if let Some(diagnostic) = timeout_diagnostic {
+                    let mut tail = ExecResult::success("");
+                    tail.err = diagnostic;
+                    cb_ref(&tail);
+                } else if effective_cancel.is_cancelled() && !result.ok() {
+                    // The token, not the code: a killed child exits 128+signal,
+                    // and `exit 143` alone is not a cancel.
+                    result.code = 130;
+                }
+                result
+            });
 
         // Restore self.cancel_token to a fresh, uncancelled token so the
         // embedder's view of `Kernel::cancel()` stays predictable on the
@@ -2542,8 +2537,13 @@ impl Kernel {
 
         let mut result = ExecResult::success("");
 
-        // Reset cancellation token for this execution.
-        let cancel = self.reset_cancel();
+        // The caller installed this call's token. Resetting it here would
+        // discard a cancel that fired before the first statement.
+        let cancel = {
+            #[allow(clippy::expect_used)]
+            let token = self.cancel_token.lock().expect("cancel_token poisoned");
+            token.clone()
+        };
 
         for stmt in program.statements.into_iter() {
             if matches!(stmt, Stmt::Empty) {
@@ -2604,9 +2604,10 @@ impl Kernel {
                     accumulate_result(&mut result, &r);
                     result.set_output(last_output);
                 }
-                ControlFlow::Exit { code, result: carried } => {
+                ControlFlow::Exit { code, result: mut carried } => {
+                    // Into `carried`, as the other arms do, so `on_output` sees it.
                     if !drained_stderr.is_empty() {
-                        result.err.push_str(&drained_stderr);
+                        carried.err = format!("{}{}", drained_stderr, carried.err);
                     }
                     // Output produced before the exit — e.g. by the loop the
                     // `exit` ran inside — arrives on the signal. Emit it like
@@ -3362,7 +3363,7 @@ impl Kernel {
                 let result = match self.eval_arithmetic_async(expr_str).await {
                     Ok(n) if n != 0 => ExecResult::success(""),
                     Ok(_) => ExecResult::failure(1, ""),
-                    Err(e) => ExecResult::failure(2, e.to_string()).into_fault(),
+                    Err(e) => ExecResult::failure(2, format!("{e:#}")).into_fault(),
                 };
                 self.update_last_result(&result).await;
                 if !result.ok() {
@@ -8078,6 +8079,31 @@ pub(crate) async fn kill_with_grace(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod statement_loop_cancel_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_installed_cancelled_token_stops_the_statement_loop() {
+        // `execute_with_options_inner` installs the call's token before the
+        // loop runs. When an embedder or job token fired first, that token is
+        // already cancelled; the loop must stop on it, not replace it.
+        let kernel = Kernel::transient().expect("kernel");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        *kernel.cancel_token.lock().expect("cancel_token") = token;
+
+        let mut on_output = |_: &ExecResult| {};
+        let result = kernel
+            .execute_streaming_inner("echo a; echo b", &mut on_output)
+            .await
+            .expect("program runs");
+        assert_eq!(result.code, 130, "{result:?}");
+        assert_eq!(result.text_out(), "", "no statement may run under a cancelled token");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod argv_classify_tests {
     use super::*;
 
@@ -8523,12 +8549,11 @@ mod tests {
         // Set PATH in kernel to ensure it's available
         kernel.execute(&format!(r#"PATH="{}""#, path_var)).await.expect("set PATH failed");
 
-        // Now try an external command like /usr/bin/env
-        // But env is also a builtin... let's try uname
-        let result = kernel.execute("uname").await.expect("execution failed");
-        eprintln!("uname result: {:?}", result);
-        // uname should succeed if external commands work
-        assert!(result.ok() || result.code == 127, "uname: {:?}", result);
+        // An absolute path skips builtin lookup, so this reaches external
+        // dispatch (`uname` would run the builtin).
+        let result = kernel.execute("/usr/bin/printf external-ok").await.expect("execution failed");
+        assert_eq!(result.code, 0, "{result:?}");
+        assert_eq!(result.text_out(), "external-ok");
     }
 
     #[tokio::test]
@@ -10244,8 +10269,6 @@ AFTER="yes"'"#)
 
     #[tokio::test]
     async fn test_background_job_basic() {
-        use std::time::Duration;
-
         let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
 
         // Run a simple background command, redirecting its output to a
@@ -10255,17 +10278,12 @@ AFTER="yes"'"#)
         assert!(result.ok(), "background command should succeed: {}", result.err);
         assert!(result.err.contains("[1]"), "announcement rides stderr: {:?}", result.err);
 
-        // Give the job time to complete
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        kernel.execute("wait %1").await.expect("wait failed");
 
         // Check job status
         let status = kernel.execute("cat /v/jobs/1/status").await.expect("status check failed");
         assert!(status.ok(), "status should succeed: {}", status.err);
-        assert!(
-            status.text_out().contains("done:") || status.text_out().contains("running"),
-            "should have valid status: {}",
-            status.text_out()
-        );
+        assert_eq!(status.text_out().trim(), "done:0", "{}", status.text_out());
 
         // Check the redirected output
         let stdout = kernel.execute("cat /tmp/basic_out.txt").await.expect("output check failed");
@@ -10559,17 +10577,13 @@ AFTER="yes"'"#)
     async fn test_bare_glob_no_matches_errors() {
         let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
-        let result = kernel.execute("echo *.nonexistent").await;
-        match &result {
-            Ok(exec) => {
-                // No-match glob should produce a non-zero exit code
-                assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
-                assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
-            }
-            Err(e) => {
-                assert!(e.to_string().contains("no matches"), "error should say no matches: {}", e);
-            }
-        }
+        // docs/LANGUAGE.md, "Glob Expansion": a zero-match glob fails the
+        // COMMAND with exit code 1 rather than passing the literal pattern
+        // through — it is not a kernel-level error, so `execute` returns `Ok`
+        // with a failed `ExecResult`, never `Err`.
+        let exec = kernel.execute("echo *.nonexistent").await.expect("execute");
+        assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
+        assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
     }
 
     #[tokio::test]

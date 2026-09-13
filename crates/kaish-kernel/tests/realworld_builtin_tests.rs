@@ -253,9 +253,11 @@ mod grep_realworld {
         let (_dir, kernel) = fixture();
         let (out, code) = run(&kernel, "grep -v DEBUG tmp/app.log").await;
         assert_eq!(code, 0, "grep -v failed: {out:?}");
-        // Should NOT contain DEBUG lines, but should contain others
+        // The fixture's app.log is fixed: filtering DEBUG leaves 8 lines, and
+        // both INFO and ERROR are always among them — not an either/or.
         assert!(!out.contains("DEBUG"));
-        assert!(out.contains("INFO") || out.contains("ERROR"));
+        assert!(out.contains("INFO"), "expected INFO lines to survive: {out:?}");
+        assert!(out.contains("ERROR"), "expected ERROR line to survive: {out:?}");
     }
 
     // Pattern: cmd | grep "pattern"
@@ -532,7 +534,10 @@ mod ls_realworld {
         let (_dir, kernel) = fixture();
         let (out, code) = run(&kernel, "cd src && ls").await;
         assert_eq!(code, 0, "ls cwd failed: {out:?}");
-        assert!(out.contains("main.rs") || out.contains("lib.rs"));
+        // The fixture's src/ is fixed (api.rs, lib, lib.rs, main.rs) — both
+        // files are always listed, not an either/or.
+        assert!(out.contains("main.rs"), "expected main.rs in: {out:?}");
+        assert!(out.contains("lib.rs"), "expected lib.rs in: {out:?}");
     }
 }
 

@@ -327,21 +327,18 @@ async fn validation_passes_for_valid_seq() {
 #[tokio::test]
 async fn validation_accepts_glob_pattern_ls_star() {
     let kernel = make_kernel().await;
-    // `ls *.txt` now parses and expands at runtime.
-    // In an empty temp dir, it returns "no matches" error at runtime (not parse error).
-    let result = kernel.execute("ls *.txt").await;
-
-    // Parse succeeds, runtime may fail with "no matches"
-    match result {
-        Ok(exec) => {
-            // If there happen to be .txt files, it succeeds
-            assert!(exec.code == 0 || exec.code == 1);
-        }
-        Err(e) => {
-            let err = e.to_string();
-            assert!(err.contains("no matches"), "expected no-matches error: {}", err);
-        }
-    }
+    // `ls *.txt` parses and expands at runtime. In a directory with no match
+    // the command fails with exit 1 (docs/LANGUAGE.md, "Glob Expansion"),
+    // and `execute` returns `Ok`, not `Err`.
+    // Made through the kernel, so it exists with or without the localfs backend.
+    let dir = format!("/tmp/kaish-glob-empty-{}", std::process::id());
+    let cd = kernel.execute(&format!("mkdir -p {dir} && cd {dir}")).await.expect("cd");
+    assert!(cd.ok(), "cd into the empty directory must succeed: {cd:?}");
+    let exec = kernel.execute("ls *.txt").await.expect("execute");
+    let cleanup = kernel.execute(&format!("cd / && rm -r {dir}")).await.expect("cleanup");
+    assert!(cleanup.ok(), "remove the empty directory: {cleanup:?}");
+    assert_eq!(exec.code, 1, "{exec:?}");
+    assert!(exec.err.contains("no matches"), "{exec:?}");
 }
 
 #[tokio::test]

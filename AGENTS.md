@@ -42,6 +42,7 @@ crates/
 cargo build                              # Build workspace
 cargo build -p kaish-kernel              # Build specific crate
 cargo test --all                         # Run all tests
+cargo test -p kaish-kernel --features subprocess,localfs   # Kernel tests, all suites
 cargo test -p kaish-kernel --test lexer_tests   # Lexer tests only
 cargo test -p kaish-kernel --test parser_tests  # Parser tests only
 cargo clippy --all --all-targets         # Lint everything incl. tests (must be clean)

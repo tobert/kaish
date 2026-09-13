@@ -130,7 +130,9 @@ async fn tree_existing_path_exits_zero() {
     let kernel = kernel_at(dir.path());
     let (out, code) = run(&kernel, "tree subdir").await;
     assert_eq!(code, 0, "tree on existing dir should succeed: {out:?}");
-    assert!(out.contains("subdir") || out.contains("file.txt"), "output should mention the tree: {out:?}");
+    // Fixed fixture: the root is always named for the argument and its one
+    // child is always listed, not an either/or.
+    assert_eq!(out, "subdir/{file.txt}", "output should show the tree: {out:?}");
 }
 
 /// `tree` without an argument (uses cwd `.`) still exits 0.

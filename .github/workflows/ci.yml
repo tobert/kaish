@@ -94,6 +94,10 @@ jobs:
           key: no-default-features
 
       - name: Test (kernel, no default features)
+        # The build is reduced on purpose; feature_coverage_tests would
+        # otherwise fail it for compiling out the subprocess suites.
+        env:
+          KAISH_ALLOW_REDUCED_TESTS: "1"
         run: cargo test -p kaish-kernel --no-default-features --locked
 
   # The WASI target only builds (no test runner); it exists to keep the kernel

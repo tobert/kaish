@@ -19,6 +19,15 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- A streaming caller (`kaish -c`, `execute_with_options_streaming`) now
+  receives stderr drained during an `exit` statement and the watchdog's
+  timeout line. The timeout line follows any stderr the program wrote
+  instead of being dropped.
+- A cancel that fires before a program's first statement now stops it. An
+  embedder or job token cancelled that early let the program run to
+  completion.
+- A cancelled call exits 130 even when it ends a child by signal. A single
+  external command reported the child's 143 or 137 instead.
 - A runtime fault keeps the output that ran before it. `echo left &&
   x=$((1/0))` shows `left`, and a function that faults exits 1 with what it
   printed and the full cause instead of only the outermost message.
