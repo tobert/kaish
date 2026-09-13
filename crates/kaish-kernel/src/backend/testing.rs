@@ -22,12 +22,15 @@ pub struct MockBackend {
     /// path, instead of always getting `ToolResult::success("mock executed")`.
     #[allow(clippy::type_complexity)]
     tool_result: Option<Arc<dyn Fn(&str) -> BackendResult<ToolResult> + Send + Sync>>,
+    /// When set, `call_tool` waits on its context's cancel token for at most
+    /// this long, the way an embedder tool waits on slow work.
+    wait_for_cancel: Option<std::time::Duration>,
 }
 
 impl MockBackend {
     pub fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
-        (Self { call_count: count.clone(), tool_result: None }, count)
+        (Self { call_count: count.clone(), tool_result: None, wait_for_cancel: None }, count)
     }
 
     /// Get the current call count.
@@ -44,6 +47,13 @@ impl MockBackend {
         self.tool_result = Some(Arc::new(result));
         self
     }
+
+    /// Make `call_tool` wait until its context's cancel token fires, or `limit`
+    /// passes.
+    pub fn waiting_for_cancel(mut self, limit: std::time::Duration) -> Self {
+        self.wait_for_cancel = Some(limit);
+        self
+    }
 }
 
 impl Default for MockBackend {
@@ -51,6 +61,7 @@ impl Default for MockBackend {
         Self {
             call_count: Arc::new(AtomicUsize::new(0)),
             tool_result: None,
+            wait_for_cancel: None,
         }
     }
 }
@@ -109,9 +120,19 @@ impl KernelBackend for MockBackend {
         &self,
         name: &str,
         _args: ToolArgs,
-        _ctx: &mut dyn ToolCtx,
+        ctx: &mut dyn ToolCtx,
     ) -> BackendResult<ToolResult> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(limit) = self.wait_for_cancel {
+            let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {
+                return Err(BackendError::InvalidOperation("waiting_for_cancel needs an ExecContext".into()));
+            };
+            let cancel = exec_ctx.cancel.clone();
+            return tokio::select! {
+                _ = cancel.cancelled() => Ok(ToolResult::failure(130, "mock tool: cancelled")),
+                _ = tokio::time::sleep(limit) => Ok(ToolResult::success("mock tool: waited out")),
+            };
+        }
         if let Some(f) = &self.tool_result {
             return f(name);
         }
