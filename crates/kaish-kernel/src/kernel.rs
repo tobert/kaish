@@ -3951,7 +3951,7 @@ impl Kernel {
                     }
                     s
                 });
-                let tool_args = self.build_args_async(args, tool_schema.as_ref()).await?;
+                let tool_args = self.build_args_async(args, tool_schema.as_ref(), &mut *ctx).await?;
                 let mut ctx = self.exec_ctx.write().await;
                 {
                     let scope = self.scope.read().await;
@@ -4034,7 +4034,7 @@ impl Kernel {
                     }
                 };
 
-            let tool_args = self.build_args_async(args, Some(schema)).await?;
+            let tool_args = self.build_args_async(args, Some(schema), &mut *ctx).await?;
 
             // --help / -h: show the generic whole-tool help, unless either the tool's
             // root schema claims that flag OR the tool owns its output. Owned-output
@@ -4218,8 +4218,9 @@ impl Kernel {
     /// the same drift-class GH #133 fixed for the external-command spawn
     /// sites. Now both paths call the one `bind_tool_args` core, differing
     /// only in which `ArgValueSource` they hand it.
-    async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
-        bind_tool_args(args, schema, self).await
+    async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>, ctx: &mut ExecContext) -> Result<ToolArgs> {
+        let source = KernelArgSource { kernel: self, ctx: tokio::sync::Mutex::new(ctx) };
+        bind_tool_args(args, schema, &source).await
     }
 
     /// Build arguments as flat string list for external commands.
@@ -4232,20 +4233,9 @@ impl Kernel {
     ///
     /// This is what external commands expect in their argv.
     #[cfg(feature = "subprocess")]
-    async fn build_args_flat(&self, args: &[Arg]) -> Result<Vec<String>> {
+    async fn build_args_flat(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<Vec<String>> {
         let mut argv = Vec::new();
         let home = self.scope_home().await;
-        let cancel = {
-            #[allow(clippy::expect_used)]
-            let token = self.cancel_token.lock().expect("cancel_token poisoned");
-            token.clone()
-        };
-        // Root context for this run; the interpreter threads it.
-        let mut root_ctx = {
-            let ec = self.exec_ctx.read().await;
-            let scope = self.scope.read().await;
-            self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel)
-        };
         for arg in args {
             match arg {
                 Arg::Positional(expr) => {
@@ -4286,7 +4276,7 @@ impl Kernel {
                         argv.push(raw.clone());
                         continue;
                     }
-                    let value = self.eval_expr_async(expr, &mut root_ctx).await?;
+                    let value = self.eval_expr_async(expr, &mut *ctx).await?;
                     // Decision D: a bare collection can't cross the external
                     // process boundary as an argv element — refuse rather than
                     // silently JSON-serializing it. A quoted `"$x"` already
@@ -4305,7 +4295,7 @@ impl Kernel {
                         argv.push(format!("--{key}={raw}"));
                         continue;
                     }
-                    let val = self.eval_expr_async(value, &mut root_ctx).await?;
+                    let val = self.eval_expr_async(value, &mut *ctx).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
                     }
@@ -4318,7 +4308,7 @@ impl Kernel {
                         argv.push(format!("{key}={raw}"));
                         continue;
                     }
-                    let val = self.eval_expr_async(value, &mut root_ctx).await?;
+                    let val = self.eval_expr_async(value, &mut *ctx).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
                     }
@@ -5057,7 +5047,7 @@ impl Kernel {
         let _depth = self.enter_recursion("a shell function")?;
 
         // 1. Build function args from AST args (async to support command substitution)
-        let tool_args = self.build_args_async(args, None).await?;
+        let tool_args = self.build_args_async(args, None, &mut *ctx).await?;
 
         // 2. Push a new scope frame for local variables
         {
@@ -5631,7 +5621,7 @@ impl Kernel {
         let _depth = self.enter_recursion("source")?;
 
         // Get the file path from the first positional argument
-        let tool_args = self.build_args_async(args, None).await?;
+        let tool_args = self.build_args_async(args, None, &mut *ctx).await?;
         let path = match tool_args.positional.first() {
             Some(Value::String(s)) => s.clone(),
             Some(v) => value_to_string(v),
@@ -5840,7 +5830,7 @@ impl Kernel {
             };
 
             // Build tool_args from args (async for command substitution support)
-            let tool_args = self.build_args_async(args, None).await?;
+            let tool_args = self.build_args_async(args, None, &mut *ctx).await?;
 
             // Create isolated scope (like user tools). The trash rail and
             // errexit are NOT session state a script may shed: a `.kai`
@@ -6092,7 +6082,7 @@ impl Kernel {
         tracing::debug!(executable = %executable, "resolved external command");
 
         // Build flat argv (preserves flag format)
-        let argv = self.build_args_flat(args).await?;
+        let argv = self.build_args_flat(args, &mut *ctx).await?;
 
         // Get stdin sources: a streaming `pipe_stdin` (an inter-stage pipeline
         // pipe, or a frontend-seeded process-stdin pipe) and/or a buffered
@@ -6695,30 +6685,29 @@ pub(crate) trait ArgValueSource: Send + Sync {
     async fn home(&self) -> Option<String>;
 }
 
+/// The kernel's argument evaluator, bound to the context of the command whose
+/// arguments it evaluates, so `$(…)` in an argument runs with that command's
+/// stdin and cancel token. The mutex makes the source `Sync` while `eval`
+/// stays `&self`.
+struct KernelArgSource<'a> {
+    kernel: &'a Kernel,
+    ctx: tokio::sync::Mutex<&'a mut ExecContext>,
+}
+
 #[async_trait]
-impl ArgValueSource for Kernel {
+impl ArgValueSource for KernelArgSource<'_> {
     async fn eval(&self, expr: &Expr) -> Result<Option<Value>> {
-        let cancel = {
-            #[allow(clippy::expect_used)]
-            let token = self.cancel_token.lock().expect("cancel_token poisoned");
-            token.clone()
-        };
-        // Root context for this run; the interpreter threads it.
-        let mut root_ctx = {
-            let ec = self.exec_ctx.read().await;
-            let scope = self.scope.read().await;
-            self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel)
-        };
-        Ok(Some(self.eval_expr_async(expr, &mut root_ctx).await?))
+        let mut ctx = self.ctx.lock().await;
+        Ok(Some(self.kernel.eval_expr_async(expr, &mut ctx).await?))
     }
 
     async fn expand_glob(&self, pattern: &str) -> Result<Option<Vec<String>>> {
-        let glob_enabled = self.scope.read().await.glob_enabled();
+        let glob_enabled = self.kernel.scope.read().await.glob_enabled();
         if !glob_enabled {
             return Ok(None);
         }
         let (paths, cwd) = {
-            let ctx = self.exec_ctx.read().await;
+            let ctx = self.kernel.exec_ctx.read().await;
             let paths = ctx
                 .expand_glob(pattern)
                 .await
@@ -6746,7 +6735,7 @@ impl ArgValueSource for Kernel {
     }
 
     async fn home(&self) -> Option<String> {
-        self.scope_home().await
+        self.kernel.scope_home().await
     }
 }
 
@@ -10944,6 +10933,16 @@ AFTER="yes"'"#)
     /// Helper: a throwaway schema with one `--pair` param declared as
     /// consuming two positionals per occurrence. Modelled after what
     /// jq_native will declare for `--arg` / `--argjson`.
+    /// A root context for calling interpreter functions directly, built the way
+    /// the statement loop builds one.
+    #[allow(clippy::expect_used)]
+    async fn root_ctx(kernel: &Kernel) -> ExecContext {
+        let cancel = kernel.cancel_token.lock().expect("cancel_token poisoned").clone();
+        let ec = kernel.exec_ctx.read().await;
+        let scope = kernel.scope.read().await;
+        *kernel.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel)
+    }
+
     fn multi_consume_schema() -> crate::tools::ToolSchema {
         use crate::tools::{ParamSchema, ToolSchema};
         ToolSchema::new("test", "multi-consume smoke")
@@ -10969,7 +10968,7 @@ AFTER="yes"'"#)
             pos("filter"),
         ];
         let built = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect("build_args should succeed");
 
@@ -11010,7 +11009,7 @@ AFTER="yes"'"#)
             pos("filter"),
         ];
         let built = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect("build_args should succeed");
 
@@ -11068,7 +11067,7 @@ AFTER="yes"'"#)
             pos("explorer"),
         ];
         let err = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect_err("undeclared --type with a space value must fail loud");
         let msg = err.to_string();
@@ -11090,7 +11089,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("type".into()),
             pos("explorer"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
@@ -11103,7 +11102,7 @@ AFTER="yes"'"#)
             pos("exp"),
             Arg::Named { key: "type".into(), value: Expr::Literal(Value::String("explorer".into())) },
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
@@ -11113,7 +11112,7 @@ AFTER="yes"'"#)
         let schema = kj_like_schema();
         // No positional follows --force → unambiguously a bare flag.
         let args = vec![pos("exp"), Arg::LongFlag("force".into())];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("force"));
     }
 
@@ -11126,7 +11125,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("verbose".into()),
             Arg::Named { key: "name".into(), value: Expr::Literal(Value::String("x".into())) },
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("verbose"));
     }
 
@@ -11138,7 +11137,7 @@ AFTER="yes"'"#)
         let schema = ToolSchema::new("frobnicate", "builtin-style")
             .param(ParamSchema::optional("name", "string", Value::Null, "name"));
         let args = vec![Arg::LongFlag("frob".into()), pos("value")];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("frob"));
     }
 
@@ -11156,7 +11155,7 @@ AFTER="yes"'"#)
         // kj exp -t explorer
         let args = vec![pos("exp"), Arg::ShortFlag("t".into()), pos("explorer")];
         let err = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect_err("undeclared -t with a space value must fail loud");
         let msg = err.to_string();
@@ -11172,7 +11171,7 @@ AFTER="yes"'"#)
         let schema = ToolSchema::new("frobnicate", "builtin-style")
             .param(ParamSchema::optional("name", "string", Value::Null, "name"));
         let args = vec![Arg::ShortFlag("t".into()), pos("value")];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("t"));
     }
 
@@ -11208,7 +11207,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("type".into()),
             pos("explorer"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.expect("build_args");
         // --type (declared only on the create leaf) binds in space form.
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
         // The subcommand path survives as positionals for kj to re-parse.
@@ -11232,7 +11231,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("force".into()),
             pos("somearg"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.expect("build_args");
         assert!(built.flags.contains("force"), "force should be a bare flag");
         let positionals: Vec<&str> = built
             .positional
@@ -11253,7 +11252,7 @@ AFTER="yes"'"#)
             Arg::ShortFlag("t".into()),
             pos("explorer"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.expect("build_args");
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
@@ -11266,7 +11265,7 @@ AFTER="yes"'"#)
             crate::ast::Command { name: "echo".into(), args: vec![], redirects: vec![] },
         )]))];
         let err = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect_err("computed subcommand selector must error");
         assert!(
