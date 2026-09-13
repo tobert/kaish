@@ -885,11 +885,14 @@ impl PipelineRunner {
                     }
                     if i == last_idx {
                         last_result = result;
-                        // Sync last stage's scope and cwd changes back
+                        // The last stage returns every session change, the
+                        // same as a statement run on its own.
                         ctx.scope = stage_ctx.scope;
                         ctx.cwd = stage_ctx.cwd;
                         ctx.prev_cwd = stage_ctx.prev_cwd;
                         ctx.aliases = stage_ctx.aliases;
+                        ctx.ignore_config = stage_ctx.ignore_config;
+                        ctx.output_limit = stage_ctx.output_limit;
                     }
                 }
                 Err(e) => {
