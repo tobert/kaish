@@ -1450,7 +1450,11 @@ impl Kernel {
         job_id: crate::scheduler::JobId,
     ) -> Arc<Self> {
         let fork = self.fork_inner(cancel, Some(job_id)).await;
-        fork.exec_ctx.write().await.background_stream_output = true;
+        {
+            let mut ec = fork.exec_ctx.write().await;
+            ec.background_stream_output = true;
+            ec.background_stream_stderr = true;
+        }
         fork
     }
 
@@ -1857,11 +1861,12 @@ impl Kernel {
     /// job. The fork runs the source with the same [`ExecuteOptions`]
     /// semantics as [`Self::execute_with_options`].
     ///
-    /// Output reaches the job's streams after each top-level statement
-    /// finishes, not while a statement runs. A runtime error (exit 1), timeout
-    /// (exit 124), or cancellation (exit 130) ends the job's stderr with one
-    /// diagnostic, in the result and in the stream. `JobManager::cancel` and
-    /// `opts.cancel_token` both cancel the job.
+    /// Stdout reaches the job's stream as commands produce it, as in a `cmd &`
+    /// job: an external per chunk, a builtin when it returns. Stderr reaches
+    /// the stream after each top-level statement finishes. A runtime error
+    /// (exit 1), timeout (exit 124), or cancellation (exit 130) ends the job's
+    /// stderr with one diagnostic, in the result and in the stream.
+    /// `JobManager::cancel` and `opts.cancel_token` both cancel the job.
     ///
     /// # Errors
     ///
@@ -1893,11 +1898,13 @@ impl Kernel {
         let job_id = self.jobs.register(source.to_owned(), result_rx).await;
         self.jobs.set_cancel_token(job_id, cancel.clone()).await;
         {
-            // This job publishes whole statement results below; a command
-            // publishing the same bytes as it runs would write them twice.
+            // Stdout streams as commands produce it, like a `cmd &` job.
+            // Stderr is written per statement below, so an external's stderr
+            // must not also tee live.
             let mut ec = fork.exec_ctx.write().await;
             ec.background_job = Some(job_id);
-            ec.background_stream_output = false;
+            ec.background_stream_output = true;
+            ec.background_stream_stderr = false;
         }
 
         // The job token is this call's cancel input, so `JobManager::cancel`
@@ -1906,19 +1913,16 @@ impl Kernel {
         let embedder_cancel = opts.cancel_token.replace(cancel.clone());
 
         let jobs = self.jobs.clone();
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<ExecResult>();
+        let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel::<String>();
 
-        let output_jobs = jobs.clone();
-        let output_writer = tokio::spawn(crate::telemetry::bind_current_context(async move {
-            let Some(streams) = output_jobs.streams(job_id).await else {
+        // Stdout reaches the job's stream from the commands themselves.
+        let stderr_jobs = jobs.clone();
+        let stderr_writer = tokio::spawn(crate::telemetry::bind_current_context(async move {
+            let Some(streams) = stderr_jobs.streams(job_id).await else {
                 return;
             };
-            while let Some(output) = output_rx.recv().await {
-                match output.out_bytes() {
-                    Some(bytes) => streams.stdout.write(bytes).await,
-                    None => streams.stdout.write(output.text_out().as_bytes()).await,
-                }
-                streams.stderr.write(output.err.as_bytes()).await;
+            while let Some(err) = stderr_rx.recv().await {
+                streams.stderr.write(err.as_bytes()).await;
             }
         }));
 
@@ -1938,8 +1942,8 @@ impl Kernel {
                 accumulate_result(&mut streamed, output);
                 // Unbounded: this synchronous callback cannot await a bounded
                 // channel without dropping output or blocking execution.
-                if output_tx.send(output.clone()).is_err() {
-                    tracing::error!(job_id = %job_id, "background job output writer stopped before execution completed");
+                if !output.err.is_empty() && stderr_tx.send(output.err.clone()).is_err() {
+                    tracing::error!(job_id = %job_id, "background job stderr writer stopped before execution completed");
                 }
             };
             // `run_inner` merges it into an Ok result only.
@@ -1977,22 +1981,22 @@ impl Kernel {
                 unstreamed_err.push_str(&diagnostic);
             }
             if !unstreamed_err.is_empty() {
-                let mut tail = ExecResult::success("");
+                let mut tail = String::new();
                 if stream_needs_newline {
-                    tail.err.push('\n');
+                    tail.push('\n');
                 }
-                tail.err.push_str(&unstreamed_err);
-                if output_tx.send(tail).is_err() {
-                    tracing::error!(job_id = %job_id, "background job output writer stopped before its final diagnostic");
+                tail.push_str(&unstreamed_err);
+                if stderr_tx.send(tail).is_err() {
+                    tracing::error!(job_id = %job_id, "background job stderr writer stopped before its final diagnostic");
                 }
             }
-            drop(output_tx);
+            drop(stderr_tx);
 
-            if let Err(error) = output_writer.await {
+            if let Err(error) = stderr_writer.await {
                 result.code = 1;
                 push_diagnostic(
                     &mut result.err,
-                    &ExecResult::terminate_diagnostic(format!("background job output writer failed: {error}")),
+                    &ExecResult::terminate_diagnostic(format!("background job stderr writer failed: {error}")),
                 );
             }
             jobs.finalize_streams(job_id, &result).await;
@@ -3470,6 +3474,7 @@ impl Kernel {
             kill_grace: ec.kill_grace,
             background_job: ec.background_job,
             background_stream_output: ec.background_stream_output,
+            background_stream_stderr: ec.background_stream_stderr,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -3960,6 +3965,10 @@ impl Kernel {
                             || tool_schema
                                 .as_ref()
                                 .is_some_and(|s| s.typed_substitution);
+                        drop(scope);
+                        // No builtin or external command produced this output,
+                        // so nothing else publishes it to a background job.
+                        ctx.publish_job_stdout(&result).await;
                         return Ok(result);
                     }
                     Err(BackendError::ToolNotFound(_)) => {
@@ -10390,6 +10399,62 @@ AFTER="yes"'"#)
             String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8"),
             result.text_out(),
             "statement output must be complete and must not duplicate custom-tool output"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_job_publishes_custom_tool_stdout() {
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+
+        let jobs = Arc::new(JobManager::new());
+        let (mock, calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|name| Ok(ToolResult::success(format!("tool:{name}\n"))));
+        let kernel = Kernel::with_backend(
+            Arc::new(backend),
+            KernelConfig::isolated().with_job_manager(jobs.clone()),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        kernel.execute("embedder_tool &").await.expect("spawn");
+        let id = crate::scheduler::JobId(1);
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "background job failed: {result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "custom tool must run in the fork");
+        assert_eq!(
+            String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8"),
+            "tool:embedder_tool\n",
+            "a custom tool's stdout is the job's stdout"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_job_publishes_redispatched_custom_tool_stdout_once() {
+        use crate::backend::testing::MockBackend;
+        use crate::backend::ToolResult;
+
+        let jobs = Arc::new(JobManager::new());
+        let (mock, calls) = MockBackend::new();
+        let backend = mock.with_tool_result(|name| Ok(ToolResult::success(format!("tool:{name}\n"))));
+        let kernel = Kernel::with_backend(
+            Arc::new(backend),
+            KernelConfig::isolated().with_job_manager(jobs.clone()),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        kernel.execute("timeout 5 embedder_tool &").await.expect("spawn");
+        let id = crate::scheduler::JobId(1);
+        let result = jobs.wait(id).await.expect("job result");
+        assert!(result.ok(), "background job failed: {result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "timeout must run the custom tool once");
+        assert_eq!(
+            String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8"),
+            "tool:embedder_tool\n",
+            "timeout publishes nothing when the tool it ran already published"
         );
     }
 

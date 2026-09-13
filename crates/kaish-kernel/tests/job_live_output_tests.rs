@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::scheduler::JobId;
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 
 /// The execution core is hermetic — it never reads OS env — so PATH comes in
 /// through `initial_vars`, exactly as the REPL frontend supplies it.
@@ -357,4 +357,74 @@ async fn scatter_worker_output_is_not_job_output() {
     assert!(!out.lines().any(|line| line == "worker"), "a worker's raw stdout leaked: {out:?}");
     assert_eq!(out.lines().count(), 2, "one gather record per worker: {out:?}");
     assert!(out.contains("\"out\":\"worker\""), "gather's records must reach the stream: {out:?}");
+}
+
+// ── Whole-program jobs stream stdout like `&` jobs ──
+//
+// A shell user sees output as it is produced. Each liveness case emits,
+// waits, and emits again; the first token must be readable while the job
+// still runs and before the second arrives.
+
+/// Poll until `first` is in the job's stdout. The status is sampled before the
+/// stream, so `running` plus `first` without `second` is a live write, not a
+/// completion-time dump.
+async fn assert_stdout_live(kernel: &Kernel, id: JobId, first: &str, second: &str) {
+    let deadline = Instant::now() + LIVE_TIMEOUT;
+    loop {
+        let status = status_of(kernel, id).await;
+        let out = stdout_of(kernel, id).await;
+        if out.contains(first) {
+            assert_eq!(status, "running", "stdout held {first:?} only after the job finished: {out:?}");
+            assert!(!out.contains(second), "stdout arrived as one buffer: {out:?}");
+            return;
+        }
+        assert_eq!(status, "running", "job finished before {first:?} reached stdout: {out:?}");
+        assert!(Instant::now() < deadline, "{first:?} never reached stdout while the job ran");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn start_program(kernel: &Kernel, program: &str) -> JobId {
+    kernel
+        .execute_background_with_options(program, ExecuteOptions::new())
+        .await
+        .expect("program rejected")
+}
+
+#[tokio::test]
+async fn whole_program_external_stdout_is_live() {
+    let kernel = kernel();
+    let id = start_program(&kernel, "sh -c 'echo first; sleep 2; echo second'").await;
+    assert_stdout_live(&kernel, id, "first", "second").await;
+    assert_eq!(wait_done(&kernel, id).await, "done:0");
+    assert_eq!(stdout_of(&kernel, id).await, "first\nsecond\n");
+}
+
+#[tokio::test]
+async fn whole_program_builtin_output_inside_a_loop_is_live() {
+    let kernel = kernel();
+    let id = start_program(&kernel, "for i in 1 2; do echo \"tick-$i\"; sleep 2; done").await;
+    assert_stdout_live(&kernel, id, "tick-1", "tick-2").await;
+    assert_eq!(wait_done(&kernel, id).await, "done:0");
+    assert_eq!(stdout_of(&kernel, id).await, "tick-1\ntick-2\n");
+}
+
+#[tokio::test]
+async fn whole_program_stderr_stream_matches_the_result_in_order() {
+    let kernel = kernel();
+    let id = start_program(&kernel, "echo one >&2; sh -c 'echo two >&2'; echo three >&2").await;
+    let result = kernel.jobs().wait(id).await.expect("job result");
+    let stream = stderr_of(&kernel, id).await;
+    assert_eq!(stream, "one\ntwo\nthree\n");
+    assert_eq!(stream, result.err, "the stream and the result must agree");
+}
+
+#[tokio::test]
+async fn whole_program_substitution_stderr_is_job_stderr() {
+    let kernel = kernel();
+    let id = start_program(&kernel, "x=$(cat /kaish-no-such-file); echo \"got [$x]\"").await;
+    assert_eq!(wait_done(&kernel, id).await, "done:0");
+    assert_eq!(stdout_of(&kernel, id).await, "got []\n");
+    let err = stderr_of(&kernel, id).await;
+    assert_eq!(err.matches("kaish-no-such-file").count(), 1, "substitution stderr, once: {err:?}");
 }

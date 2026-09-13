@@ -14,11 +14,14 @@ breaking entries are marked **BREAKING**.
 
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
-  registers no job. Output reaches the job streams after each top-level
-  statement.
+  registers no job. Stdout streams as the program runs; stderr reaches the
+  job stream after each top-level statement.
 
 ### Fixed
 
+- An embedder tool's stdout now reaches its background job's stdout stream.
+  `embedder_tool &` left `/v/jobs/N/stdout` empty; the output was only in
+  the job's result.
 - A streaming caller (`kaish -c`, `execute_with_options_streaming`) now
   receives stderr drained during an `exit` statement and the watchdog's
   timeout line. The timeout line follows any stderr the program wrote

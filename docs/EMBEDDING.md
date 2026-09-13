@@ -1462,11 +1462,11 @@ let result = kernel.jobs().wait(id).await.expect("job remains tracked");
 
 The job runs in a fork with the same options, tools, variables, and cwd as
 foreground execution. `JobManager::cancel` and the options' cancel token both
-stop it with exit 130. Output reaches the job's stdout and stderr streams when
-each top-level statement finishes, not while a statement runs. A runtime error
-(exit 1), a timeout (exit 124), or a cancellation (exit 130) ends stderr with
-one diagnostic line, in both the result and the stream. Shell `cmd &` jobs
-stream external output as it arrives.
+stop it with exit 130. Stdout reaches the job's stream as it is produced, the
+same as a `cmd &` job; stderr reaches the stream when each top-level statement
+finishes. A runtime error (exit 1), a timeout (exit 124), or a cancellation
+(exit 130) ends stderr with one diagnostic line, in both the result and the
+stream.
 
 ### JobFs for Background Job Observability
 
