@@ -19,7 +19,11 @@ use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::ExecResult;
 
 async fn run(script: &str) -> ExecResult {
-    let k = Kernel::new(KernelConfig::repl()).expect("kernel");
+    // `isolated()` is NoLocal, which forces in-memory truncation. `repl()` is
+    // Passthrough and spills to disk, so these tests wrote a ~600 KB file into
+    // the host spill directory on every run. Truncation sets `did_spill`
+    // either way, which is all these tests read.
+    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
     k.execute(script).await.expect("kernel execute")
 }
 
@@ -144,4 +148,32 @@ async fn no_spill_leaves_original_code_unset() {
         r.original_code, None,
         "`original_code` is present only alongside a spill"
     );
+}
+
+/// `exit` takes the same path: the exit arm assigns `code` after the fold, so
+/// a spill before it had left `original_code` answering for a code that was
+/// replaced. `seq …; exit 5` reported 0.
+#[tokio::test]
+async fn a_spill_before_an_exit_reports_the_exit_code() {
+    let r = run("kaish-output-limit set 2K; seq 1 100000; exit 5").await;
+    assert!(r.did_spill, "statement 1 was truncated");
+    assert_eq!(real_exit(&r), 5, "`exit 5` set the status; the spill did not");
+}
+
+/// A `break` carries no code of its own, so a loop that spills and then breaks
+/// reports the loop's 0. `original_code` follows `code` here as everywhere
+/// else: the truncation stays reported, the pre-break failure does not become
+/// the loop's status. Pinned because the signal fold reaches
+/// `accumulate_result` with a control-flow placeholder rather than a
+/// statement.
+#[tokio::test]
+async fn a_loop_that_spills_then_breaks_reports_the_loop_status() {
+    let r = run(
+        "kaish-output-limit set 2K; set -o pipefail; \
+         for i in 1; do false | seq 1 100000; break; done",
+    )
+    .await;
+    assert!(r.did_spill, "the body truncated, and that stays reported");
+    assert_eq!(r.code, 0, "`break` leaves the loop at 0");
+    assert_eq!(real_exit(&r), 0, "`original_code` answers for that same 0");
 }
