@@ -2585,6 +2585,10 @@ impl Kernel {
             // sites. It runs before `execute_stmt_flow`, so a held statement
             // has run *nothing*: no substitution, no redirect opened, no
             let flow_result = self.execute_stmt_flow(&stmt, &mut root_ctx).await;
+            // Publish the session before anything can leave this loop — Ok, a
+            // fault, or a control-flow signal — so `Kernel::cwd()` and the other
+            // public accessors are right the moment the call returns.
+            self.write_session_back(&root_ctx).await;
             let flow = match flow_result {
                 Ok(flow) => flow,
                 Err(error) => {
@@ -3557,6 +3561,15 @@ impl Kernel {
             stage.background_job = caller.background_job;
             stage.background_stream_output = caller.background_stream_output;
             stage.background_stream_stderr = caller.background_stream_stderr;
+            // Session state comes from the caller too. `snapshot_exec_ctx`
+            // seeds from the slot, which now only carries the session BETWEEN
+            // runs — inside one run a `cd` in an earlier statement lives on the
+            // ctx, and seeding from the slot lost it (`x=$(cd /tmp; pwd)`).
+            stage.cwd = caller.cwd.clone();
+            stage.prev_cwd = caller.prev_cwd.clone();
+            stage.aliases = caller.aliases.clone();
+            stage.ignore_config = caller.ignore_config.clone();
+            stage.output_limit = caller.output_limit.clone();
             stage
         }; // locks released
 
@@ -3598,15 +3611,14 @@ impl Kernel {
         // apply — see `apply_spill_contract`'s doc comment (GH #212).
         crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
 
-        // Sync changes back from context
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd.clone();
-            ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.aliases = ctx.aliases.clone();
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.output_limit = ctx.output_limit.clone();
-        }
+        // Session changes go back to the CALLER, not the slot: a `cd` or a
+        // `kaish-ignore` inside this pipeline belongs to the enclosing run,
+        // and the run publishes the slot once the statement finishes.
+        caller.cwd = ctx.cwd.clone();
+        caller.prev_cwd = ctx.prev_cwd.clone();
+        caller.aliases = ctx.aliases.clone();
+        caller.ignore_config = ctx.ignore_config.clone();
+        caller.output_limit = ctx.output_limit.clone();
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -4083,6 +4095,13 @@ impl Kernel {
             tool_ctx.background_job = caller.background_job;
             tool_ctx.background_stream_output = caller.background_stream_output;
             tool_ctx.background_stream_stderr = caller.background_stream_stderr;
+            // Session state from the caller, for the same reason as the stage
+            // context above: the slot is between-run state now.
+            tool_ctx.cwd = caller.cwd.clone();
+            tool_ctx.prev_cwd = caller.prev_cwd.clone();
+            tool_ctx.aliases = caller.aliases.clone();
+            tool_ctx.ignore_config = caller.ignore_config.clone();
+            tool_ctx.output_limit = caller.output_limit.clone();
             tool_ctx
         }; // both locks released — tool.execute can re-dispatch safely
 
@@ -4147,22 +4166,16 @@ impl Kernel {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd;
-            ec.prev_cwd = ctx.prev_cwd;
-            ec.aliases = ctx.aliases;
-            // A builtin (`set -o output-limit`, `kaish-output-limit set`) can
-            // mutate the runtime output limit; without this sync the change is
-            // dropped here and never reaches dispatch_command's read-back, so
-            // it would not survive past the current statement.
-            ec.output_limit = ctx.output_limit.clone();
-            // Same for `kaish-ignore` (add/clear/defaults/scope): this field
-            // was missing from this sync, so every runtime ignore mutation
-            // silently died at the end of its own statement — including the
-            // documented `kaish-ignore add .gitignore` rc-file recipe.
-            ec.ignore_config = ctx.ignore_config.clone();
-        }
+        // A builtin can mutate session state: `cd`, `alias`, `kaish-ignore`
+        // and `set -o output-limit` all do. It goes to the caller so the change
+        // outlives this dispatch — the bug those two comments described was
+        // this sync being incomplete, and a caller field cannot be forgotten
+        // the same way.
+        caller.cwd = ctx.cwd;
+        caller.prev_cwd = ctx.prev_cwd;
+        caller.aliases = ctx.aliases;
+        caller.output_limit = ctx.output_limit.clone();
+        caller.ignore_config = ctx.ignore_config.clone();
         // Unused pipe ends go back so the runner can forward this stage's
         // output; a partial read's remainder (`read x; read y`) and an
         // unconsumed sideband value go back for the next reader.
@@ -4484,16 +4497,16 @@ impl Kernel {
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_ec = {
-                    let ec = self.exec_ctx.read().await;
-                    (
-                        ec.cwd.clone(),
-                        ec.prev_cwd.clone(),
-                        ec.aliases.clone(),
-                        ec.ignore_config.clone(),
-                        ec.output_limit.clone(),
-                    )
-                };
+                // A substitution's session changes do not escape into the enclosing
+                // statement. Saved off the threaded ctx: the run's truth lives there
+                // now, and the slot is only written when the statement finishes.
+                let saved_ec = (
+                    ctx.cwd.clone(),
+                    ctx.prev_cwd.clone(),
+                    ctx.aliases.clone(),
+                    ctx.ignore_config.clone(),
+                    ctx.output_limit.clone(),
+                );
 
                 // Capture result without `?` — restore state unconditionally
                 let run_result = self.execute_block_capturing(stmts, &mut *ctx).await;
@@ -4508,13 +4521,12 @@ impl Kernel {
                     }
                 }
                 {
-                    let mut ec = self.exec_ctx.write().await;
                     let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-                    ec.cwd = cwd;
-                    ec.prev_cwd = prev_cwd;
-                    ec.aliases = aliases;
-                    ec.ignore_config = ignore_config;
-                    ec.output_limit = output_limit;
+                    ctx.cwd = cwd;
+                    ctx.prev_cwd = prev_cwd;
+                    ctx.aliases = aliases;
+                    ctx.ignore_config = ignore_config;
+                    ctx.output_limit = output_limit;
                 }
 
                 // A substitution's stderr belongs to the enclosing statement,
@@ -4927,16 +4939,16 @@ impl Kernel {
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_ec = {
-                    let ec = self.exec_ctx.read().await;
-                    (
-                        ec.cwd.clone(),
-                        ec.prev_cwd.clone(),
-                        ec.aliases.clone(),
-                        ec.ignore_config.clone(),
-                        ec.output_limit.clone(),
-                    )
-                };
+                // A substitution's session changes do not escape into the enclosing
+                // statement. Saved off the threaded ctx: the run's truth lives there
+                // now, and the slot is only written when the statement finishes.
+                let saved_ec = (
+                    ctx.cwd.clone(),
+                    ctx.prev_cwd.clone(),
+                    ctx.aliases.clone(),
+                    ctx.ignore_config.clone(),
+                    ctx.output_limit.clone(),
+                );
 
                 // Capture result without `?` — restore state unconditionally
                 let run_result = self.execute_block_capturing(stmts, ctx).await;
@@ -4951,13 +4963,12 @@ impl Kernel {
                     }
                 }
                 {
-                    let mut ec = self.exec_ctx.write().await;
                     let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-                    ec.cwd = cwd;
-                    ec.prev_cwd = prev_cwd;
-                    ec.aliases = aliases;
-                    ec.ignore_config = ignore_config;
-                    ec.output_limit = output_limit;
+                    ctx.cwd = cwd;
+                    ctx.prev_cwd = prev_cwd;
+                    ctx.aliases = aliases;
+                    ctx.ignore_config = ignore_config;
+                    ctx.output_limit = output_limit;
                 }
 
                 // A substitution's stderr belongs to the enclosing statement,
@@ -5573,16 +5584,16 @@ impl Kernel {
     /// base, never coerced first — see `crate::arithmetic::based_value`).
     async fn run_arith_command_subst_text(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<String> {
         let saved_scope = Box::new(self.scope.read().await.clone());
-        let saved_ec = {
-            let ec = self.exec_ctx.read().await;
-            (
-                ec.cwd.clone(),
-                ec.prev_cwd.clone(),
-                ec.aliases.clone(),
-                ec.ignore_config.clone(),
-                ec.output_limit.clone(),
-            )
-        };
+        // A substitution's session changes do not escape into the enclosing
+        // statement. Saved off the threaded ctx: the run's truth lives there
+        // now, and the slot is only written when the statement finishes.
+        let saved_ec = (
+            ctx.cwd.clone(),
+            ctx.prev_cwd.clone(),
+            ctx.aliases.clone(),
+            ctx.ignore_config.clone(),
+            ctx.output_limit.clone(),
+        );
 
         let run_result = self.execute_block_capturing(stmts, ctx).await;
 
@@ -5595,13 +5606,12 @@ impl Kernel {
             }
         }
         {
-            let mut ec = self.exec_ctx.write().await;
             let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-            ec.cwd = cwd;
-            ec.prev_cwd = prev_cwd;
-            ec.aliases = aliases;
-            ec.ignore_config = ignore_config;
-            ec.output_limit = output_limit;
+            ctx.cwd = cwd;
+            ctx.prev_cwd = prev_cwd;
+            ctx.aliases = aliases;
+            ctx.ignore_config = ignore_config;
+            ctx.output_limit = output_limit;
         }
 
         if let Ok(ref r) = run_result {
@@ -6208,6 +6218,21 @@ impl Kernel {
     // --- CWD ---
 
     /// Get current working directory.
+    /// Publish a run's session state to the shared slot.
+    ///
+    /// During a run the threaded context is the truth. The slot carries the
+    /// session BETWEEN runs, which is what `cwd` below and the other public
+    /// accessors read, so a run writes it after each top-level statement and
+    /// before a fault leaves. Nothing inside a run reads it back.
+    async fn write_session_back(&self, ctx: &ExecContext) {
+        let mut ec = self.exec_ctx.write().await;
+        ec.cwd = ctx.cwd.clone();
+        ec.prev_cwd = ctx.prev_cwd.clone();
+        ec.aliases = ctx.aliases.clone();
+        ec.ignore_config = ctx.ignore_config.clone();
+        ec.output_limit = ctx.output_limit.clone();
+    }
+
     pub async fn cwd(&self) -> PathBuf {
         self.exec_ctx.read().await.cwd.clone()
     }
@@ -6480,14 +6505,6 @@ impl Kernel {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd.clone();
-            ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.aliases = ctx.aliases.clone();
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.output_limit = ctx.output_limit.clone();
-        }
 
         // A command nested in this dispatch runs as its own single-command
         // pipeline (`Only`), so the flag, not its position, carries whether
@@ -6526,16 +6543,6 @@ impl Kernel {
             let scope = self.scope.read().await;
             ctx.scope = scope.clone();
         }
-        {
-            // Read, not write: C5 moved the stdin family onto the threaded ctx,
-            // so this block only copies session state back out of the slot.
-            let ec = self.exec_ctx.read().await;
-            ctx.cwd = ec.cwd.clone();
-            ctx.prev_cwd = ec.prev_cwd.clone();
-            ctx.aliases = ec.aliases.clone();
-            ctx.ignore_config = ec.ignore_config.clone();
-            ctx.output_limit = ec.output_limit.clone();
-        }
 
         Ok(result)
     }
@@ -6564,15 +6571,6 @@ impl Kernel {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd.clone();
-            ec.prev_cwd = ctx.prev_cwd.clone();
-            // Kernel stderr still reaches the tool through self.exec_ctx.
-            ec.aliases = ctx.aliases.clone();
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.output_limit = ctx.output_limit.clone();
-        }
 
         // A command nested in this dispatch runs as its own single-command
         // pipeline (`Only`), so the flag, not its position, carries whether
@@ -6592,16 +6590,6 @@ impl Kernel {
         {
             let scope = self.scope.read().await;
             ctx.scope = scope.clone();
-        }
-        {
-            // Read, not write: C5 moved the stdin family onto the threaded ctx,
-            // so this block only copies session state back out of the slot.
-            let ec = self.exec_ctx.read().await;
-            ctx.cwd = ec.cwd.clone();
-            ctx.prev_cwd = ec.prev_cwd.clone();
-            ctx.aliases = ec.aliases.clone();
-            ctx.ignore_config = ec.ignore_config.clone();
-            ctx.output_limit = ec.output_limit.clone();
         }
 
         Ok(result)
