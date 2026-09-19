@@ -7765,12 +7765,15 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // "did I get everything" the wrong thing. The exit CODE is a separate
     // question and still belongs to the last statement, as in any shell.
     accumulated.did_spill |= new.did_spill;
-    // `original_code` is only meaningful alongside a spill, so it follows the
-    // same rule: keep the first one rather than letting a later clean
-    // statement's `None` erase the code the spill replaced.
-    if accumulated.original_code.is_none() {
-        accumulated.original_code = new.original_code;
-    }
+    // Assign, like `code` — NOT the OR above. `original_code` is what `code`
+    // would have been without the spill remap, so it belongs to whichever
+    // statement `code` belongs to: the last one. Keeping the first left a
+    // spill in statement 1 standing over everything after it, and an embedder
+    // reading `original_code.unwrap_or(code)` as the real exit settled
+    // `seq 1 5000; false` as success — 0 from `seq`, not 1 from `false`.
+    // `did_spill` stays sticky because truncation is a fact about the output;
+    // a status is not.
+    accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
 }

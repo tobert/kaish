@@ -34,6 +34,10 @@ breaking entries are marked **BREAKING**.
 - A runtime fault keeps the output that ran before it. `echo left &&
   x=$((1/0))` shows `left`, and a function that faults exits 1 with what it
   printed and the full cause instead of only the outermost message.
+- A spilled statement no longer masks a later statement's exit.
+  `original_code` belongs to the statement `code` reports, so an embedder
+  reading `original_code.unwrap_or(code)` sees `seq 1 5000; false` exit 1.
+  `did_spill` still stays true once anything spilled.
 - A background job's stdout stream (`/v/jobs/N/stdout`) now holds only the
   job's own output, in order: builtin output is published when each builtin
   returns, and output captured by `$(...)`, redirected with `>`, or read by

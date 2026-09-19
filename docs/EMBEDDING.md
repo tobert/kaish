@@ -57,9 +57,17 @@ code is something agents can branch on:
 | 0 | Success | — |
 | 1 | Failure | Read `err` |
 | 2 | Usage error, or a refusal that names what to do instead (e.g. `kaish-trash empty` without `--confirm`) | Read `err` |
-| 3 | Output truncated by the output limit | `original_code` holds the real exit code. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
+| 3 | Output truncated by the output limit | `original_code` holds the real exit code of the statement `code` reports. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
+
+A program's `code` is its last statement's, as in `sh`, and `original_code`
+follows it. `seq 1 5000; false` exits **1** with `did_spill: true` — the
+truncation is still reported, and the status is `false`'s. Read the real exit
+as `original_code.unwrap_or(code)`, and read "was anything lost" from
+`did_spill`, which stays true once any top-level statement spilled. A spill
+inside `$(...)`, a function body, or an `if`/`while` condition does not reach
+it — that output is truncated without the program-level flag being set.
 
 **Assert on the code and the kind, never on the wording.** The exit code is
 contract, and so is the `std::io::ErrorKind` a VFS refusal carries — a write
