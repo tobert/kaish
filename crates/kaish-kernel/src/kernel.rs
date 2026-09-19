@@ -2558,11 +2558,16 @@ impl Kernel {
             token.clone()
         };
 
-        // Root context for this run; the interpreter threads it.
+        // Root context for this run; the interpreter threads it. It takes the
+        // stdin a caller seeded for this call, so the first reader consumes it.
         let mut root_ctx = {
-            let ec = self.exec_ctx.read().await;
+            let mut ec = self.exec_ctx.write().await;
             let scope = self.scope.read().await;
-            self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone())
+            let mut root = self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone());
+            root.stdin = ec.stdin.take();
+            root.stdin_data = ec.stdin_data.take();
+            root.pipe_stdin = ec.pipe_stdin.take();
+            root
         };
 
         for stmt in program.statements.into_iter() {
@@ -3475,8 +3480,8 @@ impl Kernel {
             scope: scope.clone(),
             cwd: ec.cwd.clone(),
             prev_cwd: ec.prev_cwd.clone(),
-            stdin: ec.stdin.clone(),
-            stdin_data: ec.stdin_data.clone(),
+            stdin: None,
+            stdin_data: None,
             stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
@@ -3537,51 +3542,27 @@ impl Kernel {
         // lock before running. This prevents deadlocks when dispatch_command
         // is called from within the pipeline and recursively triggers another
         // pipeline (e.g., via user-defined tools).
-        let (mut ctx, has_pipe_stdin) = {
+        let mut ctx = {
             let ec = self.exec_ctx.read().await;
             let scope = self.scope.read().await;
-            // A frontend-seeded lazy stdin (`execute_with_pipe_stdin`) lives in
-            // the persistent exec_ctx; it's moved (non-Clone) into this ctx in
-            // the consume-once block below, so note its presence here.
-            let has_pipe_stdin = ec.pipe_stdin.is_some();
-            // The pipeline runner drives stage 0 with the first stage's stdin
-            // seeded from any frontend-supplied input (`ExecuteOptions::stdin`,
-            // e.g. `printf … | kaish -c sort`) unless a redirect already set it,
-            // and takes the caller's cancel token and watchdog, so a `timeout`
-            // around a function body reaches its stages. See `snapshot_exec_ctx`
-            // for why the snapshot is boxed.
+            // The stage takes the caller's cancel token and watchdog, so a
+            // `timeout` around a function body reaches its stages. See
+            // `snapshot_exec_ctx` for why the snapshot is boxed.
             let mut stage = self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, caller.cancel.clone());
             stage.watchdog = caller.watchdog.clone();
-            (stage, has_pipe_stdin)
+            stage
         }; // locks released
 
-        // Consume-once: move/clear the seeded stdin sources from the persistent
-        // exec_ctx now that this pipeline's ctx owns them, so a later statement
-        // in the same call (`cat ; cat`) does not re-receive them — matching
-        // shell stdin draining. `pipe_stdin` is non-Clone, so it's *moved* here
-        // (the ctx above was built with `pipe_stdin: None`).
-        if ctx.stdin.is_some() || ctx.stdin_data.is_some() || has_pipe_stdin {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ec.stdin = None;
-            ec.stdin_data = None;
-        }
-
-        // Park the enclosing command's write end and sideband receiver here for
-        // the duration. `ec` is one shared slot and the snapshot above zeroes
-        // both, so a nested dispatch — `$(…)` in a command's own arguments, a
-        // function body, a `source`d file — overwrites whatever is left in it.
-        // `echo $(echo sub) | cat` printed nothing at exit 0;
-        // `seq 1 3 | jq -c $(echo .)` fell back to reading the pipe as text.
-        //
-        // Here rather than at each re-entering caller: this is the one path
-        // they all take. The shared slot is the actual defect — threading a
-        // ctx through the interpreter would retire this whole dance.
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.pipe_stdout = ec.pipe_stdout.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-        }
+        // The pipeline owns the caller's stdin, pipe ends, and sideband while it
+        // runs: stage 0 reads that stdin (`cat ; cat` drains it once, and
+        // `printf … | kaish -c sort` feeds `sort`), and a nested dispatch that
+        // writes the enclosing command's output finds the writer here. What is
+        // left goes back to the caller below.
+        ctx.stdin = caller.stdin.take();
+        ctx.stdin_data = caller.stdin_data.take();
+        ctx.pipe_stdin = caller.pipe_stdin.take();
+        ctx.pipe_stdout = caller.pipe_stdout.take();
+        ctx.stdin_data_rx = caller.stdin_data_rx.take();
 
         let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
 
@@ -3618,27 +3599,23 @@ impl Kernel {
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
-            // Unconsumed stdin goes back to the session, or it dies here with
-            // `ctx`. A partial read (`read` takes one line) leaves the rest
-            // split across two places: the bytes it over-read sit in `stdin`,
-            // and the pipe still holds everything past them. Dropping the
-            // reader discards that tail with no error — `read x; wc -c` over
-            // 100 KiB counted 8187 bytes and said nothing.
-            //
-            // A multi-stage pipeline reaches here with the remainder already
-            // returned by `run_pipeline`'s join, so this carries the
-            // single-command and the pipeline case alike.
-            ec.stdin = ctx.stdin.take();
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            // The parked handles go home. Stages get writers the runner owns,
-            // so what is here is what was carried in.
-            ec.pipe_stdout = ctx.pipe_stdout.take();
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
         }
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
+
+        // Unconsumed stdin goes back to the caller, or it dies here with `ctx`.
+        // A partial read (`read` takes one line) leaves the rest split across
+        // `stdin` and the pipe; dropping the reader would discard that tail
+        // with no error (`read x; wc -c` over 100 KiB once counted 8187
+        // bytes). A multi-stage pipeline's join has already returned its
+        // remainder to `ctx`. The writer and sideband go back for the
+        // enclosing command.
+        caller.stdin = ctx.stdin.take();
+        caller.pipe_stdin = ctx.pipe_stdin.take();
+        caller.pipe_stdout = ctx.pipe_stdout.take();
+        caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
         Ok(result)
     }
@@ -4074,31 +4051,25 @@ impl Kernel {
         // would deadlock any builtin that re-dispatches through ctx.dispatcher
         // (timeout, scatter) — the inner dispatch_command needs its own
         // exec_ctx.write() and would block forever.
+        let caller = ctx;
         let mut ctx = {
             let ec = self.exec_ctx.write().await;
             let scope = self.scope.read().await;
             // Inherit `ec.pipeline_position`, and the caller's cancel token and
             // watchdog, so a builtin-swapped child token (timeout's) reaches a
             // spawned external. See `snapshot_exec_ctx` for the boxing rationale.
-            let mut tool_ctx = self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, ctx.cancel.clone());
-            tool_ctx.watchdog = ctx.watchdog.clone();
+            let mut tool_ctx = self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, caller.cancel.clone());
+            tool_ctx.watchdog = caller.watchdog.clone();
             tool_ctx
         }; // both locks released — tool.execute can re-dispatch safely
 
-        // Move stdin out of self.exec_ctx into the snapshot (consumed-by-tool
-        // semantics): take() so a later dispatch doesn't see stale stdin.
-        // Done after the snapshot above so we hold the write briefly.
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.stdin = ec.stdin.take();
-            ctx.stdin_data = ec.stdin_data.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ctx.pipe_stdout = ec.pipe_stdout.take();
-            // Same take-don't-clone discipline as stdin, and for the same
-            // reason: these belong to exactly one dispatch, and a copy left
-            // behind would let the next command adopt it.
-        }
+        // The tool owns the caller's stdin, pipe ends, and sideband for this
+        // dispatch; what it leaves goes back to the caller below.
+        ctx.stdin = caller.stdin.take();
+        ctx.stdin_data = caller.stdin_data.take();
+        ctx.stdin_data_rx = caller.stdin_data_rx.take();
+        ctx.pipe_stdin = caller.pipe_stdin.take();
+        ctx.pipe_stdout = caller.pipe_stdout.take();
 
         // Honor --json before the builtin runs so its setting survives a clap
         // parse failure (e.g. `cmd --json --bogus-flag` would otherwise drop
@@ -4168,18 +4139,15 @@ impl Kernel {
             // silently died at the end of its own statement — including the
             // documented `kaish-ignore add .gitignore` rc-file recipe.
             ec.ignore_config = ctx.ignore_config.clone();
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            ec.pipe_stdout = ctx.pipe_stdout.take();
-            // What a partial read left behind goes back too: `read` takes one
-            // line and keeps the rest, and that remainder belongs to the next
-            // reader. Without this it dies with the tool's context and
-            // `read x; read y` loses the second line.
-            ec.stdin = ctx.stdin.take();
-            // The sideband is stdin in typed form and returns by the same
-            // rule; taken in above, an unconsumed value would die here.
-            ec.stdin_data = ctx.stdin_data.take();
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
         }
+        // Unused pipe ends go back so the runner can forward this stage's
+        // output; a partial read's remainder (`read x; read y`) and an
+        // unconsumed sideband value go back for the next reader.
+        caller.pipe_stdin = ctx.pipe_stdin.take();
+        caller.pipe_stdout = ctx.pipe_stdout.take();
+        caller.stdin = ctx.stdin.take();
+        caller.stdin_data = ctx.stdin_data.take();
+        caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
         // Builtins parse --json via the GlobalFlags flatten in their clap
         // struct and write ctx.output_format. The kernel applies it — unless the
@@ -5243,6 +5211,13 @@ impl Kernel {
 
     async fn execute_block_capturing(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<ExecResult> {
         let _depth = self.enter_recursion("command substitution")?;
+        // A substitution's output is its value. It runs without the enclosing
+        // command's writer and sideband, so nothing inside can write into that
+        // command's pipe (`cat` writes to a writer it finds) or take its typed
+        // input. It still reads the enclosing stdin, as bash does. Restored
+        // after the block below.
+        let writer = ctx.pipe_stdout.take();
+        let sideband = ctx.stdin_data_rx.take();
         // Captured output is a value, not job output: nothing inside publishes
         // to a job stream. Restored on every exit from the block below.
         let stream_output = std::mem::replace(&mut self.exec_ctx.write().await.background_stream_output, false);
@@ -5321,6 +5296,8 @@ impl Kernel {
         }
         .await;
         self.exec_ctx.write().await.background_stream_output = stream_output;
+        ctx.pipe_stdout = writer;
+        ctx.stdin_data_rx = sideband;
         outcome
     }
 
@@ -6097,10 +6074,7 @@ impl Kernel {
         // `sleep 60 | extern`). The pipe is streamed to the child *after* spawn.
         // `set_stdin` clears `pipe_stdin`, so a redirect-set buffer and a pipe
         // are mutually exclusive in practice; prefer the pipe.
-        let (pipe_stdin, stdin_bytes) = {
-            let mut ctx = self.exec_ctx.write().await;
-            (ctx.pipe_stdin.take(), ctx.take_stdin())
-        };
+        let (pipe_stdin, stdin_bytes) = (ctx.pipe_stdin.take(), ctx.take_stdin());
         let has_stdin = pipe_stdin.is_some() || stdin_bytes.is_some();
 
         // The cancel token comes from the caller's ctx, so the `timeout`
@@ -6485,14 +6459,6 @@ impl Kernel {
             let mut ec = self.exec_ctx.write().await;
             ec.cwd = ctx.cwd.clone();
             ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.stdin = ctx.stdin.take();
-            ec.stdin_data = ctx.stdin_data.take();
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            // The writer is NOT handed over — see this function's doc comment.
-            // Clearing the slot keeps a writer left by an earlier dispatch from
-            // catching the first command inside the loop body.
-            ec.pipe_stdout = None;
             if let Some(stderr) = ctx.stderr.clone() {
                 ec.stderr = Some(stderr);
             }
@@ -6516,7 +6482,11 @@ impl Kernel {
         // the same boundary bash draws by running each stage in a subshell.
         // Whatever output the statement produced before the signal still comes
         // back and still reaches the pipe.
+        // The writer is NOT handed to the statement — see this function's doc
+        // comment. It comes back before the runner forwards the output.
+        let writer = ctx.pipe_stdout.take();
         let flow = self.execute_stmt_flow(stmt, &mut *ctx).await;
+        ctx.pipe_stdout = writer;
         self.exec_ctx.write().await.background_stream_output = saved_stream_output;
         let result = match flow? {
             ControlFlow::Normal(result)
@@ -6535,16 +6505,14 @@ impl Kernel {
             ctx.scope = scope.clone();
         }
         {
-            let mut ec = self.exec_ctx.write().await;
+            // Read, not write: C5 moved the stdin family onto the threaded ctx,
+            // so this block only copies session state back out of the slot.
+            let ec = self.exec_ctx.read().await;
             ctx.cwd = ec.cwd.clone();
             ctx.prev_cwd = ec.prev_cwd.clone();
             ctx.aliases = ec.aliases.clone();
             ctx.ignore_config = ec.ignore_config.clone();
             ctx.output_limit = ec.output_limit.clone();
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ctx.stdin = ec.stdin.take();
-            ctx.stdin_data = ec.stdin_data.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
         }
 
         Ok(result)
@@ -6580,20 +6548,7 @@ impl Kernel {
             let mut ec = self.exec_ctx.write().await;
             ec.cwd = ctx.cwd.clone();
             ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.stdin = ctx.stdin.take();
-            ec.stdin_data = ctx.stdin_data.take();
-            // The structured-data sideband receiver (set by the concurrent
-            // pipeline runner on the stage ctx) must reach the tool's snapshot
-            // too — same reason as the pipe endpoints below. Without this a
-            // pipeline consumer never sees the producer's `.data`.
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
-            // Streaming pipe endpoints and kernel stderr must flow to the
-            // tool via self.exec_ctx — execute_command reads that, not the
-            // passed-in ctx. Without moving these, concurrent pipeline
-            // stages dispatched via a fork get pipe_stdin = None and
-            // silently read nothing.
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            ec.pipe_stdout = ctx.pipe_stdout.take();
+            // Kernel stderr still reaches the tool through self.exec_ctx.
             if let Some(stderr) = ctx.stderr.clone() {
                 ec.stderr = Some(stderr);
             }
@@ -6622,31 +6577,14 @@ impl Kernel {
             ctx.scope = scope.clone();
         }
         {
-            let mut ec = self.exec_ctx.write().await;
+            // Read, not write: C5 moved the stdin family onto the threaded ctx,
+            // so this block only copies session state back out of the slot.
+            let ec = self.exec_ctx.read().await;
             ctx.cwd = ec.cwd.clone();
             ctx.prev_cwd = ec.prev_cwd.clone();
             ctx.aliases = ec.aliases.clone();
             ctx.ignore_config = ec.ignore_config.clone();
             ctx.output_limit = ec.output_limit.clone();
-            // Return any pipe endpoints that the tool didn't consume.
-            // `take()` here keeps the fork's exec_ctx in a clean state for
-            // the next dispatch — these are per-command and shouldn't leak
-            // between calls.
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ctx.pipe_stdout = ec.pipe_stdout.take();
-            // Unconsumed buffered stdin comes back the same way, and for a
-            // sharper reason than symmetry: a partial read (`read` takes one
-            // line) leaves its remainder in `ec`, and the caller's own
-            // end-of-statement sync writes `ctx.stdin` back over `ec.stdin`.
-            // Without this the caller writes its stale `None` over the
-            // remainder and the rest of the stream is gone.
-            ctx.stdin = ec.stdin.take();
-            // The sideband rides home with stdin, same rule.
-            ctx.stdin_data = ec.stdin_data.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-            // Same take-don't-clone discipline as stdin, and for the same
-            // reason: these belong to exactly one dispatch, and a copy left
-            // behind would let the next command adopt it.
         }
 
         Ok(result)
