@@ -1462,11 +1462,11 @@ let result = kernel.jobs().wait(id).await.expect("job remains tracked");
 
 The job runs in a fork with the same options, tools, variables, and cwd as
 foreground execution. `JobManager::cancel` and the options' cancel token both
-stop it with exit 130. Output reaches the job's stdout and stderr streams when
-each top-level statement finishes, not while a statement runs. A runtime error
-(exit 1), a timeout (exit 124), or a cancellation (exit 130) ends stderr with
-one diagnostic line, in both the result and the stream. Shell `cmd &` jobs
-stream external output as it arrives.
+stop it with exit 130. Stdout reaches the job's stream as it is produced, the
+same as a `cmd &` job; stderr reaches the stream when each top-level statement
+finishes. A runtime error (exit 1), a timeout (exit 124), or a cancellation
+(exit 130) ends stderr with one diagnostic line, in both the result and the
+stream.
 
 ### JobFs for Background Job Observability
 
@@ -1509,10 +1509,11 @@ Three limits, stated because an embedder polling these needs to predict them:
 - **Only the job's own stdout reaches `stdout`.** An upstream stage's output
   is the next stage's stdin, `$(...)` output is a value, a redirected stdout
   goes to its target, and a scatter worker's stdout is gather's input; none
-  of it is published. `stderr` takes every external stage's stderr live,
-  since stderr is not piped. A builtin's stderr reaches the node at
-  completion, and only when no external wrote stderr first; otherwise it
-  stays in the job's `ExecResult`.
+  of it is published. `stderr` takes an external command's stderr live
+  when the command ends its pipeline. A builtin's stderr, and an earlier
+  stage's, reach the node at completion, and only when nothing arrived live;
+  otherwise they stay in the job's `ExecResult`. A whole-program job writes
+  each top-level statement's stderr when the statement finishes.
 - **Each node is a 10 MB ring** that evicts its oldest bytes. A job that
   outruns it loses its head, not its tail; redirect to a file
   (`cmd > /tmp/out.log &`) when the whole output matters.
