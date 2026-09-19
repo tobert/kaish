@@ -3613,6 +3613,7 @@ impl Kernel {
         // remainder to `ctx`. The writer and sideband go back for the
         // enclosing command.
         caller.stdin = ctx.stdin.take();
+        caller.stdin_data = ctx.stdin_data.take();
         caller.pipe_stdin = ctx.pipe_stdin.take();
         caller.pipe_stdout = ctx.pipe_stdout.take();
         caller.stdin_data_rx = ctx.stdin_data_rx.take();

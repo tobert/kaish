@@ -284,6 +284,16 @@ async fn stderr_is_shared_not_owned_so_a_stage_body_still_reports() {
 #[rstest]
 #[case::builtin_reading_a_file("echo \"got [$(cat in.txt)]\" | cat", "got [hello]\n")]
 #[case::builtin_writing_its_argument("echo \"got [$(echo sub)]\" | cat", "got [sub]\n")]
+// The same seam, reached through the other doors a substitution can sit
+// behind. All four funnel through `execute_block_capturing`, which takes the
+// writer off the threaded ctx for the capture, but only the bare form above
+// was pinned.
+#[case::function_body_reading_a_file("f() { cat in.txt; }; echo \"got [$(f)]\" | cat", "got [hello]\n")]
+#[case::substitution_inside_a_function("f() { echo \"got [$(cat in.txt)]\"; }; f | cat", "got [hello]\n")]
+#[case::sourced_script_reading_a_file(
+    "echo 'cat in.txt' > s.kai; echo \"got [$(source s.kai)]\" | cat",
+    "got [hello]\n"
+)]
 #[tokio::test]
 async fn a_substitution_does_not_write_into_the_enclosing_pipe(
     #[case] script: &str,
