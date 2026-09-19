@@ -3550,6 +3550,13 @@ impl Kernel {
             // `snapshot_exec_ctx` for why the snapshot is boxed.
             let mut stage = self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, caller.cancel.clone());
             stage.watchdog = caller.watchdog.clone();
+            // stderr and the background flags come from the caller, not the
+            // slot: nothing copies them into the slot any more, and a nested
+            // pipeline that read the slot lost a substitution's stderr.
+            stage.stderr = caller.stderr.clone();
+            stage.background_job = caller.background_job;
+            stage.background_stream_output = caller.background_stream_output;
+            stage.background_stream_stderr = caller.background_stream_stderr;
             stage
         }; // locks released
 
@@ -4054,13 +4061,28 @@ impl Kernel {
         // exec_ctx.write() and would block forever.
         let caller = ctx;
         let mut ctx = {
-            let ec = self.exec_ctx.write().await;
+            // Read, not write: this block only copies out of the slot. The
+            // position comes from the caller rather than the slot, so a nested
+            // dispatch cannot inherit whatever the last statement left there,
+            // along with the caller's cancel token and watchdog, so a
+            // builtin-swapped child token (timeout's) reaches a spawned
+            // external. See `snapshot_exec_ctx` for the boxing rationale.
+            let ec = self.exec_ctx.read().await;
             let scope = self.scope.read().await;
-            // Inherit `ec.pipeline_position`, and the caller's cancel token and
-            // watchdog, so a builtin-swapped child token (timeout's) reaches a
-            // spawned external. See `snapshot_exec_ctx` for the boxing rationale.
-            let mut tool_ctx = self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, caller.cancel.clone());
+            let mut tool_ctx = self.snapshot_exec_ctx(
+                &ec,
+                &scope,
+                caller.pipeline_position,
+                caller.cancel.clone(),
+            );
             tool_ctx.watchdog = caller.watchdog.clone();
+            // stderr and the background flags follow the position: they are
+            // facts about THIS dispatch, carried by the caller, not whatever
+            // the slot holds from a previous statement.
+            tool_ctx.stderr = caller.stderr.clone();
+            tool_ctx.background_job = caller.background_job;
+            tool_ctx.background_stream_output = caller.background_stream_output;
+            tool_ctx.background_stream_stderr = caller.background_stream_stderr;
             tool_ctx
         }; // both locks released — tool.execute can re-dispatch safely
 
@@ -4338,7 +4360,7 @@ impl Kernel {
             match expr {
                 Expr::Command(cmd) => {
                     let mut result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
-                    self.emit_cmdsubst_stderr(&result.err).await;
+                    self.emit_cmdsubst_stderr(&result.err, ctx).await;
                     // Truthiness comes from the command's OWN code, read before
                     // the spill contract can remap it. A capped `if seq 1
                     // 100000` succeeded; only its output was too big to keep,
@@ -4348,7 +4370,7 @@ impl Kernel {
                     // reading it as false would let `else` run on a comparison
                     // that never happened.
                     if result.fault {
-                        self.emit_cmdsubst_stderr(&result.err).await;
+                        self.emit_cmdsubst_stderr(&result.err, ctx).await;
                         return Err(anyhow::anyhow!("{}", result.err.trim_end()));
                     }
                     let truthy = result.code == 0;
@@ -4498,7 +4520,7 @@ impl Kernel {
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
                 if let Ok(ref r) = run_result {
-                    self.emit_cmdsubst_stderr(&r.err).await;
+                    self.emit_cmdsubst_stderr(&r.err, ctx).await;
                 }
 
                 // Now propagate the error
@@ -4603,7 +4625,7 @@ impl Kernel {
                 // `if cat /nonexistent; then …` print nothing at all, so every
                 // condition that failed for a reason failed silently.
                 let result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
-                self.emit_cmdsubst_stderr(&result.err).await;
+                self.emit_cmdsubst_stderr(&result.err, ctx).await;
                 Ok(Value::Bool(result.code == 0))
             }
             Expr::LastExitCode => {
@@ -4941,7 +4963,7 @@ impl Kernel {
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
                 if let Ok(ref r) = run_result {
-                    self.emit_cmdsubst_stderr(&r.err).await;
+                    self.emit_cmdsubst_stderr(&r.err, ctx).await;
                 }
 
                 // Now propagate the error
@@ -5180,7 +5202,7 @@ impl Kernel {
     /// Two callers, one rule: a command substitution's stderr is not part of
     /// its value, and a condition command's stderr is not part of its
     /// truthiness. Both belong to the statement the author wrote.
-    async fn emit_cmdsubst_stderr(&self, err: &str) {
+    async fn emit_cmdsubst_stderr(&self, err: &str, ctx: &ExecContext) {
         if err.is_empty() {
             return;
         }
@@ -5197,7 +5219,11 @@ impl Kernel {
             terminated = format!("{err}\n");
             &terminated
         };
-        match self.exec_ctx.read().await.stderr.as_ref() {
+        // The caller's stream, not the slot's: inside a pipeline stage the
+        // stage carries its own sender, and the runner flushes that one. The
+        // slot holds the kernel's construction-time sender, which no drain on
+        // this path collects — a substitution's message vanished.
+        match ctx.stderr.as_ref() {
             Some(stream) => stream.write_str(err),
             // The kernel seeds this stream in both `new` and `fork`, so it is
             // always present on the kernel's own context; the `Option` exists
@@ -5221,7 +5247,7 @@ impl Kernel {
         let sideband = ctx.stdin_data_rx.take();
         // Captured output is a value, not job output: nothing inside publishes
         // to a job stream. Restored on every exit from the block below.
-        let stream_output = std::mem::replace(&mut self.exec_ctx.write().await.background_stream_output, false);
+        let stream_output = std::mem::replace(&mut ctx.background_stream_output, false);
         let outcome: Result<ExecResult> = async {
         // Accumulate stdout as raw bytes so a binary-producing statement
         // (`$(dd …)`, `$(base64 -d …)`) isn't lossy-decoded here before the
@@ -5296,7 +5322,7 @@ impl Kernel {
         Ok(result)
         }
         .await;
-        self.exec_ctx.write().await.background_stream_output = stream_output;
+        ctx.background_stream_output = stream_output;
         ctx.pipe_stdout = writer;
         ctx.stdin_data_rx = sideband;
         outcome
@@ -5579,7 +5605,7 @@ impl Kernel {
         }
 
         if let Ok(ref r) = run_result {
-            self.emit_cmdsubst_stderr(&r.err).await;
+            self.emit_cmdsubst_stderr(&r.err, ctx).await;
         }
 
         let result = run_result?;
@@ -6085,12 +6111,12 @@ impl Kernel {
         // In interactive mode, standalone or last-in-pipeline commands inherit
         // the terminal's stdout/stderr so output streams in real-time.
         // First/middle commands must capture stdout for the pipe — same as bash.
-        let (pipeline_position, spawn_ctx) = {
-            let ec = self.exec_ctx.read().await;
-            let mut spawn_ctx = crate::spawn::SpawnContext::from_exec_context(&ec);
-            spawn_ctx.cancel = ctx.cancel.clone();
-            (ec.pipeline_position, spawn_ctx)
-        };
+        // Built from the threaded ctx, not the slot: position and the
+        // background flags are facts about THIS command, and the slot carries
+        // whatever the last statement left there. `from_exec_context` already
+        // takes the cancel token from the ctx it is given.
+        let spawn_ctx = crate::spawn::SpawnContext::from_exec_context(ctx);
+        let pipeline_position = ctx.pipeline_position;
         let inherit_output = self.interactive
             && matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
@@ -6450,8 +6476,6 @@ impl Kernel {
         }
 
         // 1. Sync ctx → self internals
-        // The stream flag is per dispatch; the kernel's own value returns after.
-        let saved_stream_output;
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -6460,22 +6484,19 @@ impl Kernel {
             let mut ec = self.exec_ctx.write().await;
             ec.cwd = ctx.cwd.clone();
             ec.prev_cwd = ctx.prev_cwd.clone();
-            if let Some(stderr) = ctx.stderr.clone() {
-                ec.stderr = Some(stderr);
-            }
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
-            ec.pipeline_position = ctx.pipeline_position;
-            // A command nested in this dispatch runs as its own single-command
-            // pipeline (`Only`), so the flag, not its position, carries whether
-            // this stage's stdout is the job's stdout.
-            saved_stream_output = std::mem::replace(
-                &mut ec.background_stream_output,
-                ctx.background_stream_output
-                    && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
-            );
         }
+
+        // A command nested in this dispatch runs as its own single-command
+        // pipeline (`Only`), so the flag, not its position, carries whether
+        // this stage's stdout is the job's stdout. Masked on the threaded ctx
+        // now that nested execution reads the flag from there, not the slot.
+        // The stream flag is per dispatch; the caller's value returns after.
+        let saved_stream_output = ctx.background_stream_output;
+        ctx.background_stream_output = saved_stream_output
+            && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
         // 2. Run the statement. A stage is its own execution unit, so a
         // `break`, `continue`, `return`, or `exit` that reaches the top of the
@@ -6488,7 +6509,7 @@ impl Kernel {
         let writer = ctx.pipe_stdout.take();
         let flow = self.execute_stmt_flow(stmt, &mut *ctx).await;
         ctx.pipe_stdout = writer;
-        self.exec_ctx.write().await.background_stream_output = saved_stream_output;
+        ctx.background_stream_output = saved_stream_output;
         let result = match flow? {
             ControlFlow::Normal(result)
             | ControlFlow::Break { result, .. }
@@ -6539,8 +6560,6 @@ impl Kernel {
         }
 
         // 1. Sync ctx → self internals
-        // The stream flag is per dispatch; the kernel's own value returns after.
-        let saved_stream_output;
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -6550,26 +6569,23 @@ impl Kernel {
             ec.cwd = ctx.cwd.clone();
             ec.prev_cwd = ctx.prev_cwd.clone();
             // Kernel stderr still reaches the tool through self.exec_ctx.
-            if let Some(stderr) = ctx.stderr.clone() {
-                ec.stderr = Some(stderr);
-            }
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
-            ec.pipeline_position = ctx.pipeline_position;
-            // A command nested in this dispatch runs as its own single-command
-            // pipeline (`Only`), so the flag, not its position, carries whether
-            // this stage's stdout is the job's stdout.
-            saved_stream_output = std::mem::replace(
-                &mut ec.background_stream_output,
-                ctx.background_stream_output
-                    && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
-            );
         }
+
+        // A command nested in this dispatch runs as its own single-command
+        // pipeline (`Only`), so the flag, not its position, carries whether
+        // this stage's stdout is the job's stdout. Masked on the threaded ctx
+        // now that nested execution reads the flag from there, not the slot.
+        // The stream flag is per dispatch; the caller's value returns after.
+        let saved_stream_output = ctx.background_stream_output;
+        ctx.background_stream_output = saved_stream_output
+            && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
         // 2. Execute via the full dispatch chain
         let result = self.execute_command(&cmd.name, &cmd.args, &mut *ctx).await;
-        self.exec_ctx.write().await.background_stream_output = saved_stream_output;
+        ctx.background_stream_output = saved_stream_output;
         let result = result?;
 
         // 3. Sync self → ctx
