@@ -1744,12 +1744,17 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone())
             };
-            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await?;
+            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await;
+            // The door runs one command the same way a statement does, so a
+            // `cd` or an `alias` through it outlives the call. Published
+            // before the error is propagated, because a command that faults
+            // may still have moved the session first.
+            self.write_session_back(&root_ctx).await;
             // A gate raised while evaluating inside the dispatched tool — a
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
             // call to mis-take.
-            Ok(result)
+            Ok(result?)
         };
         // The argv door returns one command's result; it has no statement
         // stream that could miss the timeout diagnostic.
@@ -2862,7 +2867,6 @@ impl Kernel {
                         };
                         if glob_enabled {
                             let (paths, cwd) = {
-                                let ctx = self.exec_ctx.read().await;
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
                                 let cwd = ctx.resolve_path(".");
@@ -3468,10 +3472,15 @@ impl Kernel {
     /// Sync on purpose: the ~30 field clones live in this transient frame rather
     /// than a coroutine slot, and the result is `Box`ed so only an 8-byte pointer
     /// — not the 960-byte struct — rides the dispatch await at every recursion
-    /// level (GH #48, item 2). `pipeline_position` and `cancel` are the only
-    /// per-site differences (the pipeline runner uses the kernel's own cancel
-    /// token and forces `Only`; the per-command dispatch inherits `ec`'s), so
-    /// they're parameters; every other field is snapshotted identically.
+    /// level (GH #48, item 2). `pipeline_position` and `cancel` are parameters
+    /// because every caller sets them.
+    ///
+    /// Reading `ec` is right only for a context that starts a run. The slot's
+    /// session fields are from before the current statement, so a caller with
+    /// a calling context must overwrite cwd, prev_cwd, aliases, the ignore
+    /// config and the output limit from it — along with the watchdog, stderr
+    /// and the background flags. Every caller inside a run does; see
+    /// `write_session_back` for why.
     fn snapshot_exec_ctx(
         &self,
         ec: &ExecContext,
@@ -3515,16 +3524,6 @@ impl Kernel {
             watchdog: ec.watchdog.clone(),
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
-            // Correlate this command's requests with the background job it
-            // runs for, if any — the ONE place `job_id` is stamped.
-            // A replay correlation belongs to exactly one dispatch. Moved
-            // (not cloned) out of the parent context at the dispatch seam —
-            // see the stdin hand-off below, which takes it under the same
-            // write lock — so the gate this snapshot reaches is the only one
-            // that can adopt it.
-            // A forked or backgrounded execution keeps its parenthood: a
-            // gate reached from inside a gated statement is nested under it
-            // (spec §A.7).
         })
     }
 
@@ -3536,7 +3535,7 @@ impl Kernel {
 
         // Handle background execution (`&` operator)
         if pipeline.background {
-            return self.execute_background(pipeline).await;
+            return self.execute_background(pipeline, caller).await;
         }
 
         // All commands go through the runner with the Kernel as dispatcher.
@@ -3654,8 +3653,12 @@ impl Kernel {
     /// `Job::stdout_stream` for exactly which bytes reach them.
     ///
     /// Returns immediately with a job ID like "[1]".
-    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.stages.len()))]
-    async fn execute_background(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
+    #[tracing::instrument(level = "debug", skip(self, pipeline, caller), fields(command_count = pipeline.stages.len()))]
+    async fn execute_background(
+        &self,
+        pipeline: &crate::ast::Pipeline,
+        caller: &ExecContext,
+    ) -> Result<ExecResult> {
         use tokio::sync::oneshot;
 
         // Format the command for display in /v/jobs/{id}/command
@@ -3692,6 +3695,25 @@ impl Kernel {
             ec.child_for_pipeline()
         };
         bg_ctx.scope = fork.scope.read().await.clone();
+        // Session state comes from the caller, not the fork's slot. The slot
+        // is the session as of the last top-level statement, so `cd d && ls &`
+        // would run the job in the directory the statement started in.
+        bg_ctx.cwd = caller.cwd.clone();
+        bg_ctx.prev_cwd = caller.prev_cwd.clone();
+        bg_ctx.aliases = caller.aliases.clone();
+        bg_ctx.ignore_config = caller.ignore_config.clone();
+        bg_ctx.output_limit = caller.output_limit.clone();
+        {
+            // The fork's own slot too, so a query answered outside the job's
+            // run — `classify_command`, an embedder reading `cwd()` — agrees
+            // with what the job is doing.
+            let mut ec = fork.exec_ctx.write().await;
+            ec.cwd = bg_ctx.cwd.clone();
+            ec.prev_cwd = bg_ctx.prev_cwd.clone();
+            ec.aliases = bg_ctx.aliases.clone();
+            ec.ignore_config = bg_ctx.ignore_config.clone();
+            ec.output_limit = bg_ctx.output_limit.clone();
+        }
         // The fork's dispatcher points at the fork itself; set it here so
         // builtins inside the background task (e.g. timeout) re-dispatch
         // through the fork, not the parent.
@@ -3857,10 +3879,7 @@ impl Kernel {
 
         // Alias expansion (with recursion limit)
         if alias_depth < 10 {
-            let alias_value = {
-                let ctx = self.exec_ctx.read().await;
-                ctx.aliases.get(name).cloned()
-            };
+            let alias_value = ctx.aliases.get(name).cloned();
             if let Some(alias_val) = alias_value {
                 // Split alias value into command + args
                 let parts: Vec<&str> = alias_val.split_whitespace().collect();
@@ -3949,12 +3968,16 @@ impl Kernel {
                     s
                 });
                 let tool_args = self.build_args_async(args, tool_schema.as_ref(), &mut *ctx).await?;
-                // The tool runs on the slot, which no dispatch refreshes, so it gets
-                // this command's cancel token and watchdog first.
-                let (cancel, watchdog) = (ctx.cancel.clone(), ctx.watchdog.clone());
-                let mut ctx = self.exec_ctx.write().await;
-                ctx.cancel = cancel;
-                ctx.watchdog = watchdog;
+                // The embedder tool runs on the CALLER's context, like a
+                // builtin. Its stdin, pipe ends, cwd, pipeline position and
+                // background flags are facts about this dispatch; the kernel's
+                // slot holds the session as of the last top-level statement and
+                // no longer carries the stdin family at all, so running the tool
+                // on it handed `printf hi | embedder_tool` an empty stdin.
+                //
+                // Nothing holds the slot lock across `call_tool` either. An
+                // embedder whose tool re-enters the kernel would deadlock on it,
+                // which is the hazard the builtin arm below spells out.
                 {
                     let scope = self.scope.read().await;
                     ctx.scope = scope.clone();
@@ -4157,11 +4180,10 @@ impl Kernel {
         result.data_is_value |= typed_substitution || data_is_only_output;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
-        // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
-        // endpoints to self.exec_ctx so dispatch_command's post-execute sync
-        // hands them back to the pipeline runner — the runner uses
-        // stage_ctx.pipe_stdout to write the result to the next stage when
-        // the tool itself didn't take and write to it.
+        // cwd/prev_cwd (cd), and aliases (alias). Unused pipe endpoints go
+        // back to `caller` below, not to the slot: the runner writes the
+        // result to the next stage through `stage_ctx.pipe_stdout` when the
+        // tool itself did not take and write to it.
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
@@ -4256,7 +4278,6 @@ impl Kernel {
                         };
                         if glob_enabled {
                             let (paths, cwd) = {
-                                let ctx = self.exec_ctx.read().await;
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
                                 let cwd = ctx.resolve_path(".");
@@ -4394,7 +4415,7 @@ impl Kernel {
                     // `apply_spill_contract`'s "ONE seam" note requires.
                     // Without this a condition handed back its full output with
                     // no limit at all.
-                    let limit = self.exec_ctx.read().await.output_limit.clone();
+                    let limit = ctx.output_limit.clone();
                     crate::output_limit::apply_spill_contract(&mut result, &limit).await;
                     push_stdout_of(out, &result);
                     Ok(Value::Bool(truthy))
@@ -4738,10 +4759,7 @@ impl Kernel {
                     // relative `[[ -f rel ]]` honors `cd` and agrees with the
                     // VFS-aware `test` builtin (GH #101). Backend stats a raw
                     // relative path against the process cwd otherwise.
-                    let (resolved, backend) = {
-                        let ctx = self.exec_ctx.read().await;
-                        (ctx.resolve_path(&path_str), ctx.backend.clone())
-                    };
+                    let (resolved, backend) = (ctx.resolve_path(&path_str), ctx.backend.clone());
                     // `-r`/`-w`/`-x` go through `path_access`, never through
                     // the raw mode bits: the mount's read-only state is half
                     // the answer and `stat` does not carry it. The `test`
@@ -5651,7 +5669,6 @@ impl Kernel {
 
         // Resolve path relative to cwd
         let full_path = {
-            let ctx = self.exec_ctx.read().await;
             if path.starts_with('/') {
                 std::path::PathBuf::from(&path)
             } else {
@@ -6029,10 +6046,7 @@ impl Kernel {
         // virtual-cwd error would blame the wrong thing for that case. Once
         // the command actually resolves, `real_cwd` is checked again below
         // and the honest reason is given then (issue #181).
-        let (cwd, real_cwd) = {
-            let ctx = self.exec_ctx.read().await;
-            (ctx.cwd.clone(), ctx.backend.resolve_real_path(&ctx.cwd))
-        };
+        let (cwd, real_cwd) = (ctx.cwd.clone(), ctx.backend.resolve_real_path(&ctx.cwd));
 
         let executable = if name.contains('/') {
             // Resolve relative paths (./script, ../bin/tool) against the shell's cwd
@@ -6217,13 +6231,19 @@ impl Kernel {
 
     // --- CWD ---
 
-    /// Get current working directory.
     /// Publish a run's session state to the shared slot.
     ///
     /// During a run the threaded context is the truth. The slot carries the
     /// session BETWEEN runs, which is what `cwd` below and the other public
     /// accessors read, so a run writes it after each top-level statement and
-    /// before a fault leaves. Nothing inside a run reads it back.
+    /// before a fault leaves.
+    ///
+    /// Nothing inside a run may read a session field back from the slot: it
+    /// holds the value from before the current statement, so `cd d && ls *.txt`
+    /// would glob the old directory. Every in-run reader takes cwd, aliases,
+    /// the ignore config and the output limit from the threaded context.
+    /// `classify_command` is the exception that proves the rule — a public
+    /// query answered outside a run, where the slot IS the session.
     async fn write_session_back(&self, ctx: &ExecContext) {
         let mut ec = self.exec_ctx.write().await;
         ec.cwd = ctx.cwd.clone();
@@ -6233,6 +6253,7 @@ impl Kernel {
         ec.output_limit = ctx.output_limit.clone();
     }
 
+    /// Get current working directory.
     pub async fn cwd(&self) -> PathBuf {
         self.exec_ctx.read().await.cwd.clone()
     }
@@ -6549,14 +6570,15 @@ impl Kernel {
 
     /// Dispatch a single command using the full resolution chain.
     ///
-    /// This is the core of `CommandDispatcher` — it syncs state between the
-    /// passed-in `ExecContext` and kernel-internal state (scope, exec_ctx),
-    /// then delegates to `execute_command` for the actual dispatch.
+    /// This is the core of `CommandDispatcher` — it delegates to
+    /// `execute_command` for the dispatch chain (user tools, builtins,
+    /// scripts, external commands, backend tools).
     ///
-    /// State flow:
-    /// 1. ctx → self: sync scope, cwd, stdin so internal methods see current state
-    /// 2. execute_command: full dispatch chain (user tools, builtins, scripts, external, backend)
-    /// 3. self → ctx: sync scope, cwd changes back so the pipeline runner sees them
+    /// Scope is the only state that still crosses this seam in both
+    /// directions, because the kernel holds it in its own lock rather than on
+    /// the context. Everything per-invocation — the stdin family, the cancel
+    /// token, the watchdog, the session fields — travels on `ctx` and never
+    /// touches the slot here.
     async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
         // Ensure nested dispatch (e.g. the `timeout` builtin re-dispatching
         // its inner command via ctx.dispatcher) routes through THIS kernel,
@@ -6655,7 +6677,7 @@ impl ArgValueSource for KernelArgSource<'_> {
             return Ok(None);
         }
         let (paths, cwd) = {
-            let ctx = self.kernel.exec_ctx.read().await;
+            let ctx = self.ctx.lock().await;
             let paths = ctx
                 .expand_glob(pattern)
                 .await
@@ -10485,6 +10507,36 @@ AFTER="yes"'"#)
             .expect("execute");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "the embedder tool must run");
         assert_eq!(result.code, 124, "the call's timeout must stop the tool: {result:?}");
+    }
+
+    /// An embedder tool runs on the calling command's context, not the
+    /// kernel's slot. The slot no longer carries the stdin family, so a tool
+    /// run on it reads nothing from a pipe; it also holds the session from
+    /// before the current statement.
+    #[tokio::test]
+    async fn embedder_tool_reads_the_pipe_it_was_given() {
+        use crate::backend::testing::MockBackend;
+
+        let (mock, _calls) = MockBackend::new();
+        let kernel = Kernel::with_backend(
+            Arc::new(mock.reporting_context()),
+            KernelConfig::isolated(),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        let piped = kernel.execute("printf hi | embedder_tool").await.expect("execute");
+        assert_eq!(
+            piped.text_out().trim(),
+            "stdin=hi|cwd=/",
+            "the embedder tool did not receive the stage's stdin",
+        );
+
+        // The control: with no pipe there is nothing to read, so an empty
+        // `stdin=` above would otherwise be indistinguishable from success.
+        let plain = kernel.execute("embedder_tool").await.expect("execute");
+        assert_eq!(plain.text_out().trim(), "stdin=|cwd=/");
     }
 
     #[tokio::test]

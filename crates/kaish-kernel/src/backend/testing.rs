@@ -25,12 +25,26 @@ pub struct MockBackend {
     /// When set, `call_tool` waits on its context's cancel token for at most
     /// this long, the way an embedder tool waits on slow work.
     wait_for_cancel: Option<std::time::Duration>,
+    /// When set, `call_tool` reports what context it was handed instead of a
+    /// canned string: the stdin it can read and the cwd it would resolve
+    /// against. An embedder tool is the one dispatch arm that historically ran
+    /// on the kernel's slot rather than the calling command's context, so a
+    /// test needs to see which one arrived.
+    report_context: bool,
 }
 
 impl MockBackend {
     pub fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
-        (Self { call_count: count.clone(), tool_result: None, wait_for_cancel: None }, count)
+        (
+            Self {
+                call_count: count.clone(),
+                tool_result: None,
+                wait_for_cancel: None,
+                report_context: false,
+            },
+            count,
+        )
     }
 
     /// Get the current call count.
@@ -54,6 +68,12 @@ impl MockBackend {
         self.wait_for_cancel = Some(limit);
         self
     }
+
+    /// Make `call_tool` return `stdin=<what it can read>|cwd=<its cwd>`.
+    pub fn reporting_context(mut self) -> Self {
+        self.report_context = true;
+        self
+    }
 }
 
 impl Default for MockBackend {
@@ -62,6 +82,7 @@ impl Default for MockBackend {
             call_count: Arc::new(AtomicUsize::new(0)),
             tool_result: None,
             wait_for_cancel: None,
+            report_context: false,
         }
     }
 }
@@ -132,6 +153,17 @@ impl KernelBackend for MockBackend {
                 _ = cancel.cancelled() => Ok(ToolResult::failure(130, "mock tool: cancelled")),
                 _ = tokio::time::sleep(limit) => Ok(ToolResult::success("mock tool: waited out")),
             };
+        }
+        if self.report_context {
+            let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {
+                return Err(BackendError::InvalidOperation("reporting_context needs an ExecContext".into()));
+            };
+            let stdin = match exec_ctx.resolve_stdin().await {
+                Ok((_, text)) => text,
+                Err(e) => return Err(BackendError::InvalidOperation(format!("stdin: {e}"))),
+            };
+            let cwd = exec_ctx.cwd.display().to_string();
+            return Ok(ToolResult::success(format!("stdin={stdin}|cwd={cwd}")));
         }
         if let Some(f) = &self.tool_result {
             return f(name);
