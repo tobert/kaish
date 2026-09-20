@@ -134,7 +134,8 @@ pub struct JobInfo {
 
 impl JobInfo {
     /// Create a `JobInfo` with the required fields; `output_file`/`pid`/
-    /// `exit_code`/`finished_at` default to `None`, `pgids` to empty,
+    /// `exit_code`/`finished_at`/`original_code` default to `None`,
+    /// `did_spill` to false, `pgids` to empty,
     /// and `started_at` to now (callers that track a job's real start time —
     /// i.e. `JobManager` — override it via [`Self::with_started_at`]). Chain
     /// the `with_*` setters to fill in the rest.
@@ -299,7 +300,9 @@ mod tests {
     #[test]
     fn job_info_omits_unset_optional_fields_from_the_wire() {
         // A plain running job (the common case) must not carry dead weight:
-        // no output_file/pid/exit_code/finished_at, no pgids array.
+        // no output_file/pid/exit_code/finished_at, no pgids array, and
+        // neither spill field — a reader that has not been updated for them
+        // still sees exactly the document it saw before.
         let info = JobInfo::new(JobId(4), "sleep 5", JobStatus::Running);
         let json = serde_json::to_value(&info).unwrap();
         let obj = json.as_object().unwrap();
@@ -308,6 +311,8 @@ mod tests {
         assert!(!obj.contains_key("exit_code"), "{json}");
         assert!(!obj.contains_key("finished_at"), "{json}");
         assert!(!obj.contains_key("pgids"), "{json}");
+        assert!(!obj.contains_key("did_spill"), "{json}");
+        assert!(!obj.contains_key("original_code"), "{json}");
         // Required fields always present.
         assert!(obj.contains_key("started_at"), "{json}");
         assert!(obj.contains_key("status"), "{json}");

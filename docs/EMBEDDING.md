@@ -1574,7 +1574,12 @@ work on `wasm32-unknown-unknown` too), and `pgids: Vec<u32>` — the real OS
 process groups a background job spawned. `pgids` is the surface to use for
 "what is this job actually doing"; `pid` is set only for a Ctrl-Z-stopped
 foreground job (a TTY concept an embedder never sees) and is otherwise
-`None`. For a finished job's `ExecResult` without blocking, use the
+`None`. Two fields say whether a finished job's exit code is its command's
+own: `did_spill: bool` is true when the output was capped and the code was
+remapped to 3, and `original_code: Option<i64>` carries the code that was
+replaced. Without them a spilled job and a job that genuinely exited 3 are
+the same report. Both are omitted from the JSON when unset. For a finished
+job's `ExecResult` without blocking, use the
 non-blocking `JobManager::try_result(id) -> Option<ExecResult>` instead of
 `wait`, which parks until the job completes.
 

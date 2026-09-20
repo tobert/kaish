@@ -867,6 +867,43 @@ mod external_process_tests {
         );
     }
 
+    /// A stage that is not the job's stdout does not tee.
+    ///
+    /// In `a | b`, `a`'s bytes are `b`'s stdin, and teeing them would put the
+    /// pipeline's intermediate data into the job's node alongside its real
+    /// output. This is the control for the test above: without it, a tee that
+    /// ignored the pipeline position entirely would pass unnoticed.
+    #[tokio::test]
+    async fn a_non_final_stages_stdout_does_not_tee() {
+        use crate::scheduler::JobManager;
+
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let manager = Arc::new(JobManager::new());
+        let (_result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job_id = manager.register("sh -c 'echo upstream' | cat".to_string(), result_rx).await;
+
+        ctx.set_job_manager(manager.clone());
+        ctx.background_job = Some(job_id);
+        ctx.background_stream_output = true;
+        ctx.pipeline_position = PipelinePosition::First;
+
+        let cmd = sh_cmd("echo upstream");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(result.code, 0, "err: {}", result.err);
+        assert_eq!(
+            result.text_out(),
+            "upstream\n",
+            "the stage still returns its output for the runner to forward",
+        );
+
+        let streamed = manager.read_stdout(job_id).await.expect("the job still exists");
+        assert!(
+            streamed.is_empty(),
+            "an upstream stage's bytes are the next stage's stdin, not the job's output: {}",
+            String::from_utf8_lossy(&streamed),
+        );
+    }
+
     /// GH #133 item 3: before this fix, `try_external` special-cased
     /// `ctx.pipe_stdout` — taking it out of the context and hand-streaming
     /// the child's stdout straight into it in 8KB chunks, bypassing the
