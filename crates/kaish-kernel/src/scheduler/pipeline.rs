@@ -647,8 +647,9 @@ impl PipelineRunner {
     /// stage's pipe writer here rather than handing it to the statement, so
     /// the loop runs to completion and its whole output is written to the pipe
     /// at once — `for … done | head -1` therefore runs every iteration where
-    /// bash would stop early. Streaming needs a writer threaded through nested
-    /// statement execution; see GH #369.
+    /// bash would stop early. The writer now travels on the threaded context
+    /// (GH #369), so this is a remaining behavior gap rather than a missing
+    /// mechanism.
     async fn run_pipeline(
         &self,
         stages: &[PipelineStage],

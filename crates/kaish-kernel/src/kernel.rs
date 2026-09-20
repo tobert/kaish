@@ -4356,8 +4356,8 @@ impl Kernel {
     /// back to the caller keeps the decision there: the `if`/`while` arm folds
     /// them into the statement's own result, and every consumer of that result
     /// — a pipe, a `$(…)` capture, a redirect — carries them without learning
-    /// what a condition is. A shared slot on `ExecContext` would have done it
-    /// the other way; that is the pattern GH #369 exists to remove.
+    /// what a condition is. Routing them through a slot on the kernel would
+    /// have done it the other way, and that is the shape GH #369 removed.
     ///
     /// Only the forms that can hold a command in STATEMENT position are handled
     /// here. Everything else is [`Self::eval_expr_async`]'s, `$(…)` above all:
@@ -6485,16 +6485,16 @@ impl Kernel {
 
     /// Run a compound statement that occupies a pipeline stage.
     ///
-    /// Same ctx↔exec_ctx sync as `dispatch_command`, with one deliberate
-    /// difference: the stage's pipe writer stays behind with the runner. The
-    /// statement buffers — its whole output comes back in the `ExecResult` and
-    /// the runner writes it to the pipe once. Handing the writer down instead
-    /// would give it to whichever nested command grabbed the slot first, and
-    /// every later iteration would write nowhere.
+    /// The stage's pipe writer stays behind with the runner: the statement
+    /// buffers, its whole output comes back in the `ExecResult`, and the
+    /// runner writes it to the pipe once.
     ///
-    /// Streaming a stage would mean threading a writer through nested
-    /// statement execution, which is the shared-slot machinery GH #369 is
-    /// about. Revisit once the interpreter takes a ctx parameter.
+    /// That is now a choice rather than a constraint. The writer travels on
+    /// the threaded context, so handing it down would reach the nested
+    /// statement intact — what it would not do is make a loop stream, because
+    /// each iteration would write as it ran and `for … done | head -1` would
+    /// still run every iteration. Streaming a compound stage is its own
+    /// change; the context threading it was waiting on is done.
     async fn dispatch_statement(&self, stmt: &Stmt, ctx: &mut ExecContext) -> Result<ExecResult> {
         if let Some(d) = self.dispatcher() {
             ctx.dispatcher = Some(d);

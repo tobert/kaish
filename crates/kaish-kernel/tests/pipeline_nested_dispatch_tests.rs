@@ -1,6 +1,6 @@
 //! A nested dispatch must not consume the enclosing command's pipe writer.
 //!
-//! `exec_ctx` is one shared slot. A pipeline stage parks its `pipe_stdout`
+//! `exec_ctx` was one shared slot. A pipeline stage parked its `pipe_stdout`
 //! there for the dispatch, and anything dispatching *while that command runs*
 //! — a `$(…)` in its own arguments, a function body, a `source`d file — took
 //! the writer and dropped it with its own context:
