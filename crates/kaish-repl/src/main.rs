@@ -259,7 +259,7 @@ fn print_plan(source: Option<String>) -> ExitCode {
             // A plan that parses can still be a program the kernel refuses.
             // Reporting it as a clean plan makes the dry run worse than
             // useless — the caller commits to a command that cannot run.
-            let refusals = plan_validation_errors(&source);
+            let (refusals, warnings) = plan_validation_issues(&source);
             if !refusals.is_empty() {
                 return print_plan_errors(refusals);
             }
@@ -274,7 +274,6 @@ fn print_plan(source: Option<String>) -> ExitCode {
                 "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
                 "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
             });
-            let warnings = plan_validation_warnings(&source);
             if !warnings.is_empty()
                 && let Some(object) = doc.as_object_mut()
             {
@@ -298,49 +297,61 @@ fn print_plan(source: Option<String>) -> ExitCode {
     }
 }
 
-/// The validator's errors for `source`, as plan-error JSON objects.
+/// The validator's errors and plan-worthy warnings for `source`, as plan
+/// JSON objects.
 ///
-/// Errors only: the kernel filters validation to `Error` before it refuses a
-/// program, so anything else here would report a plan as unrunnable that the
-/// kernel would have run. Warnings go to `plan_validation_warnings` and their
-/// own field. A source that does not parse returns nothing — the caller is
-/// already reporting the parse failure.
-fn plan_validation_errors(source: &str) -> Vec<serde_json::Value> {
-    plan_validation_issues(source, kaish_kernel::validator::Severity::Error)
-}
-
-/// The validator's warnings for `source`, as plan JSON objects.
+/// Errors and warnings come back together because they come from one
+/// validation pass — asking twice re-parsed the source and rebuilt the
+/// builtin registry for the second answer.
 ///
-/// A warning does not stop the kernel, so these never become `errors` — they
-/// report what the runtime will refuse in a program the kernel will still
-/// run. `[[ "abc" -eq 1 ]]` is the shape: it plans, it runs, and it faults
-/// with exit 2 the moment it is reached.
-fn plan_validation_warnings(source: &str) -> Vec<serde_json::Value> {
-    plan_validation_issues(source, kaish_kernel::validator::Severity::Warning)
-}
+/// Errors are what the kernel refuses, so they and only they become
+/// `errors`; anything else there would report a plan as unrunnable that the
+/// kernel would have run. Warnings are filtered by
+/// [`IssueCode::surfaces_in_plan`] rather than by severity: the bar is "this
+/// statement will run and will fail", not "the validator had a thought".
+/// `UndefinedCommand` fires on every external command and must not reach a
+/// plan.
+///
+/// A source that does not parse returns nothing — the caller is already
+/// reporting the parse failure.
+fn plan_validation_issues(source: &str) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    use kaish_kernel::validator::Severity;
 
-fn plan_validation_issues(source: &str, severity: kaish_kernel::validator::Severity) -> Vec<serde_json::Value> {
     let Ok(issues) = kaish_kernel::validator::validate_program(source) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    issues
-        .iter()
-        .filter(|issue| issue.severity == severity)
-        .map(|issue| {
-            let mut object = serde_json::Map::new();
-            object.insert("message".into(), issue.message.clone().into());
-            if let Some(span) = &issue.span {
-                object.insert("start".into(), span.start.into());
-                object.insert("end".into(), span.end.into());
-            }
-            // The suggestion is the fix the caller acts on; dropping it here
-            // would hand back a refusal with no way forward.
-            if let Some(suggestion) = &issue.suggestion {
-                object.insert("suggestion".into(), suggestion.clone().into());
-            }
-            serde_json::Value::Object(object)
-        })
-        .collect()
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    for issue in &issues {
+        match issue.severity {
+            Severity::Error => errors.push(plan_issue_json(issue)),
+            _ if issue.code.surfaces_in_plan() => warnings.push(plan_issue_json(issue)),
+            _ => {}
+        }
+    }
+    (errors, warnings)
+}
+
+/// One validation issue as a plan JSON object.
+///
+/// `code` is always present. `IssueCode`'s docs tell an embedder to route on
+/// the code rather than on message text, and with warnings and errors in one
+/// document it is the only field that separates "this will fault" from
+/// anything else.
+fn plan_issue_json(issue: &kaish_kernel::validator::ValidationIssue) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert("code".into(), issue.code.code().into());
+    object.insert("message".into(), issue.message.clone().into());
+    if let Some(span) = &issue.span {
+        object.insert("start".into(), span.start.into());
+        object.insert("end".into(), span.end.into());
+    }
+    // The suggestion is the fix the caller acts on; dropping it here would
+    // hand back a refusal with no way forward.
+    if let Some(suggestion) = &issue.suggestion {
+        object.insert("suggestion".into(), suggestion.clone().into());
+    }
+    serde_json::Value::Object(object)
 }
 
 /// Emit the `{"errors": [...]}` document and the rejection exit code.
@@ -402,7 +413,10 @@ Options:
                                Prints {{"statements": [...]}} and exits 0, or
                                {{"errors": [...]}} and exits 2 for a program
                                kaish would refuse to run, whether it failed to
-                               parse or failed validation. Both carry
+                               parse or failed validation. A plan that will
+                               run also carries {{"warnings": [...]}} when a
+                               statement in it will fail anyway. Every issue
+                               object carries a code. Both documents carry
                                kaish_version, kaish_git_hash, and
                                kaish_build_date at the top level, so a
                                caller can window results by build without

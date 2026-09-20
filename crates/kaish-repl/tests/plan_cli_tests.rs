@@ -365,3 +365,36 @@ fn a_computed_operand_is_not_guessed_at() {
         );
     }
 }
+
+/// The plan's `warnings` array holds only what the runtime will refuse.
+///
+/// Filtering by severity alone would publish `UndefinedCommand`, which fires
+/// on every external command — so every plan of a program that runs `cargo`
+/// would carry a line about it. That is the noise `surfaces_to_agent` exists
+/// to keep off an agent's stderr, and it does not belong in a plan either.
+#[test]
+fn an_advisory_warning_stays_out_of_the_plan() {
+    let (code, json) = plan("cargo build");
+    assert_eq!(code, 0, "{json}");
+    assert!(
+        json.get("warnings").is_none(),
+        "an external command is not a prediction that it will fail: {json}"
+    );
+}
+
+/// Every issue object carries its code, so a consumer routes on the code
+/// rather than on message text.
+#[test]
+fn plan_issues_carry_their_code() {
+    let (_, warned) = plan(r#"[[ "abc" -eq 1 ]]"#);
+    let warnings = warned["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings[0]["code"], "W008", "{warned}");
+
+    let (code, refused) = plan("break");
+    assert_eq!(code, 2, "a validation refusal still exits 2: {refused}");
+    let errors = refused["errors"].as_array().expect("errors");
+    assert!(
+        errors[0]["code"].as_str().is_some_and(|c| c.starts_with('E')),
+        "an error object carries its code too: {refused}"
+    );
+}

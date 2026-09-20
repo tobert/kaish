@@ -291,3 +291,25 @@ async fn non_leading_zero_numeral_still_types_as_number() {
         );
     }
 }
+
+/// The `warnings` array is part of the projection, so the builtin carries it
+/// too.
+///
+/// The two emitters are documented as one shape. A key the CLI emits and the
+/// builtin does not is a divergence between them, not a difference in what
+/// each is for — and an embedder whose hooks are written in kaish reads the
+/// builtin's document, not the CLI's.
+#[tokio::test]
+async fn plan_carries_the_warnings_the_cli_carries() {
+    let doc = plan_json(r#"plan '[[ "abc" -eq 1 ]]' --json"#).await;
+    let warnings = doc["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the builtin must carry warnings too: {doc}"));
+    assert_eq!(warnings.len(), 1, "{doc}");
+    assert_eq!(warnings[0]["code"], "W008", "{doc}");
+
+    // Absent when there is nothing to say, so a reader of `statements` alone
+    // sees exactly the document it saw before.
+    let clean = plan_json(r#"plan 'echo hi' --json"#).await;
+    assert!(clean.get("warnings").is_none(), "{clean}");
+}
