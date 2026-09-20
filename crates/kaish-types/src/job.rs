@@ -117,6 +117,19 @@ pub struct JobInfo {
     /// applies to an embedder-created job.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pgids: Vec<u32>,
+    /// True when the job's output was capped and data was lost — spilled to a
+    /// file, truncated in memory, or evicted from the capture ring. The exit
+    /// code is remapped to 3 in every one of those cases, so without this
+    /// field a spilled job and a job that genuinely exited 3 report the same
+    /// `failed:3` and an embedder cannot tell them apart. See
+    /// [`crate::ExecResult::did_spill`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub did_spill: bool,
+    /// The exit code the job's command returned before the spill remap
+    /// replaced it. `Some` only when [`Self::did_spill`] is true and the code
+    /// was changed. See [`crate::ExecResult::original_code`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_code: Option<i64>,
 }
 
 impl JobInfo {
@@ -139,6 +152,8 @@ impl JobInfo {
             started_at: clock::system_now(),
             finished_at: None,
             pgids: Vec::new(),
+            did_spill: false,
+            original_code: None,
         }
     }
 
@@ -177,6 +192,16 @@ impl JobInfo {
         self.pgids = pgids;
         self
     }
+
+    /// Set the spill facts together (see [`Self::did_spill`] and
+    /// [`Self::original_code`]). One setter because they answer one question —
+    /// "was this exit code the command's own?" — and a caller that set only
+    /// the flag would leave that question half-answered.
+    pub fn with_spill(mut self, did_spill: bool, original_code: Option<i64>) -> Self {
+        self.did_spill = did_spill;
+        self.original_code = original_code;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +220,8 @@ mod tests {
         assert!(info.exit_code.is_none());
         assert!(info.finished_at.is_none());
         assert!(info.pgids.is_empty());
+        assert!(!info.did_spill);
+        assert!(info.original_code.is_none());
         // started_at defaults to "now" — bounded sanity check, not exact.
         assert!(
             info.started_at >= before,
@@ -216,13 +243,16 @@ mod tests {
             .with_exit_code(Some(0))
             .with_started_at(started)
             .with_finished_at(Some(finished))
-            .with_pgids(vec![4242, 4243]);
+            .with_pgids(vec![4242, 4243])
+            .with_spill(true, Some(0));
         assert_eq!(info.output_file, Some(PathBuf::from("job-output.txt")));
         assert_eq!(info.pid, Some(1234));
         assert_eq!(info.exit_code, Some(0));
         assert_eq!(info.started_at, started);
         assert_eq!(info.finished_at, Some(finished));
         assert_eq!(info.pgids, vec![4242, 4243]);
+        assert!(info.did_spill);
+        assert_eq!(info.original_code, Some(0));
     }
 
     // ── serde: JobId ──
