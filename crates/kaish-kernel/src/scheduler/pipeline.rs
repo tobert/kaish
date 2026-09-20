@@ -484,7 +484,7 @@ impl PipelineRunner {
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            let result = self.run_single(&stages[0], ctx, None, dispatcher).await;
+            let result = self.run_single(&stages[0], ctx, dispatcher).await;
             // A lone command is a pipeline of one, and bash reports it:
             // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
             // multi-stage case would leave the previous pipeline's codes
@@ -592,25 +592,23 @@ impl PipelineRunner {
             .await
     }
 
-    /// Run a single command with optional stdin.
+    /// Run a single command.
     ///
     /// The dispatcher handles arg parsing, schema lookup, output format, and execution.
     /// The runner handles stdin setup (redirects + pipeline) and output redirects.
+    ///
+    /// Stdin arrives on `ctx` — from a redirect set up here, or from the
+    /// session. A pipeline's stages go through `run_pipeline` instead, which
+    /// wires each stage's `pipe_stdin` directly.
     async fn run_single(
         &self,
         stage: &PipelineStage,
         ctx: &mut ExecContext,
-        stdin: Option<Vec<u8>>,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Set up stdin from redirects (< file, <<heredoc)
         if let Err(e) = setup_stdin_redirects_for(stage, ctx, dispatcher).await {
             return ExecResult::failure(1, e);
-        }
-
-        // Set stdin from pipeline (overrides redirect stdin)
-        if let Some(input) = stdin {
-            ctx.set_stdin(input);
         }
 
         // Set pipeline position for stdio inheritance decisions
@@ -679,7 +677,17 @@ impl PipelineRunner {
             data_receivers.push(Some(rx));
         }
 
-        let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
+        // A `JoinSet` aborts the tasks it still owns when it is dropped; a
+        // `Vec<JoinHandle>` detaches them. Every stage is joined below, so the
+        // two differ only on a path that leaves this function early — and a
+        // pipeline that keeps stages running after it has returned is a shape
+        // to make impossible, not one to rely on never reaching. Stage
+        // identity travels two ways so the join below stays as precise as the
+        // indexed `Vec` was: in the task's own payload, and through
+        // `stage_of_task` for a task that panicked and has no payload.
+        let mut stage_tasks: tokio::task::JoinSet<(usize, ExecResult, ExecContext)> =
+            tokio::task::JoinSet::new();
+        let mut stage_of_task: HashMap<tokio::task::Id, usize> = HashMap::new();
         // Set when stage 0 receives the session's stdin rather than a redirect's.
         // Only then may its remainder be returned at the join.
         let mut stage0_took_session_stdin = false;
@@ -758,11 +766,10 @@ impl PipelineRunner {
 
             // Propagate the embedder's trace context across the spawn boundary
             // so each concurrent stage's spans stay in the same trace.
-            let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
-                tokio::spawn(crate::telemetry::bind_current_context(async move {
+            let task = stage_tasks.spawn(crate::telemetry::bind_current_context(async move {
                 // A stdin-redirect setup failure short-circuits this stage.
                 if let Err(e) = stdin_setup {
-                    return (ExecResult::failure(1, e), stage_ctx);
+                    return (i, ExecResult::failure(1, e), stage_ctx);
                 }
 
                 // Hand the structured-data sideband receiver to the stage; do
@@ -846,10 +853,10 @@ impl PipelineRunner {
                     // Drop pipe_out signals EOF to next stage's reader
                 }
 
-                (result, stage_ctx)
+                (i, result, stage_ctx)
             }));
 
-            handles.push(handle);
+            stage_of_task.insert(task.id(), i);
         }
 
         // Await all stages and return last stage's result.
@@ -862,11 +869,15 @@ impl PipelineRunner {
         // produced one; it reads as 1, the same status the panic gives the
         // pipeline below, so the list never has a hole and never claims a
         // stage succeeded because its task died.
-        let mut codes: Vec<i64> = vec![1; handles.len()];
+        let mut codes: Vec<i64> = vec![1; stage_count];
 
-        for (i, handle) in handles.into_iter().enumerate() {
-            match handle.await {
-                Ok((result, mut stage_ctx)) => {
+        // Completion order, not stage order. Each arm below touches only its
+        // own stage's slot or a disjoint piece of `ctx` (stage 0's stdin, the
+        // last stage's session state), so the order they arrive in does not
+        // change the outcome.
+        while let Some(joined) = stage_tasks.join_next_with_id().await {
+            match joined {
+                Ok((_, (i, result, mut stage_ctx))) => {
                     codes[i] = result.code;
                     // Stage 0 was handed the session's stdin. Whatever it did
                     // not consume comes back, or it dies here — `seq 1 2 | cat`
@@ -896,9 +907,12 @@ impl PipelineRunner {
                         ctx.output_limit = stage_ctx.output_limit;
                     }
                 }
-                Err(e) => {
-                    panics.push(format!("stage {}: {}", i, e));
-                }
+                Err(e) => match stage_of_task.get(&e.id()) {
+                    Some(i) => panics.push(format!("stage {}: {}", i, e)),
+                    // Every spawn records its id above, so this cannot happen
+                    // — and if it ever does, the panic is still reported.
+                    None => panics.push(format!("an unidentified stage: {}", e)),
+                },
             }
         }
 
