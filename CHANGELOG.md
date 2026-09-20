@@ -42,6 +42,21 @@ breaking entries are marked **BREAKING**.
   job's own output, in order: builtin output is published when each builtin
   returns, and output captured by `$(...)`, redirected with `>`, or read by
   `scatter` no longer appears in it.
+- `timeout` now reaches an external command inside a function body, inside a
+  piped function body, and inside a `$(...)` in that body's arguments. The
+  timer's cancel token stopped at the function boundary and the command ran
+  to completion.
+- A `$(...)` in a here-string, a heredoc body, or a `< file` target now runs
+  under the cancel token and watchdog of the command being redirected.
+  `f() { cat <<< $(slow); }; timeout 1 f` ran past its deadline.
+- An embedder tool now sees the call's cancel token and watchdog, so a
+  request timeout stops it. It had been receiving the kernel's.
+- A command substitution no longer writes into the enclosing pipe, and keeps
+  its own stderr. `echo "got [$(cat f)]" | cat` printed only the file, and a
+  substitution's stderr in a middle stage was dropped.
+- A pipeline's last stage now returns its ignore config and output limit,
+  not only scope, cwd and aliases. `echo x | kaish-output-limit off` left the
+  limit on, while the same command run on its own turned it off.
 - `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
   unreadable file, or a missing pattern argument exits 2, so a caller cannot
   read a broken search as a negative answer. `diff` argument errors exit 2 to
@@ -71,6 +86,9 @@ breaking entries are marked **BREAKING**.
 - **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive a
   `ToolCtx` and never implement one, so this changes no supported use, but an
   out-of-tree implementation no longer compiles.
+- **BREAKING** (`kaish-kernel`): `CommandDispatcher::eval_expr` takes
+  `&mut ExecContext`. It evaluates a redirect operand on the calling
+  command's context now; the old `&ExecContext` was ignored.
 - A kernel builtin dispatched with a context that is not the kernel's now
   panics instead of returning exit 1 with an internal message. Sealing
   `ToolCtx` is what makes that branch unreachable: `ToolRegistry::get` and
