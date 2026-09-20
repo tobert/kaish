@@ -105,10 +105,12 @@ pub struct ConflictError {
 /// `Replace`) to preserve original line endings.
 #[derive(Debug, Clone)]
 pub enum PatchOp {
-    /// Insert content at byte offset.
+    /// Insert content at byte offset. The offset must land on a character
+    /// boundary; one inside a multi-byte character is an `InvalidOperation`.
     Insert { offset: usize, content: String },
 
-    /// Delete bytes from offset to offset+len.
+    /// Delete bytes from offset to offset+len. Both ends must land on
+    /// character boundaries.
     /// `expected`: if Some, must match content being deleted (CAS)
     Delete {
         offset: usize,
@@ -116,7 +118,8 @@ pub enum PatchOp {
         expected: Option<String>,
     },
 
-    /// Replace content at offset.
+    /// Replace content at offset. Both ends of the replaced range must land
+    /// on character boundaries.
     /// `expected`: if Some, must match content being replaced (CAS)
     Replace {
         offset: usize,
@@ -125,14 +128,17 @@ pub enum PatchOp {
         expected: Option<String>,
     },
 
-    /// Insert a line at line number (1-indexed).
+    /// Insert a line at line number (1-indexed; line 0 is an
+    /// `InvalidOperation`).
     InsertLine { line: usize, content: String },
 
-    /// Delete a line at line number (1-indexed).
+    /// Delete a line at line number (1-indexed; line 0 is an
+    /// `InvalidOperation`).
     /// `expected`: if Some, must match line being deleted (CAS)
     DeleteLine { line: usize, expected: Option<String> },
 
-    /// Replace a line at line number (1-indexed).
+    /// Replace a line at line number (1-indexed; line 0 is an
+    /// `InvalidOperation`).
     /// `expected`: if Some, must match line being replaced (CAS)
     ReplaceLine {
         line: usize,

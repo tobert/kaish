@@ -952,6 +952,27 @@ fn build_refuses_a_stdin_posture_declared_on_a_node() {
     assert!(error.to_string().contains("git worktree"), "{error}");
 }
 
+/// A node's `json_output` was accepted and then ignored at every point that
+/// would act on it: `walk_leaf_json` counts leaves only, and the call that
+/// binds typed output runs on the leaf. Refuse it at `build()` instead.
+#[test]
+fn build_refuses_json_output_declared_on_a_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = executable_at(dir.path(), "probe");
+    let error = WrappedCommand::new("git")
+        .executable(&path)
+        .verb(
+            Verb::new("worktree")
+                .json_output()
+                .verb(Verb::new("list")),
+        )
+        .build()
+        .expect_err("a node cannot run, so it cannot declare JSON output");
+    let message = error.to_string();
+    assert!(message.contains("git worktree"), "{message}");
+    assert!(message.contains("json_output"), "{message}");
+}
+
 #[test]
 fn build_refuses_children_declared_on_the_root_verb() {
     let dir = tempfile::tempdir().unwrap();

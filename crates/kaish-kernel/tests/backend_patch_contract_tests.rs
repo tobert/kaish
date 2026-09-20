@@ -16,15 +16,24 @@ use kaish_kernel::{BackendError, KernelBackend, LocalBackend, PatchOp, VirtualOv
 
 const ORIGINAL: &str = "alpha\nbravo\ncharlie\n";
 
+/// Multi-byte content for the character-boundary cases: `é` occupies bytes
+/// 0 and 1, so offset 1 is inside it.
+const MULTIBYTE: &str = "école\nnaïve\n";
+
 /// Every backend under test, with the path to exercise it on.
 ///
 /// The overlay's path sits under a kaish mount so the operation stays in the
 /// overlay rather than falling through to `inner` — the fall-through case is
 /// `LocalBackend`'s row, already covered.
 async fn backends() -> Vec<(&'static str, Arc<dyn KernelBackend>, &'static Path)> {
+    backends_holding(ORIGINAL).await
+}
+
+/// `backends()` with the file's starting content chosen by the caller.
+async fn backends_holding(content: &str) -> Vec<(&'static str, Arc<dyn KernelBackend>, &'static Path)> {
     let local = {
         let mem = MemoryFs::new();
-        mem.write(Path::new("lines.txt"), ORIGINAL.as_bytes()).await.unwrap();
+        mem.write(Path::new("lines.txt"), content.as_bytes()).await.unwrap();
         let mut vfs = VfsRouter::new();
         vfs.mount("/", mem);
         Arc::new(LocalBackend::new(Arc::new(vfs))) as Arc<dyn KernelBackend>
@@ -36,7 +45,7 @@ async fn backends() -> Vec<(&'static str, Arc<dyn KernelBackend>, &'static Path)
         // embedder's backend.
         let inner = Arc::new(LocalBackend::new(Arc::new(VfsRouter::new())));
         let blobs = MemoryFs::new();
-        blobs.write(Path::new("lines.txt"), ORIGINAL.as_bytes()).await.unwrap();
+        blobs.write(Path::new("lines.txt"), content.as_bytes()).await.unwrap();
         let mut vfs = VfsRouter::new();
         vfs.mount("/v/blobs", blobs);
         Arc::new(VirtualOverlayBackend::new(inner, Arc::new(vfs))) as Arc<dyn KernelBackend>
@@ -118,5 +127,86 @@ async fn ops_within_a_batch_see_each_others_edits() {
             "zero\nONE\nbravo\ncharlie\n",
             "{name}: offsets and line numbers are relative to the accumulated content",
         );
+    }
+}
+
+/// A byte offset inside a multi-byte character is refused, not a panic.
+///
+/// `insert_str`, `&content[a..b]`, `drain`, and `replace_range` all abort the
+/// process on a mid-codepoint index. An embedder that computes its own byte
+/// offset — off by one against a `é` — used to take the kernel down with it;
+/// it gets an `InvalidOperation` naming the character instead.
+#[tokio::test]
+async fn a_mid_codepoint_offset_is_refused() {
+    let split_ops = [
+        ("Insert", PatchOp::Insert { offset: 1, content: "x".to_string() }),
+        ("Delete", PatchOp::Delete { offset: 1, len: 1, expected: None }),
+        ("Delete end", PatchOp::Delete { offset: 0, len: 1, expected: None }),
+        (
+            "Replace",
+            PatchOp::Replace { offset: 1, len: 1, content: "x".to_string(), expected: None },
+        ),
+    ];
+
+    for (label, op) in split_ops {
+        for (name, backend, path) in backends_holding(MULTIBYTE).await {
+            let err = match backend.patch(path, std::slice::from_ref(&op)).await {
+                Ok(()) => panic!("{name}/{label}: a mid-codepoint offset must be refused"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(err, BackendError::InvalidOperation(_)),
+                "{name}/{label}: expected InvalidOperation, got {err:?}",
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("character boundary") && message.contains('é'),
+                "{name}/{label}: the error must name the character it splits: {message}",
+            );
+            assert_eq!(
+                read_text(&backend, path).await,
+                MULTIBYTE,
+                "{name}/{label}: a refused op must leave the file untouched",
+            );
+        }
+    }
+}
+
+/// `line: 0` is refused rather than mapped onto line 1.
+///
+/// `PatchOp`'s docs say line numbers are 1-indexed. `saturating_sub(1)` used
+/// to turn a caller's 0-indexed line number into an edit one line off, which
+/// is the silent-fallback shape: the wrong line is written and nobody is told.
+#[tokio::test]
+async fn line_zero_is_refused() {
+    let zero_ops = [
+        ("InsertLine", PatchOp::InsertLine { line: 0, content: "zero".to_string() }),
+        ("DeleteLine", PatchOp::DeleteLine { line: 0, expected: None }),
+        (
+            "ReplaceLine",
+            PatchOp::ReplaceLine { line: 0, content: "ZERO".to_string(), expected: None },
+        ),
+    ];
+
+    for (label, op) in zero_ops {
+        for (name, backend, path) in backends().await {
+            let err = match backend.patch(path, std::slice::from_ref(&op)).await {
+                Ok(()) => panic!("{name}/{label}: line 0 must be refused"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(err, BackendError::InvalidOperation(_)),
+                "{name}/{label}: expected InvalidOperation, got {err:?}",
+            );
+            assert!(
+                err.to_string().contains("1-indexed"),
+                "{name}/{label}: the error must name the rule: {err}",
+            );
+            assert_eq!(
+                read_text(&backend, path).await,
+                ORIGINAL,
+                "{name}/{label}: a refused op must leave the file untouched",
+            );
+        }
     }
 }

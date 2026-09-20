@@ -51,6 +51,42 @@ impl LocalBackend {
         self.tools.as_ref()
     }
 
+    /// Refuse a byte offset that lands inside a multi-byte character.
+    ///
+    /// `insert_str`, `&content[a..b]`, `drain`, and `replace_range` all abort
+    /// the process on a mid-codepoint index, so an embedder computing its own
+    /// offset would take the kernel down. Name the character it splits and the
+    /// boundary below it so the caller can correct the offset.
+    fn check_char_boundary(content: &str, offset: usize, what: &str) -> BackendResult<()> {
+        if content.is_char_boundary(offset) {
+            return Ok(());
+        }
+        // A non-boundary offset is strictly inside the content, so some
+        // character starts at or before it; the `None` arm cannot happen and
+        // still returns the refusal rather than guessing an offset.
+        match content.char_indices().take_while(|(start, _)| *start < offset).last() {
+            Some((start, character)) => Err(BackendError::InvalidOperation(format!(
+                "{what} offset {offset} splits the {}-byte character '{character}' at offset \
+                 {start}; a byte offset must land on a character boundary",
+                character.len_utf8()
+            ))),
+            None => Err(BackendError::InvalidOperation(format!(
+                "{what} offset {offset} is not a character boundary"
+            ))),
+        }
+    }
+
+    /// Refuse line number 0. `PatchOp`'s line operations are 1-indexed, and
+    /// mapping 0 onto line 1 edits a line the caller did not name.
+    fn check_line_number(line: usize, what: &str) -> BackendResult<()> {
+        if line == 0 {
+            return Err(BackendError::InvalidOperation(format!(
+                "{what} line 0 does not exist; line numbers are 1-indexed, so the first line is 1"
+            )));
+        }
+        Ok(())
+    }
+
     /// Apply a single patch operation to file content.
     ///
     /// This is public for use by VirtualOverlayBackend.
@@ -64,6 +100,7 @@ impl LocalBackend {
                         content.len()
                     )));
                 }
+                Self::check_char_boundary(content, *offset, "insert")?;
                 content.insert_str(*offset, insert_content);
             }
 
@@ -75,6 +112,8 @@ impl LocalBackend {
                         offset, end, content.len()
                     )));
                 }
+                Self::check_char_boundary(content, *offset, "delete start")?;
+                Self::check_char_boundary(content, end, "delete end")?;
                 // CAS check
                 if let Some(expected_content) = expected {
                     let actual = &content[*offset..end];
@@ -102,6 +141,8 @@ impl LocalBackend {
                         offset, end, content.len()
                     )));
                 }
+                Self::check_char_boundary(content, *offset, "replace start")?;
+                Self::check_char_boundary(content, end, "replace end")?;
                 // CAS check
                 if let Some(expected_content) = expected {
                     let actual = &content[*offset..end];
@@ -117,8 +158,9 @@ impl LocalBackend {
             }
 
             PatchOp::InsertLine { line, content: insert_content } => {
+                Self::check_line_number(*line, "insert")?;
                 let lines: Vec<&str> = content.lines().collect();
-                let line_idx = line.saturating_sub(1); // Convert to 0-indexed
+                let line_idx = line - 1; // Convert to 0-indexed
                 if line_idx > lines.len() {
                     return Err(BackendError::InvalidOperation(format!(
                         "line {} exceeds line count {}",
@@ -136,8 +178,9 @@ impl LocalBackend {
             }
 
             PatchOp::DeleteLine { line, expected } => {
+                Self::check_line_number(*line, "delete")?;
                 let lines: Vec<&str> = content.lines().collect();
-                let line_idx = line.saturating_sub(1); // Convert to 0-indexed
+                let line_idx = line - 1; // Convert to 0-indexed
                 if line_idx >= lines.len() {
                     return Err(BackendError::InvalidOperation(format!(
                         "line {} exceeds line count {}",
@@ -169,8 +212,9 @@ impl LocalBackend {
                 content: replace_content,
                 expected,
             } => {
+                Self::check_line_number(*line, "replace")?;
                 let lines: Vec<&str> = content.lines().collect();
-                let line_idx = line.saturating_sub(1); // Convert to 0-indexed
+                let line_idx = line - 1; // Convert to 0-indexed
                 if line_idx >= lines.len() {
                     return Err(BackendError::InvalidOperation(format!(
                         "line {} exceeds line count {}",
