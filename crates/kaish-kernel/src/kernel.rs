@@ -1754,7 +1754,7 @@ impl Kernel {
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
             // call to mis-take.
-            Ok(result?)
+            result
         };
         // The argv door returns one command's result; it has no statement
         // stream that could miss the timeout diagnostic.
