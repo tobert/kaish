@@ -645,3 +645,33 @@ async fn scatter_as_and_limit_options_still_bind_through_the_shared_core() {
     outs.sort();
     assert_eq!(outs, vec!["1", "2", "3"], "--as N must bind the item to $N: {got:?}");
 }
+
+/// A worker that exited 0 with binary stdout keeps its own exit code.
+///
+/// The row is `ok:false` and `err` names the refusal — that is the loud
+/// signal, and the aggregate is still 123. `code` used to be rewritten from
+/// the worker's 0 to a 1, reporting a number the worker never returned.
+#[tokio::test]
+async fn a_binary_worker_row_keeps_the_workers_exit_code() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("bin.dat"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    let k = kernel_at(dir.path());
+
+    let r = run_full(&k, "echo one | scatter --as N | cat bin.dat | gather").await;
+    assert_eq!(r.code, 123, "an unrepresentable row still fails the gather: {:?}", r.err);
+
+    let rows = rows(&r.text_out());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["ok"], serde_json::json!(false), "the row is loud: {}", rows[0]);
+    assert_eq!(
+        rows[0]["code"],
+        serde_json::json!(0),
+        "the worker exited 0 and the row says so: {}",
+        rows[0]
+    );
+    assert!(
+        rows[0]["err"].as_str().unwrap_or_default().contains("not representable as text"),
+        "err carries the reason: {}",
+        rows[0]
+    );
+}

@@ -528,11 +528,12 @@ fn strip_one_trailing_newline(s: &str) -> &str {
 /// riding through the row as if it were the worker's real text output. Per
 /// "crash beats corrupt" we go loud at row granularity instead: `try_text_out`
 /// catches it, the row is forced `ok:false` with a clear `err` (never a
-/// lossily-decoded `out`), and the OTHER rows are unaffected — see
+/// lossily-decoded `out`) while `code` keeps the worker's own exit code, and
+/// the OTHER rows are unaffected — see
 /// `docs/binary-data.md` for the broader binary-data plan.
 fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     let mut ok = r.result.ok() && !r.timed_out;
-    let mut code = if r.timed_out { 124 } else { r.result.code };
+    let code = if r.timed_out { 124 } else { r.result.code };
 
     let (out_text, err_text) = match r.result.try_text_out() {
         Ok(text) => (
@@ -540,10 +541,11 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
             strip_one_trailing_newline(&r.result.err).to_string(),
         ),
         Err(e) => {
+            // `ok:false` and `err` carry the refusal; the worker's own exit
+            // code stays as the worker reported it. Rewriting a 0 to a 1 here
+            // reported a number the worker never returned, which is the one
+            // field a caller reads to learn what the worker did.
             ok = false;
-            if code == 0 {
-                code = 1;
-            }
             (
                 String::new(),
                 format!(

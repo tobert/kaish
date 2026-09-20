@@ -193,14 +193,12 @@ impl Tool for Spawn {
         // Build command
         let mut cmd = Command::new(&command);
         cmd.args(&argv);
-        // Ensure the OS process is killed if this Command/Child is dropped
-        // before we've waited on it. This is exactly what happens on the
-        // timeout arm below: tokio::time::timeout drops the owned
-        // wait_with_output() future (and the Child inside it) when it fires,
-        // and without kill_on_drop the process was silently left running
-        // past the timeout — a real leak for a long-lived agent that
-        // repeatedly hits spawn timeouts. Mirrors the same call in
-        // dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
+        // Backstop: kill the OS process if this Command/Child is dropped
+        // before we have waited on it — an early return between the spawn
+        // and the wait would otherwise leave the child running, a real leak
+        // for a long-lived agent. The timeout arm below kills explicitly so
+        // it can read the child's partial output first. Mirrors the same
+        // call in dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
         cmd.kill_on_drop(true);
 
         // Set working directory if specified
@@ -258,15 +256,47 @@ impl Tool for Spawn {
         // Wait with optional timeout
         if let Some(ms) = timeout_ms {
             let timeout = Duration::from_millis(ms);
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(Ok(output)) => capture_to_result(output.status.code(), output.stdout, output.stderr),
-                Ok(Err(e)) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
+
+            // Drain both pipes into tasks rather than letting
+            // `wait_with_output()` own the buffers. That future owns
+            // everything it has read, so the timeout arm used to drop the
+            // child's partial output with it: a worker that printed a
+            // diagnostic and then hung reported 124 and nothing else.
+            let stdout_task = tokio::spawn(drain_pipe(child.stdout.take()));
+            let stderr_task = tokio::spawn(drain_pipe(child.stderr.take()));
+
+            let timed_out = match tokio::time::timeout(timeout, child.wait()).await {
+                Ok(Ok(status)) => Ok(status.code()),
+                Ok(Err(e)) => Err(e),
                 Err(_) => {
-                    // Timeout — dropping this future drops the owned Child;
-                    // kill_on_drop (set above) kills and reaps the process
-                    // as part of that drop, so it does not outlive us.
-                    ExecResult::failure(124, format!("spawn: {}: timed out after {}ms", command, ms))
+                    // Kill before joining the drains: a reader only reaches
+                    // EOF once the child's pipe writers are closed.
+                    if let Err(e) = child.start_kill() {
+                        return ExecResult::failure(1, format!("spawn: failed to kill after timeout: {e}"));
+                    }
+                    match child.wait().await {
+                        Ok(_) => Ok(None),
+                        Err(e) => Err(e),
+                    }
                 }
+            };
+            let exit_code = match timed_out {
+                Ok(code) => code,
+                Err(e) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
+            };
+            let expired = exit_code.is_none();
+
+            let (stdout, mut stderr) = (joined_pipe(stdout_task).await, joined_pipe(stderr_task).await);
+            if expired {
+                append_line(
+                    &mut stderr,
+                    format!("spawn: {}: timed out after {}ms", command, ms).as_bytes(),
+                );
+                // 124 is `timeout(1)`'s code, and the partial output the child
+                // did produce rides along with it.
+                capture_to_result(Some(124), stdout, stderr)
+            } else {
+                capture_to_result(exit_code, stdout, stderr)
             }
         } else {
             match child.wait_with_output().await {
@@ -275,6 +305,54 @@ impl Tool for Spawn {
             }
         }
     }
+}
+
+/// Read one child pipe to EOF, keeping whatever arrived before an error.
+///
+/// `read_to_end` would discard a partial read on an I/O error; this returns
+/// the bytes and the error together so neither is lost.
+async fn drain_pipe<R>(pipe: Option<R>) -> (Vec<u8>, Option<std::io::Error>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let Some(mut pipe) = pipe else {
+        return (Vec::new(), None);
+    };
+    let mut collected = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) => return (collected, None),
+            Ok(n) => collected.extend_from_slice(&chunk[..n]),
+            Err(e) => return (collected, Some(e)),
+        }
+    }
+}
+
+/// Collect a drain task's bytes, folding a read error or a panicked task into
+/// the bytes as a diagnostic line rather than dropping either silently.
+async fn joined_pipe(
+    task: tokio::task::JoinHandle<(Vec<u8>, Option<std::io::Error>)>,
+) -> Vec<u8> {
+    match task.await {
+        Ok((bytes, None)) => bytes,
+        Ok((mut bytes, Some(e))) => {
+            append_line(&mut bytes, format!("spawn: failed to read child output: {e}").as_bytes());
+            bytes
+        }
+        Err(e) => format!("spawn: output reader did not finish: {e}\n").into_bytes(),
+    }
+}
+
+/// Append a line to captured output, adding the separator only when the
+/// bytes already there do not end in one.
+fn append_line(buffer: &mut Vec<u8>, line: &[u8]) {
+    if !buffer.is_empty() && !buffer.ends_with(b"\n") {
+        buffer.push(b'\n');
+    }
+    buffer.extend_from_slice(line);
+    buffer.push(b'\n');
 }
 
 /// Build a result from a child's captured stdout/stderr: stdout keeps binary

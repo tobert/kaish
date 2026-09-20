@@ -50,3 +50,35 @@ async fn spawn_timeout_kills_child_process_does_not_leak() {
         "child process kept running past the timeout — leaked"
     );
 }
+
+/// A timeout keeps what the child already wrote.
+///
+/// `wait_with_output()` owns the buffers it fills, so dropping that future on
+/// the timeout dropped the bytes with it: a child that printed a diagnostic
+/// and then hung reported 124 and nothing else, and the one line that said
+/// why it hung was gone.
+#[tokio::test]
+async fn spawn_timeout_keeps_the_childs_partial_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let script = r#"spawn --command sh --argv '["-c", "echo partial-out; echo partial-err >&2; sleep 5"]' --timeout 300"#;
+    let result = kernel.execute(script).await.expect("kernel execute");
+
+    assert_eq!(result.code, 124, "expected timeout exit code: {:?}", result.err);
+    assert!(
+        result.text_out().contains("partial-out"),
+        "stdout written before the timeout must survive it: {:?}",
+        result.text_out()
+    );
+    assert!(
+        result.err.contains("partial-err"),
+        "stderr written before the timeout must survive it: {:?}",
+        result.err
+    );
+    assert!(
+        result.err.contains("timed out after 300ms"),
+        "the timeout diagnostic rides alongside the child's stderr: {:?}",
+        result.err
+    );
+}
