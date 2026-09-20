@@ -231,3 +231,30 @@ async fn warning_reaches_both_the_stream_and_the_aggregate() {
         result.err
     );
 }
+
+/// A program that warns and then faults keeps the warning in the error it
+/// hands back.
+///
+/// The three `Ok` returns in `execute_streaming_inner` prepend the advisory
+/// to the aggregate; the fault return did not, so a non-streaming caller lost
+/// it exactly when the program also went wrong.
+#[tokio::test]
+async fn a_warning_survives_a_fault_in_the_same_program() {
+    use kaish_kernel::KernelError;
+
+    let k = kernel();
+    let name = cyrillic_path();
+    let err = k
+        .execute(&format!("{name}=/bin\nx=$((1/0))"))
+        .await
+        .expect_err("the arithmetic fault must propagate");
+
+    let KernelError::Execution { output, .. } = err else {
+        panic!("expected an execution fault");
+    };
+    assert!(
+        output.err.contains("W007"),
+        "the advisory must survive the fault: {:?}",
+        output.err
+    );
+}

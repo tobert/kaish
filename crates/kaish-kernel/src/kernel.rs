@@ -2543,9 +2543,9 @@ impl Kernel {
 
         // Surface opted-in validation warnings to the streaming frontend,
         // before any command output. The same text is ALSO prepended to the
-        // aggregate `result.err` at each return below, which is what a
-        // non-streaming caller (`kernel.execute`, whose callback is a noop)
-        // reads.
+        // aggregate `result.err` at every return below — the three `Ok`
+        // returns and the fault return — which is what a non-streaming
+        // caller (`kernel.execute`, whose callback is a noop) reads.
         //
         // These two are not disjoint. `execute_with_options_streaming` hands
         // a caller both the callback and the aggregate, so an embedder that
@@ -2615,6 +2615,13 @@ impl Kernel {
                     let error = with_prior_output(partial, error);
                     if let Some(carrier) = error.downcast_ref::<crate::error::FaultWithOutput>() {
                         on_output(&carrier.output);
+                    }
+                    // The advisory rides this return too. The three `Ok`
+                    // returns below prepend it and this one did not, so a
+                    // program that both warned and faulted lost the warning
+                    // from the error it handed back.
+                    if !surfaced_warnings.is_empty() {
+                        result.err = format!("{surfaced_warnings}{}", result.err);
                     }
                     return Err(with_prior_output(std::mem::take(&mut result), error));
                 }

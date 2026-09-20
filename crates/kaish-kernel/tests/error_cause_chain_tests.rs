@@ -22,7 +22,7 @@ fn kernel() -> Kernel {
 /// `$(...)` through the full async evaluator and folded a fault via
 /// `.map_err(|e| e.to_string())`. A redirect target that is itself a command
 /// substitution containing a failing assignment carries a two-frame chain
-/// ("failed to evaluate assignment" wrapping "arithmetic error: ... divides
+/// ("failed to evaluate assignment to x" wrapping "arithmetic error: ... divides
 /// by zero"); `to_string()` showed only the outer frame.
 #[tokio::test]
 async fn redirect_target_fault_keeps_its_cause_chain() {
