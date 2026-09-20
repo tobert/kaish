@@ -80,7 +80,7 @@ async fn arithmetic_division_by_zero_is_matchable_as_failed_while_running() {
     // untouched. The original fault is still there, one level down: the
     // debug chain (`{:?}`) and `source()` both still reach it, so nothing
     // was actually lost — only `Display`'s single line is terse.
-    assert_eq!(inner.to_string(), "failed to evaluate assignment");
+    assert_eq!(inner.to_string(), "failed to evaluate assignment to x");
     let chain = format!("{inner:?}");
     assert!(chain.contains("divides by zero"), "the chain must still carry the original fault: {chain}");
 }
@@ -158,7 +158,7 @@ async fn execution_display_is_pinned() {
     let err = kernel.execute("x=$((1/0))").await.expect_err("must fault at runtime");
     // Identical to what `.to_string()` on the pre-existing `anyhow::Error`
     // produced: `Display` shows the outermost `.context(...)` only.
-    assert_eq!(err.to_string(), "failed to evaluate assignment");
+    assert_eq!(err.to_string(), "failed to evaluate assignment to x");
 }
 
 /// The `{:#}` form specifically, because that is the one that broke.
@@ -320,5 +320,46 @@ async fn validation_issue_command_is_pinned_at_every_populated_site(
         issue.command.as_deref(),
         expected_command,
         "`{script}` ({code:?}) command mismatch: {issues:?}"
+    );
+}
+
+// ── A fault inside `$(...)` names both assignments ─────────────────────
+//
+// `y=$(echo inner; x=$((1/0)))` runs the assignment arm twice: once for the
+// inner `x`, once for the outer `y`. Both wrapped the fault in the same
+// unnamed context, so `{:#}` read "failed to evaluate assignment: failed to
+// evaluate assignment: arithmetic error…" — two identical frames, neither
+// saying which assignment it belonged to.
+//
+// The fix names the target rather than walking the chain to suppress the
+// outer frame: both frames are true, and a reader who can tell them apart
+// learns where the fault came from and where it landed.
+
+#[tokio::test]
+async fn a_nested_assignment_fault_names_both_targets() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("y=$(echo inner; x=$((1/0)))")
+        .await
+        .expect_err("the inner arithmetic fault must propagate");
+
+    assert_eq!(
+        err.to_string(),
+        "failed to evaluate assignment to y",
+        "Display shows the outermost frame, which is the assignment that failed"
+    );
+
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("failed to evaluate assignment to y"),
+        "the outer assignment must be named: {chain}"
+    );
+    assert!(
+        chain.contains("failed to evaluate assignment to x"),
+        "the inner assignment must be named too, not repeated verbatim: {chain}"
+    );
+    assert!(
+        chain.contains("divides by zero"),
+        "the original fault must still be reachable: {chain}"
     );
 }

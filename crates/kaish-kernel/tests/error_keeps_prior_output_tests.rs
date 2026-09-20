@@ -101,9 +101,9 @@ async fn streaming_caller_receives_the_faulting_statement_output() {
 async fn display_is_unchanged_by_the_carried_output() {
     let kernel = Kernel::transient().expect("kernel");
     let err = kernel.execute("echo left && x=$((1/0))").await.expect_err("fault");
-    assert_eq!(err.to_string(), "failed to evaluate assignment");
+    assert_eq!(err.to_string(), "failed to evaluate assignment to x");
     let alternate = format!("{err:#}");
-    assert!(alternate.starts_with("failed to evaluate assignment: "), "{alternate}");
+    assert!(alternate.starts_with("failed to evaluate assignment to x: "), "{alternate}");
     assert!(alternate.contains("divides by zero"), "{alternate}");
     assert!(!alternate.contains("left"), "output must not leak into the error text: {alternate}");
 }

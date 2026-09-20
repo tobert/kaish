@@ -195,3 +195,39 @@ async fn env_also_judges_a_command_argument_that_looks_like_an_assignment() {
         "a quoted argument after the command is not judged: {quiet:?}"
     );
 }
+
+/// The advisory reaches the streaming callback **and** the returned
+/// aggregate, and `execute_with_options_streaming` hands a caller both.
+///
+/// `execute_streaming_inner`'s comment used to claim the streaming and
+/// non-streaming paths were "disjoint, so this prints the advisory exactly
+/// once on each". They are not: this entry point is streaming and returns the
+/// aggregate. An embedder that prints its callback's stderr and then the
+/// result's sees W007 twice. The duplicate is deliberate — neither caller may
+/// lose the advisory — and this test is what keeps the comment honest.
+#[tokio::test]
+async fn warning_reaches_both_the_stream_and_the_aggregate() {
+    use kaish_kernel::ExecuteOptions;
+
+    let k = kernel();
+    let name = cyrillic_path();
+
+    let mut streamed_err = String::new();
+    let mut on_output = |r: &kaish_kernel::interpreter::ExecResult| {
+        streamed_err.push_str(&r.err);
+    };
+    let result = k
+        .execute_with_options_streaming(&format!("{name}=/bin"), ExecuteOptions::new(), &mut on_output)
+        .await
+        .expect("a mixed-script name is a warning, not a failure");
+
+    assert!(
+        streamed_err.contains("W007"),
+        "the streaming callback must receive the advisory: {streamed_err:?}"
+    );
+    assert!(
+        result.err.contains("W007"),
+        "the returned aggregate carries it too: {:?}",
+        result.err
+    );
+}
