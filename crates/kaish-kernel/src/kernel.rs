@@ -7605,25 +7605,16 @@ impl CommandDispatcher for Kernel {
         self.dispatch_statement(stmt, ctx).await
     }
 
-    /// Evaluate an expression through the kernel's async chain, including
-    /// command substitution. Delegates to `eval_expr_async`, which snapshots
-    /// the kernel's scope/cwd and restores them after any `$(...)` runs, so
-    /// only command output escapes. The `ctx` is unused here because the
-    /// kernel evaluates against its own session state (a fork carries the
-    /// pipeline stage's snapshot); var refs resolve against that scope.
-    async fn eval_expr(&self, expr: &Expr, _ctx: &ExecContext) -> Result<Value> {
-        let cancel = {
-            #[allow(clippy::expect_used)]
-            let token = self.cancel_token.lock().expect("cancel_token poisoned");
-            token.clone()
-        };
-        // Root context for this run; the interpreter threads it.
-        let mut root_ctx = {
-            let ec = self.exec_ctx.read().await;
-            let scope = self.scope.read().await;
-            self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel)
-        };
-        self.eval_expr_async(expr, &mut root_ctx).await
+    /// Evaluate a redirect operand through the kernel's async chain,
+    /// including command substitution. Delegates to `eval_expr_async`, which
+    /// snapshots the kernel's scope/cwd and restores them after any `$(...)`
+    /// runs, so only command output escapes.
+    ///
+    /// The caller's `ctx` is the context to run on. A root context built here
+    /// instead would carry the kernel's cancel token, and `timeout 1 cat <<<
+    /// $(slow)` would run past its deadline.
+    async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value> {
+        self.eval_expr_async(expr, ctx).await
     }
 
     /// Produce a forked dispatcher with independent mutable state (detached).

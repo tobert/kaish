@@ -408,11 +408,12 @@ async fn timeout_builtin_kills_external_in_argument_substitution_inside_function
 /// A here-string, a heredoc body, and a `< file` target all resolve through
 /// one call site, `eval_redirect_target`. It reaches the kernel through
 /// `CommandDispatcher::eval_expr`, so a `$(…)` in any of the three must run
-/// under the cancel token of the command being redirected — `timeout`'s child
-/// token here, not the kernel's.
+/// under the cancel token of the command being redirected.
 ///
-/// No function body: the redirect operand is evaluated before the command
-/// runs, so the gap shows at the top level.
+/// The redirect goes inside the function body, not on `timeout` itself:
+/// `timeout 1 cat <<< $(slow)` expands the operand before `timeout` starts
+/// its timer, which is bash's order too, so no timer could cover it. Here
+/// `timeout` is already running when `cat`'s operand is evaluated.
 #[tokio::test]
 async fn timeout_builtin_kills_external_in_a_here_string_substitution() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -420,7 +421,7 @@ async fn timeout_builtin_kills_external_in_a_here_string_substitution() {
     let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
 
     let kernel = kernel_for_test();
-    let program = format!("timeout 1 cat <<< $(bash {})", script.display());
+    let program = format!("f() {{ cat <<< $(bash {}); }}; timeout 1 f", script.display());
     let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
     let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     let Ok(result) = outcome else {
@@ -429,7 +430,7 @@ async fn timeout_builtin_kills_external_in_a_here_string_substitution() {
             nix::unistd::Pid::from_raw(pid as i32),
             nix::sys::signal::Signal::SIGKILL,
         );
-        panic!("`timeout 1 cat <<< $(external)` did not return within 10s");
+        panic!("`timeout 1 f` with `$(external)` in a here-string did not return within 10s");
     };
     let result = result.expect("execute");
 
@@ -451,7 +452,8 @@ async fn timeout_builtin_kills_external_in_a_heredoc_substitution() {
     let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
 
     let kernel = kernel_for_test();
-    let program = format!("timeout 1 cat <<EOF\n$(bash {})\nEOF\n", script.display());
+    let program =
+        format!("f() {{ cat <<EOF\n$(bash {})\nEOF\n}}; timeout 1 f", script.display());
     let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
     let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     let Ok(result) = outcome else {
@@ -460,7 +462,7 @@ async fn timeout_builtin_kills_external_in_a_heredoc_substitution() {
             nix::unistd::Pid::from_raw(pid as i32),
             nix::sys::signal::Signal::SIGKILL,
         );
-        panic!("`timeout 1 cat <<EOF` with `$(external)` in the body did not return within 10s");
+        panic!("`timeout 1 f` with `$(external)` in a heredoc body did not return within 10s");
     };
     let result = result.expect("execute");
 

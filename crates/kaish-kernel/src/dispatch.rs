@@ -140,16 +140,20 @@ pub trait CommandDispatcher: Send + Sync {
         anyhow::bail!("this dispatcher cannot run a compound statement in a pipeline stage")
     }
 
-    /// Evaluate an expression through the full async chain.
+    /// Evaluate a redirect operand through the full async chain.
     ///
     /// Unlike the runner's sync `eval_simple_expr`, this can run command
     /// substitution (`$(...)`) because it has access to pipeline execution.
-    /// Used for redirect targets and heredoc bodies so `cat < $(cmd)`,
-    /// `echo x > $(cmd)`, and `$(...)` inside heredoc bodies work. The `ctx`
-    /// carries scope/cwd/backend for dispatchers that evaluate against it;
-    /// stateful dispatchers (Kernel) snapshot their own session state and
-    /// only let command output escape (side effects like `cd` do not).
-    async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value>;
+    /// `scheduler::pipeline::eval_redirect_target` is the caller, so this
+    /// covers every redirect operand: a target (`cat < $(cmd)`,
+    /// `echo x > $(cmd)`), a heredoc body, and a here-string word.
+    ///
+    /// `ctx` is the context of the command being redirected, and a `$(...)`
+    /// here runs on it: the operand is evaluated before that command runs,
+    /// but under its cancel token and watchdog, so `timeout 1 cat <<< $(slow)`
+    /// ends at the deadline. Session side effects still do not escape — the
+    /// Kernel restores scope and cwd around the substitution.
+    async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value>;
 
     /// Fork the dispatcher for concurrent execution (detached).
     ///
@@ -686,7 +690,7 @@ impl CommandDispatcher for BackendDispatcher {
 
     /// Sync-only evaluation (no command substitution) — matches this
     /// test dispatcher's documented "no async argument evaluation" limit.
-    async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value> {
+    async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value> {
         crate::scheduler::pipeline::eval_simple_expr(expr, ctx)
             .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!("cannot evaluate expression in test dispatcher"))
