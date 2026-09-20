@@ -1231,7 +1231,10 @@ mod tests {
         let row: serde_json::Value =
             serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
         assert_eq!(row["ok"], false, "binary output must not be silently ok:true");
-        assert_ne!(row["code"], 0, "must carry a nonzero code");
+        // `code` is the worker's own. This worker exited 0, and `ok:false`
+        // plus `err` carry the refusal — rewriting the 0 to a 1 reported a
+        // number the worker never returned.
+        assert_eq!(row["code"], 0, "the worker's own exit code rides the row");
         assert!(row["out"].as_str().unwrap().is_empty(), "no lossy text in out");
         let err_text = row["err"].as_str().unwrap();
         assert!(err_text.contains("binary"), "{err_text}");
