@@ -16,8 +16,10 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
@@ -50,7 +52,9 @@ struct SpawnArgs {
     #[arg(long = "cwd")]
     cwd: Option<String>,
 
-    /// Timeout in milliseconds.
+    /// Timeout in milliseconds. On expiry the command exits 124 and keeps
+    /// whatever the child already wrote; the timeout line is appended to
+    /// stderr after the child's own.
     #[arg(long = "timeout")]
     timeout: Option<String>,
 
@@ -257,36 +261,56 @@ impl Tool for Spawn {
         if let Some(ms) = timeout_ms {
             let timeout = Duration::from_millis(ms);
 
-            // Drain both pipes into tasks rather than letting
-            // `wait_with_output()` own the buffers. That future owns
+            // Drain both pipes into tasks writing to shared buffers, rather
+            // than letting `wait_with_output()` own them. That future owns
             // everything it has read, so the timeout arm used to drop the
-            // child's partial output with it: a worker that printed a
-            // diagnostic and then hung reported 124 and nothing else.
-            let stdout_task = tokio::spawn(drain_pipe(child.stdout.take()));
-            let stderr_task = tokio::spawn(drain_pipe(child.stderr.take()));
+            // child's partial output with it: a child that printed a
+            // diagnostic and then hung reported 124 and nothing else. Shared
+            // buffers also mean an aborted drain still leaves its bytes here.
+            let captured_stdout = Arc::new(Mutex::new(Vec::new()));
+            let captured_stderr = Arc::new(Mutex::new(Vec::new()));
+            let stdout_task = tokio::spawn(drain_pipe(child.stdout.take(), captured_stdout.clone()));
+            let stderr_task = tokio::spawn(drain_pipe(child.stderr.take(), captured_stderr.clone()));
 
-            let timed_out = match tokio::time::timeout(timeout, child.wait()).await {
-                Ok(Ok(status)) => Ok(status.code()),
-                Ok(Err(e)) => Err(e),
+            let mut kill_note = None;
+            let (exit_code, expired) = match tokio::time::timeout(timeout, child.wait()).await {
+                // A child that died by signal has no code. It is not a
+                // timeout, and reading `None` as one would report 124 and a
+                // "timed out" line for a segfault.
+                Ok(Ok(status)) => (status.code(), false),
+                Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
                 Err(_) => {
-                    // Kill before joining the drains: a reader only reaches
-                    // EOF once the child's pipe writers are closed.
-                    if let Err(e) = child.start_kill() {
-                        return ExecResult::failure(1, format!("spawn: failed to kill after timeout: {e}"));
+                    // Kill first: a reader reaches EOF only once every write
+                    // end of the pipe is closed.
+                    match child.start_kill() {
+                        // Unreachable for an unreaped child on Unix. Report
+                        // it and skip the wait, which would have nothing to
+                        // reap; `kill_on_drop` is still the backstop.
+                        Err(e) => kill_note = Some(format!("spawn: failed to kill after timeout: {e}")),
+                        Ok(()) => {
+                            if let Err(e) = child.wait().await {
+                                return ExecResult::failure(1, format!("spawn: failed to wait: {}", e));
+                            }
+                        }
                     }
-                    match child.wait().await {
-                        Ok(_) => Ok(None),
-                        Err(e) => Err(e),
-                    }
+                    (None, true)
                 }
             };
-            let exit_code = match timed_out {
-                Ok(code) => code,
-                Err(e) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
-            };
-            let expired = exit_code.is_none();
 
-            let (stdout, mut stderr) = (joined_pipe(stdout_task).await, joined_pipe(stderr_task).await);
+            // Bounded join. The child is reaped, so everything it wrote is
+            // already in the pipe buffer and the drains need only a moment to
+            // pick it up — but this child was never put in its own process
+            // group, so a grandchild that inherited the write end keeps EOF
+            // from ever arriving. Awaiting EOF made `--timeout 300` return
+            // when the GRANDCHILD exited, which is not a timeout at all. The
+            // grace collects what is there and then stops waiting; the bytes
+            // are in the shared buffers either way.
+            let stdout = finish_drain(stdout_task, &captured_stdout).await;
+            let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
+
+            if let Some(note) = kill_note {
+                append_line(&mut stderr, note.as_bytes());
+            }
             if expired {
                 append_line(
                     &mut stderr,
@@ -307,42 +331,57 @@ impl Tool for Spawn {
     }
 }
 
-/// Read one child pipe to EOF, keeping whatever arrived before an error.
+/// How long a reaped child's drains get to pick up what is already buffered
+/// before the wait is abandoned. Only a grandchild holding the pipe's write
+/// end open makes this matter.
+const DRAIN_GRACE: Duration = Duration::from_millis(200);
+
+/// Read one child pipe to EOF into a shared buffer.
 ///
-/// `read_to_end` would discard a partial read on an I/O error; this returns
-/// the bytes and the error together so neither is lost.
-async fn drain_pipe<R>(pipe: Option<R>) -> (Vec<u8>, Option<std::io::Error>)
+/// The buffer is shared so an abandoned drain still leaves the bytes it read.
+/// A read error ends the drain and is returned rather than discarded.
+async fn drain_pipe<R>(pipe: Option<R>, into: Arc<Mutex<Vec<u8>>>) -> Option<std::io::Error>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     use tokio::io::AsyncReadExt;
-    let Some(mut pipe) = pipe else {
-        return (Vec::new(), None);
-    };
-    let mut collected = Vec::new();
+    let mut pipe = pipe?;
     let mut chunk = [0u8; 8192];
     loop {
         match pipe.read(&mut chunk).await {
-            Ok(0) => return (collected, None),
-            Ok(n) => collected.extend_from_slice(&chunk[..n]),
-            Err(e) => return (collected, Some(e)),
+            Ok(0) => return None,
+            Ok(n) => into.lock().await.extend_from_slice(&chunk[..n]),
+            Err(e) => return Some(e),
         }
     }
 }
 
-/// Collect a drain task's bytes, folding a read error or a panicked task into
-/// the bytes as a diagnostic line rather than dropping either silently.
-async fn joined_pipe(
-    task: tokio::task::JoinHandle<(Vec<u8>, Option<std::io::Error>)>,
+/// Give a drain [`DRAIN_GRACE`] to finish, then take what it collected.
+///
+/// A read error or a panicked reader is appended to the bytes as a
+/// diagnostic — neither is dropped, and neither replaces the output.
+async fn finish_drain(
+    mut task: tokio::task::JoinHandle<Option<std::io::Error>>,
+    buffer: &Arc<Mutex<Vec<u8>>>,
 ) -> Vec<u8> {
-    match task.await {
-        Ok((bytes, None)) => bytes,
-        Ok((mut bytes, Some(e))) => {
-            append_line(&mut bytes, format!("spawn: failed to read child output: {e}").as_bytes());
-            bytes
+    let note = match tokio::time::timeout(DRAIN_GRACE, &mut task).await {
+        Ok(Ok(None)) => None,
+        Ok(Ok(Some(e))) => Some(format!("spawn: failed to read child output: {e}")),
+        Ok(Err(e)) => Some(format!("spawn: output reader did not finish: {e}")),
+        // The grace elapsed: a surviving grandchild still holds the pipe's
+        // write end, so EOF will not arrive. Abort rather than detach — a
+        // detached reader would hold the pipe for the life of the process —
+        // and say the output may be short rather than call it complete.
+        Err(_) => {
+            task.abort();
+            Some("spawn: output may be incomplete: a surviving child still holds the pipe".to_string())
         }
-        Err(e) => format!("spawn: output reader did not finish: {e}\n").into_bytes(),
+    };
+    let mut bytes = std::mem::take(&mut *buffer.lock().await);
+    if let Some(note) = note {
+        append_line(&mut bytes, note.as_bytes());
     }
+    bytes
 }
 
 /// Append a line to captured output, adding the separator only when the

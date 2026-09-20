@@ -1510,7 +1510,8 @@ done
 - **Row schema**: `i`, `item` (typed), `ok`, `code`, `out` (stdout, trailing
   newline stripped), `err` (stderr, always present) on every row; `data` (the
   worker's structured output) and `timed_out:true` when present. Timeout →
-  `code` 124.
+  `code` 124. Read `ok`, not `code`: `code` is the worker's own, and a worker
+  whose stdout is binary is `ok:false` with `code` 0.
 - **Exit codes**: `0` all workers ok · `123` any worker failed (partial or
   total — the rows carry which) · `2` usage.
 - **Ingress**: a JSON array fans out typed, element-by-element (`1` and `"1"`
