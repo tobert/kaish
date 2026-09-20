@@ -42,6 +42,9 @@ breaking entries are marked **BREAKING**.
   job's own output, in order: builtin output is published when each builtin
   returns, and output captured by `$(...)`, redirected with `>`, or read by
   `scatter` no longer appears in it.
+- An embedder tool no longer runs with the kernel's context lock held. A
+  backend tool that called back into the kernel blocked forever; it runs on
+  the calling command's context now, the same as a builtin.
 - `timeout` now reaches an external command inside a function body, inside a
   piped function body, and inside a `$(...)` in that body's arguments. The
   timer's cancel token stopped at the function boundary and the command ran
