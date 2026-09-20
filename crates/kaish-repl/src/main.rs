@@ -263,12 +263,23 @@ fn print_plan(source: Option<String>) -> ExitCode {
             if !refusals.is_empty() {
                 return print_plan_errors(refusals);
             }
-            let doc = serde_json::json!({
+            // A plan the kernel will run can still hold a statement the
+            // runtime refuses — `[[ "abc" -eq 1 ]]` faults with exit 2. That
+            // is not a refusal of the program, so it cannot join `errors`
+            // without calling a runnable plan unrunnable; it rides its own
+            // field, present only when there is something to say.
+            let mut doc = serde_json::json!({
                 "statements": statements,
                 "kaish_version": kaish_kernel::KAISH_VERSION,
                 "kaish_git_hash": kaish_kernel::KAISH_GIT_HASH,
                 "kaish_build_date": kaish_kernel::KAISH_BUILD_DATE,
             });
+            let warnings = plan_validation_warnings(&source);
+            if !warnings.is_empty()
+                && let Some(object) = doc.as_object_mut()
+            {
+                object.insert("warnings".into(), serde_json::Value::Array(warnings));
+            }
             println!("{doc}");
             ExitCode::SUCCESS
         }
@@ -289,19 +300,32 @@ fn print_plan(source: Option<String>) -> ExitCode {
 
 /// The validator's errors for `source`, as plan-error JSON objects.
 ///
-/// Warnings are left out: the kernel filters validation to `Error` before it
-/// refuses a program, so anything else would report a plan as unrunnable that
-/// the kernel would have run. A source that does not parse returns nothing —
-/// the caller is already reporting the parse failure.
+/// Errors only: the kernel filters validation to `Error` before it refuses a
+/// program, so anything else here would report a plan as unrunnable that the
+/// kernel would have run. Warnings go to `plan_validation_warnings` and their
+/// own field. A source that does not parse returns nothing — the caller is
+/// already reporting the parse failure.
 fn plan_validation_errors(source: &str) -> Vec<serde_json::Value> {
-    use kaish_kernel::validator::Severity;
+    plan_validation_issues(source, kaish_kernel::validator::Severity::Error)
+}
 
+/// The validator's warnings for `source`, as plan JSON objects.
+///
+/// A warning does not stop the kernel, so these never become `errors` — they
+/// report what the runtime will refuse in a program the kernel will still
+/// run. `[[ "abc" -eq 1 ]]` is the shape: it plans, it runs, and it faults
+/// with exit 2 the moment it is reached.
+fn plan_validation_warnings(source: &str) -> Vec<serde_json::Value> {
+    plan_validation_issues(source, kaish_kernel::validator::Severity::Warning)
+}
+
+fn plan_validation_issues(source: &str, severity: kaish_kernel::validator::Severity) -> Vec<serde_json::Value> {
     let Ok(issues) = kaish_kernel::validator::validate_program(source) else {
         return Vec::new();
     };
     issues
         .iter()
-        .filter(|issue| issue.severity == Severity::Error)
+        .filter(|issue| issue.severity == severity)
         .map(|issue| {
             let mut object = serde_json::Map::new();
             object.insert("message".into(), issue.message.clone().into());

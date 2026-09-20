@@ -95,6 +95,14 @@ pub enum IssueCode {
     /// warning, never an error: the name binds either way, and the author is
     /// the only one who knows which name they meant.
     MixedScriptName,
+    /// A literal operand in a `[[ ]]` numeric comparison is not a number, so
+    /// the comparison faults at runtime with exit 2 — `[[ "abc" -eq 1 ]]`.
+    /// Both operands are in the source, so the fault is decidable before
+    /// anything runs. A warning, not an error: the runtime already refuses
+    /// it as a result rather than an `Err`, deliberately (GH #340's
+    /// statement-position decision), and an error here would turn that
+    /// result back into a rejection.
+    NonNumericTestOperand,
     /// `test` was given an XSI compound/grouping operator (`-a`, `-o`,
     /// `(`, `)`), which kaish does not implement.
     TestCompoundOperator,
@@ -142,6 +150,7 @@ impl IssueCode {
             IssueCode::UnreadableAssignmentTarget => "E018",
             IssueCode::InvisibleAssignmentTarget => "E019",
             IssueCode::MixedScriptName => "W007",
+            IssueCode::NonNumericTestOperand => "W008",
             IssueCode::TestCompoundOperator => "E020",
             IssueCode::WrappedCallRejected => "E021",
         }
@@ -193,7 +202,8 @@ impl IssueCode {
             | IssueCode::UndefinedCommand
             | IssueCode::UnknownFlag
             | IssueCode::PossiblyUndefinedVariable
-            | IssueCode::MixedScriptName => Severity::Warning,
+            | IssueCode::MixedScriptName
+            | IssueCode::NonNumericTestOperand => Severity::Warning,
         }
     }
 }

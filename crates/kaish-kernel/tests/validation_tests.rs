@@ -831,3 +831,51 @@ async fn generic_undefined_command_warning_stays_trace_only() {
         result.err
     );
 }
+
+// ── W008: a literal operand a numeric `[[ ]]` op will refuse ───────────
+
+/// The validator's rule and the runtime's are one function, so whatever the
+/// runtime refuses is reported here — including the leading-zero and
+/// out-of-range spellings, not just a plainly non-numeric word.
+#[test]
+fn a_literal_operand_a_numeric_comparison_refuses_is_reported() {
+    for source in [
+        r#"[[ "abc" -eq 1 ]]"#,
+        "[[ 010 -eq 10 ]]",
+        "[[ inf -gt 1 ]]",
+        r#"[[ 1 -lt "nope" ]]"#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+        assert_eq!(
+            reported[0].severity,
+            kaish_kernel::validator::Severity::Warning,
+            "{source}: a warning, never an error — the runtime refuses it as a result",
+        );
+    }
+}
+
+/// Nothing computed, and nothing outside a numeric op.
+#[test]
+fn w008_stays_quiet_where_the_value_is_not_in_the_source() {
+    for source in [
+        r#"x=abc; [[ "$x" -eq 1 ]]"#,
+        r#"[[ $(echo abc) -eq 1 ]]"#,
+        r#"[[ "abc" == "abc" ]]"#,
+        r#"[[ "abc" < "b" ]]"#,
+        "[[ 1 -eq 1 ]]",
+        r#"[[ "1.5" -gt 1 ]]"#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand),
+            "{source} must not warn: {issues:?}",
+        );
+    }
+}

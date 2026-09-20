@@ -314,3 +314,54 @@ fn a_heredoc_body_starts_after_the_whole_introducer_line() {
         );
     }
 }
+
+// ── What the runtime will refuse ───────────────────────────────────────
+//
+// A plan that parses and validates can still hold a statement the runtime
+// faults on. `[[ "abc" -eq 1 ]]` exits 2 with a type error; the plan used to
+// report it as a clean statement and exit 0, so a caller committed to a
+// command that could not succeed. These do not become `errors` — the program
+// is runnable, and calling it unrunnable would be the opposite mistake.
+
+#[test]
+fn a_literal_type_error_rides_the_plan_as_a_warning() {
+    let (code, json) = plan(r#"[[ "abc" -eq 1 ]]"#);
+    assert_eq!(code, 0, "the program is runnable, so the plan still succeeds: {json}");
+    assert!(json.get("statements").is_some(), "the plan is still a plan: {json}");
+
+    let warnings = json
+        .get("warnings")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("a decidable type error must be reported: {json}"));
+    assert_eq!(warnings.len(), 1, "{json}");
+    let message = warnings[0]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("abc"),
+        "the warning must name the operand: {message}"
+    );
+    assert!(
+        warnings[0]["suggestion"].as_str().is_some_and(|s| s.contains("==")),
+        "and name the fix: {json}"
+    );
+}
+
+/// The control. A computed operand holds a value the validator cannot see, so
+/// guessing at one would report a fault for a comparison that succeeds.
+/// Without this case, a rule that warned on every numeric comparison would
+/// pass the test above.
+#[test]
+fn a_computed_operand_is_not_guessed_at() {
+    for source in [
+        r#"x=abc; [[ "$x" -eq 1 ]]"#,
+        r#"[[ $(echo abc) -eq 1 ]]"#,
+        "[[ 1 -eq 1 ]]",
+        r#"[[ "abc" == "abc" ]]"#,
+    ] {
+        let (code, json) = plan(source);
+        assert_eq!(code, 0, "{source}: {json}");
+        assert!(
+            json.get("warnings").is_none(),
+            "{source} must plan clean, got: {json}"
+        );
+    }
+}

@@ -1274,6 +1274,16 @@ fn value_to_num(value: &Value) -> EvalResult<Num> {
     }
 }
 
+/// Why a numeric test op would refuse this operand, or `None` when it reads
+/// as a number.
+///
+/// The validator calls this so its rule and the runtime's are one function.
+/// A second copy of "what counts as a number here" would drift from this one
+/// the first time either changed.
+pub(crate) fn numeric_operand_refusal(value: &Value) -> Option<String> {
+    value_to_num(value).err().map(|e| e.to_string())
+}
+
 /// Numeric ordering for `[[ -eq ]]`/`-gt`/`-lt`/`-ge`/`-le`/`-ne`.
 /// Coerces string operands via `value_to_num`. Shared verbatim with the `test`
 /// builtin so `test`'s numeric ops match `[[` exactly (JSON-number semantics,
