@@ -31,6 +31,10 @@ pub struct MockBackend {
     /// on the kernel's slot rather than the calling command's context, so a
     /// test needs to see which one arrived.
     report_context: bool,
+    /// When set, `call_tool` writes this variable into its context's scope and
+    /// then fails. A tool's scope mutation has to survive an error the same way
+    /// a builtin's does, and a builtin cannot return one at all.
+    scope_write_then_fail: Option<(String, String)>,
 }
 
 impl MockBackend {
@@ -42,6 +46,7 @@ impl MockBackend {
                 tool_result: None,
                 wait_for_cancel: None,
                 report_context: false,
+                scope_write_then_fail: None,
             },
             count,
         )
@@ -74,6 +79,12 @@ impl MockBackend {
         self.report_context = true;
         self
     }
+
+    /// Make `call_tool` set `name=value` in its context's scope and then fail.
+    pub fn writing_scope_then_failing(mut self, name: &str, value: &str) -> Self {
+        self.scope_write_then_fail = Some((name.to_string(), value.to_string()));
+        self
+    }
 }
 
 impl Default for MockBackend {
@@ -83,6 +94,7 @@ impl Default for MockBackend {
             tool_result: None,
             wait_for_cancel: None,
             report_context: false,
+            scope_write_then_fail: None,
         }
     }
 }
@@ -153,6 +165,15 @@ impl KernelBackend for MockBackend {
                 _ = cancel.cancelled() => Ok(ToolResult::failure(130, "mock tool: cancelled")),
                 _ = tokio::time::sleep(limit) => Ok(ToolResult::success("mock tool: waited out")),
             };
+        }
+        if let Some((var, value)) = &self.scope_write_then_fail {
+            let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {
+                return Err(BackendError::InvalidOperation(
+                    "writing_scope_then_failing needs an ExecContext".into(),
+                ));
+            };
+            exec_ctx.scope.set_global(var.clone(), crate::ast::Value::String(value.clone()));
+            return Err(BackendError::Io("mock tool: failed after writing scope".into()));
         }
         if self.report_context {
             let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {

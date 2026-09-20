@@ -252,7 +252,7 @@ impl ScatterGatherRunner {
     /// Run the parallel stage for all items.
     ///
     /// Each worker gets its own forked dispatcher via
-    /// [`CommandDispatcher::fork`]. The fork snapshots per-session state
+    /// [`CommandDispatcher::fork_attached`], so a cancel cascades into it. The fork snapshots per-session state
     /// (scope, cwd, aliases, user tools) so workers can run concurrently
     /// without racing. Forks are cheap (Scope is COW, plus a few Arc bumps),
     /// and they unlock the full dispatch chain inside workers — user tools,

@@ -2453,8 +2453,8 @@ impl Kernel {
             None
         };
 
-        // Sync the effective cancel into self.exec_ctx so try_execute_external
-        // (which reads via self.cancel_token) sees cancellation. We also need
+        // Mirror the effective cancel into self.cancel_token, which a root
+        // context copies onto `ctx.cancel` for the run. We also need
         // builtins to see it via ctx.cancel — handled in execute_command.
         // For simplicity here we mirror effective_cancel into self.cancel_token
         // for the duration of this call, then restore the internal token at
@@ -3703,17 +3703,6 @@ impl Kernel {
         bg_ctx.aliases = caller.aliases.clone();
         bg_ctx.ignore_config = caller.ignore_config.clone();
         bg_ctx.output_limit = caller.output_limit.clone();
-        {
-            // The fork's own slot too, so a query answered outside the job's
-            // run — `classify_command`, an embedder reading `cwd()` — agrees
-            // with what the job is doing.
-            let mut ec = fork.exec_ctx.write().await;
-            ec.cwd = bg_ctx.cwd.clone();
-            ec.prev_cwd = bg_ctx.prev_cwd.clone();
-            ec.aliases = bg_ctx.aliases.clone();
-            ec.ignore_config = bg_ctx.ignore_config.clone();
-            ec.output_limit = bg_ctx.output_limit.clone();
-        }
         // The fork's dispatcher points at the fork itself; set it here so
         // builtins inside the background task (e.g. timeout) re-dispatch
         // through the fork, not the parent.
@@ -3983,10 +3972,18 @@ impl Kernel {
                     ctx.scope = scope.clone();
                 }
                 let backend = ctx.backend.clone();
-                match backend.call_tool(name, tool_args, &mut *ctx).await {
+                let call = backend.call_tool(name, tool_args, &mut *ctx).await;
+                // Whatever the tool did to the scope stands, whether it
+                // returned a result or an error. A builtin cannot return an
+                // error at all — `tool.execute` hands back an `ExecResult` —
+                // so its copy-back is unconditional, and an embedder tool that
+                // set a variable and then failed used to lose the variable.
+                {
+                    let mut scope = self.scope.write().await;
+                    *scope = ctx.scope.clone();
+                }
+                match call {
                     Ok(tool_result) => {
-                        let mut scope = self.scope.write().await;
-                        *scope = ctx.scope.clone();
                         // Preserve every field (data/content_type/baggage,
                         // not just stdout text) — this is the embedder seam:
                         // `x=$(embedder_tool)` and structured iteration over
@@ -4005,7 +4002,6 @@ impl Kernel {
                             || tool_schema
                                 .as_ref()
                                 .is_some_and(|s| s.typed_substitution);
-                        drop(scope);
                         // No builtin or external command produced this output,
                         // so nothing else publishes it to a background job.
                         ctx.publish_job_stdout(&result).await;
@@ -4089,11 +4085,13 @@ impl Kernel {
             return Ok(result);
         }
 
-        // Snapshot exec_ctx into a local context and release the write lock
-        // before calling tool.execute. Holding the write across tool execution
-        // would deadlock any builtin that re-dispatches through ctx.dispatcher
-        // (timeout, scatter) — the inner dispatch_command needs its own
-        // exec_ctx.write() and would block forever.
+        // Snapshot exec_ctx into a local context and release the lock before
+        // calling tool.execute. No dispatch takes the slot's write lock during
+        // a run any more, but tokio's RwLock is write-preferring: an embedder
+        // calling `set_cwd` or `reset` from another task queues a writer, and
+        // a nested read taken behind a guard held across `tool.execute` would
+        // wait behind it forever. A builtin that re-dispatches through
+        // ctx.dispatcher (timeout, scatter) is the path that would hang.
         let caller = ctx;
         let mut ctx = {
             // Read, not write: this block only copies out of the slot. The
@@ -5676,10 +5674,12 @@ impl Kernel {
             }
         };
 
-        // Read file content via backend
+        // Read file content via backend. The backend handle comes out of the
+        // slot before the read: a guard held across VFS I/O blocks every writer,
+        // including the session publish at the end of the statement.
+        let backend = self.exec_ctx.read().await.backend.clone();
         let content = {
-            let ctx = self.exec_ctx.read().await;
-            match ctx.backend.read(&full_path, None).await {
+            match backend.read(&full_path, None).await {
                 Ok(bytes) => {
                     String::from_utf8(bytes).map_err(|e| {
                         anyhow::anyhow!("source: {}: invalid UTF-8: {}", path, e)
@@ -5820,11 +5820,10 @@ impl Kernel {
             // Build script path: {dir}/{name}.kai
             let script_path = PathBuf::from(dir).join(format!("{}.kai", name));
 
-            // Check if script exists
-            let exists = {
-                let ctx = self.exec_ctx.read().await;
-                ctx.backend.exists(&script_path).await
-            };
+            // Check if script exists. Backend handle out of the slot first,
+            // for the same reason as `execute_source`.
+            let backend = self.exec_ctx.read().await.backend.clone();
+            let exists = backend.exists(&script_path).await;
 
             if !exists {
                 continue;
@@ -5832,8 +5831,7 @@ impl Kernel {
 
             // Read script content
             let content = {
-                let ctx = self.exec_ctx.read().await;
-                match ctx.backend.read(&script_path, None).await {
+                match backend.read(&script_path, None).await {
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(s) => s,
                         Err(e) => {
@@ -6130,7 +6128,6 @@ impl Kernel {
 
         // The cancel token comes from the caller's ctx, so the `timeout`
         // builtin's swapped child token reaches the wait_or_kill discipline.
-        // The kill grace and the background job still come from `self.exec_ctx`.
         //
         // In interactive mode, standalone or last-in-pipeline commands inherit
         // the terminal's stdout/stderr so output streams in real-time.
@@ -6244,6 +6241,11 @@ impl Kernel {
     /// the ignore config and the output limit from the threaded context.
     /// `classify_command` is the exception that proves the rule — a public
     /// query answered outside a run, where the slot IS the session.
+    ///
+    /// `fork_inner` reads them too, through `child_for_pipeline`, and it does
+    /// run mid-statement. Every consumer of a fork's context overwrites all
+    /// five from its own caller before using them, so the values never reach
+    /// a decision; a reader who changes that has to seed the fork instead.
     async fn write_session_back(&self, ctx: &ExecContext) {
         let mut ec = self.exec_ctx.write().await;
         ec.cwd = ctx.cwd.clone();
@@ -10537,6 +10539,30 @@ AFTER="yes"'"#)
         // `stdin=` above would otherwise be indistinguishable from success.
         let plain = kernel.execute("embedder_tool").await.expect("execute");
         assert_eq!(plain.text_out().trim(), "stdin=|cwd=/");
+    }
+
+    /// A tool's scope mutation survives the tool failing. A builtin cannot
+    /// return an error — `tool.execute` hands back an `ExecResult` — so its
+    /// copy-back is unconditional, and an embedder tool has to match it or a
+    /// variable set before the failure is erased on the way out.
+    #[tokio::test]
+    async fn embedder_tool_keeps_its_scope_write_when_it_fails() {
+        use crate::backend::testing::MockBackend;
+
+        let (mock, _calls) = MockBackend::new();
+        let kernel = Kernel::with_backend(
+            Arc::new(mock.writing_scope_then_failing("PROGRESS", "1")),
+            KernelConfig::isolated(),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        let failed = kernel.execute("embedder_tool").await.expect("execute");
+        assert_ne!(failed.code, 0, "the mock tool must fail: {failed:?}");
+
+        let r = kernel.execute("echo \"[$PROGRESS]\"").await.expect("execute");
+        assert_eq!(r.text_out().trim(), "[1]", "the failing tool's scope write was lost");
     }
 
     #[tokio::test]
