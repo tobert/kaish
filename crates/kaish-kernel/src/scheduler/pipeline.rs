@@ -677,17 +677,23 @@ impl PipelineRunner {
             data_receivers.push(Some(rx));
         }
 
-        // A `JoinSet` aborts the tasks it still owns when it is dropped; a
-        // `Vec<JoinHandle>` detaches them. Every stage is joined below, so the
-        // two differ only on a path that leaves this function early — and a
-        // pipeline that keeps stages running after it has returned is a shape
-        // to make impossible, not one to rely on never reaching. Stage
-        // identity travels two ways so the join below stays as precise as the
-        // indexed `Vec` was: in the task's own payload, and through
-        // `stage_of_task` for a task that panicked and has no payload.
-        let mut stage_tasks: tokio::task::JoinSet<(usize, ExecResult, ExecContext)> =
-            tokio::task::JoinSet::new();
-        let mut stage_of_task: HashMap<tokio::task::Id, usize> = HashMap::new();
+        // Detached handles, deliberately — a `JoinSet` would be wrong here.
+        //
+        // GH #190 asked for `JoinSet` so a dropped set aborts what it owns.
+        // The drop path is reachable: the REPL races `execute` against SIGINT
+        // and drops the loser, and any embedder wrapping `execute` in a
+        // `timeout` does the same. On that path aborting is the WORSE
+        // cleanup. A detached stage stays alive long enough for the cancel
+        // that follows to reach `wait_or_kill`, which SIGTERMs the child's
+        // process GROUP, waits the grace, then SIGKILLs the group. An abort
+        // drops the `Child` instead and falls back to `kill_on_drop`, a bare
+        // SIGKILL of the direct child pid — so a stage's grandchildren
+        // survive a Ctrl-C that used to kill them.
+        //
+        // The leak the issue worried about is bounded: every stage is joined
+        // below, and the `fork_attached` cancellation cascade owns the
+        // teardown on the one path that skips the join.
+        let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
         // Set when stage 0 receives the session's stdin rather than a redirect's.
         // Only then may its remainder be returned at the join.
         let mut stage0_took_session_stdin = false;
@@ -766,10 +772,11 @@ impl PipelineRunner {
 
             // Propagate the embedder's trace context across the spawn boundary
             // so each concurrent stage's spans stay in the same trace.
-            let task = stage_tasks.spawn(crate::telemetry::bind_current_context(async move {
+            let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
+                tokio::spawn(crate::telemetry::bind_current_context(async move {
                 // A stdin-redirect setup failure short-circuits this stage.
                 if let Err(e) = stdin_setup {
-                    return (i, ExecResult::failure(1, e), stage_ctx);
+                    return (ExecResult::failure(1, e), stage_ctx);
                 }
 
                 // Hand the structured-data sideband receiver to the stage; do
@@ -853,10 +860,10 @@ impl PipelineRunner {
                     // Drop pipe_out signals EOF to next stage's reader
                 }
 
-                (i, result, stage_ctx)
+                (result, stage_ctx)
             }));
 
-            stage_of_task.insert(task.id(), i);
+            handles.push(handle);
         }
 
         // Await all stages and return last stage's result.
@@ -869,15 +876,11 @@ impl PipelineRunner {
         // produced one; it reads as 1, the same status the panic gives the
         // pipeline below, so the list never has a hole and never claims a
         // stage succeeded because its task died.
-        let mut codes: Vec<i64> = vec![1; stage_count];
+        let mut codes: Vec<i64> = vec![1; handles.len()];
 
-        // Completion order, not stage order. Each arm below touches only its
-        // own stage's slot or a disjoint piece of `ctx` (stage 0's stdin, the
-        // last stage's session state), so the order they arrive in does not
-        // change the outcome.
-        while let Some(joined) = stage_tasks.join_next_with_id().await {
-            match joined {
-                Ok((_, (i, result, mut stage_ctx))) => {
+        for (i, handle) in handles.into_iter().enumerate() {
+            match handle.await {
+                Ok((result, mut stage_ctx)) => {
                     codes[i] = result.code;
                     // Stage 0 was handed the session's stdin. Whatever it did
                     // not consume comes back, or it dies here — `seq 1 2 | cat`
@@ -907,12 +910,9 @@ impl PipelineRunner {
                         ctx.output_limit = stage_ctx.output_limit;
                     }
                 }
-                Err(e) => match stage_of_task.get(&e.id()) {
-                    Some(i) => panics.push(format!("stage {}: {}", i, e)),
-                    // Every spawn records its id above, so this cannot happen
-                    // — and if it ever does, the panic is still reported.
-                    None => panics.push(format!("an unidentified stage: {}", e)),
-                },
+                Err(e) => {
+                    panics.push(format!("stage {}: {}", i, e));
+                }
             }
         }
 
