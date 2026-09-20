@@ -100,8 +100,9 @@ async fn concurrent_var_no_clobber() {
     }
 }
 
-/// Same shape with aliases. Aliases are part of the per-session state that
-/// `execute_pipeline` syncs through the exec_ctx RwLock.
+/// Same shape with aliases. Aliases are per-session state: it travels on the
+/// threaded context during a run and is published to the session once each
+/// top-level statement finishes, so concurrent kernels must not clobber it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_alias_no_clobber() {
     let kernel = setup().await;

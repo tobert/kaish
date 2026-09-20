@@ -1715,10 +1715,9 @@ impl Kernel {
 
     /// [`Self::execute_argv`]'s body, with the execute lock assumed **held**.
     async fn execute_argv_locked(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
-        // Fresh cancel surface for this call: `execute_pipeline` reads
-        // `self.cancel_token`, so a stale cancelled token from a prior call must be
-        // replaced first. The returned clone is the token the watchdog cancels on
-        // an elapsed deadline (it shares state with what `execute_pipeline` reads),
+        // Fresh cancel surface for this call, so a stale cancelled token from a
+        // prior call is replaced first. The watchdog cancels this token on an
+        // elapsed deadline, and the root context carries it to every stage,
         // cascading SIGTERM/SIGKILL to any external child.
         let cancel = self.reset_cancel();
 
@@ -1739,12 +1738,23 @@ impl Kernel {
             background: false,
         };
         let work = async {
-            let result = self.execute_pipeline(&pipeline).await?;
+            // Root context for this call, built once the watchdog is installed.
+            let mut root_ctx = {
+                let ec = self.exec_ctx.read().await;
+                let scope = self.scope.read().await;
+                self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone())
+            };
+            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await;
+            // The door runs one command the same way a statement does, so a
+            // `cd` or an `alias` through it outlives the call. Published
+            // before the error is propagated, because a command that faults
+            // may still have moved the session first.
+            self.write_session_back(&root_ctx).await;
             // A gate raised while evaluating inside the dispatched tool — a
             // user tool body's `$(…)` — surfaces as this call's own held
             // result, and must not strand in the slot for the next serialized
             // call to mis-take.
-            Ok(result)
+            result
         };
         // The argv door returns one command's result; it has no statement
         // stream that could miss the timeout diagnostic.
@@ -2443,8 +2453,8 @@ impl Kernel {
             None
         };
 
-        // Sync the effective cancel into self.exec_ctx so try_execute_external
-        // (which reads via self.cancel_token) sees cancellation. We also need
+        // Mirror the effective cancel into self.cancel_token, which a root
+        // context copies onto `ctx.cancel` for the run. We also need
         // builtins to see it via ctx.cancel — handled in execute_command.
         // For simplicity here we mirror effective_cancel into self.cancel_token
         // for the duration of this call, then restore the internal token at
@@ -2553,6 +2563,18 @@ impl Kernel {
             token.clone()
         };
 
+        // Root context for this run; the interpreter threads it. It takes the
+        // stdin a caller seeded for this call, so the first reader consumes it.
+        let mut root_ctx = {
+            let mut ec = self.exec_ctx.write().await;
+            let scope = self.scope.read().await;
+            let mut root = self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone());
+            root.stdin = ec.stdin.take();
+            root.stdin_data = ec.stdin_data.take();
+            root.pipe_stdin = ec.pipe_stdin.take();
+            root
+        };
+
         for stmt in program.statements.into_iter() {
             if matches!(stmt, Stmt::Empty) {
                 continue;
@@ -2567,7 +2589,11 @@ impl Kernel {
             // The statement tap and gate (spec §C.6) — one of exactly two
             // sites. It runs before `execute_stmt_flow`, so a held statement
             // has run *nothing*: no substitution, no redirect opened, no
-            let flow_result = self.execute_stmt_flow(&stmt).await;
+            let flow_result = self.execute_stmt_flow(&stmt, &mut root_ctx).await;
+            // Publish the session before anything can leave this loop — Ok, a
+            // fault, or a control-flow signal — so `Kernel::cwd()` and the other
+            // public accessors are right the moment the call returns.
+            self.write_session_back(&root_ctx).await;
             let flow = match flow_result {
                 Ok(flow) => flow,
                 Err(error) => {
@@ -2662,6 +2688,7 @@ impl Kernel {
     fn execute_stmt_flow<'a>(
         &'a self,
         stmt: &'a Stmt,
+        ctx: &'a mut ExecContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
         // No per-statement span here: `execute_stmt_flow` is the largest future
         // on the recursion ring, and wrapping it in `Instrumented<Span>` carries
@@ -2681,7 +2708,7 @@ impl Kernel {
                     scope.clear_cmdsubst_code();
                 }
                 // Use async evaluator to support command substitution
-                let value = self.eval_expr_async(&assign.value).await
+                let value = self.eval_expr_async(&assign.value, ctx).await
                     .context("failed to evaluate assignment")?;
                 let mut scope = self.scope.write().await;
                 if assign.path.segments.len() == 1 {
@@ -2740,7 +2767,7 @@ impl Kernel {
                     stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
                     background: false,
                 };
-                let result = Box::pin(self.execute_pipeline(&pipeline)).await?;
+                let result = Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2759,7 +2786,7 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = Box::pin(self.execute_pipeline(pipeline)).await?;
+                let result = Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await?;
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2784,7 +2811,7 @@ impl Kernel {
                 // in `else_branch`, so it takes this same path.)
                 let mut result = ExecResult::success("");
                 let cond_value = self
-                    .eval_condition_async(&if_stmt.condition, &mut result)
+                    .eval_condition_async(&if_stmt.condition, &mut result, &mut *ctx)
                     .await
                     .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
 
@@ -2795,7 +2822,7 @@ impl Kernel {
                 };
 
                 for stmt in branch {
-                    let flow = match self.execute_stmt_flow(stmt).await {
+                    let flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
                         Ok(flow) => flow,
                         Err(error) => {
                             self.drain_stderr_into(&mut result).await;
@@ -2840,7 +2867,6 @@ impl Kernel {
                         };
                         if glob_enabled {
                             let (paths, cwd) = {
-                                let ctx = self.exec_ctx.read().await;
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
                                 let cwd = ctx.resolve_path(".");
@@ -2868,7 +2894,7 @@ impl Kernel {
                     // $VAR is rejected upstream by validator E012. See
                     // docs/LANGUAGE.md.
                     let from_command_subst = matches!(item_expr, Expr::CommandSubst(_));
-                    let item = self.eval_expr_async(item_expr).await?;
+                    let item = self.eval_expr_async(item_expr, &mut *ctx).await?;
                     match item {
                         // JSON arrays iterate over elements (preferred path
                         // when builtins emit .data — seq, jq, cut, find, …)
@@ -2923,7 +2949,7 @@ impl Kernel {
 
                 'outer: for item in items {
                     // Cancellation checkpoint per iteration
-                    if self.is_cancelled() {
+                    if self.is_cancelled() || ctx.cancel.is_cancelled() {
                         {
                             let mut scope = self.scope.write().await;
                             scope.pop_frame();
@@ -2937,7 +2963,7 @@ impl Kernel {
                         scope.set(&for_loop.variable, item);
                     }
                     for stmt in &for_loop.body {
-                        let mut flow = match self.execute_stmt_flow(stmt).await {
+                        let mut flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
                             Ok(f) => f,
                             Err(e) => {
                                 {
@@ -3019,7 +3045,7 @@ impl Kernel {
                 'outer: loop {
                     // Evaluate condition - use async to support command substitution
                     // Cancellation checkpoint per iteration
-                    if self.is_cancelled() {
+                    if self.is_cancelled() || ctx.cancel.is_cancelled() {
                         result.code = 130;
                         self.update_last_result(&result).await;
                         return Ok(ControlFlow::ok(result));
@@ -3028,7 +3054,7 @@ impl Kernel {
                     // Per iteration, so the condition's stdout interleaves with
                     // the body's rather than arriving in one block up front.
                     let cond_value = self
-                        .eval_condition_async(&while_loop.condition, &mut result)
+                        .eval_condition_async(&while_loop.condition, &mut result, &mut *ctx)
                         .await
                         .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
 
@@ -3038,7 +3064,7 @@ impl Kernel {
 
                     // Execute body
                     for stmt in &while_loop.body {
-                        let mut flow = match self.execute_stmt_flow(stmt).await {
+                        let mut flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
                             Ok(flow) => flow,
                             Err(error) => {
                                 self.drain_stderr_into(&mut result).await;
@@ -3102,7 +3128,7 @@ impl Kernel {
                 // rather than glob-matching against the `[binary: N bytes]`
                 // placeholder (Decision E — same class as `==`/`in`).
                 let match_value = {
-                    let value = self.eval_expr_async(&case_stmt.expr).await?;
+                    let value = self.eval_expr_async(&case_stmt.expr, &mut *ctx).await?;
                     value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}"))?
                 };
 
@@ -3116,7 +3142,7 @@ impl Kernel {
                         // Execute the branch body
                         let mut result = ExecResult::success("");
                         for stmt in &branch.body {
-                            let flow = match self.execute_stmt_flow(stmt).await {
+                            let flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
                                 Ok(flow) => flow,
                                 Err(error) => {
                                     self.drain_stderr_into(&mut result).await;
@@ -3159,7 +3185,7 @@ impl Kernel {
                 // return [N] - N becomes the exit code, NOT stdout
                 // Shell semantics: return sets exit code, doesn't produce output
                 let result = if let Some(e) = expr {
-                    let val = self.eval_expr_async(e).await?;
+                    let val = self.eval_expr_async(e, ctx).await?;
                     let code = crate::interpreter::value_to_exit_code(&val)
                         .map_err(|e| anyhow::anyhow!("return: {}", e))?;
                     ExecResult::from_parts(code, String::new(), String::new(), None)
@@ -3170,7 +3196,7 @@ impl Kernel {
             }
             Stmt::Exit(expr) => {
                 let code = if let Some(e) = expr {
-                    let val = self.eval_expr_async(e).await?;
+                    let val = self.eval_expr_async(e, ctx).await?;
                     crate::interpreter::value_to_exit_code(&val)
                         .map_err(|e| anyhow::anyhow!("exit: {}", e))?
                 } else {
@@ -3190,7 +3216,7 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.suppress_errexit();
                 }
-                let left_flow = match self.execute_stmt_flow(left).await {
+                let left_flow = match self.execute_stmt_flow(left, &mut *ctx).await {
                     Ok(f) => f,
                     Err(e) => {
                         let mut scope = self.scope.write().await;
@@ -3226,7 +3252,7 @@ impl Kernel {
                         // `OrChain` twin. The stash check matters here for a
                         // hold swallowed into an apparent success below.
                         if left_result.ok() {
-                            let right_flow = match self.execute_stmt_flow(right).await {
+                            let right_flow = match self.execute_stmt_flow(right, ctx).await {
                                 Ok(flow) => flow,
                                 // The left side already ran and printed.
                                 Err(error) => return Err(with_prior_output(left_result, error)),
@@ -3261,7 +3287,7 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.suppress_errexit();
                 }
-                let left_flow = match self.execute_stmt_flow(left).await {
+                let left_flow = match self.execute_stmt_flow(left, &mut *ctx).await {
                     Ok(f) => f,
                     Err(e) => {
                         let mut scope = self.scope.write().await;
@@ -3305,7 +3331,7 @@ impl Kernel {
                         // slot's result instead. Do not "fix" this by taking
                         // the slot here: only statement boundaries take it.
                         if !left_result.ok() {
-                            let right_flow = match self.execute_stmt_flow(right).await {
+                            let right_flow = match self.execute_stmt_flow(right, ctx).await {
                                 Ok(flow) => flow,
                                 // The left side already ran and printed.
                                 Err(error) => return Err(with_prior_output(left_result, error)),
@@ -3338,7 +3364,7 @@ impl Kernel {
                 // the message, matching `(( ))` below and the `test` builtin.
                 // Escaping as `Err` collapsed the code to 1, which made a bad
                 // operand indistinguishable from a false comparison.
-                let result = match self.eval_test_async(test_expr).await {
+                let result = match self.eval_test_async(test_expr, ctx).await {
                     Ok(true) => ExecResult::success(""),
                     Ok(false) => ExecResult::failure(1, ""),
                     Err(e) => ExecResult::failure(2, format!("{e:#}")).into_fault(),
@@ -3368,7 +3394,7 @@ impl Kernel {
             // way: exit 2 with the error as the message, like any other
             // command that ran and failed.
             Stmt::Arith(expr_str) => {
-                let result = match self.eval_arithmetic_async(expr_str).await {
+                let result = match self.eval_arithmetic_async(expr_str, ctx).await {
                     Ok(n) if n != 0 => ExecResult::success(""),
                     Ok(_) => ExecResult::failure(1, ""),
                     Err(e) => ExecResult::failure(2, format!("{e:#}")).into_fault(),
@@ -3398,7 +3424,7 @@ impl Kernel {
                     Vec::with_capacity(assignments.len());
                 let mut setup_err: Option<anyhow::Error> = None;
                 for assign in assignments {
-                    match self.eval_expr_async(&assign.value).await {
+                    match self.eval_expr_async(&assign.value, &mut *ctx).await {
                         Ok(value) => {
                             let mut scope = self.scope.write().await;
                             prior_export
@@ -3413,7 +3439,7 @@ impl Kernel {
                 }
 
                 let flow = if setup_err.is_none() {
-                    self.execute_stmt_flow(body).await
+                    self.execute_stmt_flow(body, ctx).await
                 } else {
                     Ok(ControlFlow::ok(ExecResult::success("")))
                 };
@@ -3446,10 +3472,15 @@ impl Kernel {
     /// Sync on purpose: the ~30 field clones live in this transient frame rather
     /// than a coroutine slot, and the result is `Box`ed so only an 8-byte pointer
     /// — not the 960-byte struct — rides the dispatch await at every recursion
-    /// level (GH #48, item 2). `pipeline_position` and `cancel` are the only
-    /// per-site differences (the pipeline runner uses the kernel's own cancel
-    /// token and forces `Only`; the per-command dispatch inherits `ec`'s), so
-    /// they're parameters; every other field is snapshotted identically.
+    /// level (GH #48, item 2). `pipeline_position` and `cancel` are parameters
+    /// because every caller sets them.
+    ///
+    /// Reading `ec` is right only for a context that starts a run. The slot's
+    /// session fields are from before the current statement, so a caller with
+    /// a calling context must overwrite cwd, prev_cwd, aliases, the ignore
+    /// config and the output limit from it — along with the watchdog, stderr
+    /// and the background flags. Every caller inside a run does; see
+    /// `write_session_back` for why.
     fn snapshot_exec_ctx(
         &self,
         ec: &ExecContext,
@@ -3462,8 +3493,8 @@ impl Kernel {
             scope: scope.clone(),
             cwd: ec.cwd.clone(),
             prev_cwd: ec.prev_cwd.clone(),
-            stdin: ec.stdin.clone(),
-            stdin_data: ec.stdin_data.clone(),
+            stdin: None,
+            stdin_data: None,
             stdin_data_rx: None,
             pipe_stdin: None,
             pipe_stdout: None,
@@ -3493,28 +3524,18 @@ impl Kernel {
             watchdog: ec.watchdog.clone(),
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
-            // Correlate this command's requests with the background job it
-            // runs for, if any — the ONE place `job_id` is stamped.
-            // A replay correlation belongs to exactly one dispatch. Moved
-            // (not cloned) out of the parent context at the dispatch seam —
-            // see the stdin hand-off below, which takes it under the same
-            // write lock — so the gate this snapshot reaches is the only one
-            // that can adopt it.
-            // A forked or backgrounded execution keeps its parenthood: a
-            // gate reached from inside a gated statement is nested under it
-            // (spec §A.7).
         })
     }
 
     /// Execute a pipeline.
-    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
+    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ExecResult> {
         if pipeline.stages.is_empty() {
             return Ok(ExecResult::success(""));
         }
 
         // Handle background execution (`&` operator)
         if pipeline.background {
-            return self.execute_background(pipeline).await;
+            return self.execute_background(pipeline, caller).await;
         }
 
         // All commands go through the runner with the Kernel as dispatcher.
@@ -3524,53 +3545,43 @@ impl Kernel {
         // lock before running. This prevents deadlocks when dispatch_command
         // is called from within the pipeline and recursively triggers another
         // pipeline (e.g., via user-defined tools).
-        let (mut ctx, has_pipe_stdin) = {
+        let mut ctx = {
             let ec = self.exec_ctx.read().await;
             let scope = self.scope.read().await;
-            // A frontend-seeded lazy stdin (`execute_with_pipe_stdin`) lives in
-            // the persistent exec_ctx; it's moved (non-Clone) into this ctx in
-            // the consume-once block below, so note its presence here.
-            let has_pipe_stdin = ec.pipe_stdin.is_some();
-            // The pipeline runner drives stage 0 with the first stage's stdin
-            // seeded from any frontend-supplied input (`ExecuteOptions::stdin`,
-            // e.g. `printf … | kaish -c sort`) unless a redirect already set it,
-            // and uses the kernel's own cancel token so a `cancel()` reaches the
-            // stages. See `snapshot_exec_ctx` for why the snapshot is boxed.
-            let cancel = {
-                #[allow(clippy::expect_used)]
-                let token = self.cancel_token.lock().expect("cancel_token poisoned");
-                token.clone()
-            };
-            (self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel), has_pipe_stdin)
+            // The stage takes the caller's cancel token and watchdog, so a
+            // `timeout` around a function body reaches its stages. See
+            // `snapshot_exec_ctx` for why the snapshot is boxed.
+            let mut stage = self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, caller.cancel.clone());
+            stage.watchdog = caller.watchdog.clone();
+            // stderr and the background flags come from the caller, not the
+            // slot: nothing copies them into the slot any more, and a nested
+            // pipeline that read the slot lost a substitution's stderr.
+            stage.stderr = caller.stderr.clone();
+            stage.background_job = caller.background_job;
+            stage.background_stream_output = caller.background_stream_output;
+            stage.background_stream_stderr = caller.background_stream_stderr;
+            // Session state comes from the caller too. `snapshot_exec_ctx`
+            // seeds from the slot, which now only carries the session BETWEEN
+            // runs — inside one run a `cd` in an earlier statement lives on the
+            // ctx, and seeding from the slot lost it (`x=$(cd /tmp; pwd)`).
+            stage.cwd = caller.cwd.clone();
+            stage.prev_cwd = caller.prev_cwd.clone();
+            stage.aliases = caller.aliases.clone();
+            stage.ignore_config = caller.ignore_config.clone();
+            stage.output_limit = caller.output_limit.clone();
+            stage
         }; // locks released
 
-        // Consume-once: move/clear the seeded stdin sources from the persistent
-        // exec_ctx now that this pipeline's ctx owns them, so a later statement
-        // in the same call (`cat ; cat`) does not re-receive them — matching
-        // shell stdin draining. `pipe_stdin` is non-Clone, so it's *moved* here
-        // (the ctx above was built with `pipe_stdin: None`).
-        if ctx.stdin.is_some() || ctx.stdin_data.is_some() || has_pipe_stdin {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ec.stdin = None;
-            ec.stdin_data = None;
-        }
-
-        // Park the enclosing command's write end and sideband receiver here for
-        // the duration. `ec` is one shared slot and the snapshot above zeroes
-        // both, so a nested dispatch — `$(…)` in a command's own arguments, a
-        // function body, a `source`d file — overwrites whatever is left in it.
-        // `echo $(echo sub) | cat` printed nothing at exit 0;
-        // `seq 1 3 | jq -c $(echo .)` fell back to reading the pipe as text.
-        //
-        // Here rather than at each re-entering caller: this is the one path
-        // they all take. The shared slot is the actual defect — threading a
-        // ctx through the interpreter would retire this whole dance.
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.pipe_stdout = ec.pipe_stdout.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-        }
+        // The pipeline owns the caller's stdin, pipe ends, and sideband while it
+        // runs: stage 0 reads that stdin (`cat ; cat` drains it once, and
+        // `printf … | kaish -c sort` feeds `sort`), and a nested dispatch that
+        // writes the enclosing command's output finds the writer here. What is
+        // left goes back to the caller below.
+        ctx.stdin = caller.stdin.take();
+        ctx.stdin_data = caller.stdin_data.take();
+        ctx.pipe_stdin = caller.pipe_stdin.take();
+        ctx.pipe_stdout = caller.pipe_stdout.take();
+        ctx.stdin_data_rx = caller.stdin_data_rx.take();
 
         let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
 
@@ -3599,35 +3610,31 @@ impl Kernel {
         // apply — see `apply_spill_contract`'s doc comment (GH #212).
         crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
 
-        // Sync changes back from context
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd.clone();
-            ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.aliases = ctx.aliases.clone();
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.output_limit = ctx.output_limit.clone();
-            // Unconsumed stdin goes back to the session, or it dies here with
-            // `ctx`. A partial read (`read` takes one line) leaves the rest
-            // split across two places: the bytes it over-read sit in `stdin`,
-            // and the pipe still holds everything past them. Dropping the
-            // reader discards that tail with no error — `read x; wc -c` over
-            // 100 KiB counted 8187 bytes and said nothing.
-            //
-            // A multi-stage pipeline reaches here with the remainder already
-            // returned by `run_pipeline`'s join, so this carries the
-            // single-command and the pipeline case alike.
-            ec.stdin = ctx.stdin.take();
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            // The parked handles go home. Stages get writers the runner owns,
-            // so what is here is what was carried in.
-            ec.pipe_stdout = ctx.pipe_stdout.take();
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
-        }
+        // Session changes go back to the CALLER, not the slot: a `cd` or a
+        // `kaish-ignore` inside this pipeline belongs to the enclosing run,
+        // and the run publishes the slot once the statement finishes.
+        caller.cwd = ctx.cwd.clone();
+        caller.prev_cwd = ctx.prev_cwd.clone();
+        caller.aliases = ctx.aliases.clone();
+        caller.ignore_config = ctx.ignore_config.clone();
+        caller.output_limit = ctx.output_limit.clone();
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
+
+        // Unconsumed stdin goes back to the caller, or it dies here with `ctx`.
+        // A partial read (`read` takes one line) leaves the rest split across
+        // `stdin` and the pipe; dropping the reader would discard that tail
+        // with no error (`read x; wc -c` over 100 KiB once counted 8187
+        // bytes). A multi-stage pipeline's join has already returned its
+        // remainder to `ctx`. The writer and sideband go back for the
+        // enclosing command.
+        caller.stdin = ctx.stdin.take();
+        caller.stdin_data = ctx.stdin_data.take();
+        caller.pipe_stdin = ctx.pipe_stdin.take();
+        caller.pipe_stdout = ctx.pipe_stdout.take();
+        caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
         Ok(result)
     }
@@ -3646,8 +3653,12 @@ impl Kernel {
     /// `Job::stdout_stream` for exactly which bytes reach them.
     ///
     /// Returns immediately with a job ID like "[1]".
-    #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.stages.len()))]
-    async fn execute_background(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
+    #[tracing::instrument(level = "debug", skip(self, pipeline, caller), fields(command_count = pipeline.stages.len()))]
+    async fn execute_background(
+        &self,
+        pipeline: &crate::ast::Pipeline,
+        caller: &ExecContext,
+    ) -> Result<ExecResult> {
         use tokio::sync::oneshot;
 
         // Format the command for display in /v/jobs/{id}/command
@@ -3684,6 +3695,14 @@ impl Kernel {
             ec.child_for_pipeline()
         };
         bg_ctx.scope = fork.scope.read().await.clone();
+        // Session state comes from the caller, not the fork's slot. The slot
+        // is the session as of the last top-level statement, so `cd d && ls &`
+        // would run the job in the directory the statement started in.
+        bg_ctx.cwd = caller.cwd.clone();
+        bg_ctx.prev_cwd = caller.prev_cwd.clone();
+        bg_ctx.aliases = caller.aliases.clone();
+        bg_ctx.ignore_config = caller.ignore_config.clone();
+        bg_ctx.output_limit = caller.output_limit.clone();
         // The fork's dispatcher points at the fork itself; set it here so
         // builtins inside the background task (e.g. timeout) re-dispatch
         // through the fork, not the parent.
@@ -3822,11 +3841,11 @@ impl Kernel {
     }
 
     /// Execute a single command.
-    async fn execute_command(&self, name: &str, args: &[Arg]) -> Result<ExecResult> {
-        self.execute_command_depth(name, args, 0).await
+    async fn execute_command(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+        self.execute_command_depth(name, args, 0, ctx).await
     }
 
-    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
+    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8, ctx: &mut ExecContext) -> Result<ExecResult> {
         // Dispatch breadcrumb instead of an `#[instrument]` span: this is the
         // most-recursed function on the ring, so wrapping its future in
         // `Instrumented<Span>` (plus the `err` recorder) cost native stack at
@@ -3843,16 +3862,13 @@ impl Kernel {
             return match form {
                 crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
                 crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
-                crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args)).await,
+                crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args, ctx)).await,
             };
         }
 
         // Alias expansion (with recursion limit)
         if alias_depth < 10 {
-            let alias_value = {
-                let ctx = self.exec_ctx.read().await;
-                ctx.aliases.get(name).cloned()
-            };
+            let alias_value = ctx.aliases.get(name).cloned();
             if let Some(alias_val) = alias_value {
                 // Split alias value into command + args
                 let parts: Vec<&str> = alias_val.split_whitespace().collect();
@@ -3862,7 +3878,7 @@ impl Kernel {
                         .map(|a| Arg::Positional(Expr::Literal(Value::String(a.to_string()))))
                         .collect();
                     new_args.extend_from_slice(args);
-                    return Box::pin(self.execute_command_depth(alias_cmd, &new_args, alias_depth + 1)).await;
+                    return Box::pin(self.execute_command_depth(alias_cmd, &new_args, alias_depth + 1, ctx)).await;
                 }
             }
         }
@@ -3870,7 +3886,7 @@ impl Kernel {
         // Handle /v/bin/ prefix — dispatch to builtins via virtual path
         if let Some(builtin_name) = name.strip_prefix("/v/bin/") {
             return match self.tools.get(builtin_name) {
-                Some(_) => Box::pin(self.execute_command_depth(builtin_name, args, alias_depth)).await,
+                Some(_) => Box::pin(self.execute_command_depth(builtin_name, args, alias_depth, ctx)).await,
                 None => Ok(ExecResult::failure(127, format!("command not found: {}", name))),
             };
         }
@@ -3881,7 +3897,7 @@ impl Kernel {
             if let Some(tool_def) = user_tools.get(name) {
                 let tool_def = tool_def.clone();
                 drop(user_tools);
-                return Box::pin(self.execute_user_tool(tool_def, args)).await;
+                return Box::pin(self.execute_user_tool(tool_def, args, ctx)).await;
             }
         }
 
@@ -3890,7 +3906,7 @@ impl Kernel {
             Some(t) => t,
             None => {
                 // Try executing as .kai script from PATH
-                if let Some(result) = Box::pin(self.try_execute_script(name, args)).await? {
+                if let Some(result) = Box::pin(self.try_execute_script(name, args, ctx)).await? {
                     return Ok(result);
                 }
                 // Try executing as external command from PATH — boxed because its
@@ -3906,7 +3922,7 @@ impl Kernel {
                 // claimed this name" message can name it, instead of the
                 // fallthrough re-deriving the wrong "command not found".
                 let mut unavailable = None;
-                match Box::pin(self.try_execute_external(name, args)).await? {
+                match Box::pin(self.try_execute_external(name, args, &mut *ctx)).await? {
                     ExternalCommandOutcome::Ran(result) => return Ok(*result),
                     ExternalCommandOutcome::NotFound => {}
                     ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
@@ -3940,17 +3956,34 @@ impl Kernel {
                     }
                     s
                 });
-                let tool_args = self.build_args_async(args, tool_schema.as_ref()).await?;
-                let mut ctx = self.exec_ctx.write().await;
+                let tool_args = self.build_args_async(args, tool_schema.as_ref(), &mut *ctx).await?;
+                // The embedder tool runs on the CALLER's context, like a
+                // builtin. Its stdin, pipe ends, cwd, pipeline position and
+                // background flags are facts about this dispatch; the kernel's
+                // slot holds the session as of the last top-level statement and
+                // no longer carries the stdin family at all, so running the tool
+                // on it handed `printf hi | embedder_tool` an empty stdin.
+                //
+                // Nothing holds the slot lock across `call_tool` either. An
+                // embedder whose tool re-enters the kernel would deadlock on it,
+                // which is the hazard the builtin arm below spells out.
                 {
                     let scope = self.scope.read().await;
                     ctx.scope = scope.clone();
                 }
                 let backend = ctx.backend.clone();
-                match backend.call_tool(name, tool_args, &mut *ctx).await {
+                let call = backend.call_tool(name, tool_args, &mut *ctx).await;
+                // Whatever the tool did to the scope stands, whether it
+                // returned a result or an error. A builtin cannot return an
+                // error at all — `tool.execute` hands back an `ExecResult` —
+                // so its copy-back is unconditional, and an embedder tool that
+                // set a variable and then failed used to lose the variable.
+                {
+                    let mut scope = self.scope.write().await;
+                    *scope = ctx.scope.clone();
+                }
+                match call {
                     Ok(tool_result) => {
-                        let mut scope = self.scope.write().await;
-                        *scope = ctx.scope.clone();
                         // Preserve every field (data/content_type/baggage,
                         // not just stdout text) — this is the embedder seam:
                         // `x=$(embedder_tool)` and structured iteration over
@@ -3969,7 +4002,6 @@ impl Kernel {
                             || tool_schema
                                 .as_ref()
                                 .is_some_and(|s| s.typed_substitution);
-                        drop(scope);
                         // No builtin or external command produced this output,
                         // so nothing else publishes it to a background job.
                         ctx.publish_job_stdout(&result).await;
@@ -4023,7 +4055,7 @@ impl Kernel {
                     }
                 };
 
-            let tool_args = self.build_args_async(args, Some(schema)).await?;
+            let tool_args = self.build_args_async(args, Some(schema), &mut *ctx).await?;
 
             // --help / -h: show the generic whole-tool help, unless either the tool's
             // root schema claims that flag OR the tool owns its output. Owned-output
@@ -4053,36 +4085,54 @@ impl Kernel {
             return Ok(result);
         }
 
-        // Snapshot exec_ctx into a local context and release the write lock
-        // before calling tool.execute. Holding the write across tool execution
-        // would deadlock any builtin that re-dispatches through ctx.dispatcher
-        // (timeout, scatter) — the inner dispatch_command needs its own
-        // exec_ctx.write() and would block forever.
+        // Snapshot exec_ctx into a local context and release the lock before
+        // calling tool.execute. No dispatch takes the slot's write lock during
+        // a run any more, but tokio's RwLock is write-preferring: an embedder
+        // calling `set_cwd` or `reset` from another task queues a writer, and
+        // a nested read taken behind a guard held across `tool.execute` would
+        // wait behind it forever. A builtin that re-dispatches through
+        // ctx.dispatcher (timeout, scatter) is the path that would hang.
+        let caller = ctx;
         let mut ctx = {
-            let ec = self.exec_ctx.write().await;
+            // Read, not write: this block only copies out of the slot. The
+            // position comes from the caller rather than the slot, so a nested
+            // dispatch cannot inherit whatever the last statement left there,
+            // along with the caller's cancel token and watchdog, so a
+            // builtin-swapped child token (timeout's) reaches a spawned
+            // external. See `snapshot_exec_ctx` for the boxing rationale.
+            let ec = self.exec_ctx.read().await;
             let scope = self.scope.read().await;
-            // Inherit `ec.pipeline_position` and `ec.cancel` (the latter set by
-            // dispatch_command from the runner's ctx.cancel, so a builtin-swapped
-            // child token — e.g. timeout's — reaches the spawned external via
-            // wait_or_kill; it falls back to the kernel's own token on a
-            // non-dispatch path). See `snapshot_exec_ctx` for the boxing rationale.
-            self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, ec.cancel.clone())
+            let mut tool_ctx = self.snapshot_exec_ctx(
+                &ec,
+                &scope,
+                caller.pipeline_position,
+                caller.cancel.clone(),
+            );
+            tool_ctx.watchdog = caller.watchdog.clone();
+            // stderr and the background flags follow the position: they are
+            // facts about THIS dispatch, carried by the caller, not whatever
+            // the slot holds from a previous statement.
+            tool_ctx.stderr = caller.stderr.clone();
+            tool_ctx.background_job = caller.background_job;
+            tool_ctx.background_stream_output = caller.background_stream_output;
+            tool_ctx.background_stream_stderr = caller.background_stream_stderr;
+            // Session state from the caller, for the same reason as the stage
+            // context above: the slot is between-run state now.
+            tool_ctx.cwd = caller.cwd.clone();
+            tool_ctx.prev_cwd = caller.prev_cwd.clone();
+            tool_ctx.aliases = caller.aliases.clone();
+            tool_ctx.ignore_config = caller.ignore_config.clone();
+            tool_ctx.output_limit = caller.output_limit.clone();
+            tool_ctx
         }; // both locks released — tool.execute can re-dispatch safely
 
-        // Move stdin out of self.exec_ctx into the snapshot (consumed-by-tool
-        // semantics): take() so a later dispatch doesn't see stale stdin.
-        // Done after the snapshot above so we hold the write briefly.
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.stdin = ec.stdin.take();
-            ctx.stdin_data = ec.stdin_data.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ctx.pipe_stdout = ec.pipe_stdout.take();
-            // Same take-don't-clone discipline as stdin, and for the same
-            // reason: these belong to exactly one dispatch, and a copy left
-            // behind would let the next command adopt it.
-        }
+        // The tool owns the caller's stdin, pipe ends, and sideband for this
+        // dispatch; what it leaves goes back to the caller below.
+        ctx.stdin = caller.stdin.take();
+        ctx.stdin_data = caller.stdin_data.take();
+        ctx.stdin_data_rx = caller.stdin_data_rx.take();
+        ctx.pipe_stdin = caller.pipe_stdin.take();
+        ctx.pipe_stdout = caller.pipe_stdout.take();
 
         // Honor --json before the builtin runs so its setting survives a clap
         // parse failure (e.g. `cmd --json --bogus-flag` would otherwise drop
@@ -4128,42 +4178,32 @@ impl Kernel {
         result.data_is_value |= typed_substitution || data_is_only_output;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
-        // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
-        // endpoints to self.exec_ctx so dispatch_command's post-execute sync
-        // hands them back to the pipeline runner — the runner uses
-        // stage_ctx.pipe_stdout to write the result to the next stage when
-        // the tool itself didn't take and write to it.
+        // cwd/prev_cwd (cd), and aliases (alias). Unused pipe endpoints go
+        // back to `caller` below, not to the slot: the runner writes the
+        // result to the next stage through `stage_ctx.pipe_stdout` when the
+        // tool itself did not take and write to it.
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd;
-            ec.prev_cwd = ctx.prev_cwd;
-            ec.aliases = ctx.aliases;
-            // A builtin (`set -o output-limit`, `kaish-output-limit set`) can
-            // mutate the runtime output limit; without this sync the change is
-            // dropped here and never reaches dispatch_command's read-back, so
-            // it would not survive past the current statement.
-            ec.output_limit = ctx.output_limit.clone();
-            // Same for `kaish-ignore` (add/clear/defaults/scope): this field
-            // was missing from this sync, so every runtime ignore mutation
-            // silently died at the end of its own statement — including the
-            // documented `kaish-ignore add .gitignore` rc-file recipe.
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            ec.pipe_stdout = ctx.pipe_stdout.take();
-            // What a partial read left behind goes back too: `read` takes one
-            // line and keeps the rest, and that remainder belongs to the next
-            // reader. Without this it dies with the tool's context and
-            // `read x; read y` loses the second line.
-            ec.stdin = ctx.stdin.take();
-            // The sideband is stdin in typed form and returns by the same
-            // rule; taken in above, an unconsumed value would die here.
-            ec.stdin_data = ctx.stdin_data.take();
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
-        }
+        // A builtin can mutate session state: `cd`, `alias`, `kaish-ignore`
+        // and `set -o output-limit` all do. It goes to the caller so the change
+        // outlives this dispatch — the bug those two comments described was
+        // this sync being incomplete, and a caller field cannot be forgotten
+        // the same way.
+        caller.cwd = ctx.cwd;
+        caller.prev_cwd = ctx.prev_cwd;
+        caller.aliases = ctx.aliases;
+        caller.output_limit = ctx.output_limit.clone();
+        caller.ignore_config = ctx.ignore_config.clone();
+        // Unused pipe ends go back so the runner can forward this stage's
+        // output; a partial read's remainder (`read x; read y`) and an
+        // unconsumed sideband value go back for the next reader.
+        caller.pipe_stdin = ctx.pipe_stdin.take();
+        caller.pipe_stdout = ctx.pipe_stdout.take();
+        caller.stdin = ctx.stdin.take();
+        caller.stdin_data = ctx.stdin_data.take();
+        caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
         // Builtins parse --json via the GlobalFlags flatten in their clap
         // struct and write ctx.output_format. The kernel applies it — unless the
@@ -4207,8 +4247,9 @@ impl Kernel {
     /// the same drift-class GH #133 fixed for the external-command spawn
     /// sites. Now both paths call the one `bind_tool_args` core, differing
     /// only in which `ArgValueSource` they hand it.
-    async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
-        bind_tool_args(args, schema, self).await
+    async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>, ctx: &mut ExecContext) -> Result<ToolArgs> {
+        let source = KernelArgSource { kernel: self, ctx: tokio::sync::Mutex::new(ctx) };
+        bind_tool_args(args, schema, &source).await
     }
 
     /// Build arguments as flat string list for external commands.
@@ -4221,7 +4262,7 @@ impl Kernel {
     ///
     /// This is what external commands expect in their argv.
     #[cfg(feature = "subprocess")]
-    async fn build_args_flat(&self, args: &[Arg]) -> Result<Vec<String>> {
+    async fn build_args_flat(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<Vec<String>> {
         let mut argv = Vec::new();
         let home = self.scope_home().await;
         for arg in args {
@@ -4235,7 +4276,6 @@ impl Kernel {
                         };
                         if glob_enabled {
                             let (paths, cwd) = {
-                                let ctx = self.exec_ctx.read().await;
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
                                 let cwd = ctx.resolve_path(".");
@@ -4264,7 +4304,7 @@ impl Kernel {
                         argv.push(raw.clone());
                         continue;
                     }
-                    let value = self.eval_expr_async(expr).await?;
+                    let value = self.eval_expr_async(expr, &mut *ctx).await?;
                     // Decision D: a bare collection can't cross the external
                     // process boundary as an argv element — refuse rather than
                     // silently JSON-serializing it. A quoted `"$x"` already
@@ -4283,7 +4323,7 @@ impl Kernel {
                         argv.push(format!("--{key}={raw}"));
                         continue;
                     }
-                    let val = self.eval_expr_async(value).await?;
+                    let val = self.eval_expr_async(value, &mut *ctx).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
                     }
@@ -4296,7 +4336,7 @@ impl Kernel {
                         argv.push(format!("{key}={raw}"));
                         continue;
                     }
-                    let val = self.eval_expr_async(value).await?;
+                    let val = self.eval_expr_async(value, &mut *ctx).await?;
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
                     }
@@ -4335,8 +4375,8 @@ impl Kernel {
     /// back to the caller keeps the decision there: the `if`/`while` arm folds
     /// them into the statement's own result, and every consumer of that result
     /// — a pipe, a `$(…)` capture, a redirect — carries them without learning
-    /// what a condition is. A shared slot on `ExecContext` would have done it
-    /// the other way; that is the pattern GH #369 exists to remove.
+    /// what a condition is. Routing them through a slot on the kernel would
+    /// have done it the other way, and that is the shape GH #369 removed.
     ///
     /// Only the forms that can hold a command in STATEMENT position are handled
     /// here. Everything else is [`Self::eval_expr_async`]'s, `$(…)` above all:
@@ -4346,12 +4386,13 @@ impl Kernel {
         &'a self,
         expr: &'a Expr,
         out: &'a mut ExecResult,
+        ctx: &'a mut ExecContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
             match expr {
                 Expr::Command(cmd) => {
-                    let mut result = self.execute_command(&cmd.name, &cmd.args).await?;
-                    self.emit_cmdsubst_stderr(&result.err).await;
+                    let mut result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                    self.emit_cmdsubst_stderr(&result.err, ctx).await;
                     // Truthiness comes from the command's OWN code, read before
                     // the spill contract can remap it. A capped `if seq 1
                     // 100000` succeeded; only its output was too big to keep,
@@ -4361,7 +4402,7 @@ impl Kernel {
                     // reading it as false would let `else` run on a comparison
                     // that never happened.
                     if result.fault {
-                        self.emit_cmdsubst_stderr(&result.err).await;
+                        self.emit_cmdsubst_stderr(&result.err, ctx).await;
                         return Err(anyhow::anyhow!("{}", result.err.trim_end()));
                     }
                     let truthy = result.code == 0;
@@ -4372,7 +4413,7 @@ impl Kernel {
                     // `apply_spill_contract`'s "ONE seam" note requires.
                     // Without this a condition handed back its full output with
                     // no limit at all.
-                    let limit = self.exec_ctx.read().await.output_limit.clone();
+                    let limit = ctx.output_limit.clone();
                     crate::output_limit::apply_spill_contract(&mut result, &limit).await;
                     push_stdout_of(out, &result);
                     Ok(Value::Bool(truthy))
@@ -4381,7 +4422,7 @@ impl Kernel {
                 // yields the operand's own value rather than a coerced bool. A
                 // side that short-circuits never runs, so it prints nothing.
                 Expr::BinaryOp { left, op, right } => {
-                    let left_val = self.eval_condition_async(left, &mut *out).await?;
+                    let left_val = self.eval_condition_async(left, &mut *out, &mut *ctx).await?;
                     let short_circuits = match op {
                         BinaryOp::And => !is_truthy(&left_val),
                         BinaryOp::Or => is_truthy(&left_val),
@@ -4389,25 +4430,25 @@ impl Kernel {
                     if short_circuits {
                         return Ok(left_val);
                     }
-                    self.eval_condition_async(right, out).await
+                    self.eval_condition_async(right, out, ctx).await
                 }
                 // The negated command still RUNS, so its output belongs to the
                 // statement exactly as an un-negated one's does. Routing this
                 // through `eval_expr_async` would drop it.
                 Expr::Not(inner) => {
-                    let value = self.eval_condition_async(inner, out).await?;
+                    let value = self.eval_condition_async(inner, out, ctx).await?;
                     Ok(Value::Bool(!is_truthy(&value)))
                 }
-                other => self.eval_expr_async(other).await,
+                other => self.eval_expr_async(other, ctx).await,
             }
         })
     }
 
-    fn eval_expr_async<'a>(&'a self, expr: &'a Expr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    fn eval_expr_async<'a>(&'a self, expr: &'a Expr, ctx: &'a mut ExecContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
         match expr {
             Expr::Not(inner) => {
-                let value = self.eval_expr_async(inner).await?;
+                let value = self.eval_expr_async(inner, ctx).await?;
                 Ok(Value::Bool(!is_truthy(&value)))
             }
             Expr::Literal(value) => Ok(value.clone()),
@@ -4429,7 +4470,7 @@ impl Kernel {
             Expr::Interpolated(parts) => {
                 let mut result = String::new();
                 for part in parts {
-                    result.push_str(&self.eval_string_part_async(part).await?);
+                    result.push_str(&self.eval_string_part_async(part, &mut *ctx).await?);
                 }
                 Ok(Value::String(result))
             }
@@ -4442,7 +4483,7 @@ impl Kernel {
                     match &sp.part {
                         StringPart::Literal(s) => asm.push_literal(s),
                         other => {
-                            asm.push_interpolated(&self.eval_string_part_async(other).await?)
+                            asm.push_interpolated(&self.eval_string_part_async(other, &mut *ctx).await?)
                         }
                     }
                 }
@@ -4450,18 +4491,18 @@ impl Kernel {
             }
             Expr::BinaryOp { left, op, right } => match op {
                 BinaryOp::And => {
-                    let left_val = self.eval_expr_async(left).await?;
+                    let left_val = self.eval_expr_async(left, &mut *ctx).await?;
                     if !is_truthy(&left_val) {
                         return Ok(left_val);
                     }
-                    self.eval_expr_async(right).await
+                    self.eval_expr_async(right, ctx).await
                 }
                 BinaryOp::Or => {
-                    let left_val = self.eval_expr_async(left).await?;
+                    let left_val = self.eval_expr_async(left, &mut *ctx).await?;
                     if is_truthy(&left_val) {
                         return Ok(left_val);
                     }
-                    self.eval_expr_async(right).await
+                    self.eval_expr_async(right, ctx).await
                 }
             },
             Expr::CommandSubst(stmts) => {
@@ -4475,19 +4516,19 @@ impl Kernel {
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_ec = {
-                    let ec = self.exec_ctx.read().await;
-                    (
-                        ec.cwd.clone(),
-                        ec.prev_cwd.clone(),
-                        ec.aliases.clone(),
-                        ec.ignore_config.clone(),
-                        ec.output_limit.clone(),
-                    )
-                };
+                // A substitution's session changes do not escape into the enclosing
+                // statement. Saved off the threaded ctx: the run's truth lives there
+                // now, and the slot is only written when the statement finishes.
+                let saved_ec = (
+                    ctx.cwd.clone(),
+                    ctx.prev_cwd.clone(),
+                    ctx.aliases.clone(),
+                    ctx.ignore_config.clone(),
+                    ctx.output_limit.clone(),
+                );
 
                 // Capture result without `?` — restore state unconditionally
-                let run_result = self.execute_block_capturing(stmts).await;
+                let run_result = self.execute_block_capturing(stmts, &mut *ctx).await;
 
                 // Restore scope and cwd regardless of success/failure
                 {
@@ -4499,19 +4540,18 @@ impl Kernel {
                     }
                 }
                 {
-                    let mut ec = self.exec_ctx.write().await;
                     let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-                    ec.cwd = cwd;
-                    ec.prev_cwd = prev_cwd;
-                    ec.aliases = aliases;
-                    ec.ignore_config = ignore_config;
-                    ec.output_limit = output_limit;
+                    ctx.cwd = cwd;
+                    ctx.prev_cwd = prev_cwd;
+                    ctx.aliases = aliases;
+                    ctx.ignore_config = ignore_config;
+                    ctx.output_limit = output_limit;
                 }
 
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
                 if let Ok(ref r) = run_result {
-                    self.emit_cmdsubst_stderr(&r.err).await;
+                    self.emit_cmdsubst_stderr(&r.err, ctx).await;
                 }
 
                 // Now propagate the error
@@ -4556,7 +4596,7 @@ impl Kernel {
                 }
             }
             Expr::Test(test_expr) => {
-                Ok(Value::Bool(self.eval_test_async(test_expr).await?))
+                Ok(Value::Bool(self.eval_test_async(test_expr, ctx).await?))
             }
             // `(( expr ))` in condition position (`if`/`while`). Unlike the
             // standalone `Stmt::Arith` form, a condition has no exit-code
@@ -4565,7 +4605,7 @@ impl Kernel {
             // enclosing statement rather than silently reading false.
             Expr::Arith(expr_str) => {
                 let n = self
-                    .eval_arithmetic_async(expr_str)
+                    .eval_arithmetic_async(expr_str, ctx)
                     .await
                     .context("arithmetic condition")?;
                 Ok(Value::Bool(n != 0))
@@ -4601,11 +4641,11 @@ impl Kernel {
                 };
                 match resolved {
                     Some(value) => Ok(value),
-                    None => self.eval_string_parts_async(default).await.map(Value::String),
+                    None => self.eval_string_parts_async(default, ctx).await.map(Value::String),
                 }
             }
             Expr::Arithmetic(expr_str) => {
-                self.eval_arithmetic_async(expr_str).await.map(Value::Int)
+                self.eval_arithmetic_async(expr_str, ctx).await.map(Value::Int)
             }
             Expr::Command(cmd) => {
                 // A command in expression position — an `if`/`while`
@@ -4615,8 +4655,8 @@ impl Kernel {
                 // a substitution's stderr. Dropping the `ExecResult` here made
                 // `if cat /nonexistent; then …` print nothing at all, so every
                 // condition that failed for a reason failed silently.
-                let result = self.execute_command(&cmd.name, &cmd.args).await?;
-                self.emit_cmdsubst_stderr(&result.err).await;
+                let result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                self.emit_cmdsubst_stderr(&result.err, ctx).await;
                 Ok(Value::Bool(result.code == 0))
             }
             Expr::LastExitCode => {
@@ -4637,11 +4677,11 @@ impl Kernel {
                 for elem in elems {
                     match elem {
                         ListElem::Item(e) => {
-                            let value = self.eval_expr_async(e).await?;
+                            let value = self.eval_expr_async(e, &mut *ctx).await?;
                             out.push(crate::interpreter::value_to_json(&value));
                         }
                         ListElem::Spread(e) => {
-                            let value = self.eval_expr_async(e).await?;
+                            let value = self.eval_expr_async(e, &mut *ctx).await?;
                             match value {
                                 Value::Json(serde_json::Value::Array(items)) => out.extend(items),
                                 other => return Err(anyhow::anyhow!(spread_non_list_message(&other))),
@@ -4662,10 +4702,10 @@ impl Kernel {
                         // `{"$k": v}` resolves like any double-quoted string
                         // (used to silently create a literal "$k" key).
                         RecordKey::Interpolated(parts) => {
-                            self.eval_string_parts_async(parts).await?
+                            self.eval_string_parts_async(parts, &mut *ctx).await?
                         }
                     };
-                    let value = self.eval_expr_async(&entry.value).await?;
+                    let value = self.eval_expr_async(&entry.value, &mut *ctx).await?;
                     map.insert(key, crate::interpreter::value_to_json(&value));
                 }
                 Ok(Value::Json(serde_json::Value::Object(map)))
@@ -4675,11 +4715,11 @@ impl Kernel {
     }
 
     /// Async helper to evaluate multiple StringParts into a single string.
-    fn eval_string_parts_async<'a>(&'a self, parts: &'a [StringPart]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+    fn eval_string_parts_async<'a>(&'a self, parts: &'a [StringPart], ctx: &'a mut ExecContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let mut result = String::new();
             for part in parts {
-                result.push_str(&self.eval_string_part_async(part).await?);
+                result.push_str(&self.eval_string_part_async(part, &mut *ctx).await?);
             }
             Ok(result)
         })
@@ -4688,11 +4728,11 @@ impl Kernel {
     /// Async helper to evaluate a StringPart.
     /// Evaluate a `[[ ]]` test expression asynchronously, routing file tests
     /// through the VFS backend instead of using raw `std::path`.
-    fn eval_test_async<'a>(&'a self, test_expr: &'a TestExpr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>> {
+    fn eval_test_async<'a>(&'a self, test_expr: &'a TestExpr, ctx: &'a mut ExecContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>> {
         Box::pin(async move {
             match test_expr {
                 TestExpr::FileTest { op, path } => {
-                    let path_value = self.eval_expr_async(path).await?;
+                    let path_value = self.eval_expr_async(path, ctx).await?;
                     // Expand `~` against the session HOME before stat'ing, the
                     // same way argv positionals do — otherwise `[[ -f ~/x ]]`
                     // stats the literal `~/x` and is always false.
@@ -4717,10 +4757,7 @@ impl Kernel {
                     // relative `[[ -f rel ]]` honors `cd` and agrees with the
                     // VFS-aware `test` builtin (GH #101). Backend stats a raw
                     // relative path against the process cwd otherwise.
-                    let (resolved, backend) = {
-                        let ctx = self.exec_ctx.read().await;
-                        (ctx.resolve_path(&path_str), ctx.backend.clone())
-                    };
+                    let (resolved, backend) = (ctx.resolve_path(&path_str), ctx.backend.clone());
                     // `-r`/`-w`/`-x` go through `path_access`, never through
                     // the raw mode bits: the mount's read-only state is half
                     // the answer and `stat` does not carry it. The `test`
@@ -4756,7 +4793,7 @@ impl Kernel {
                 }
                 TestExpr::StringTest { op, value } => match op {
                     crate::ast::StringTestOp::IsEmpty | crate::ast::StringTestOp::IsNonEmpty => {
-                        let val = self.eval_expr_async(value).await?;
+                        let val = self.eval_expr_async(value, ctx).await?;
                         // Decision E: a collection operand is a loud Shape error
                         // here too — must not diverge from the sync path in
                         // interpreter/eval.rs (shared `scalar_test_operand_error`).
@@ -4782,14 +4819,14 @@ impl Kernel {
                     // false). A defined-but-wrong-shaped value is false. Must
                     // not diverge from the sync path in interpreter/eval.rs.
                     crate::ast::StringTestOp::IsList | crate::ast::StringTestOp::IsRecord => {
-                        let val = self.eval_expr_async(value).await?;
+                        let val = self.eval_expr_async(value, ctx).await?;
                         Ok(op.matches_shape(&val))
                     }
                 },
                 TestExpr::Comparison { left, op, right } => {
                     // Evaluate operands async (handles $(cmd)), then compare sync
-                    let left_val = self.eval_expr_async(left).await?;
-                    let right_val = self.eval_expr_async(right).await?;
+                    let left_val = self.eval_expr_async(left, &mut *ctx).await?;
+                    let right_val = self.eval_expr_async(right, ctx).await?;
                     let resolved = TestExpr::Comparison {
                         left: Box::new(Expr::Literal(left_val)),
                         op: *op,
@@ -4802,25 +4839,25 @@ impl Kernel {
                     Ok(value_to_bool(&value))
                 }
                 TestExpr::And { left, right } => {
-                    if !self.eval_test_async(left).await? {
+                    if !self.eval_test_async(left, &mut *ctx).await? {
                         Ok(false)
                     } else {
-                        self.eval_test_async(right).await
+                        self.eval_test_async(right, ctx).await
                     }
                 }
                 TestExpr::Or { left, right } => {
-                    if self.eval_test_async(left).await? {
+                    if self.eval_test_async(left, &mut *ctx).await? {
                         Ok(true)
                     } else {
-                        self.eval_test_async(right).await
+                        self.eval_test_async(right, ctx).await
                     }
                 }
                 TestExpr::Not { expr } => {
-                    Ok(!self.eval_test_async(expr).await?)
+                    Ok(!self.eval_test_async(expr, ctx).await?)
                 }
                 TestExpr::In { left, right } => {
-                    let left_val = self.eval_expr_async(left).await?;
-                    let right_val = self.eval_expr_async(right).await?;
+                    let left_val = self.eval_expr_async(left, &mut *ctx).await?;
+                    let right_val = self.eval_expr_async(right, ctx).await?;
                     let resolved = TestExpr::In {
                         left: Box::new(Expr::Literal(left_val)),
                         right: Box::new(Expr::Literal(right_val)),
@@ -4832,8 +4869,8 @@ impl Kernel {
                     Ok(value_to_bool(&value))
                 }
                 TestExpr::NotIn { left, right } => {
-                    let left_val = self.eval_expr_async(left).await?;
-                    let right_val = self.eval_expr_async(right).await?;
+                    let left_val = self.eval_expr_async(left, &mut *ctx).await?;
+                    let right_val = self.eval_expr_async(right, ctx).await?;
                     let resolved = TestExpr::NotIn {
                         left: Box::new(Expr::Literal(left_val)),
                         right: Box::new(Expr::Literal(right_val)),
@@ -4848,7 +4885,7 @@ impl Kernel {
         })
     }
 
-    fn eval_string_part_async<'a>(&'a self, part: &'a StringPart) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+    fn eval_string_part_async<'a>(&'a self, part: &'a StringPart, ctx: &'a mut ExecContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             match part {
                 StringPart::Literal(s) => Ok(s.clone()),
@@ -4874,7 +4911,7 @@ impl Kernel {
                     };
                     match resolved {
                         Some(value) => value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}")),
-                        None => self.eval_string_parts_async(default).await,
+                        None => self.eval_string_parts_async(default, ctx).await,
                     }
                 }
             StringPart::VarLength(path) => {
@@ -4904,7 +4941,7 @@ impl Kernel {
                 // `"$((1/0))"` — `echo "value: $((1/0))"` printed "value: "
                 // at exit 0 instead of failing. Matches the bare (non-string)
                 // `Expr::Arithmetic` arm above, which already propagates.
-                self.eval_arithmetic_async(expr).await.map(|value| value.to_string())
+                self.eval_arithmetic_async(expr, ctx).await.map(|value| value.to_string())
             }
             StringPart::CommandSubst(stmts) => {
                 // Snapshot scope, cwd, and session config — command
@@ -4918,19 +4955,19 @@ impl Kernel {
                 // `$(…)` recursion await below, so inlining it grows every
                 // command-substitution level's future (GH #48, item 4).
                 let saved_scope = Box::new(self.scope.read().await.clone());
-                let saved_ec = {
-                    let ec = self.exec_ctx.read().await;
-                    (
-                        ec.cwd.clone(),
-                        ec.prev_cwd.clone(),
-                        ec.aliases.clone(),
-                        ec.ignore_config.clone(),
-                        ec.output_limit.clone(),
-                    )
-                };
+                // A substitution's session changes do not escape into the enclosing
+                // statement. Saved off the threaded ctx: the run's truth lives there
+                // now, and the slot is only written when the statement finishes.
+                let saved_ec = (
+                    ctx.cwd.clone(),
+                    ctx.prev_cwd.clone(),
+                    ctx.aliases.clone(),
+                    ctx.ignore_config.clone(),
+                    ctx.output_limit.clone(),
+                );
 
                 // Capture result without `?` — restore state unconditionally
-                let run_result = self.execute_block_capturing(stmts).await;
+                let run_result = self.execute_block_capturing(stmts, ctx).await;
 
                 // Restore scope and cwd regardless of success/failure
                 {
@@ -4942,19 +4979,18 @@ impl Kernel {
                     }
                 }
                 {
-                    let mut ec = self.exec_ctx.write().await;
                     let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-                    ec.cwd = cwd;
-                    ec.prev_cwd = prev_cwd;
-                    ec.aliases = aliases;
-                    ec.ignore_config = ignore_config;
-                    ec.output_limit = output_limit;
+                    ctx.cwd = cwd;
+                    ctx.prev_cwd = prev_cwd;
+                    ctx.aliases = aliases;
+                    ctx.ignore_config = ignore_config;
+                    ctx.output_limit = output_limit;
                 }
 
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
                 if let Ok(ref r) = run_result {
-                    self.emit_cmdsubst_stderr(&r.err).await;
+                    self.emit_cmdsubst_stderr(&r.err, ctx).await;
                 }
 
                 // Now propagate the error
@@ -5030,11 +5066,11 @@ impl Kernel {
     /// Functions push a new scope frame for local variables. Variables declared
     /// with `local` are scoped to the function; other assignments modify outer
     /// scopes (or create in root if new).
-    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
+    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
         let _depth = self.enter_recursion("a shell function")?;
 
         // 1. Build function args from AST args (async to support command substitution)
-        let tool_args = self.build_args_async(args, None).await?;
+        let tool_args = self.build_args_async(args, None, &mut *ctx).await?;
 
         // 2. Push a new scope frame for local variables
         {
@@ -5087,7 +5123,7 @@ impl Kernel {
         let mut exit_code: Option<i64> = None;
 
         for stmt in &def.body {
-            match self.execute_stmt_flow(stmt).await {
+            match self.execute_stmt_flow(stmt, &mut *ctx).await {
                 Ok(flow) => {
                     // Drain pipeline stderr after each sub-statement.
                     let drained = {
@@ -5193,7 +5229,7 @@ impl Kernel {
     /// Two callers, one rule: a command substitution's stderr is not part of
     /// its value, and a condition command's stderr is not part of its
     /// truthiness. Both belong to the statement the author wrote.
-    async fn emit_cmdsubst_stderr(&self, err: &str) {
+    async fn emit_cmdsubst_stderr(&self, err: &str, ctx: &ExecContext) {
         if err.is_empty() {
             return;
         }
@@ -5210,7 +5246,11 @@ impl Kernel {
             terminated = format!("{err}\n");
             &terminated
         };
-        match self.exec_ctx.read().await.stderr.as_ref() {
+        // The caller's stream, not the slot's: inside a pipeline stage the
+        // stage carries its own sender, and the runner flushes that one. The
+        // slot holds the kernel's construction-time sender, which no drain on
+        // this path collects — a substitution's message vanished.
+        match ctx.stderr.as_ref() {
             Some(stream) => stream.write_str(err),
             // The kernel seeds this stream in both `new` and `fork`, so it is
             // always present on the kernel's own context; the `Option` exists
@@ -5223,11 +5263,18 @@ impl Kernel {
         }
     }
 
-    async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
+    async fn execute_block_capturing(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<ExecResult> {
         let _depth = self.enter_recursion("command substitution")?;
+        // A substitution's output is its value. It runs without the enclosing
+        // command's writer and sideband, so nothing inside can write into that
+        // command's pipe (`cat` writes to a writer it finds) or take its typed
+        // input. It still reads the enclosing stdin, as bash does. Restored
+        // after the block below.
+        let writer = ctx.pipe_stdout.take();
+        let sideband = ctx.stdin_data_rx.take();
         // Captured output is a value, not job output: nothing inside publishes
         // to a job stream. Restored on every exit from the block below.
-        let stream_output = std::mem::replace(&mut self.exec_ctx.write().await.background_stream_output, false);
+        let stream_output = std::mem::replace(&mut ctx.background_stream_output, false);
         let outcome: Result<ExecResult> = async {
         // Accumulate stdout as raw bytes so a binary-producing statement
         // (`$(dd …)`, `$(base64 -d …)`) isn't lossy-decoded here before the
@@ -5246,7 +5293,7 @@ impl Kernel {
         }
 
         for stmt in stmts {
-            let flow = match self.execute_stmt_flow(stmt).await {
+            let flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
                 Ok(flow) => flow,
                 Err(error) => {
                     let drained = {
@@ -5302,7 +5349,9 @@ impl Kernel {
         Ok(result)
         }
         .await;
-        self.exec_ctx.write().await.background_stream_output = stream_output;
+        ctx.background_stream_output = stream_output;
+        ctx.pipe_stdout = writer;
+        ctx.stdin_data_rx = sideband;
         outcome
     }
 
@@ -5311,10 +5360,10 @@ impl Kernel {
     /// is reachable in the parsed tree; otherwise walks it with
     /// `Self::eval_arith_expr_async`, which can run a `$(...)` operand and
     /// never runs one on the unselected side of `&&`/`||`/`?:`.
-    async fn eval_arithmetic_async(&self, text: &str) -> Result<i64> {
+    async fn eval_arithmetic_async(&self, text: &str, ctx: &mut ExecContext) -> Result<i64> {
         let ast = crate::arithmetic::parse(text).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
         if ast.contains_command_subst() {
-            self.eval_arith_expr_async(&ast).await
+            self.eval_arith_expr_async(&ast, ctx).await
         } else {
             let scope = self.scope.read().await;
             crate::arithmetic::eval_sync(&ast, &scope).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
@@ -5331,23 +5380,24 @@ impl Kernel {
     fn eval_arith_expr_async<'a>(
         &'a self,
         expr: &'a crate::arithmetic::ArithExpr,
+        ctx: &'a mut ExecContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64>> + Send + 'a>> {
         use crate::arithmetic::{ArithExpr, BinOp};
         Box::pin(async move {
             match expr {
                 ArithExpr::Int(n) => Ok(*n),
-                ArithExpr::Expansion(e) => self.eval_arith_expansion_async(e).await,
+                ArithExpr::Expansion(e) => self.eval_arith_expansion_async(e, ctx).await,
                 ArithExpr::Subscript { root, indices } => {
                     let mut values = Vec::with_capacity(indices.len());
                     for index in indices {
-                        values.push(self.eval_arith_expr_async(index).await?);
+                        values.push(self.eval_arith_expr_async(index, &mut *ctx).await?);
                     }
                     let scope = self.scope.read().await;
                     crate::arithmetic::resolve_subscript_sync(&scope, root, &values)
                         .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
                 }
                 ArithExpr::BasedExpansion { base, expansion } => {
-                    let text = self.eval_arith_expansion_text_async(expansion).await?;
+                    let text = self.eval_arith_expansion_text_async(expansion, ctx).await?;
                     let (label, verb) = crate::arithmetic::expansion_label(expansion);
                     crate::arithmetic::based_value(*base, &text, &label, verb, false)
                         .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
@@ -5362,41 +5412,41 @@ impl Kernel {
                     let ArithExpr::BasedExpansion { base, expansion } = operand.as_ref() else {
                         unreachable!("guarded by the match arm's pattern")
                     };
-                    let text = self.eval_arith_expansion_text_async(expansion).await?;
+                    let text = self.eval_arith_expansion_text_async(expansion, ctx).await?;
                     let (label, verb) = crate::arithmetic::expansion_label(expansion);
                     crate::arithmetic::based_value(*base, &text, &label, verb, true)
                         .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
                 }
                 ArithExpr::Unary { op, operand } => {
-                    let v = self.eval_arith_expr_async(operand).await?;
+                    let v = self.eval_arith_expr_async(operand, ctx).await?;
                     crate::arithmetic::apply_unary(*op, v).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
                 }
                 // `&&`/`||` short-circuit: the unselected side's `$(...)`
                 // must not run (docs/LANGUAGE.md, "Operators").
                 ArithExpr::Binary { op: BinOp::And, left, right } => {
-                    if self.eval_arith_expr_async(left).await? == 0 {
+                    if self.eval_arith_expr_async(left, &mut *ctx).await? == 0 {
                         Ok(0)
                     } else {
-                        Ok(if self.eval_arith_expr_async(right).await? != 0 { 1 } else { 0 })
+                        Ok(if self.eval_arith_expr_async(right, ctx).await? != 0 { 1 } else { 0 })
                     }
                 }
                 ArithExpr::Binary { op: BinOp::Or, left, right } => {
-                    if self.eval_arith_expr_async(left).await? != 0 {
+                    if self.eval_arith_expr_async(left, &mut *ctx).await? != 0 {
                         Ok(1)
                     } else {
-                        Ok(if self.eval_arith_expr_async(right).await? != 0 { 1 } else { 0 })
+                        Ok(if self.eval_arith_expr_async(right, ctx).await? != 0 { 1 } else { 0 })
                     }
                 }
                 ArithExpr::Binary { op, left, right } => {
-                    let l = self.eval_arith_expr_async(left).await?;
-                    let r = self.eval_arith_expr_async(right).await?;
+                    let l = self.eval_arith_expr_async(left, &mut *ctx).await?;
+                    let r = self.eval_arith_expr_async(right, ctx).await?;
                     crate::arithmetic::apply_binary(*op, l, r).map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
                 }
                 ArithExpr::Ternary { cond, then_branch, else_branch } => {
-                    if self.eval_arith_expr_async(cond).await? != 0 {
-                        self.eval_arith_expr_async(then_branch).await
+                    if self.eval_arith_expr_async(cond, &mut *ctx).await? != 0 {
+                        self.eval_arith_expr_async(then_branch, ctx).await
                     } else {
-                        self.eval_arith_expr_async(else_branch).await
+                        self.eval_arith_expr_async(else_branch, ctx).await
                     }
                 }
             }
@@ -5406,6 +5456,7 @@ impl Kernel {
     fn eval_arith_expansion_async<'a>(
         &'a self,
         expansion: &'a crate::arithmetic::Expansion,
+        ctx: &'a mut ExecContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64>> + Send + 'a>> {
         use crate::arithmetic::Expansion;
         Box::pin(async move {
@@ -5432,7 +5483,7 @@ impl Kernel {
                         None => {
                             let default_expr = crate::arithmetic::parse(default)
                                 .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
-                            self.eval_arith_expr_async(&default_expr).await
+                            self.eval_arith_expr_async(&default_expr, ctx).await
                         }
                         Some(value) => crate::arithmetic::value_to_arith(&value, root)
                             .map_err(|e| anyhow::anyhow!("arithmetic error: {e}")),
@@ -5446,8 +5497,8 @@ impl Kernel {
                     let scope = self.scope.read().await;
                     Ok(scope.pid() as i64)
                 }
-                Expansion::CommandSubst(stmts) => self.run_arith_command_subst(stmts).await,
-                Expansion::Nested(inner) => self.eval_arith_expr_async(inner).await,
+                Expansion::CommandSubst(stmts) => self.run_arith_command_subst(stmts, ctx).await,
+                Expansion::Nested(inner) => self.eval_arith_expr_async(inner, ctx).await,
             }
         })
     }
@@ -5460,6 +5511,7 @@ impl Kernel {
     fn eval_arith_expansion_text_async<'a>(
         &'a self,
         expansion: &'a crate::arithmetic::Expansion,
+        ctx: &'a mut ExecContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         use crate::arithmetic::Expansion;
         Box::pin(async move {
@@ -5504,10 +5556,10 @@ impl Kernel {
                                 .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))?;
                             match default_expr {
                                 crate::arithmetic::ArithExpr::Expansion(e) => {
-                                    self.eval_arith_expansion_text_async(&e).await
+                                    self.eval_arith_expansion_text_async(&e, ctx).await
                                 }
                                 default_expr => {
-                                    let n = self.eval_arith_expr_async(&default_expr).await?;
+                                    let n = self.eval_arith_expr_async(&default_expr, ctx).await?;
                                     Ok(n.to_string())
                                 }
                             }
@@ -5523,9 +5575,9 @@ impl Kernel {
                     let scope = self.scope.read().await;
                     Ok(scope.pid().to_string())
                 }
-                Expansion::CommandSubst(stmts) => self.run_arith_command_subst_text(stmts).await,
+                Expansion::CommandSubst(stmts) => self.run_arith_command_subst_text(stmts, ctx).await,
                 Expansion::Nested(inner) => {
-                    let n = self.eval_arith_expr_async(inner).await?;
+                    let n = self.eval_arith_expr_async(inner, ctx).await?;
                     Ok(n.to_string())
                 }
             }
@@ -5536,8 +5588,8 @@ impl Kernel {
     /// isolation (scope/cwd/config snapshot-and-restore, stderr forwarded to
     /// the enclosing statement) — the same substitution mechanism, just
     /// coerced to an integer instead of spliced in as text.
-    async fn run_arith_command_subst(&self, stmts: &[Stmt]) -> Result<i64> {
-        let text = self.run_arith_command_subst_text(stmts).await?;
+    async fn run_arith_command_subst(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<i64> {
+        let text = self.run_arith_command_subst_text(stmts, ctx).await?;
         crate::arithmetic::parse_command_output(&text, "$(...)")
             .map_err(|e| anyhow::anyhow!("arithmetic error: {e}"))
     }
@@ -5546,20 +5598,20 @@ impl Kernel {
     /// of `Self::run_arith_command_subst` (a bare operand, coerced to an
     /// integer) and the `base#$(...)` case (the text is read as digits in a
     /// base, never coerced first — see `crate::arithmetic::based_value`).
-    async fn run_arith_command_subst_text(&self, stmts: &[Stmt]) -> Result<String> {
+    async fn run_arith_command_subst_text(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<String> {
         let saved_scope = Box::new(self.scope.read().await.clone());
-        let saved_ec = {
-            let ec = self.exec_ctx.read().await;
-            (
-                ec.cwd.clone(),
-                ec.prev_cwd.clone(),
-                ec.aliases.clone(),
-                ec.ignore_config.clone(),
-                ec.output_limit.clone(),
-            )
-        };
+        // A substitution's session changes do not escape into the enclosing
+        // statement. Saved off the threaded ctx: the run's truth lives there
+        // now, and the slot is only written when the statement finishes.
+        let saved_ec = (
+            ctx.cwd.clone(),
+            ctx.prev_cwd.clone(),
+            ctx.aliases.clone(),
+            ctx.ignore_config.clone(),
+            ctx.output_limit.clone(),
+        );
 
-        let run_result = self.execute_block_capturing(stmts).await;
+        let run_result = self.execute_block_capturing(stmts, ctx).await;
 
         {
             let mut scope = self.scope.write().await;
@@ -5570,17 +5622,16 @@ impl Kernel {
             }
         }
         {
-            let mut ec = self.exec_ctx.write().await;
             let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-            ec.cwd = cwd;
-            ec.prev_cwd = prev_cwd;
-            ec.aliases = aliases;
-            ec.ignore_config = ignore_config;
-            ec.output_limit = output_limit;
+            ctx.cwd = cwd;
+            ctx.prev_cwd = prev_cwd;
+            ctx.aliases = aliases;
+            ctx.ignore_config = ignore_config;
+            ctx.output_limit = output_limit;
         }
 
         if let Ok(ref r) = run_result {
-            self.emit_cmdsubst_stderr(&r.err).await;
+            self.emit_cmdsubst_stderr(&r.err, ctx).await;
         }
 
         let result = run_result?;
@@ -5596,7 +5647,7 @@ impl Kernel {
     ///
     /// Unlike regular tool execution, `source` executes in the CURRENT scope,
     /// allowing the sourced script to set variables and modify shell state.
-    async fn execute_source(&self, args: &[Arg]) -> Result<ExecResult> {
+    async fn execute_source(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
         // `source`/`.` is the fourth dynamic re-entry point: it runs the
         // sourced file's statements inline via `execute_stmt_flow`, so a file
         // that sources itself recurses unbounded just like a runaway function
@@ -5605,7 +5656,7 @@ impl Kernel {
         let _depth = self.enter_recursion("source")?;
 
         // Get the file path from the first positional argument
-        let tool_args = self.build_args_async(args, None).await?;
+        let tool_args = self.build_args_async(args, None, &mut *ctx).await?;
         let path = match tool_args.positional.first() {
             Some(Value::String(s)) => s.clone(),
             Some(v) => value_to_string(v),
@@ -5616,7 +5667,6 @@ impl Kernel {
 
         // Resolve path relative to cwd
         let full_path = {
-            let ctx = self.exec_ctx.read().await;
             if path.starts_with('/') {
                 std::path::PathBuf::from(&path)
             } else {
@@ -5624,10 +5674,12 @@ impl Kernel {
             }
         };
 
-        // Read file content via backend
+        // Read file content via backend. The backend handle comes out of the
+        // slot before the read: a guard held across VFS I/O blocks every writer,
+        // including the session publish at the end of the statement.
+        let backend = self.exec_ctx.read().await.backend.clone();
         let content = {
-            let ctx = self.exec_ctx.read().await;
-            match ctx.backend.read(&full_path, None).await {
+            match backend.read(&full_path, None).await {
                 Ok(bytes) => {
                     String::from_utf8(bytes).map_err(|e| {
                         anyhow::anyhow!("source: {}: invalid UTF-8: {}", path, e)
@@ -5676,7 +5728,7 @@ impl Kernel {
                 continue;
             }
 
-            match self.execute_stmt_flow(&stmt).await {
+            match self.execute_stmt_flow(&stmt, &mut *ctx).await {
                 Ok(flow) => {
                     let drained = {
                         let mut receiver = self.stderr_receiver.lock().await;
@@ -5743,7 +5795,7 @@ impl Kernel {
     ///
     /// Searches PATH for `{name}.kai` files and executes them in isolated scope
     /// (like user-defined tools). Returns None if no script is found.
-    async fn try_execute_script(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+    async fn try_execute_script(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<Option<ExecResult>> {
         // Held across the PATH probe *and* body execution: a `.kai` sourcing a
         // `.kai` re-enters here, and that nesting is what must be bounded (#46).
         // A non-script command pays only a transient, balanced increment during
@@ -5768,11 +5820,10 @@ impl Kernel {
             // Build script path: {dir}/{name}.kai
             let script_path = PathBuf::from(dir).join(format!("{}.kai", name));
 
-            // Check if script exists
-            let exists = {
-                let ctx = self.exec_ctx.read().await;
-                ctx.backend.exists(&script_path).await
-            };
+            // Check if script exists. Backend handle out of the slot first,
+            // for the same reason as `execute_source`.
+            let backend = self.exec_ctx.read().await.backend.clone();
+            let exists = backend.exists(&script_path).await;
 
             if !exists {
                 continue;
@@ -5780,8 +5831,7 @@ impl Kernel {
 
             // Read script content
             let content = {
-                let ctx = self.exec_ctx.read().await;
-                match ctx.backend.read(&script_path, None).await {
+                match backend.read(&script_path, None).await {
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(s) => s,
                         Err(e) => {
@@ -5814,7 +5864,7 @@ impl Kernel {
             };
 
             // Build tool_args from args (async for command substitution support)
-            let tool_args = self.build_args_async(args, None).await?;
+            let tool_args = self.build_args_async(args, None, &mut *ctx).await?;
 
             // Create isolated scope (like user tools). The trash rail and
             // errexit are NOT session state a script may shed: a `.kai`
@@ -5874,7 +5924,7 @@ impl Kernel {
                     continue;
                 }
 
-                match self.execute_stmt_flow(&stmt).await {
+                match self.execute_stmt_flow(&stmt, &mut *ctx).await {
                     Ok(flow) => {
                         let drained = {
                             let mut receiver = self.stderr_receiver.lock().await;
@@ -5962,17 +6012,17 @@ impl Kernel {
     ///   separate capability and is still tried by the caller
     /// - `Err` on execution errors
     #[cfg(not(feature = "subprocess"))]
-    async fn try_execute_external(&self, _name: &str, _args: &[Arg]) -> Result<ExternalCommandOutcome> {
+    async fn try_execute_external(&self, _name: &str, _args: &[Arg], _ctx: &mut ExecContext) -> Result<ExternalCommandOutcome> {
         Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::NotCompiled))
     }
 
     /// Try to execute an external command from PATH.
     #[cfg(feature = "subprocess")]
-    async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<ExternalCommandOutcome> {
+    async fn try_execute_external(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ExternalCommandOutcome> {
         if !self.allow_external_commands {
             return Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff));
         }
-        Ok(match Box::pin(self.try_execute_external_on_path(name, args)).await? {
+        Ok(match Box::pin(self.try_execute_external_on_path(name, args, &mut *ctx)).await? {
             Some(result) => ExternalCommandOutcome::Ran(Box::new(result)),
             None => ExternalCommandOutcome::NotFound,
         })
@@ -5984,8 +6034,8 @@ impl Kernel {
     /// means "bare name, nothing on PATH", the one case where the caller
     /// should keep looking elsewhere.
     #[cfg(feature = "subprocess")]
-    #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
-    async fn try_execute_external_on_path(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+    #[tracing::instrument(level = "debug", skip(self, args, ctx), fields(command = %name))]
+    async fn try_execute_external_on_path(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<Option<ExecResult>> {
         // Get the shell's cwd and its real filesystem location, if any. A
         // `None` real path means the cwd is virtual (a CoW overlay, an
         // in-memory VFS mount, `/dev`, …) — there's nowhere for a child OS
@@ -5994,10 +6044,7 @@ impl Kernel {
         // virtual-cwd error would blame the wrong thing for that case. Once
         // the command actually resolves, `real_cwd` is checked again below
         // and the honest reason is given then (issue #181).
-        let (cwd, real_cwd) = {
-            let ctx = self.exec_ctx.read().await;
-            (ctx.cwd.clone(), ctx.backend.resolve_real_path(&ctx.cwd))
-        };
+        let (cwd, real_cwd) = (ctx.cwd.clone(), ctx.backend.resolve_real_path(&ctx.cwd));
 
         let executable = if name.contains('/') {
             // Resolve relative paths (./script, ../bin/tool) against the shell's cwd
@@ -6066,7 +6113,7 @@ impl Kernel {
         tracing::debug!(executable = %executable, "resolved external command");
 
         // Build flat argv (preserves flag format)
-        let argv = self.build_args_flat(args).await?;
+        let argv = self.build_args_flat(args, &mut *ctx).await?;
 
         // Get stdin sources: a streaming `pipe_stdin` (an inter-stage pipeline
         // pipe, or a frontend-seeded process-stdin pipe) and/or a buffered
@@ -6076,29 +6123,21 @@ impl Kernel {
         // `sleep 60 | extern`). The pipe is streamed to the child *after* spawn.
         // `set_stdin` clears `pipe_stdin`, so a redirect-set buffer and a pipe
         // are mutually exclusive in practice; prefer the pipe.
-        let (pipe_stdin, stdin_bytes) = {
-            let mut ctx = self.exec_ctx.write().await;
-            (ctx.pipe_stdin.take(), ctx.take_stdin())
-        };
+        let (pipe_stdin, stdin_bytes) = (ctx.pipe_stdin.take(), ctx.take_stdin());
         let has_stdin = pipe_stdin.is_some() || stdin_bytes.is_some();
 
-        // The cancel token, the kill grace, and the background job all come
-        // from `self.exec_ctx`, which `dispatch_command` populates from the
-        // inbound ctx on every dispatch. That is what makes the `timeout`
-        // builtin's swapped child token reach the wait_or_kill discipline —
-        // reading `self.cancel_token` would give the kernel-wide token and
-        // miss the timeout's child cascade.
+        // The cancel token comes from the caller's ctx, so the `timeout`
+        // builtin's swapped child token reaches the wait_or_kill discipline.
         //
         // In interactive mode, standalone or last-in-pipeline commands inherit
         // the terminal's stdout/stderr so output streams in real-time.
         // First/middle commands must capture stdout for the pipe — same as bash.
-        let (pipeline_position, spawn_ctx) = {
-            let ctx = self.exec_ctx.read().await;
-            (
-                ctx.pipeline_position,
-                crate::spawn::SpawnContext::from_exec_context(&ctx),
-            )
-        };
+        // Built from the threaded ctx, not the slot: position and the
+        // background flags are facts about THIS command, and the slot carries
+        // whatever the last statement left there. `from_exec_context` already
+        // takes the cancel token from the ctx it is given.
+        let spawn_ctx = crate::spawn::SpawnContext::from_exec_context(ctx);
+        let pipeline_position = ctx.pipeline_position;
         let inherit_output = self.interactive
             && matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
@@ -6188,6 +6227,33 @@ impl Kernel {
     }
 
     // --- CWD ---
+
+    /// Publish a run's session state to the shared slot.
+    ///
+    /// During a run the threaded context is the truth. The slot carries the
+    /// session BETWEEN runs, which is what `cwd` below and the other public
+    /// accessors read, so a run writes it after each top-level statement and
+    /// before a fault leaves.
+    ///
+    /// Nothing inside a run may read a session field back from the slot: it
+    /// holds the value from before the current statement, so `cd d && ls *.txt`
+    /// would glob the old directory. Every in-run reader takes cwd, aliases,
+    /// the ignore config and the output limit from the threaded context.
+    /// `classify_command` is the exception that proves the rule — a public
+    /// query answered outside a run, where the slot IS the session.
+    ///
+    /// `fork_inner` reads them too, through `child_for_pipeline`, and it does
+    /// run mid-statement. Every consumer of a fork's context overwrites all
+    /// five from its own caller before using them, so the values never reach
+    /// a decision; a reader who changes that has to seed the fork instead.
+    async fn write_session_back(&self, ctx: &ExecContext) {
+        let mut ec = self.exec_ctx.write().await;
+        ec.cwd = ctx.cwd.clone();
+        ec.prev_cwd = ctx.prev_cwd.clone();
+        ec.aliases = ctx.aliases.clone();
+        ec.ignore_config = ctx.ignore_config.clone();
+        ec.output_limit = ctx.output_limit.clone();
+    }
 
     /// Get current working directory.
     pub async fn cwd(&self) -> PathBuf {
@@ -6442,58 +6508,35 @@ impl Kernel {
 
     /// Run a compound statement that occupies a pipeline stage.
     ///
-    /// Same ctx↔exec_ctx sync as `dispatch_command`, with one deliberate
-    /// difference: the stage's pipe writer stays behind with the runner. The
-    /// statement buffers — its whole output comes back in the `ExecResult` and
-    /// the runner writes it to the pipe once. Handing the writer down instead
-    /// would give it to whichever nested command grabbed the slot first, and
-    /// every later iteration would write nowhere.
+    /// The stage's pipe writer stays behind with the runner: the statement
+    /// buffers, its whole output comes back in the `ExecResult`, and the
+    /// runner writes it to the pipe once.
     ///
-    /// Streaming a stage would mean threading a writer through nested
-    /// statement execution, which is the shared-slot machinery GH #369 is
-    /// about. Revisit once the interpreter takes a ctx parameter.
+    /// That is now a choice rather than a constraint. The writer travels on
+    /// the threaded context, so handing it down would reach the nested
+    /// statement intact — what it would not do is make a loop stream, because
+    /// each iteration would write as it ran and `for … done | head -1` would
+    /// still run every iteration. Streaming a compound stage is its own
+    /// change; the context threading it was waiting on is done.
     async fn dispatch_statement(&self, stmt: &Stmt, ctx: &mut ExecContext) -> Result<ExecResult> {
         if let Some(d) = self.dispatcher() {
             ctx.dispatcher = Some(d);
         }
 
         // 1. Sync ctx → self internals
-        // The stream flag is per dispatch; the kernel's own value returns after.
-        let saved_stream_output;
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd.clone();
-            ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.stdin = ctx.stdin.take();
-            ec.stdin_data = ctx.stdin_data.take();
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            // The writer is NOT handed over — see this function's doc comment.
-            // Clearing the slot keeps a writer left by an earlier dispatch from
-            // catching the first command inside the loop body.
-            ec.pipe_stdout = None;
-            if let Some(stderr) = ctx.stderr.clone() {
-                ec.stderr = Some(stderr);
-            }
-            ec.aliases = ctx.aliases.clone();
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.output_limit = ctx.output_limit.clone();
-            ec.pipeline_position = ctx.pipeline_position;
-            // A command nested in this dispatch runs as its own single-command
-            // pipeline (`Only`), so the flag, not its position, carries whether
-            // this stage's stdout is the job's stdout.
-            saved_stream_output = std::mem::replace(
-                &mut ec.background_stream_output,
-                ctx.background_stream_output
-                    && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
-            );
-            ec.cancel = ctx.cancel.clone();
-            ec.watchdog = ctx.watchdog.clone();
-        }
+
+        // A command nested in this dispatch runs as its own single-command
+        // pipeline (`Only`), so the flag, not its position, carries whether
+        // this stage's stdout is the job's stdout. Masked on the threaded ctx
+        // now that nested execution reads the flag from there, not the slot.
+        // The stream flag is per dispatch; the caller's value returns after.
+        let saved_stream_output = ctx.background_stream_output;
+        ctx.background_stream_output = saved_stream_output
+            && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
         // 2. Run the statement. A stage is its own execution unit, so a
         // `break`, `continue`, `return`, or `exit` that reaches the top of the
@@ -6501,8 +6544,12 @@ impl Kernel {
         // the same boundary bash draws by running each stage in a subshell.
         // Whatever output the statement produced before the signal still comes
         // back and still reaches the pipe.
-        let flow = self.execute_stmt_flow(stmt).await;
-        self.exec_ctx.write().await.background_stream_output = saved_stream_output;
+        // The writer is NOT handed to the statement — see this function's doc
+        // comment. It comes back before the runner forwards the output.
+        let writer = ctx.pipe_stdout.take();
+        let flow = self.execute_stmt_flow(stmt, &mut *ctx).await;
+        ctx.pipe_stdout = writer;
+        ctx.background_stream_output = saved_stream_output;
         let result = match flow? {
             ControlFlow::Normal(result)
             | ControlFlow::Break { result, .. }
@@ -6519,32 +6566,21 @@ impl Kernel {
             let scope = self.scope.read().await;
             ctx.scope = scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.cwd = ec.cwd.clone();
-            ctx.prev_cwd = ec.prev_cwd.clone();
-            ctx.aliases = ec.aliases.clone();
-            ctx.ignore_config = ec.ignore_config.clone();
-            ctx.output_limit = ec.output_limit.clone();
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ctx.stdin = ec.stdin.take();
-            ctx.stdin_data = ec.stdin_data.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-        }
 
         Ok(result)
     }
 
     /// Dispatch a single command using the full resolution chain.
     ///
-    /// This is the core of `CommandDispatcher` — it syncs state between the
-    /// passed-in `ExecContext` and kernel-internal state (scope, exec_ctx),
-    /// then delegates to `execute_command` for the actual dispatch.
+    /// This is the core of `CommandDispatcher` — it delegates to
+    /// `execute_command` for the dispatch chain (user tools, builtins,
+    /// scripts, external commands, backend tools).
     ///
-    /// State flow:
-    /// 1. ctx → self: sync scope, cwd, stdin so internal methods see current state
-    /// 2. execute_command: full dispatch chain (user tools, builtins, scripts, external, backend)
-    /// 3. self → ctx: sync scope, cwd changes back so the pipeline runner sees them
+    /// Scope is the only state that still crosses this seam in both
+    /// directions, because the kernel holds it in its own lock rather than on
+    /// the context. Everything per-invocation — the stdin family, the cancel
+    /// token, the watchdog, the session fields — travels on `ctx` and never
+    /// touches the slot here.
     async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
         // Ensure nested dispatch (e.g. the `timeout` builtin re-dispatching
         // its inner command via ctx.dispatcher) routes through THIS kernel,
@@ -6555,92 +6591,29 @@ impl Kernel {
         }
 
         // 1. Sync ctx → self internals
-        // The stream flag is per dispatch; the kernel's own value returns after.
-        let saved_stream_output;
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
         }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ec.cwd = ctx.cwd.clone();
-            ec.prev_cwd = ctx.prev_cwd.clone();
-            ec.stdin = ctx.stdin.take();
-            ec.stdin_data = ctx.stdin_data.take();
-            // The structured-data sideband receiver (set by the concurrent
-            // pipeline runner on the stage ctx) must reach the tool's snapshot
-            // too — same reason as the pipe endpoints below. Without this a
-            // pipeline consumer never sees the producer's `.data`.
-            ec.stdin_data_rx = ctx.stdin_data_rx.take();
-            // Streaming pipe endpoints and kernel stderr must flow to the
-            // tool via self.exec_ctx — execute_command reads that, not the
-            // passed-in ctx. Without moving these, concurrent pipeline
-            // stages dispatched via a fork get pipe_stdin = None and
-            // silently read nothing.
-            ec.pipe_stdin = ctx.pipe_stdin.take();
-            ec.pipe_stdout = ctx.pipe_stdout.take();
-            if let Some(stderr) = ctx.stderr.clone() {
-                ec.stderr = Some(stderr);
-            }
-            ec.aliases = ctx.aliases.clone();
-            ec.ignore_config = ctx.ignore_config.clone();
-            ec.output_limit = ctx.output_limit.clone();
-            ec.pipeline_position = ctx.pipeline_position;
-            // A command nested in this dispatch runs as its own single-command
-            // pipeline (`Only`), so the flag, not its position, carries whether
-            // this stage's stdout is the job's stdout.
-            saved_stream_output = std::mem::replace(
-                &mut ec.background_stream_output,
-                ctx.background_stream_output
-                    && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last),
-            );
-            // Sync the cancel token from ctx → ec. Builtins like `timeout`
-            // swap ctx.cancel to a derived child token before re-dispatching;
-            // execute_command's snapshot reads ec.cancel (kept aligned by
-            // this sync), so try_execute_external sees the right token.
-            ec.cancel = ctx.cancel.clone();
-            // Same alignment for the watchdog: a fork dispatching through its
-            // own kernel must hand the shared script clock to the snapshot so
-            // patient holds in forked stages suspend the right timer.
-            ec.watchdog = ctx.watchdog.clone();
-        }
+
+        // A command nested in this dispatch runs as its own single-command
+        // pipeline (`Only`), so the flag, not its position, carries whether
+        // this stage's stdout is the job's stdout. Masked on the threaded ctx
+        // now that nested execution reads the flag from there, not the slot.
+        // The stream flag is per dispatch; the caller's value returns after.
+        let saved_stream_output = ctx.background_stream_output;
+        ctx.background_stream_output = saved_stream_output
+            && matches!(ctx.pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
         // 2. Execute via the full dispatch chain
-        let result = self.execute_command(&cmd.name, &cmd.args).await;
-        self.exec_ctx.write().await.background_stream_output = saved_stream_output;
+        let result = self.execute_command(&cmd.name, &cmd.args, &mut *ctx).await;
+        ctx.background_stream_output = saved_stream_output;
         let result = result?;
 
         // 3. Sync self → ctx
         {
             let scope = self.scope.read().await;
             ctx.scope = scope.clone();
-        }
-        {
-            let mut ec = self.exec_ctx.write().await;
-            ctx.cwd = ec.cwd.clone();
-            ctx.prev_cwd = ec.prev_cwd.clone();
-            ctx.aliases = ec.aliases.clone();
-            ctx.ignore_config = ec.ignore_config.clone();
-            ctx.output_limit = ec.output_limit.clone();
-            // Return any pipe endpoints that the tool didn't consume.
-            // `take()` here keeps the fork's exec_ctx in a clean state for
-            // the next dispatch — these are per-command and shouldn't leak
-            // between calls.
-            ctx.pipe_stdin = ec.pipe_stdin.take();
-            ctx.pipe_stdout = ec.pipe_stdout.take();
-            // Unconsumed buffered stdin comes back the same way, and for a
-            // sharper reason than symmetry: a partial read (`read` takes one
-            // line) leaves its remainder in `ec`, and the caller's own
-            // end-of-statement sync writes `ctx.stdin` back over `ec.stdin`.
-            // Without this the caller writes its stale `None` over the
-            // remainder and the rest of the stream is gone.
-            ctx.stdin = ec.stdin.take();
-            // The sideband rides home with stdin, same rule.
-            ctx.stdin_data = ec.stdin_data.take();
-            ctx.stdin_data_rx = ec.stdin_data_rx.take();
-            // Same take-don't-clone discipline as stdin, and for the same
-            // reason: these belong to exactly one dispatch, and a copy left
-            // behind would let the next command adopt it.
         }
 
         Ok(result)
@@ -6684,19 +6657,29 @@ pub(crate) trait ArgValueSource: Send + Sync {
     async fn home(&self) -> Option<String>;
 }
 
+/// The kernel's argument evaluator, bound to the context of the command whose
+/// arguments it evaluates, so `$(…)` in an argument runs with that command's
+/// stdin and cancel token. The mutex makes the source `Sync` while `eval`
+/// stays `&self`.
+struct KernelArgSource<'a> {
+    kernel: &'a Kernel,
+    ctx: tokio::sync::Mutex<&'a mut ExecContext>,
+}
+
 #[async_trait]
-impl ArgValueSource for Kernel {
+impl ArgValueSource for KernelArgSource<'_> {
     async fn eval(&self, expr: &Expr) -> Result<Option<Value>> {
-        Ok(Some(self.eval_expr_async(expr).await?))
+        let mut ctx = self.ctx.lock().await;
+        Ok(Some(self.kernel.eval_expr_async(expr, &mut ctx).await?))
     }
 
     async fn expand_glob(&self, pattern: &str) -> Result<Option<Vec<String>>> {
-        let glob_enabled = self.scope.read().await.glob_enabled();
+        let glob_enabled = self.kernel.scope.read().await.glob_enabled();
         if !glob_enabled {
             return Ok(None);
         }
         let (paths, cwd) = {
-            let ctx = self.exec_ctx.read().await;
+            let ctx = self.ctx.lock().await;
             let paths = ctx
                 .expand_glob(pattern)
                 .await
@@ -6724,7 +6707,7 @@ impl ArgValueSource for Kernel {
     }
 
     async fn home(&self) -> Option<String> {
-        self.scope_home().await
+        self.kernel.scope_home().await
     }
 }
 
@@ -7646,14 +7629,16 @@ impl CommandDispatcher for Kernel {
         self.dispatch_statement(stmt, ctx).await
     }
 
-    /// Evaluate an expression through the kernel's async chain, including
-    /// command substitution. Delegates to `eval_expr_async`, which snapshots
-    /// the kernel's scope/cwd and restores them after any `$(...)` runs, so
-    /// only command output escapes. The `ctx` is unused here because the
-    /// kernel evaluates against its own session state (a fork carries the
-    /// pipeline stage's snapshot); var refs resolve against that scope.
-    async fn eval_expr(&self, expr: &Expr, _ctx: &ExecContext) -> Result<Value> {
-        self.eval_expr_async(expr).await
+    /// Evaluate a redirect operand through the kernel's async chain,
+    /// including command substitution. Delegates to `eval_expr_async`, which
+    /// snapshots the kernel's scope/cwd and restores them after any `$(...)`
+    /// runs, so only command output escapes.
+    ///
+    /// The caller's `ctx` is the context to run on. A root context built here
+    /// instead would carry the kernel's cancel token, and `timeout 1 cat <<<
+    /// $(slow)` would run past its deadline.
+    async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value> {
+        self.eval_expr_async(expr, ctx).await
     }
 
     /// Produce a forked dispatcher with independent mutable state (detached).
@@ -10499,6 +10484,87 @@ AFTER="yes"'"#)
         );
     }
 
+    /// An embedder tool runs on the kernel's context slot. It must still see the
+    /// call's cancel token, or a tool that waits on cancellation ignores a
+    /// request timeout.
+    #[tokio::test]
+    async fn embedder_tool_sees_the_call_timeout() {
+        use crate::backend::testing::MockBackend;
+
+        let (mock, calls) = MockBackend::new();
+        let backend = mock.waiting_for_cancel(Duration::from_secs(30));
+        let kernel = Kernel::with_backend(Arc::new(backend), KernelConfig::isolated(), |_| {}, |_| {})
+            .expect("kernel");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            kernel.execute_with_options(
+                "embedder_tool",
+                ExecuteOptions::new().with_timeout(Duration::from_millis(200)),
+            ),
+        )
+        .await;
+        let result = outcome
+            .expect("the embedder tool ignored the call's 200ms timeout for 10s")
+            .expect("execute");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the embedder tool must run");
+        assert_eq!(result.code, 124, "the call's timeout must stop the tool: {result:?}");
+    }
+
+    /// An embedder tool runs on the calling command's context, not the
+    /// kernel's slot. The slot no longer carries the stdin family, so a tool
+    /// run on it reads nothing from a pipe; it also holds the session from
+    /// before the current statement.
+    #[tokio::test]
+    async fn embedder_tool_reads_the_pipe_it_was_given() {
+        use crate::backend::testing::MockBackend;
+
+        let (mock, _calls) = MockBackend::new();
+        let kernel = Kernel::with_backend(
+            Arc::new(mock.reporting_context()),
+            KernelConfig::isolated(),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        let piped = kernel.execute("printf hi | embedder_tool").await.expect("execute");
+        assert_eq!(
+            piped.text_out().trim(),
+            "stdin=hi|cwd=/",
+            "the embedder tool did not receive the stage's stdin",
+        );
+
+        // The control: with no pipe there is nothing to read, so an empty
+        // `stdin=` above would otherwise be indistinguishable from success.
+        let plain = kernel.execute("embedder_tool").await.expect("execute");
+        assert_eq!(plain.text_out().trim(), "stdin=|cwd=/");
+    }
+
+    /// A tool's scope mutation survives the tool failing. A builtin cannot
+    /// return an error — `tool.execute` hands back an `ExecResult` — so its
+    /// copy-back is unconditional, and an embedder tool has to match it or a
+    /// variable set before the failure is erased on the way out.
+    #[tokio::test]
+    async fn embedder_tool_keeps_its_scope_write_when_it_fails() {
+        use crate::backend::testing::MockBackend;
+
+        let (mock, _calls) = MockBackend::new();
+        let kernel = Kernel::with_backend(
+            Arc::new(mock.writing_scope_then_failing("PROGRESS", "1")),
+            KernelConfig::isolated(),
+            |_| {},
+            |_| {},
+        )
+        .expect("kernel");
+
+        let failed = kernel.execute("embedder_tool").await.expect("execute");
+        assert_ne!(failed.code, 0, "the mock tool must fail: {failed:?}");
+
+        let r = kernel.execute("echo \"[$PROGRESS]\"").await.expect("execute");
+        assert_eq!(r.text_out().trim(), "[1]", "the failing tool's scope write was lost");
+    }
+
     #[tokio::test]
     async fn background_program_cancel_reaches_running_execution() {
         let jobs = Arc::new(JobManager::new());
@@ -10911,6 +10977,16 @@ AFTER="yes"'"#)
     /// Helper: a throwaway schema with one `--pair` param declared as
     /// consuming two positionals per occurrence. Modelled after what
     /// jq_native will declare for `--arg` / `--argjson`.
+    /// A root context for calling interpreter functions directly, built the way
+    /// the statement loop builds one.
+    #[allow(clippy::expect_used)]
+    async fn root_ctx(kernel: &Kernel) -> ExecContext {
+        let cancel = kernel.cancel_token.lock().expect("cancel_token poisoned").clone();
+        let ec = kernel.exec_ctx.read().await;
+        let scope = kernel.scope.read().await;
+        *kernel.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel)
+    }
+
     fn multi_consume_schema() -> crate::tools::ToolSchema {
         use crate::tools::{ParamSchema, ToolSchema};
         ToolSchema::new("test", "multi-consume smoke")
@@ -10936,7 +11012,7 @@ AFTER="yes"'"#)
             pos("filter"),
         ];
         let built = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect("build_args should succeed");
 
@@ -10977,7 +11053,7 @@ AFTER="yes"'"#)
             pos("filter"),
         ];
         let built = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect("build_args should succeed");
 
@@ -11035,7 +11111,7 @@ AFTER="yes"'"#)
             pos("explorer"),
         ];
         let err = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect_err("undeclared --type with a space value must fail loud");
         let msg = err.to_string();
@@ -11057,7 +11133,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("type".into()),
             pos("explorer"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
@@ -11070,7 +11146,7 @@ AFTER="yes"'"#)
             pos("exp"),
             Arg::Named { key: "type".into(), value: Expr::Literal(Value::String("explorer".into())) },
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
@@ -11080,7 +11156,7 @@ AFTER="yes"'"#)
         let schema = kj_like_schema();
         // No positional follows --force → unambiguously a bare flag.
         let args = vec![pos("exp"), Arg::LongFlag("force".into())];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("force"));
     }
 
@@ -11093,7 +11169,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("verbose".into()),
             Arg::Named { key: "name".into(), value: Expr::Literal(Value::String("x".into())) },
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("verbose"));
     }
 
@@ -11105,7 +11181,7 @@ AFTER="yes"'"#)
         let schema = ToolSchema::new("frobnicate", "builtin-style")
             .param(ParamSchema::optional("name", "string", Value::Null, "name"));
         let args = vec![Arg::LongFlag("frob".into()), pos("value")];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("frob"));
     }
 
@@ -11123,7 +11199,7 @@ AFTER="yes"'"#)
         // kj exp -t explorer
         let args = vec![pos("exp"), Arg::ShortFlag("t".into()), pos("explorer")];
         let err = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect_err("undeclared -t with a space value must fail loud");
         let msg = err.to_string();
@@ -11139,7 +11215,7 @@ AFTER="yes"'"#)
         let schema = ToolSchema::new("frobnicate", "builtin-style")
             .param(ParamSchema::optional("name", "string", Value::Null, "name"));
         let args = vec![Arg::ShortFlag("t".into()), pos("value")];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert!(built.flags.contains("t"));
     }
 
@@ -11175,7 +11251,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("type".into()),
             pos("explorer"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.expect("build_args");
         // --type (declared only on the create leaf) binds in space form.
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
         // The subcommand path survives as positionals for kj to re-parse.
@@ -11199,7 +11275,7 @@ AFTER="yes"'"#)
             Arg::LongFlag("force".into()),
             pos("somearg"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.expect("build_args");
         assert!(built.flags.contains("force"), "force should be a bare flag");
         let positionals: Vec<&str> = built
             .positional
@@ -11220,7 +11296,7 @@ AFTER="yes"'"#)
             Arg::ShortFlag("t".into()),
             pos("explorer"),
         ];
-        let built = kernel.build_args_async(&args, Some(&schema)).await.expect("build_args");
+        let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.expect("build_args");
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
@@ -11233,7 +11309,7 @@ AFTER="yes"'"#)
             crate::ast::Command { name: "echo".into(), args: vec![], redirects: vec![] },
         )]))];
         let err = kernel
-            .build_args_async(&args, Some(&schema))
+            .build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await)
             .await
             .expect_err("computed subcommand selector must error");
         assert!(

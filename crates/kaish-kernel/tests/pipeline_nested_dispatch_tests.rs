@@ -1,6 +1,6 @@
 //! A nested dispatch must not consume the enclosing command's pipe writer.
 //!
-//! `exec_ctx` is one shared slot. A pipeline stage parks its `pipe_stdout`
+//! `exec_ctx` was one shared slot. A pipeline stage parked its `pipe_stdout`
 //! there for the dispatch, and anything dispatching *while that command runs*
 //! — a `$(…)` in its own arguments, a function body, a `source`d file — took
 //! the writer and dropped it with its own context:
@@ -270,4 +270,45 @@ async fn stderr_is_shared_not_owned_so_a_stage_body_still_reports() {
         "a non-last stage's stderr should reach the caller, got {:?}",
         result.err
     );
+}
+
+/// A substitution that runs a builtin reading a FILE still writes into the
+/// enclosing pipe. `execute_pipeline` parks the stage's `pipe_stdout` in the
+/// shared slot, and `cat`'s non-streaming path writes to `ctx.pipe_stdout`
+/// when it is present, so the file's bytes go straight down the outer pipe
+/// and the substitution captures nothing — `echo`'s whole line is lost.
+///
+/// The `echo` row is the control: it discriminates, because `echo` does not
+/// take the parked writer, so the same shape already prints correctly. A
+/// failure of both rows means the harness broke, not the fix.
+#[rstest]
+#[case::builtin_reading_a_file("echo \"got [$(cat in.txt)]\" | cat", "got [hello]\n")]
+#[case::builtin_writing_its_argument("echo \"got [$(echo sub)]\" | cat", "got [sub]\n")]
+// The same seam, reached through the other doors a substitution can sit
+// behind. All four funnel through `execute_block_capturing`, which takes the
+// writer off the threaded ctx for the capture, but only the bare form above
+// was pinned.
+#[case::function_body_reading_a_file("f() { cat in.txt; }; echo \"got [$(f)]\" | cat", "got [hello]\n")]
+#[case::substitution_inside_a_function("f() { echo \"got [$(cat in.txt)]\"; }; f | cat", "got [hello]\n")]
+#[case::sourced_script_reading_a_file(
+    "echo 'cat in.txt' > s.kai; echo \"got [$(source s.kai)]\" | cat",
+    "got [hello]\n"
+)]
+#[tokio::test]
+async fn a_substitution_does_not_write_into_the_enclosing_pipe(
+    #[case] script: &str,
+    #[case] expected: &str,
+) {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("in.txt"), "hello\n").unwrap();
+    let kernel = Kernel::new(
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_trash(false),
+    )
+    .expect("failed to create kernel");
+
+    let result = kernel.execute(script).await.expect("execution failed");
+
+    assert_eq!(result.text_out(), expected, "script: {script}");
 }

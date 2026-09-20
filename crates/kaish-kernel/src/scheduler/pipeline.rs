@@ -108,7 +108,7 @@ fn redirects_stdout(stage: &PipelineStage) -> bool {
 pub(crate) async fn apply_redirects(
     mut result: ExecResult,
     redirects: &[Redirect],
-    ctx: &ExecContext,
+    ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
     // Defer materialization of OutputData → result.out to individual redirect
@@ -268,7 +268,7 @@ pub(crate) async fn apply_redirects(
 /// no longer depends on how the kernel was constructed.
 async fn eval_redirect_target(
     expr: &Expr,
-    ctx: &ExecContext,
+    ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> Result<String, String> {
     // A numeral whose source text does not round-trip through its own typed
@@ -647,8 +647,9 @@ impl PipelineRunner {
     /// stage's pipe writer here rather than handing it to the statement, so
     /// the loop runs to completion and its whole output is written to the pipe
     /// at once — `for … done | head -1` therefore runs every iteration where
-    /// bash would stop early. Streaming needs a writer threaded through nested
-    /// statement execution; see GH #369.
+    /// bash would stop early. The writer now travels on the threaded context
+    /// (GH #369), so this is a remaining behavior gap rather than a missing
+    /// mechanism.
     async fn run_pipeline(
         &self,
         stages: &[PipelineStage],
@@ -788,7 +789,7 @@ impl PipelineRunner {
                 // (forked) dispatcher — the borrowed `dispatcher` can't cross
                 // the spawn boundary, and `stage_ctx.dispatcher` is `None` on a
                 // bare kernel, which is exactly the GH #90 gap.
-                result = apply_redirects(result, stage.redirects(), &stage_ctx, &*task_dispatcher).await;
+                result = apply_redirects(result, stage.redirects(), &mut stage_ctx, &*task_dispatcher).await;
 
                 // Flush buffered stderr to the kernel's stderr stream.
                 // This delivers error output from intermediate pipeline stages
@@ -885,11 +886,14 @@ impl PipelineRunner {
                     }
                     if i == last_idx {
                         last_result = result;
-                        // Sync last stage's scope and cwd changes back
+                        // The last stage returns every session change, the
+                        // same as a statement run on its own.
                         ctx.scope = stage_ctx.scope;
                         ctx.cwd = stage_ctx.cwd;
                         ctx.prev_cwd = stage_ctx.prev_cwd;
                         ctx.aliases = stage_ctx.aliases;
+                        ctx.ignore_config = stage_ctx.ignore_config;
+                        ctx.output_limit = stage_ctx.output_limit;
                     }
                 }
                 Err(e) => {
@@ -2848,8 +2852,8 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout contentstderr content");
         assert!(result.err.is_empty());
@@ -2865,8 +2869,8 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout only");
         assert!(result.err.is_empty());
@@ -2886,8 +2890,8 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout\nstderr\n");
         assert!(result.err.is_empty());
@@ -2973,8 +2977,8 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/out.txt".to_string())),
         }];
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         // Both streams went to the file: stdout (incl. the sideband) and
         // stderr are both dropped from the in-memory result.
@@ -3006,8 +3010,8 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/big.txt".to_string())),
         }];
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
         assert!(result.ok());
 
         let written = ctx.backend.read(Path::new("/big.txt"), None).await.expect("file written");
@@ -3027,8 +3031,8 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/bin.out".to_string())),
         }];
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
         assert!(result.ok());
 
         let written = ctx.backend.read(Path::new("/bin.out"), None).await.expect("file written");

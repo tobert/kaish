@@ -22,12 +22,34 @@ pub struct MockBackend {
     /// path, instead of always getting `ToolResult::success("mock executed")`.
     #[allow(clippy::type_complexity)]
     tool_result: Option<Arc<dyn Fn(&str) -> BackendResult<ToolResult> + Send + Sync>>,
+    /// When set, `call_tool` waits on its context's cancel token for at most
+    /// this long, the way an embedder tool waits on slow work.
+    wait_for_cancel: Option<std::time::Duration>,
+    /// When set, `call_tool` reports what context it was handed instead of a
+    /// canned string: the stdin it can read and the cwd it would resolve
+    /// against. An embedder tool is the one dispatch arm that historically ran
+    /// on the kernel's slot rather than the calling command's context, so a
+    /// test needs to see which one arrived.
+    report_context: bool,
+    /// When set, `call_tool` writes this variable into its context's scope and
+    /// then fails. A tool's scope mutation has to survive an error the same way
+    /// a builtin's does, and a builtin cannot return one at all.
+    scope_write_then_fail: Option<(String, String)>,
 }
 
 impl MockBackend {
     pub fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
-        (Self { call_count: count.clone(), tool_result: None }, count)
+        (
+            Self {
+                call_count: count.clone(),
+                tool_result: None,
+                wait_for_cancel: None,
+                report_context: false,
+                scope_write_then_fail: None,
+            },
+            count,
+        )
     }
 
     /// Get the current call count.
@@ -44,6 +66,25 @@ impl MockBackend {
         self.tool_result = Some(Arc::new(result));
         self
     }
+
+    /// Make `call_tool` wait until its context's cancel token fires, or `limit`
+    /// passes.
+    pub fn waiting_for_cancel(mut self, limit: std::time::Duration) -> Self {
+        self.wait_for_cancel = Some(limit);
+        self
+    }
+
+    /// Make `call_tool` return `stdin=<what it can read>|cwd=<its cwd>`.
+    pub fn reporting_context(mut self) -> Self {
+        self.report_context = true;
+        self
+    }
+
+    /// Make `call_tool` set `name=value` in its context's scope and then fail.
+    pub fn writing_scope_then_failing(mut self, name: &str, value: &str) -> Self {
+        self.scope_write_then_fail = Some((name.to_string(), value.to_string()));
+        self
+    }
 }
 
 impl Default for MockBackend {
@@ -51,6 +92,9 @@ impl Default for MockBackend {
         Self {
             call_count: Arc::new(AtomicUsize::new(0)),
             tool_result: None,
+            wait_for_cancel: None,
+            report_context: false,
+            scope_write_then_fail: None,
         }
     }
 }
@@ -109,9 +153,39 @@ impl KernelBackend for MockBackend {
         &self,
         name: &str,
         _args: ToolArgs,
-        _ctx: &mut dyn ToolCtx,
+        ctx: &mut dyn ToolCtx,
     ) -> BackendResult<ToolResult> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(limit) = self.wait_for_cancel {
+            let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {
+                return Err(BackendError::InvalidOperation("waiting_for_cancel needs an ExecContext".into()));
+            };
+            let cancel = exec_ctx.cancel.clone();
+            return tokio::select! {
+                _ = cancel.cancelled() => Ok(ToolResult::failure(130, "mock tool: cancelled")),
+                _ = tokio::time::sleep(limit) => Ok(ToolResult::success("mock tool: waited out")),
+            };
+        }
+        if let Some((var, value)) = &self.scope_write_then_fail {
+            let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {
+                return Err(BackendError::InvalidOperation(
+                    "writing_scope_then_failing needs an ExecContext".into(),
+                ));
+            };
+            exec_ctx.scope.set_global(var.clone(), crate::ast::Value::String(value.clone()));
+            return Err(BackendError::Io("mock tool: failed after writing scope".into()));
+        }
+        if self.report_context {
+            let Some(exec_ctx) = ctx.as_any_mut().downcast_mut::<crate::tools::ExecContext>() else {
+                return Err(BackendError::InvalidOperation("reporting_context needs an ExecContext".into()));
+            };
+            let stdin = match exec_ctx.resolve_stdin().await {
+                Ok((_, text)) => text,
+                Err(e) => return Err(BackendError::InvalidOperation(format!("stdin: {e}"))),
+            };
+            let cwd = exec_ctx.cwd.display().to_string();
+            return Ok(ToolResult::success(format!("stdin={stdin}|cwd={cwd}")));
+        }
         if let Some(f) = &self.tool_result {
             return f(name);
         }

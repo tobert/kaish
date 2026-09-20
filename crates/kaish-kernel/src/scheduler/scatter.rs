@@ -252,7 +252,7 @@ impl ScatterGatherRunner {
     /// Run the parallel stage for all items.
     ///
     /// Each worker gets its own forked dispatcher via
-    /// [`CommandDispatcher::fork`]. The fork snapshots per-session state
+    /// [`CommandDispatcher::fork_attached`], so a cancel cascades into it. The fork snapshots per-session state
     /// (scope, cwd, aliases, user tools) so workers can run concurrently
     /// without racing. Forks are cheap (Scope is COW, plus a few Arc bumps),
     /// and they unlock the full dispatch chain inside workers — user tools,
@@ -286,12 +286,11 @@ impl ScatterGatherRunner {
 
             // Build the worker context FROM THE PARENT, not from scratch. A
             // from-scratch `ExecContext::with_backend_and_scope` starts
-            // `watchdog = None`; `dispatch_command` then syncs that `None` INTO
-            // the subkernel (kernel.rs `ec.watchdog = ctx.watchdog.clone()`),
-            // clobbering the fork's inherited watchdog — so inside a worker the
-            // script clock is gone and any `ctx.patient` hold suspends a
-            // *missing* timer, yielding false-positive request timeouts that
-            // kill the worker. `child_for_pipeline` clones exactly what a worker
+            // `watchdog = None`, and commands in the worker read the watchdog
+            // from this context — so the script clock would be gone and any
+            // `ctx.patient` hold would suspend a *missing* timer, yielding
+            // false-positive request timeouts that kill the worker.
+            // `child_for_pipeline` clones exactly what a worker
             // needs in one shot — watchdog, vfs_budget, aliases, ignore_config,
             // output_limit, allow_external_commands, backend, cwd, scope,
             // dispatcher — replacing the manual field-copy that was easy to let
@@ -1284,7 +1283,7 @@ mod tests {
         );
 
         // Document the trap the fix closes: the old construction starts with a
-        // None watchdog, which dispatch_command then syncs into the subkernel.
+        // None watchdog, which the worker's commands would then read.
         let from_scratch =
             ExecContext::with_backend_and_scope(parent.backend.clone(), parent.scope.clone());
         assert!(

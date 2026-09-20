@@ -311,6 +311,170 @@ async fn timeout_builtin_kills_inner_external() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// 5b. timeout reaches an external inside a function body
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `timeout` swaps a child cancel token onto its ctx and re-dispatches `f`. The
+/// function body re-enters `execute_pipeline`, which snapshots the kernel's own
+/// token, so the timer's cancel may never reach the external the body runs.
+#[tokio::test]
+async fn timeout_builtin_kills_external_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ bash {}; }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` did not return within 10s: the timer's cancel never reached the external in f's body");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left pid {} alive inside the function body",
+        pid,
+    );
+}
+
+#[tokio::test]
+async fn timeout_builtin_kills_piped_external_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ bash {} | cat; }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with a piped external in f did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the piped stage's pid {} alive inside the function body",
+        pid,
+    );
+}
+
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_argument_substitution_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ echo $(bash {}); }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in an argument did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the substitution's pid {} alive inside the function body",
+        pid,
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 5c. timeout reaches an external in a redirect operand's substitution
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A here-string, a heredoc body, and a `< file` target all resolve through
+/// one call site, `eval_redirect_target`. It reaches the kernel through
+/// `CommandDispatcher::eval_expr`, so a `$(…)` in any of the three must run
+/// under the cancel token of the command being redirected.
+///
+/// The redirect goes inside the function body, not on `timeout` itself:
+/// `timeout 1 cat <<< $(slow)` expands the operand before `timeout` starts
+/// its timer, which is bash's order too, so no timer could cover it. Here
+/// `timeout` is already running when `cat`'s operand is evaluated.
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_a_here_string_substitution() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ cat <<< $(bash {}); }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in a here-string did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the here-string substitution's pid {} alive",
+        pid,
+    );
+}
+
+/// The heredoc arm of the same call site. A heredoc body that holds a `$(…)`
+/// is evaluated as an expression rather than taken as literal text, so it
+/// reaches `eval_redirect_target` the same way the here-string does.
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_a_heredoc_substitution() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program =
+        format!("f() {{ cat <<EOF\n$(bash {})\nEOF\n}}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in a heredoc body did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the heredoc substitution's pid {} alive",
+        pid,
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // 6. Pipeline cascade: cancel kills both stages of a `sleep | cat`
 // ════════════════════════════════════════════════════════════════════════════
 

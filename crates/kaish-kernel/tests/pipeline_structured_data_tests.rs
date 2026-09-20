@@ -76,9 +76,10 @@ async fn seq_into_scatter_sees_structured_items() {
 //     seq 1 3 | jq -c $(echo .)    → "trailing characters … looks like JSONL"
 //
 // Same root as the `pipe_stdout` loss (see pipeline_nested_dispatch_tests.rs):
-// a per-invocation resource in the one shared `exec_ctx` slot, taken by a
-// nested dispatch and not returned. This one fails loudly rather than at
-// exit 0.
+// a per-invocation resource in what was then one shared `exec_ctx` slot, taken
+// by a nested dispatch and not returned. This one failed loudly rather than at
+// exit 0. The resource travels on the threaded context now (GH #369); the test
+// stays as the guard for the behavior.
 //
 // Deterministic, so no loop — the race above is a different mechanism.
 
