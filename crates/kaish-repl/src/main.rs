@@ -307,7 +307,7 @@ fn print_plan(source: Option<String>) -> ExitCode {
 /// Errors are what the kernel refuses, so they and only they become
 /// `errors`; anything else there would report a plan as unrunnable that the
 /// kernel would have run. Warnings are filtered by
-/// [`IssueCode::surfaces_in_plan`] rather than by severity: the bar is "this
+/// `IssueCode::surfaces_in_plan` rather than by severity: the bar is "this
 /// statement will run and will fail", not "the validator had a thought".
 /// `UndefinedCommand` fires on every external command and must not reach a
 /// plan.
