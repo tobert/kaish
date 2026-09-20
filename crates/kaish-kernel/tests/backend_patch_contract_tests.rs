@@ -138,17 +138,27 @@ async fn ops_within_a_batch_see_each_others_edits() {
 /// it gets an `InvalidOperation` naming the character instead.
 #[tokio::test]
 async fn a_mid_codepoint_offset_is_refused() {
+    // Each case names the character its offset splits: `é` occupies bytes 0-1,
+    // and `ï` bytes 9-10.
     let split_ops = [
-        ("Insert", PatchOp::Insert { offset: 1, content: "x".to_string() }),
-        ("Delete", PatchOp::Delete { offset: 1, len: 1, expected: None }),
-        ("Delete end", PatchOp::Delete { offset: 0, len: 1, expected: None }),
+        ("Insert", PatchOp::Insert { offset: 1, content: "x".to_string() }, 'é'),
+        ("Delete", PatchOp::Delete { offset: 1, len: 1, expected: None }, 'é'),
+        ("Delete end", PatchOp::Delete { offset: 0, len: 1, expected: None }, 'é'),
         (
-            "Replace",
+            "Replace start",
             PatchOp::Replace { offset: 1, len: 1, content: "x".to_string(), expected: None },
+            'é',
+        ),
+        // Starts on a boundary and ends inside `naïve`'s `ï` — the end check
+        // is the one the other Replace case never reaches.
+        (
+            "Replace end",
+            PatchOp::Replace { offset: 0, len: 10, content: "x".to_string(), expected: None },
+            'ï',
         ),
     ];
 
-    for (label, op) in split_ops {
+    for (label, op, split) in split_ops {
         for (name, backend, path) in backends_holding(MULTIBYTE).await {
             let err = match backend.patch(path, std::slice::from_ref(&op)).await {
                 Ok(()) => panic!("{name}/{label}: a mid-codepoint offset must be refused"),
@@ -160,8 +170,8 @@ async fn a_mid_codepoint_offset_is_refused() {
             );
             let message = err.to_string();
             assert!(
-                message.contains("character boundary") && message.contains('é'),
-                "{name}/{label}: the error must name the character it splits: {message}",
+                message.contains("character boundary") && message.contains(split),
+                "{name}/{label}: the error must name the character it splits ({split}): {message}",
             );
             assert_eq!(
                 read_text(&backend, path).await,
@@ -208,5 +218,27 @@ async fn line_zero_is_refused() {
                 "{name}/{label}: a refused op must leave the file untouched",
             );
         }
+    }
+}
+
+/// A boundary that is a boundary still works.
+///
+/// The refusals above would pass just as well against a check that rejected
+/// every multi-byte offset. This is the control: `école` is 6 bytes, `é`
+/// takes the first two, and an edit at offset 2 lands between characters and
+/// must apply.
+#[tokio::test]
+async fn a_valid_boundary_in_multibyte_content_still_applies() {
+    for (name, backend, path) in backends_holding(MULTIBYTE).await {
+        let ops = vec![PatchOp::Insert { offset: 2, content: "-".to_string() }];
+        backend
+            .patch(path, &ops)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: offset 2 is a character boundary: {e:?}"));
+        assert_eq!(
+            read_text(&backend, path).await,
+            "\u{e9}-cole\nna\u{ef}ve\n",
+            "{name}: an insert on a boundary applies where it was asked to",
+        );
     }
 }
