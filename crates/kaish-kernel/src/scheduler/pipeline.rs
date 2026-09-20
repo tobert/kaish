@@ -2852,7 +2852,7 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
+        let mut ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout contentstderr content");
@@ -2869,7 +2869,7 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
+        let mut ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout only");
@@ -2890,7 +2890,7 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
+        let mut ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout\nstderr\n");
@@ -2977,7 +2977,7 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/out.txt".to_string())),
         }];
-        let ctx = make_minimal_ctx();
+        let mut ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         // Both streams went to the file: stdout (incl. the sideband) and
@@ -3010,7 +3010,7 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/big.txt".to_string())),
         }];
-        let ctx = make_minimal_ctx();
+        let mut ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
         assert!(result.ok());
 
@@ -3031,7 +3031,7 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/bin.out".to_string())),
         }];
-        let ctx = make_minimal_ctx();
+        let mut ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
         assert!(result.ok());
 
