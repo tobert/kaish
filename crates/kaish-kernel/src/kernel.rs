@@ -3288,6 +3288,9 @@ impl Kernel {
                             self.update_last_result(&left_result).await;
                             // The fault's unpublished stderr is its message;
                             // its stdout and any published stderr already ran.
+                            // A fully published fault (a compound whose body
+                            // published it) leaves the message empty: the text
+                            // stays prior output, shown once, not rendered again.
                             let published = left_result.stderr_published_len;
                             let message = left_result.err.split_off(published);
                             return Err(with_prior_output(
@@ -3365,6 +3368,9 @@ impl Kernel {
                             self.update_last_result(&left_result).await;
                             // The fault's unpublished stderr is its message;
                             // its stdout and any published stderr already ran.
+                            // A fully published fault (a compound whose body
+                            // published it) leaves the message empty: the text
+                            // stays prior output, shown once, not rendered again.
                             let published = left_result.stderr_published_len;
                             let message = left_result.err.split_off(published);
                             return Err(with_prior_output(

@@ -164,6 +164,9 @@ pub struct ExecResult {
     /// stream already holds. Publishing writes `err[stderr_published_len..]`
     /// and advances this to `err.len()`, so text appended after a publish is
     /// published once and text published before is never sent again.
+    /// It counts bytes, not order: the stream holds them in the order they
+    /// were produced. An external's overflow markers lead `err` but follow
+    /// its live bytes on the stream.
     /// Internal plumbing, not part of the wire contract: never serialized.
     #[serde(skip)]
     pub stderr_published_len: usize,
