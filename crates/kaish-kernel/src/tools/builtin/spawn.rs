@@ -16,8 +16,10 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
@@ -50,7 +52,9 @@ struct SpawnArgs {
     #[arg(long = "cwd")]
     cwd: Option<String>,
 
-    /// Timeout in milliseconds.
+    /// Timeout in milliseconds. On expiry the command exits 124 and keeps
+    /// whatever the child already wrote; the timeout line is appended to
+    /// stderr after the child's own.
     #[arg(long = "timeout")]
     timeout: Option<String>,
 
@@ -193,14 +197,12 @@ impl Tool for Spawn {
         // Build command
         let mut cmd = Command::new(&command);
         cmd.args(&argv);
-        // Ensure the OS process is killed if this Command/Child is dropped
-        // before we've waited on it. This is exactly what happens on the
-        // timeout arm below: tokio::time::timeout drops the owned
-        // wait_with_output() future (and the Child inside it) when it fires,
-        // and without kill_on_drop the process was silently left running
-        // past the timeout — a real leak for a long-lived agent that
-        // repeatedly hits spawn timeouts. Mirrors the same call in
-        // dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
+        // Backstop: kill the OS process if this Command/Child is dropped
+        // before we have waited on it — an early return between the spawn
+        // and the wait would otherwise leave the child running, a real leak
+        // for a long-lived agent. The timeout arm below kills explicitly so
+        // it can read the child's partial output first. Mirrors the same
+        // call in dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
         cmd.kill_on_drop(true);
 
         // Set working directory if specified
@@ -258,15 +260,67 @@ impl Tool for Spawn {
         // Wait with optional timeout
         if let Some(ms) = timeout_ms {
             let timeout = Duration::from_millis(ms);
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(Ok(output)) => capture_to_result(output.status.code(), output.stdout, output.stderr),
-                Ok(Err(e)) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
+
+            // Drain both pipes into tasks writing to shared buffers, rather
+            // than letting `wait_with_output()` own them. That future owns
+            // everything it has read, so the timeout arm used to drop the
+            // child's partial output with it: a child that printed a
+            // diagnostic and then hung reported 124 and nothing else. Shared
+            // buffers also mean an aborted drain still leaves its bytes here.
+            let captured_stdout = Arc::new(Mutex::new(Vec::new()));
+            let captured_stderr = Arc::new(Mutex::new(Vec::new()));
+            let stdout_task = tokio::spawn(drain_pipe(child.stdout.take(), captured_stdout.clone()));
+            let stderr_task = tokio::spawn(drain_pipe(child.stderr.take(), captured_stderr.clone()));
+
+            let mut kill_note = None;
+            let (exit_code, expired) = match tokio::time::timeout(timeout, child.wait()).await {
+                // A child that died by signal has no code. It is not a
+                // timeout, and reading `None` as one would report 124 and a
+                // "timed out" line for a segfault.
+                Ok(Ok(status)) => (status.code(), false),
+                Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
                 Err(_) => {
-                    // Timeout — dropping this future drops the owned Child;
-                    // kill_on_drop (set above) kills and reaps the process
-                    // as part of that drop, so it does not outlive us.
-                    ExecResult::failure(124, format!("spawn: {}: timed out after {}ms", command, ms))
+                    // Kill first: a reader reaches EOF only once every write
+                    // end of the pipe is closed.
+                    match child.start_kill() {
+                        // Unreachable for an unreaped child on Unix. Report
+                        // it and skip the wait, which would have nothing to
+                        // reap; `kill_on_drop` is still the backstop.
+                        Err(e) => kill_note = Some(format!("spawn: failed to kill after timeout: {e}")),
+                        Ok(()) => {
+                            if let Err(e) = child.wait().await {
+                                return ExecResult::failure(1, format!("spawn: failed to wait: {}", e));
+                            }
+                        }
+                    }
+                    (None, true)
                 }
+            };
+
+            // Bounded join. The child is reaped, so everything it wrote is
+            // already in the pipe buffer and the drains need only a moment to
+            // pick it up — but this child was never put in its own process
+            // group, so a grandchild that inherited the write end keeps EOF
+            // from ever arriving. Awaiting EOF made `--timeout 300` return
+            // when the GRANDCHILD exited, which is not a timeout at all. The
+            // grace collects what is there and then stops waiting; the bytes
+            // are in the shared buffers either way.
+            let stdout = finish_drain(stdout_task, &captured_stdout).await;
+            let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
+
+            if let Some(note) = kill_note {
+                append_line(&mut stderr, note.as_bytes());
+            }
+            if expired {
+                append_line(
+                    &mut stderr,
+                    format!("spawn: {}: timed out after {}ms", command, ms).as_bytes(),
+                );
+                // 124 is `timeout(1)`'s code, and the partial output the child
+                // did produce rides along with it.
+                capture_to_result(Some(124), stdout, stderr)
+            } else {
+                capture_to_result(exit_code, stdout, stderr)
             }
         } else {
             match child.wait_with_output().await {
@@ -275,6 +329,69 @@ impl Tool for Spawn {
             }
         }
     }
+}
+
+/// How long a reaped child's drains get to pick up what is already buffered
+/// before the wait is abandoned. Only a grandchild holding the pipe's write
+/// end open makes this matter.
+const DRAIN_GRACE: Duration = Duration::from_millis(200);
+
+/// Read one child pipe to EOF into a shared buffer.
+///
+/// The buffer is shared so an abandoned drain still leaves the bytes it read.
+/// A read error ends the drain and is returned rather than discarded.
+async fn drain_pipe<R>(pipe: Option<R>, into: Arc<Mutex<Vec<u8>>>) -> Option<std::io::Error>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let mut pipe = pipe?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) => return None,
+            Ok(n) => into.lock().await.extend_from_slice(&chunk[..n]),
+            Err(e) => return Some(e),
+        }
+    }
+}
+
+/// Give a drain [`DRAIN_GRACE`] to finish, then take what it collected.
+///
+/// A read error or a panicked reader is appended to the bytes as a
+/// diagnostic — neither is dropped, and neither replaces the output.
+async fn finish_drain(
+    mut task: tokio::task::JoinHandle<Option<std::io::Error>>,
+    buffer: &Arc<Mutex<Vec<u8>>>,
+) -> Vec<u8> {
+    let note = match tokio::time::timeout(DRAIN_GRACE, &mut task).await {
+        Ok(Ok(None)) => None,
+        Ok(Ok(Some(e))) => Some(format!("spawn: failed to read child output: {e}")),
+        Ok(Err(e)) => Some(format!("spawn: output reader did not finish: {e}")),
+        // The grace elapsed: a surviving grandchild still holds the pipe's
+        // write end, so EOF will not arrive. Abort rather than detach — a
+        // detached reader would hold the pipe for the life of the process —
+        // and say the output may be short rather than call it complete.
+        Err(_) => {
+            task.abort();
+            Some("spawn: output may be incomplete: a surviving child still holds the pipe".to_string())
+        }
+    };
+    let mut bytes = std::mem::take(&mut *buffer.lock().await);
+    if let Some(note) = note {
+        append_line(&mut bytes, note.as_bytes());
+    }
+    bytes
+}
+
+/// Append a line to captured output, adding the separator only when the
+/// bytes already there do not end in one.
+fn append_line(buffer: &mut Vec<u8>, line: &[u8]) {
+    if !buffer.is_empty() && !buffer.ends_with(b"\n") {
+        buffer.push(b'\n');
+    }
+    buffer.extend_from_slice(line);
+    buffer.push(b'\n');
 }
 
 /// Build a result from a child's captured stdout/stderr: stdout keeps binary

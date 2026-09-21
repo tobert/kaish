@@ -23,6 +23,10 @@ record), `ok`, `code`, `out` (worker stdout, trailing newline stripped), `err`
 output, typed) and `timed_out:true` only when present. A timed-out worker
 reports `code` 124.
 
+Read `ok`, not `code`. `code` is the worker's own exit code, and a worker
+whose stdout is binary is `ok:false` with `code` 0 — the refusal is in `ok`
+and `err`.
+
 `ITEM` is **typed**: from a JSON array (jq/`values`/seq/split/glob/find), each
 worker binds the real element — `${ITEM[id]}` subscripts a record, numbers stay
 numbers, `1` ≠ `"1"`. From plain text, one string item per line (blank lines
