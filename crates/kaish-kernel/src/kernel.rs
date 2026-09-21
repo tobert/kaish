@@ -5130,6 +5130,13 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+        // Sticky, like `accumulate_result`'s `did_spill |=`: truncation is a
+        // fact about output already produced, and a later statement in the
+        // body does not untruncate it. `original_code` is assigned, like
+        // `code`, from whichever statement `last_code` came from — see the
+        // same reasoning in `accumulate_result`.
+        let mut did_spill = false;
+        let mut original_code: Option<i64> = None;
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -5163,18 +5170,23 @@ impl Kernel {
                     // substitution's value — `$(cut -f2 f)` is the text `cut`
                     // printed, the same as `$(awk '{print $2}' f)`.
                     last_data = if r.data_is_value { r.data } else { None };
+                            did_spill |= r.did_spill;
+                            original_code = r.original_code;
                         }
                         ControlFlow::Return { value } => {
                             push_out(&mut accumulated_out, &value);
                             accumulated_err.push_str(&value.err);
                             last_code = value.code;
                             last_data = if value.data_is_value { value.data } else { None };
+                            did_spill |= value.did_spill;
+                            original_code = value.original_code;
                             break;
                         }
                         ControlFlow::Exit { code, result: r } => {
                             push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             exit_code = Some(code);
+                            did_spill |= r.did_spill;
                             break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
@@ -5182,6 +5194,8 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = if r.data_is_value { r.data } else { None };
+                            did_spill |= r.did_spill;
+                            original_code = r.original_code;
                         }
                     }
                 }
@@ -5212,6 +5226,8 @@ impl Kernel {
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
         result.data = last_data;
+        result.did_spill = did_spill;
+        result.original_code = original_code;
         Ok(result)
     }
 
