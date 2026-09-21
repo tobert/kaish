@@ -607,6 +607,7 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             }
         };
 
+        let mut interrupted_after_exit = false;
         // On cancel, stop the drain tasks (the child's pipes are gone;
         // late output is lost but predictable death beats partial capture).
         // On normal exit, await drains so we don't lose buffered output.
@@ -620,16 +621,37 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
                 let _ = task.await;
             }
         } else {
-            if let Some(task) = stdout_task {
-                // Ignore join error — the drain task logs its own errors
-                let _ = task.await;
-            }
-            if let Some(task) = stderr_task {
-                let _ = task.await;
+            // The child exited, but a grandchild it left in the background
+            // can hold its pipes open. Wait for EOF, as bash's `$(...)` does,
+            // until a cancel: then signal the process group and stop.
+            let drains = async {
+                if let Some(task) = stdout_task {
+                    // Ignore join error — the drain task logs its own errors
+                    let _ = task.await;
+                }
+                if let Some(task) = stderr_task {
+                    let _ = task.await;
+                }
+            };
+            tokio::pin!(drains);
+            tokio::select! {
+                biased;
+                _ = &mut drains => {}
+                _ = spawn_ctx.cancel.cancelled() => {
+                    interrupted_after_exit = true;
+                    #[cfg(unix)]
+                    signal_leftover_group(kill_target.as_ref(), spawn_ctx.kill_grace);
+                    drain_stop.cancel();
+                    drains.await;
+                }
             }
         }
 
-        let code = crate::kernel::exit_code_from_status(&status);
+        let code = if interrupted_after_exit {
+            130
+        } else {
+            crate::kernel::exit_code_from_status(&status)
+        };
 
         // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
         // result, so `curl url`, `curl url > file.bin`, etc. keep binary
@@ -677,4 +699,22 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         result.err = stderr;
         result
     }
+}
+
+/// SIGTERM what is left of an exited command's process group, then SIGKILL
+/// it after `grace`. The command itself is already reaped, so nothing here
+/// can wait for the group to exit.
+#[cfg(unix)]
+fn signal_leftover_group(target: Option<&crate::pidfd::KillTarget>, grace: std::time::Duration) {
+    use nix::sys::signal::Signal;
+    let Some(target) = target else {
+        return;
+    };
+    target.signal_pg(Signal::SIGTERM);
+    // The group id is the reaped command's pid; `signal_pg` needs only that.
+    let group = crate::pidfd::KillTarget::from_pid(target.pid());
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        group.signal_pg(Signal::SIGKILL);
+    });
 }
