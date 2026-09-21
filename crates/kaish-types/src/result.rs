@@ -160,6 +160,15 @@ pub struct ExecResult {
     /// application-level hints, etc.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baggage: BTreeMap<String, String>,
+    /// Whether this result's `err` has already reached a background job's
+    /// `/v/jobs/N/stderr` stream. Set by whichever site actually published
+    /// the bytes — an external command's live tee, or a leaf dispatch's own
+    /// publish once its redirects apply — so a wrapper that copies this
+    /// result's `err` into its own (`timeout`, an `if`/`for`/`while` body, a
+    /// function return) does not publish the same bytes a second time.
+    /// Internal plumbing, not part of the wire contract: never serialized.
+    #[serde(skip)]
+    pub stderr_published: bool,
 }
 
 impl ExecResult {
@@ -195,6 +204,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
@@ -219,6 +229,7 @@ impl ExecResult {
                 original_code: None,
                 content_type: None,
                 baggage: BTreeMap::new(),
+                stderr_published: false,
             },
         }
     }
@@ -257,6 +268,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
@@ -281,6 +293,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
@@ -309,6 +322,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
@@ -330,6 +344,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
@@ -350,6 +365,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
@@ -372,6 +388,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stderr_published: false,
         }
     }
 
