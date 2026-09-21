@@ -1944,7 +1944,11 @@ impl Kernel {
 
         // Stdout reaches the job's stream from the commands themselves.
         let stderr_jobs = jobs.clone();
+        // Dropped when the writer ends, including after a job-task panic
+        // drops `stderr_tx`: `send_job_result` waits on it before closing.
+        let (stderr_writer_done_tx, stderr_writer_done) = oneshot::channel::<()>();
         let stderr_writer = tokio::spawn(crate::telemetry::bind_current_context(async move {
+            let _done = stderr_writer_done_tx;
             let Some(streams) = stderr_jobs.streams(job_id).await else {
                 return;
             };
@@ -2030,7 +2034,7 @@ impl Kernel {
             jobs.finalize_streams(job_id, &result).await;
             result
         }));
-        send_job_result(task_jobs, job_id, task, result_tx);
+        send_job_result(task_jobs, job_id, task, result_tx, Some(stderr_writer_done));
 
         Ok(job_id)
     }
@@ -3821,7 +3825,7 @@ impl Kernel {
             jobs.finalize_streams(job_id, &result).await;
             result
         }));
-        send_job_result(task_jobs, job_id, task, tx);
+        send_job_result(task_jobs, job_id, task, tx, None);
 
         // The announcement is a shell message, not command output: bash writes
         // it to stderr, and stdout stays clean so `$(cmd &)` captures no shell
@@ -7811,18 +7815,25 @@ fn accumulate_raw_stmt_output(
 
 /// Hand a job task's result to its `JobManager`. A task that panicked ended
 /// without closing the job's streams or producing a result, so this does
-/// both, and publishes the diagnostic it reports.
+/// both, and publishes the diagnostic it reports — after `stderr_writer_done`
+/// says the job's stderr writer task has written what was queued before.
 fn send_job_result(
     jobs: Arc<JobManager>,
     job_id: crate::scheduler::JobId,
     task: tokio::task::JoinHandle<ExecResult>,
     result_tx: tokio::sync::oneshot::Sender<ExecResult>,
+    stderr_writer_done: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
     tokio::spawn(async move {
         let result = match task.await {
             Ok(result) => result,
             Err(error) => {
                 tracing::error!(job_id = %job_id, %error, "background job task ended without a result");
+                if let Some(done) = stderr_writer_done {
+                    // Never sent: the writer drops the sender when it ends,
+                    // and that drop is the signal.
+                    let _ = done.await;
+                }
                 let result = ExecResult::failure(
                     1,
                     format!(

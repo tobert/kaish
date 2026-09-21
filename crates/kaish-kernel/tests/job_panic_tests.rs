@@ -69,3 +69,31 @@ async fn a_panicking_program_job_closes_its_streams_with_the_diagnostic() {
         .expect("program rejected");
     assert_panicked_job_ended(&kernel, id).await;
 }
+
+/// Stderr from statements that ran before the panic stays on the stream,
+/// ahead of the diagnostic. A whole-program job writes it through a writer
+/// task, which must finish before the streams close.
+#[rstest::rstest]
+#[case::program(true)]
+#[case::command(false)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stderr_before_a_panic_precedes_the_diagnostic(#[case] whole_program: bool) {
+    for round in 0..50 {
+        let kernel = kernel();
+        let id = if whole_program {
+            kernel
+                .execute_background_with_options("echo kaish-before-panic >&2; panicker", ExecuteOptions::new())
+                .await
+                .expect("program rejected")
+        } else {
+            kernel
+                .execute("if true; then echo kaish-before-panic >&2; panicker; fi &")
+                .await
+                .expect("spawn failed");
+            JobId(1)
+        };
+        let result = kernel.jobs().wait(id).await.expect("job result");
+        let stderr = String::from_utf8(kernel.jobs().read_stderr(id).await.expect("job")).expect("utf-8");
+        assert_eq!(stderr, format!("kaish-before-panic\n{}", result.err), "round {round}");
+    }
+}
