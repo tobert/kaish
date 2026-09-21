@@ -397,14 +397,18 @@ impl Tool for Spawn {
             capture_to_result(Some(124), stdout, stderr)
         } else if cancelled {
             append_line(&mut stderr, format!("spawn: {}: cancelled", command).as_bytes());
-            // No fixed code here, unlike the timeout arm's 124: the caller's
-            // cancellation token drives the reported code. `exit_code` is
-            // `None` (the child died by SIGKILL), which `capture_to_result`
-            // maps to -1 — a failure, which is what the top-level cancel
-            // normalization (`Kernel::execute_with_options`,
-            // `execute_background_with_options`) needs to see before it
-            // rewrites the final code to the documented 130.
-            capture_to_result(exit_code, stdout, stderr)
+            // 130 is the documented cancellation code (`sleep`'s own
+            // `ctx.cancel` arm returns it the same way). A foreground call
+            // gets 130 either way — `Kernel::execute_with_options`'s
+            // top-level cancel normalization would rewrite any non-ok code
+            // once `ctx.cancel` is observed cancelled — but a background
+            // job (`spawn --command sleep --argv 60 &` then `kill %1`) never
+            // runs that normalization: `execute_background` (kernel.rs)
+            // sends the runner's result straight to `JobManager` with no
+            // cancel-aware rewrite. Reporting 130 here directly, rather than
+            // relying on a normalization only one of spawn's two callers
+            // applies, is what makes `killed:130` true for both.
+            capture_to_result(Some(130), stdout, stderr)
         } else {
             capture_to_result(exit_code, stdout, stderr)
         }

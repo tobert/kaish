@@ -596,6 +596,46 @@ async fn v_jobs_status_reports_killed() {
     assert_eq!(status.text_out().trim(), "killed:130", "err: {}", status.err);
 }
 
+/// kaibo review residual: the `spawn` builtin's cancel arm relied on the
+/// top-level cancel normalization (`Kernel::execute_with_options` rewriting
+/// any non-ok result to 130 once `ctx.cancel` is observed cancelled) rather
+/// than reporting 130 itself. `execute_background` (the `&` job path this
+/// test drives, same as `v_jobs_status_reports_killed` above) never runs
+/// that normalization — it sends the runner's result straight to
+/// `JobManager` — so a `spawn --command sleep --argv 60 &` job killed with
+/// `kill %1` reported the killed child's own absent-exit-code mapping
+/// (`capture_to_result`'s `-1` fallback) instead of the documented
+/// `killed:130` the `sleep` BUILTIN's identical job (above) already reports.
+/// `spawn` must match it.
+///
+/// Needs its own kernel, not the shared `setup()`: `spawn` is an external
+/// command and `KernelConfig::isolated()` (every other test in this file)
+/// refuses those with exit 127 — a real regression here would otherwise be
+/// masked by that refusal, not proven by it.
+#[cfg(all(unix, feature = "subprocess"))]
+#[tokio::test]
+async fn kill_terminates_spawn_background_job_with_130() {
+    let kernel = kaish_kernel::Kernel::new(
+        kaish_kernel::KernelConfig::isolated().with_allow_unwrapped_commands(true),
+    )
+    .expect("failed to create kernel")
+    .into_arc();
+    let start = std::time::Instant::now();
+    let r = kernel
+        .execute("spawn --command sleep --argv 60 & kill %1")
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "kill %1 of a spawn job should succeed: {}", r.err);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "kill must return promptly once the child is killed, took {:?}",
+        start.elapsed()
+    );
+
+    let status = kernel.execute("cat /v/jobs/1/status").await.expect("execute");
+    assert_eq!(status.text_out().trim(), "killed:130", "err: {}", status.err);
+}
+
 /// GH #244: `kill --no-wait %N` returns as soon as the termination is
 /// dispatched; the job unwinds asynchronously and lands on `Killed`.
 #[tokio::test]
