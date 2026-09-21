@@ -6,7 +6,7 @@
 //! discipline, the policy gates, the output limits and JSON binding, and the
 //! text the declaration publishes.
 //!
-//! Every kernel here is built with `allow_external_commands = false`
+//! Every kernel here is built with `allow_unwrapped_commands = false`
 //! (`KernelConfig::isolated()`), so a wrapper that runs proves it runs *as a
 //! registered tool* and not through the external-command path.
 //!
@@ -381,7 +381,7 @@ async fn a_wrapper_runs_in_a_kernel_where_an_external_command_does_not() {
     let external = run(&kernel, "/bin/true").await;
     assert_ne!(
         external.code, 0,
-        "allow_external_commands=false must still refuse /bin/true: {}",
+        "allow_unwrapped_commands=false must still refuse /bin/true: {}",
         external.text_out()
     );
 }
@@ -413,7 +413,7 @@ async fn oversize_stdout_is_capped_the_same_way_an_external_commands_is() {
     let external_kernel = kernel_with_config(
         dir.path(),
         Vec::new(),
-        small_limit().with_allow_external_commands(true),
+        small_limit().with_allow_unwrapped_commands(true),
     );
     let external = run(&external_kernel, "/bin/cat big.txt").await;
 

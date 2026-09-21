@@ -92,10 +92,10 @@ passthrough (REPL) mode `/dev` is the real host `/dev` instead.
 
 **External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, and `spawn` access the real filesystem directly.
 
-To block external command execution, set `allow_external_commands=false` in `KernelConfig`:
+To block external command execution, set `allow_unwrapped_commands=false` in `KernelConfig`:
 
 ```rust
-KernelConfig::agent().with_allow_external_commands(false)
+KernelConfig::agent().with_allow_unwrapped_commands(false)
 ```
 
 When disabled, PATH lookups return "command not found" and the `exec`/`spawn` builtins return errors. `KernelConfig::isolated()` sets this to `false` by default.
