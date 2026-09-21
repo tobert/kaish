@@ -16,8 +16,38 @@ breaking entries are marked **BREAKING**.
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
   job stream after each top-level statement.
+- **`JobInfo.did_spill` / `JobInfo.original_code`** — a finished job now says
+  whether its exit code is its command's own. `failed:3` stays the status
+  string for a spilled job and a real exit 3; these two separate them, in
+  `jobs --json` as well.
+- **`kaish --plan` reports a `warnings` array** when the validator has
+  something to say about a program it will still run. The first entry is
+  W008, a literal operand a `[[ ]]` numeric comparison will refuse.
 
 ### Fixed
+
+- `spawn --timeout` keeps what the child already wrote. A child that printed
+  a diagnostic and then hung reported 124 and nothing else; the partial
+  stdout and stderr now ride the 124, with the timeout line after them.
+- A child killed by a signal inside its `spawn --timeout` is no longer
+  reported as a timeout. It had returned 124 and a "timed out" line for a
+  segfault, because a signal death and an expiry read the same.
+- `patch` refuses a byte offset inside a multi-byte character instead of
+  aborting the kernel. `Insert { offset: 1 }` into a file starting with `é`
+  took the process down; it names the character the offset splits now.
+- `patch` refuses line 0 rather than editing line 1. `PatchOp`'s line
+  operations are 1-indexed and 0 was silently mapped onto the first line.
+- A wrapped command refuses `json_output()` on a verb with children. A node
+  never runs, so the declaration was accepted at `build()` and ignored
+  everywhere after, while the schema still published `typed_substitution`.
+- A gather row keeps the worker's own exit code when its stdout is binary.
+  The row was forced to a nonzero `code` the worker never returned; `ok:false`
+  and `err` carry the refusal, and the aggregate is still 123.
+- A fault inside `$(...)` names both assignments. `y=$(x=$((1/0)))` reported
+  "failed to evaluate assignment" twice with nothing to tell the two apart;
+  each frame names its target now.
+- A validation advisory survives a fault in the same program. A program that
+  warned and then faulted handed back an error with the warning missing.
 
 - An embedder tool's stdout and a tool's `--help` text now reach a background
   job's stdout stream. `embedder_tool &` and `ls --help &` left
