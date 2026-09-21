@@ -242,11 +242,36 @@ impl Tool for Spawn {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
+        // Put the child in its own process group, same mechanism the
+        // shared spawner uses (`crate::spawn::spawn_process`'s
+        // `setpgid(0, 0)` in `pre_exec`, also duplicated in
+        // `dispatch.rs`) — so a timeout's kill below can reach a
+        // grandchild the child backgrounded (`sh -c 'sleep 100 & wait'`),
+        // not just the direct child. Without this, `--timeout` killed the
+        // direct child and left the grandchild running, and if the
+        // grandchild still held the stdout/stderr pipe open, the drains
+        // below never reached EOF either.
+        #[cfg(unix)]
+        // SAFETY: setpgid is async-signal-safe per POSIX; safe to call
+        // between fork and exec.
+        #[allow(unsafe_code)]
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+            });
+        }
+
         // Spawn the process
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => return ExecResult::failure(127, format!("spawn: {}: {}", command, e)),
         };
+        // Captured right after spawn, before any wait/kill can reap the
+        // child and clear `Child::id()`. `setpgid(0, 0)` above makes this
+        // pid double as the child's own process-group id.
+        #[cfg(unix)]
+        let child_pgid = child.id().map(|id| nix::unistd::Pid::from_raw(id as i32));
 
         // Write stdin if present
         if let Some(data) = stdin_data
@@ -281,8 +306,22 @@ impl Tool for Spawn {
                 Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
                 Err(_) => {
                     // Kill first: a reader reaches EOF only once every write
-                    // end of the pipe is closed.
-                    match child.start_kill() {
+                    // end of the pipe is closed. Kill the whole process
+                    // group — `child.start_kill()` alone only reaches the
+                    // direct child, and a grandchild it backgrounded (and
+                    // any pipe write-end fd that grandchild inherited)
+                    // would otherwise survive the timeout.
+                    #[cfg(unix)]
+                    let kill_result = match child_pgid {
+                        Some(pgid) => nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
+                            .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
+                        // No pid to target (spawn raced a reap) — nothing
+                        // left to kill.
+                        None => Ok(()),
+                    };
+                    #[cfg(not(unix))]
+                    let kill_result = child.start_kill();
+                    match kill_result {
                         // Unreachable for an unreaped child on Unix. Report
                         // it and skip the wait, which would have nothing to
                         // reap; `kill_on_drop` is still the backstop.
@@ -298,13 +337,15 @@ impl Tool for Spawn {
             };
 
             // Bounded join. The child is reaped, so everything it wrote is
-            // already in the pipe buffer and the drains need only a moment to
-            // pick it up — but this child was never put in its own process
-            // group, so a grandchild that inherited the write end keeps EOF
-            // from ever arriving. Awaiting EOF made `--timeout 300` return
-            // when the GRANDCHILD exited, which is not a timeout at all. The
-            // grace collects what is there and then stops waiting; the bytes
-            // are in the shared buffers either way.
+            // already in the pipe buffer and the drains need only a moment
+            // to pick it up. On Unix the process-group kill above reaches
+            // a grandchild too, closing its copy of the write end — but
+            // the kill and the drain race, and on a non-Unix target
+            // `start_kill()` only ever reached the direct child, so a
+            // grandchild holding the write end could still keep EOF from
+            // arriving. The grace collects what is there and then stops
+            // waiting either way; the bytes are in the shared buffers
+            // regardless.
             let stdout = finish_drain(stdout_task, &captured_stdout).await;
             let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
 
@@ -682,6 +723,56 @@ mod tests {
         assert!(!result.ok());
         assert_eq!(result.code, 124); // Timeout exit code
         assert!(result.err.contains("timed out"));
+    }
+
+    /// GH review residual: `spawn --timeout` used `Child::start_kill()`,
+    /// which only signals the direct child — a grandchild the child
+    /// backgrounded (`sh -c 'sleep 5 & wait'`) kept running past the
+    /// timeout. The fix puts the child in its own process group
+    /// (`setpgid(0, 0)` in `pre_exec`, the same mechanism
+    /// `crate::spawn::spawn_process` uses) and kills the whole group on
+    /// timeout, so the grandchild dies too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_a_grandchild_the_child_backgrounded() {
+        let mut ctx = make_ctx();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("grandchild.pid");
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/sh".into()));
+        args.named.insert(
+            "argv".to_string(),
+            Value::String(format!(
+                r#"["-c", "sleep 5 & echo $! > {} ; wait"]"#,
+                pid_file.display()
+            )),
+        );
+        // Well before the grandchild's own 5s sleep would finish on its own.
+        args.named.insert("timeout".to_string(), Value::Int(300));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 124, "must report a timeout: {result:?}");
+
+        let grandchild_pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("grandchild pid file")
+            .trim()
+            .parse()
+            .expect("pid file holds a pid");
+
+        // The group kill and the OS actually reaping the process are not
+        // synchronous with `spawn`'s return — poll briefly, bounded.
+        let pid = nix::unistd::Pid::from_raw(grandchild_pid);
+        let alive = |p: nix::unistd::Pid| nix::sys::signal::kill(p, None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !alive(pid),
+            "grandchild pid {grandchild_pid} must be gone after the timeout's process-group kill"
+        );
     }
 
     #[tokio::test]
