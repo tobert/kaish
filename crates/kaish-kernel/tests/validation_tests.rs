@@ -879,3 +879,50 @@ fn w008_stays_quiet_where_the_value_is_not_in_the_source() {
         );
     }
 }
+
+/// The same comparison written through the `test` builtin — `[[ ]]` and
+/// `test` share one set of numeric operators (docs/LANGUAGE.md, "Three
+/// spellings"), so a literal, non-numeric operand must be caught the same
+/// way through either spelling.
+#[test]
+fn a_literal_operand_a_numeric_comparison_refuses_is_reported_through_test() {
+    for source in [
+        r#"test "abc" -eq 1"#,
+        "test 010 -eq 10",
+        "test inf -gt 1",
+        r#"test 1 -lt "nope""#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+        assert_eq!(
+            reported[0].severity,
+            kaish_kernel::validator::Severity::Warning,
+            "{source}: a warning, never an error — the runtime refuses it as a result",
+        );
+    }
+}
+
+/// Same quiet cases as `[[ ]]`, through `test`: nothing computed, and
+/// nothing outside a numeric op.
+#[test]
+fn w008_stays_quiet_through_test_where_the_value_is_not_in_the_source() {
+    for source in [
+        r#"x=abc; test "$x" -eq 1"#,
+        r#"test $(echo abc) -eq 1"#,
+        r#"test "abc" == "abc""#,
+        "test 1 -eq 1",
+        r#"test "1.5" -gt 1"#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand),
+            "{source} must not warn: {issues:?}",
+        );
+    }
+}

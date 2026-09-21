@@ -127,7 +127,7 @@ impl Tool for Test {
             _ => None,
         };
 
-        match found {
+        let mut issues: Vec<ValidationIssue> = match found {
             Some(op) => vec![
                 ValidationIssue::error(
                     IssueCode::TestCompoundOperator,
@@ -137,7 +137,17 @@ impl Tool for Test {
                 .with_command(self.name()),
             ],
             None => Vec::new(),
-        }
+        };
+
+        // `[[ abc -eq 1 ]]` is caught by the validator's W008 check
+        // (`validator/walker.rs`); the same comparison written through
+        // `test` was not. `rest` already lines up 1:1 with `args.positional`
+        // sliced by the same leading-`!` skip, so the typed operands sit at
+        // the same offset the string `rest` does.
+        let skip = words.len() - rest.len();
+        issues.extend(numeric_literal_operand_issues(&args.positional[skip..]));
+
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -193,6 +203,44 @@ fn is_compound_op(s: &str) -> bool {
 
 const COMPOUND_HINT: &str =
     "kaish `test` has no -a/-o/() compound — chain with shell `&&`/`||` or use `[[ ... ]]`";
+
+/// Report a literal operand a numeric `test` op will refuse — same
+/// `IssueCode`, same runtime refusal function (`numeric_operand_refusal`), and
+/// same wording as the validator's `[[ ]]` counterpart
+/// (`walker::check_numeric_literal_operand`), so `test abc -eq 1` is caught
+/// exactly like `[[ abc -eq 1 ]]`.
+///
+/// `operands` is already sliced to the leading-`!`-stripped primary; only the
+/// three-operand shape (`LEFT OP RIGHT`) has operand slots to check. A
+/// dynamic operand (`$x`, `$(cmd)`) never reaches here — `validate` returns
+/// early on any `<dynamic>` placeholder before this is called.
+fn numeric_literal_operand_issues(operands: &[Value]) -> Vec<ValidationIssue> {
+    if operands.len() != 3 {
+        return Vec::new();
+    }
+    let op = crate::interpreter::value_to_string(&operands[1]);
+    if !is_numeric_binary_op(&op) {
+        return Vec::new();
+    }
+    [&operands[0], &operands[2]]
+        .into_iter()
+        .filter_map(|operand| {
+            let reason = crate::interpreter::numeric_operand_refusal(operand)?;
+            Some(
+                ValidationIssue::warning(
+                    IssueCode::NonNumericTestOperand,
+                    format!("this comparison cannot succeed: {reason}"),
+                )
+                .with_suggestion("compare with `==` for text, or give the operand a numeric value")
+                .with_command("test"),
+            )
+        })
+        .collect()
+}
+
+fn is_numeric_binary_op(s: &str) -> bool {
+    matches!(s, "-eq" | "-ne" | "-gt" | "-lt" | "-ge" | "-le")
+}
 
 fn is_any_op(s: &str) -> bool {
     is_unary_op(s) || is_binary_op(s) || is_compound_op(s) || s == "!"
