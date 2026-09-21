@@ -98,6 +98,6 @@ To block external command execution, set `allow_unwrapped_commands=false` in `Ke
 KernelConfig::agent().with_allow_unwrapped_commands(false)
 ```
 
-When disabled, PATH lookup, `exec`, `spawn`, and `env CMD` are all refused with "external commands are disabled on this shell" (exit 127; `exec`/`spawn` exit 1) — never "command not found", which stays reserved for a name that genuinely isn't resolvable. `KernelConfig::isolated()` sets this to `false` by default.
+When disabled, PATH lookup, `exec`, `spawn`, and `env CMD` are all refused with "external commands are disabled on this shell" and exit 127 — never "command not found", which stays reserved for a name that genuinely isn't resolvable. `KernelConfig::isolated()` sets this to `false` by default.
 
 Prefer builtins over external commands — kaish's in-process builtins (grep, sed, jq, etc.) respect VFS boundaries.

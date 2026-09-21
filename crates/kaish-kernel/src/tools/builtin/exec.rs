@@ -20,9 +20,9 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{exec_context, 
-    schema_from_clap, ExternalCommandsUnavailable, GlobalFlags, Tool, ToolArgs,
-    ToolCtx, ToolSchema,
+use crate::tools::{exec_context,
+    external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable,
+    GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema,
 };
 
 use super::spawn::resolve_in_path;
@@ -82,11 +82,9 @@ impl Tool for Exec {
             // compiled in (tools/builtin/mod.rs), so reaching here always
             // means the runtime config turned it off, never that the
             // capability is missing — `ConfiguredOff` is the only reachable
-            // reason.
-            return ExecResult::failure(
-                1,
-                format!("exec: {}", ExternalCommandsUnavailable::ConfiguredOff.condition()),
-            );
+            // reason. Exit 127, same as PATH lookup and `env CMD` — one
+            // refusal shape for all four gated sites.
+            return external_commands_unavailable_error("exec", ExternalCommandsUnavailable::ConfiguredOff);
         }
 
         // First positional is the command, rest are argv. A binary command

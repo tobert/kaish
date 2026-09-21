@@ -1021,10 +1021,9 @@ OS processes). Two gates:
   doesn't exist.
 - Runtime: `allow_unwrapped_commands = false` in `KernelConfig` — PATH
   lookup, `exec`, `spawn`, and `env CMD` are refused before anything runs,
-  with "external commands are disabled on this shell" and exit 127 (`exec`
-  and `spawn` use exit 1 for the same refusal). None of these fall back to
-  "command not found" — that message stays reserved for a name that
-  genuinely isn't resolvable. `KernelConfig::isolated()` sets this by
+  all four with "external commands are disabled on this shell" and exit 127.
+  None of these fall back to "command not found" — that message stays
+  reserved for a name that genuinely isn't resolvable. `KernelConfig::isolated()` sets this by
   default.
 
 ### Preflighting a script for external commands

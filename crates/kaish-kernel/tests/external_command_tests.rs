@@ -994,6 +994,53 @@ async fn disabled_external_commands_report_the_condition_not_command_not_found()
     );
 }
 
+// ---------------------------------------------------------------------------
+// `exec` and `spawn` refuse the same way PATH lookup and `env CMD` do: exit
+// 127, "external commands are disabled on this shell" — not exit 1. Before
+// this fix the two builtins used exit 1 for the identical refusal, an
+// inconsistency Amy asked to close (see the doc note this fix updates in
+// docs/EMBEDDING.md and vfs.md).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn disabled_exec_refuses_with_127_not_one() {
+    let config = KernelConfig::repl().with_allow_unwrapped_commands(false);
+    let kernel = Kernel::new(config).expect("kernel with external commands disabled");
+
+    let result = kernel.execute("exec /bin/sh -c true").await.expect("execute");
+
+    assert_eq!(
+        result.code, 127,
+        "exec's policy refusal must match the other three gated sites: {result:?}"
+    );
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        msg.contains("external commands are disabled on this shell"),
+        "the refusal should name the actual condition: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn disabled_spawn_refuses_with_127_not_one() {
+    let config = KernelConfig::repl().with_allow_unwrapped_commands(false);
+    let kernel = Kernel::new(config).expect("kernel with external commands disabled");
+
+    let result = kernel
+        .execute("spawn --command /bin/echo --argv hello")
+        .await
+        .expect("execute");
+
+    assert_eq!(
+        result.code, 127,
+        "spawn's policy refusal must match the other three gated sites: {result:?}"
+    );
+    let msg = format!("{}{}", result.text_out(), result.err);
+    assert!(
+        msg.contains("external commands are disabled on this shell"),
+        "the refusal should name the actual condition: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn enabled_external_commands_still_report_not_found_for_a_missing_command() {
     // Control for the test above: proves the fix didn't just relabel every

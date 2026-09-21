@@ -16,7 +16,7 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::ValidationIssue;
 
 /// Env tool: print environment or run command with modified environment.
@@ -215,9 +215,9 @@ impl Tool for Env {
             // went straight to `tokio::process::Command`, so a kernel built
             // with external commands turned off still ran the host binary.
             if !ctx.allow_unwrapped_commands {
-                return ExecResult::failure(
-                    127,
-                    format!("env: {command}: external commands are disabled on this shell"),
+                return external_commands_unavailable_error(
+                    &format!("env: {command}"),
+                    ExternalCommandsUnavailable::ConfiguredOff,
                 );
             }
             return execute_with_env(
@@ -235,11 +235,9 @@ impl Tool for Env {
         {
             let _ = (&cmd_args, &env_overrides, &unset_vars, clear_env);
             let _ = ctx;
-            return ExecResult::failure(
-                127,
-                format!(
-                    "env: {command}: external commands are not available in this build of the shell"
-                ),
+            return external_commands_unavailable_error(
+                &format!("env: {command}"),
+                ExternalCommandsUnavailable::NotCompiled,
             );
         }
     }
