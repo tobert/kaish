@@ -2625,10 +2625,8 @@ impl Kernel {
                     // Earlier statements already streamed; the faulting
                     // statement's partial output has not.
                     let mut partial = ExecResult::success("");
-                    partial.err = {
-                        let mut receiver = self.stderr_receiver.lock().await;
-                        receiver.drain_lossy()
-                    };
+                    self.drain_stderr_onto(&mut partial.err, &mut partial.stderr_published_len, &root_ctx, false)
+                        .await;
                     let error = with_prior_output(partial, error);
                     if let Some(carrier) = error.downcast_ref::<crate::error::FaultWithOutput>() {
                         on_output(&carrier.output);
@@ -2637,9 +2635,7 @@ impl Kernel {
                     // returns below prepend it and this one did not, so a
                     // program that both warned and faulted lost the warning
                     // from the error it handed back.
-                    if !surfaced_warnings.is_empty() {
-                        result.err = format!("{surfaced_warnings}{}", result.err);
-                    }
+                    prepend_stderr(&root_ctx, &surfaced_warnings, &mut result).await;
                     return Err(with_prior_output(std::mem::take(&mut result), error));
                 }
             };
@@ -2647,10 +2643,10 @@ impl Kernel {
             // Drain any stderr written by pipeline stages during this statement.
             // This captures stderr from intermediate pipeline stages that would
             // otherwise be lost (only the last stage's result is returned).
-            let drained_stderr = {
-                let mut receiver = self.stderr_receiver.lock().await;
-                receiver.drain_lossy()
-            };
+            let mut drained_stderr = String::new();
+            let mut drained_published_len = 0;
+            self.drain_stderr_onto(&mut drained_stderr, &mut drained_published_len, &root_ctx, false)
+                .await;
 
             match flow {
                 ControlFlow::Normal(mut r) => {
@@ -2659,8 +2655,8 @@ impl Kernel {
                             r.err.push('\n');
                         }
                         // Prepend pipeline stderr before the last stage's stderr
-                        let combined = format!("{}{}", drained_stderr, r.err);
-                        r.err = combined;
+                        join_drained_stderr(&drained_stderr, drained_published_len, &mut r);
+                        root_ctx.publish_job_stderr(&mut r).await;
                     }
                     on_output(&r);
                     // Carry the last statement's structured output for MCP TOON encoding.
@@ -2672,47 +2668,35 @@ impl Kernel {
                 }
                 ControlFlow::Exit { code, result: mut carried } => {
                     // Into `carried`, as the other arms do, so `on_output` sees it.
-                    if !drained_stderr.is_empty() {
-                        carried.err = format!("{}{}", drained_stderr, carried.err);
-                    }
+                    join_drained_stderr(&drained_stderr, drained_published_len, &mut carried);
                     // Output produced before the exit — e.g. by the loop the
                     // `exit` ran inside — arrives on the signal. Emit it like
                     // any other statement's, then let `code` decide the status.
                     on_output(&carried);
                     accumulate_result(&mut result, &carried);
                     result.code = code;
-                    if !surfaced_warnings.is_empty() {
-                        result.err = format!("{surfaced_warnings}{}", result.err);
-                    }
+                    prepend_stderr(&root_ctx, &surfaced_warnings, &mut result).await;
                     return Ok(result);
                 }
                 ControlFlow::Return { mut value } => {
-                    if !drained_stderr.is_empty() {
-                        value.err = format!("{}{}", drained_stderr, value.err);
-                    }
+                    join_drained_stderr(&drained_stderr, drained_published_len, &mut value);
                     on_output(&value);
                     // A top-level `return` stops the script, like `exit` —
                     // it must not discard prior statements' accumulated
                     // output nor let execution continue past it.
                     accumulate_result(&mut result, &value);
-                    if !surfaced_warnings.is_empty() {
-                        result.err = format!("{surfaced_warnings}{}", result.err);
-                    }
+                    prepend_stderr(&root_ctx, &surfaced_warnings, &mut result).await;
                     return Ok(result);
                 }
                 ControlFlow::Break { result: mut r, .. } | ControlFlow::Continue { result: mut r, .. } => {
-                    if !drained_stderr.is_empty() {
-                        r.err = format!("{}{}", drained_stderr, r.err);
-                    }
+                    join_drained_stderr(&drained_stderr, drained_published_len, &mut r);
                     on_output(&r);
                     accumulate_result(&mut result, &r);
                 }
             }
         }
 
-        if !surfaced_warnings.is_empty() {
-            result.err = format!("{surfaced_warnings}{}", result.err);
-        }
+        prepend_stderr(&root_ctx, &surfaced_warnings, &mut result).await;
         Ok(result)
     }
 
@@ -7816,6 +7800,36 @@ fn accumulate_raw_stmt_output(
         None => accumulated_out.extend_from_slice(new.text_out().as_bytes()),
     }
     append_stderr(accumulated_err, stderr_published_len, &new.err, new.stderr_published_len);
+}
+
+/// Put drained channel text ahead of a statement's own stderr. In a
+/// publishing context the drain published it, so the prefix stays published.
+fn join_drained_stderr(drained: &str, drained_published_len: usize, result: &mut ExecResult) {
+    if drained.is_empty() {
+        return;
+    }
+    let mut err = drained.to_string();
+    let mut published_len = drained_published_len;
+    append_stderr(&mut err, &mut published_len, &result.err, result.stderr_published_len);
+    result.err = err;
+    result.stderr_published_len = published_len;
+}
+
+/// Put `text` ahead of `result.err`, publishing it first in a publishing
+/// context so the published part stays a prefix.
+async fn prepend_stderr(ctx: &ExecContext, text: &str, result: &mut ExecResult) {
+    if text.is_empty() {
+        return;
+    }
+    let mut err = text.to_string();
+    let mut published_len = 0;
+    if ctx.publishes_job_stderr() {
+        ctx.write_job_stderr(text.as_bytes()).await;
+        published_len = err.len();
+    }
+    append_stderr(&mut err, &mut published_len, &result.err, result.stderr_published_len);
+    result.err = err;
+    result.stderr_published_len = published_len;
 }
 
 /// The part of `err` a job's stderr stream does not hold yet.

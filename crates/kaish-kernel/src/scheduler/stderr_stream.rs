@@ -96,16 +96,10 @@ impl StderrReceiver {
     /// Returns an empty string if no messages are pending.
     /// Non-blocking — returns immediately with whatever is available.
     ///
-    /// For a context that never publishes to a job's stderr stream: a chunk
-    /// that was already published there panics, because this drain cannot
-    /// account for it.
+    /// Text only: how much of it a job's stream already holds is dropped.
+    /// The kernel drains with `drain_chunks`, which keeps that count.
     pub fn drain_lossy(&mut self) -> String {
-        let chunks = self.drain_chunks();
-        assert!(
-            chunks.iter().all(|chunk| chunk.published_len == 0),
-            "a published stderr chunk reached a drain that cannot account for it"
-        );
-        lossy_text(&chunks)
+        lossy_text(&self.drain_chunks())
     }
 
     /// Drain all pending chunks, keeping each one's published length.

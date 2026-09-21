@@ -232,3 +232,27 @@ async fn capture_overflow_marker_reaches_the_stream_once() {
     assert_eq!(streams.stderr.matches(marker).count(), 1, "the stream carries the marker once");
     assert!(streams.stderr.trim_end().ends_with("to spill to disk]"), "the marker follows the live bytes");
 }
+
+/// `Kernel::fork_for_background` is public. An embedder that runs a script
+/// on such a fork runs it in a publishing context through `execute`, whose
+/// statement loop joins drained stderr to each statement's own. That join
+/// must account for what was already published, not assume nothing was.
+#[tokio::test]
+async fn execute_on_a_background_fork_publishes_its_stderr_once() {
+    let kernel = kernel().into_arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let id = kernel.jobs().register("embedder job".to_string(), rx).await;
+    let fork = kernel
+        .fork_for_background(tokio_util::sync::CancellationToken::new(), id)
+        .await;
+    let result = fork
+        .execute("cat /kaish-fork-stage | wc -l; echo \"$(cat /kaish-fork-sub)\" 2>/dev/null; cat /kaish-fork-own")
+        .await
+        .expect("execute on a background fork");
+    let stream = String::from_utf8(kernel.jobs().read_stderr(id).await.expect("job must exist")).expect("utf-8");
+    for marker in ["kaish-fork-stage", "kaish-fork-sub", "kaish-fork-own"] {
+        assert_eq!(result.err.matches(marker).count(), 1, "{marker} in result {:?}", result.err);
+        assert_eq!(stream.matches(marker).count(), 1, "{marker} in stream {stream:?}");
+    }
+    assert_eq!(stream, result.err);
+}
