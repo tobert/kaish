@@ -3688,7 +3688,7 @@ fn tokenize_impl(
         "replacement table must be ordered by new_start"
     );
 
-    let mut tokens = Vec::new();
+    let mut tokens: Vec<Spanned<Token>> = Vec::new();
     let mut errors = Vec::new();
     for (result, span) in Token::lexer(&scan_output.text).spanned() {
         // A token that scans for its own terminator (`"`, `${`) reads to
@@ -3708,6 +3708,22 @@ fn tokenize_impl(
                 if !keep_comments
                     && matches!(token, Token::Comment | Token::LineContinuation)
                 {
+                    // A dropped line continuation vanishes from the source
+                    // bash reads too — `!\<newline>true` is `!true` before
+                    // bash even tokenizes it. If this continuation sits
+                    // flush against the token just pushed (no real
+                    // whitespace ahead of it), widen that token's span to
+                    // swallow it, so every span-adjacency check downstream
+                    // (the glued-`!` guard, the glued-argv guard) sees the
+                    // same zero gap bash would. A real space before the
+                    // continuation (`! \<newline>true`) leaves a real gap
+                    // here too, and is untouched.
+                    if matches!(token, Token::LineContinuation)
+                        && let Some(last) = tokens.last_mut()
+                        && last.span.end == span.start
+                    {
+                        last.span.end = span.end;
+                    }
                     continue;
                 }
                 // Rewritten-buffer spans here; mapped to original

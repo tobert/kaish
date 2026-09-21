@@ -538,6 +538,81 @@ fn ordinary_glued_argument_keeps_its_pre_existing_error() {
     }
 }
 
+// ── A line continuation must not evade the glued-`!` guard ─────────────────
+//
+// `tokenize` drops `Token::LineContinuation` from the stream it hands the
+// parser, but used to keep the original byte spans either side of it — so
+// `!\<newline>true` measured a 2-byte gap between `!` and `true` and read as
+// spaced, silently negating. bash removes a backslash-newline before it even
+// tokenizes, so `!\<newline>true` IS `!true`: one glued word. Fixed at the
+// lexer: a `LineContinuation` flush against the token just kept widens that
+// token's span to swallow it, so the parser's span-adjacency check sees the
+// same zero gap bash would.
+
+#[test]
+fn glued_bang_across_a_line_continuation_is_refused() {
+    // "!" + "\" + "\n" + "true" — the continuation is flush against `!`,
+    // so removing it (as bash does) leaves `!true`, fully glued.
+    let errors = parse("!\\\ntrue").expect_err("a line continuation must not hide the glue");
+    assert!(
+        errors[0].message.contains("!true"),
+        "must report the same glued text as `!true`: {errors:?}"
+    );
+}
+
+/// Control: a REAL space before the continuation is still a real space —
+/// this must keep parsing, proving the fix above checks for the continuation
+/// specifically, not for any nonzero byte gap.
+#[test]
+fn a_real_space_before_a_line_continuation_still_negates() {
+    // "!" + " " + "\" + "\n" + "true"
+    parse("! \\\ntrue").expect("a real space before the continuation must still negate");
+}
+
+// ── A glued `!` inside `$(...)` must surface its own message ───────────────
+//
+// A purpose-built parse diagnosis raised while re-parsing a `$(...)` body
+// can lose its own message to chumsky's `choice`/alternative bookkeeping in
+// favor of a generic one — the same loss `validate_cmd_subst_bodies` exists
+// to undo for a bare, unquoted `$(...)`. A glued `!` inside a QUOTED
+// `"$(...)"` or a heredoc body took a different, still-lossy path: parsing
+// the body recursively and, on failure, discarding the real error for a
+// generic "syntax error in command substitution" wrapper. Fixed by naming
+// the real error's message inside that wrapper instead of discarding it.
+
+#[test]
+fn glued_bang_inside_a_bare_command_substitution_surfaces_its_message() {
+    // The bare, unquoted form already went through `validate_cmd_subst_bodies`,
+    // which re-parses with the real grammar and propagates its own error —
+    // a control proving the quoted/heredoc forms below were the exception,
+    // not the rule.
+    let errors = parse("echo $(!true)").expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("!true") && errors[0].message.contains("needs a space"),
+        "the bare form must surface the glued-`!` message, not a generic one: {errors:?}"
+    );
+}
+
+#[test]
+fn glued_bang_inside_a_quoted_command_substitution_surfaces_its_message() {
+    let errors = parse(r#"echo "$(!true)""#).expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("!true") && errors[0].message.contains("needs a space"),
+        "a quoted $(...) must surface the glued-`!` message, not a generic \
+         \"syntax error in command substitution\": {errors:?}"
+    );
+}
+
+#[test]
+fn glued_bang_inside_a_heredoc_command_substitution_surfaces_its_message() {
+    let errors =
+        parse("cat <<EOF\n$(!true)\nEOF\n").expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("!true") && errors[0].message.contains("needs a space"),
+        "a heredoc body's $(...) must surface the glued-`!` message: {errors:?}"
+    );
+}
+
 #[test]
 fn parser_if_command_with_args() {
     // Command with arguments as condition

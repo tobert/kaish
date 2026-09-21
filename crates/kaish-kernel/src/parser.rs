@@ -662,24 +662,35 @@ fn parse_interpolated_string_spanned(
                 // string scanner mis-reads `stamp = "$(date +%s)"` as
                 // unterminated. The escape models genuinely differ, which is
                 // why this sibling exists at all.
-                let inserted = if let Ok(program) = parse(&cmd_content) {
-                    // The full statement block runs as the substitution body
-                    // (pipelines, `&&`/`||`, `;`/newline sequences, comments).
-                    let stmts = strip_empty_stmts(program.statements);
-                    if stmts.is_empty() {
-                        false
-                    } else {
-                        parts.push(SpannedPart {
-                            part: StringPart::CommandSubst(stmts),
-                            offset: base_offset + part_start,
-                            len: pos - part_start,
-                        });
-                        true
+                let inserted = match parse(&cmd_content) {
+                    Ok(program) => {
+                        // The full statement block runs as the substitution
+                        // body (pipelines, `&&`/`||`, `;`/newline sequences,
+                        // comments).
+                        let stmts = strip_empty_stmts(program.statements);
+                        if stmts.is_empty() {
+                            false
+                        } else {
+                            parts.push(SpannedPart {
+                                part: StringPart::CommandSubst(stmts),
+                                offset: base_offset + part_start,
+                                len: pos - part_start,
+                            });
+                            true
+                        }
                     }
-                } else {
-                    return Err(format!(
-                        "syntax error in command substitution: $({cmd_content})"
-                    ));
+                    // Name the REAL problem, not a generic wrapper — a
+                    // glued `!` (or any other purpose-built diagnosis) inside
+                    // a quoted `$(...)` used to lose its own message here,
+                    // the same class of loss `validate_cmd_subst_bodies`
+                    // exists to undo for the unquoted form.
+                    Err(errs) => {
+                        let detail =
+                            errs.first().map(|e| e.message.as_str()).unwrap_or("syntax error");
+                        return Err(format!(
+                            "syntax error in command substitution: $({cmd_content}): {detail}"
+                        ));
+                    }
                 };
                 if inserted {
                     // Successfully pushed a CommandSubst; the next literal
@@ -953,12 +964,17 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                             parts.push(StringPart::CommandSubst(stmts));
                         }
                     }
-                    Err(_) => {
+                    Err(errs) => {
                         // A syntax error inside the substitution is loud, exactly
                         // like the unquoted `$(...)` form — never silently demoted
-                        // to literal text.
+                        // to literal text. Name the REAL problem, not a generic
+                        // wrapper — a glued `!` (or any other purpose-built
+                        // diagnosis) inside a quoted `$(...)` used to lose its
+                        // own message here.
+                        let detail =
+                            errs.first().map(|e| e.message.as_str()).unwrap_or("syntax error");
                         return Err(format!(
-                            "syntax error in command substitution: $({cmd_content})"
+                            "syntax error in command substitution: $({cmd_content}): {detail}"
                         ));
                     }
                 }
