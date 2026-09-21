@@ -171,6 +171,32 @@ mod tests {
         );
     }
 
+    /// The spill facts reach `jobs --json`, which is where an embedder reads
+    /// them. `job_rows_json` serializes `JobInfo` whole, so this pins the
+    /// serde surface the field docs promise rather than the struct alone.
+    #[test]
+    fn job_rows_json_carries_the_spill_facts() {
+        use crate::scheduler::{JobId, JobStatus};
+
+        let rows = job_rows_json(&[JobInfo::new(JobId(1), "seq 1 5000", JobStatus::Failed)
+            .with_exit_code(Some(3))
+            .with_spill(true, Some(0))]);
+        assert_eq!(rows[0]["exit_code"], 3, "{}", rows[0]);
+        assert_eq!(rows[0]["did_spill"], true, "{}", rows[0]);
+        assert_eq!(
+            rows[0]["original_code"], 0,
+            "the code the command actually returned: {}",
+            rows[0]
+        );
+
+        // A job that genuinely exited 3 carries neither key, so a reader can
+        // tell the two apart on presence alone.
+        let genuine = job_rows_json(&[JobInfo::new(JobId(2), "three", JobStatus::Failed)
+            .with_exit_code(Some(3))]);
+        assert!(genuine[0].get("did_spill").is_none(), "{}", genuine[0]);
+        assert!(genuine[0].get("original_code").is_none(), "{}", genuine[0]);
+    }
+
     #[tokio::test]
     async fn test_jobs_no_manager() {
         let mut ctx = make_ctx();

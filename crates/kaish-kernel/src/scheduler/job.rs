@@ -476,6 +476,13 @@ impl Job {
     /// the call sites can't drift on which fields they remember to set.
     fn to_info(&self, status: JobStatus) -> JobInfo {
         let exit_code = self.result.as_ref().map(|r| r.code);
+        // A spilled job's code was remapped to 3, so `exit_code` alone cannot
+        // be told apart from a command that genuinely exited 3. Carry the two
+        // facts that make it legible.
+        let (did_spill, original_code) = match &self.result {
+            Some(r) => (r.did_spill, r.original_code),
+            None => (false, None),
+        };
         JobInfo::new(self.id, self.command.clone(), status)
             .with_output_file(self.output_file.clone())
             .with_pid(self.pid)
@@ -483,6 +490,7 @@ impl Job {
             .with_started_at(self.started_at)
             .with_finished_at(self.finished_at)
             .with_pgids(self.pgids_combined())
+            .with_spill(did_spill, original_code)
     }
 }
 

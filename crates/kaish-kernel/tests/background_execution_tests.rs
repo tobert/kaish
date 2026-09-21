@@ -362,6 +362,52 @@ async fn test_spilled_background_job_reports_failed_not_done() {
     );
 }
 
+/// A spilled job and a job that genuinely exited 3 must be tellable apart.
+///
+/// `failed:3` is deliberately the status string for both — that is the loud
+/// signal GH #212 installed and it stays. What was missing is the pair of
+/// facts behind it: `Job::to_info` copied only `result.code`, so `did_spill`
+/// and `original_code` never reached `JobInfo` and an embedder reading
+/// `jobs --json` had no way to ask whether the 3 was the command's own.
+///
+/// The contrast case is what makes this discriminating: both jobs report
+/// `failed:3` and `exit_code: 3`, and only the fields below separate them.
+#[tokio::test]
+async fn a_spilled_job_carries_the_spill_facts_a_real_exit_3_does_not() {
+    use kaish_kernel::scheduler::JobId;
+
+    let kernel = setup().await;
+    kernel.execute("set -o output-limit=64").await.unwrap();
+
+    // Job 1 spills: `seq` exits 0 and the remap makes it 3.
+    kernel.execute("seq 1 5000 &").await.unwrap();
+    assert_eq!(wait_for_job(&kernel, 1, Duration::from_secs(5)).await, "failed:3");
+
+    // Job 2 exits 3 on its own terms, under the same output limit.
+    kernel.execute("function three { return 3 }").await.unwrap();
+    kernel.execute("three &").await.unwrap();
+    assert_eq!(wait_for_job(&kernel, 2, Duration::from_secs(5)).await, "failed:3");
+
+    let spilled = kernel.jobs().get(JobId(1)).await.expect("job 1 is still tracked");
+    let genuine = kernel.jobs().get(JobId(2)).await.expect("job 2 is still tracked");
+
+    assert_eq!(spilled.exit_code, Some(3), "both report 3: {spilled:?}");
+    assert_eq!(genuine.exit_code, Some(3), "both report 3: {genuine:?}");
+
+    assert!(spilled.did_spill, "the spilled job must say so: {spilled:?}");
+    assert_eq!(
+        spilled.original_code,
+        Some(0),
+        "seq exited 0 before the remap replaced it: {spilled:?}"
+    );
+
+    assert!(!genuine.did_spill, "nothing was capped here: {genuine:?}");
+    assert_eq!(
+        genuine.original_code, None,
+        "no code was replaced, so there is no original to report: {genuine:?}"
+    );
+}
+
 // ============================================================================
 // Pipelines in Background
 // ============================================================================
