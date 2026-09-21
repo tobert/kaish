@@ -4479,7 +4479,6 @@ impl Kernel {
             match expr {
                 Expr::Command(cmd) => {
                     let mut result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
-                    self.emit_cmdsubst_stderr(&result, ctx).await;
                     // Truthiness comes from the command's OWN code, read before
                     // the spill contract can remap it. A capped `if seq 1
                     // 100000` succeeded; only its output was too big to keep,
@@ -4487,11 +4486,14 @@ impl Kernel {
                     // A fault has no boolean to give. Aborting here is the
                     // rule `[[ ]]` and `(( ))` already follow in this position;
                     // reading it as false would let `else` run on a comparison
-                    // that never happened.
+                    // that never happened. The fault's unpublished stderr is
+                    // the error's message, so it is not also emitted.
                     if result.fault {
+                        let message = result.err.split_off(result.stderr_published_len);
                         self.emit_cmdsubst_stderr(&result, ctx).await;
-                        return Err(anyhow::anyhow!("{}", result.err.trim_end()));
+                        return Err(anyhow::anyhow!("{}", message.trim_end()));
                     }
+                    self.emit_cmdsubst_stderr(&result, ctx).await;
                     let truthy = result.code == 0;
                     // Carrying the stdout made this arm one of the surfaces
                     // that produce a raw `ExecResult`, and it reaches

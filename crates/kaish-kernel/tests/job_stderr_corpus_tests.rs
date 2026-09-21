@@ -469,3 +469,20 @@ async fn timeout_note_is_published_once_after_the_inner_stderr(#[case] program: 
         assert_eq!(stream.matches("kaish-corpus-before-timeout").count(), 1, "{stream:?}");
     }
 }
+
+/// A condition command that faults has no truth value; its diagnostic is the
+/// error, printed once — in the foreground and on a job's stream.
+#[rstest::rstest]
+#[case::if_condition("if test 1 -eq abc; then echo x; fi")]
+#[case::while_condition("while test 1 -eq abc; do echo x; done")]
+#[tokio::test]
+async fn faulting_condition_command_prints_its_diagnostic_once(#[case] body: &str) {
+    let setup = format!("f() {{ {body}; }}");
+    let fg = foreground_stderr(&setup, "f").await;
+    assert_eq!(fg.matches("\"abc\"").count(), 1, "foreground: {fg:?}");
+    for program in [format!("{body} &"), "f &".to_string()] {
+        let job = run_job(&setup, &program).await;
+        assert_eq!(job.stderr.matches("\"abc\"").count(), 1, "{program}: {:?}", job.stderr);
+    }
+    assert_job_matches_foreground(&setup, "f &").await;
+}
