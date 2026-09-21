@@ -10,9 +10,11 @@ and this document disagree, fix one and say which.
 
 ## What it is for
 
-`allow_external_commands` is a single switch. Off, nothing spawns. On, every
-program on `$PATH` spawns, with any arguments, and the validator sees each call
-as an opaque word list. There is no setting between those two.
+`allow_unwrapped_commands` is a single switch. It allows any program that is
+not a wrapped command — PATH lookup for a word that is not a builtin, `exec`,
+`spawn`, and `env CMD`. Off, only a wrapped command spawns. On, any program on
+`$PATH` also spawns, with any arguments, and the validator sees each call as
+an opaque word list. There is no setting between those two.
 
 A wrapped command is the setting between. It is an allowlist with a grammar:
 
@@ -25,7 +27,7 @@ A wrapped command is the setting between. It is an allowlist with a grammar:
 - The child's environment is the kernel's hermetic environment plus the
   declaration's pins. No `EDITOR`, no pager, no credential prompt.
 
-`allow_external_commands = false` plus a few wrapped commands is a
+`allow_unwrapped_commands = false` plus a few wrapped commands is a
 mostly-hermetic kernel: every program it can run is named, and every argument
 shape it can pass is declared.
 
@@ -492,7 +494,7 @@ and the two names that collide:
 - A relative `path_under(root)` — the root must be an absolute path.
 
 A wrapped command is a registered tool, not an external command, so
-`allow_external_commands` does not gate it. That switch is not a lock a wrapper
+`allow_unwrapped_commands` does not gate it. That switch is not a lock a wrapper
 picks: it decides whether an arbitrary word becomes a `$PATH` lookup. A wrapper
 is the narrower grant beside it — one pinned executable, one declared grammar.
 Leaving the switch `false` and registering a wrapper is the point.
@@ -576,7 +578,7 @@ kernel in `crates/kaish-kernel/tests/wrapped_command_exec_tests.rs`.
    leaves the rest for the child, in order and once each.
 8. Cancellation. `timeout 1 wrapped-sleep 10` kills the child; `kill %1`
    terminates a background wrapped child through the job's process group.
-9. Feature and policy gates. Runs with `allow_external_commands = false`; the
+9. Feature and policy gates. Runs with `allow_unwrapped_commands = false`; the
    `--no-default-features` kernel compiles without the module.
 10. Output. Oversize stdout is capped exactly as the same program's is when it
     runs as an external command; a `json_output` verb binds typed through

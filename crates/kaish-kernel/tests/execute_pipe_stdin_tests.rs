@@ -100,7 +100,7 @@ async fn lazy_stdin_feeds_an_external_command() {
     let kernel = Kernel::new(
         KernelConfig::repl()
             .with_trash(false)
-            .with_allow_external_commands(true),
+            .with_allow_unwrapped_commands(true),
     )
     .expect("failed to create kernel");
     let (writer, reader) = pipe_stream_default();

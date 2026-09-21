@@ -279,7 +279,7 @@ Consequences for embedders:
 
 - **External commands need `subprocess`.** Without it, PATH lookup and
   `exec`/`spawn` don't exist. With it, gate at runtime via
-  `allow_external_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
+  `allow_unwrapped_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
   Git is an ordinary external command (`git status`, `git log`): it runs via
   `subprocess` against your system `git`, with no in-tree builtin or backend.
   The old `kaish-tools-git` crate (git builtin + `GitVfs`, removed in 0.9.0) is
@@ -917,14 +917,16 @@ its own parser.
 
 ### Wrapped commands: an external program as a tool
 
-`allow_external_commands` is a single switch. Off, nothing spawns. On, every
-program on `$PATH` spawns, with any arguments, and the validator sees each call
-as an opaque word list. A **wrapped command** is the setting between: an
+`allow_unwrapped_commands` is a single switch. It allows any program that is
+not a wrapped command: PATH lookup for a word that is not a builtin, `exec`,
+`spawn`, and `env CMD`. Off, only a wrapped command spawns. On, any program on
+`$PATH` also spawns, with any arguments, and the validator sees each call as
+an opaque word list. A **wrapped command** is the setting between: an
 allowlist with a grammar. The embedder declares one program, the verbs it
 allows, and the flags each verb accepts; the kernel validates a call against
 that declaration, renders the child's argv itself, and runs the program with
 `execve(2)` — never through `sh -c`. It runs while
-`allow_external_commands = false`, so a kernel can name every program it is
+`allow_unwrapped_commands = false`, so a kernel can name every program it is
 able to run.
 
 The kernel holds the mechanism that makes the policy correct: the parse, the
@@ -1012,14 +1014,18 @@ Semantics:
 ## Sandboxing and External Commands
 
 Builtins go through the VFS and respect its mounts; **external commands,
-`exec`, and `spawn` access the real filesystem directly** (they're OS
-processes). Two gates:
+`exec`, `spawn`, and `env CMD` access the real filesystem directly** (they're
+OS processes). Two gates:
 
 - Compile-time: build without the `subprocess` feature — the capability
   doesn't exist.
-- Runtime: `allow_external_commands = false` in `KernelConfig` — PATH
-  lookups return "command not found" and `exec`/`spawn` error.
-  `KernelConfig::isolated()` sets this by default.
+- Runtime: `allow_unwrapped_commands = false` in `KernelConfig` — PATH
+  lookup, `exec`, `spawn`, and `env CMD` are refused before anything runs,
+  with "external commands are disabled on this shell" and exit 127 (`exec`
+  and `spawn` use exit 1 for the same refusal). None of these fall back to
+  "command not found" — that message stays reserved for a name that
+  genuinely isn't resolvable. `KernelConfig::isolated()` sets this by
+  default.
 
 ### Preflighting a script for external commands
 

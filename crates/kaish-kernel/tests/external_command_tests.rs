@@ -893,7 +893,7 @@ async fn external_command_under_overlay_gives_friendly_virtual_cwd_error() {
     let config = KernelConfig::agent_with_root(root.to_path_buf())
         .with_overlay(true)
         .with_trash(false)
-        .with_allow_external_commands(true)
+        .with_allow_unwrapped_commands(true)
         .with_initial_vars(vars);
     let kernel = Kernel::new(config).expect("overlay kernel");
 
@@ -941,7 +941,7 @@ async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
     let config = KernelConfig::agent_with_root(root.to_path_buf())
         .with_overlay(true)
         .with_trash(false)
-        .with_allow_external_commands(true)
+        .with_allow_unwrapped_commands(true)
         .with_initial_vars(vars);
     let kernel = Kernel::new(config).expect("overlay kernel");
 
@@ -964,7 +964,7 @@ async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
 // claim the command doesn't exist. This is the kaijutsu bug the fix exists
 // for: a read-only shell's `git` lookup came back "command not found", and
 // the calling model concluded git wasn't installed and gave up — when
-// `allow_external_commands: false` was the actual, actionable reason.
+// `allow_unwrapped_commands: false` was the actual, actionable reason.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -977,7 +977,7 @@ async fn disabled_external_commands_report_the_condition_not_command_not_found()
         "test fixture requires /bin/sh to exist on this system"
     );
 
-    let config = KernelConfig::repl().with_allow_external_commands(false);
+    let config = KernelConfig::repl().with_allow_unwrapped_commands(false);
     let kernel = Kernel::new(config).expect("kernel with external commands disabled");
 
     let result = kernel.execute("/bin/sh -c true").await.expect("execute");
@@ -1063,7 +1063,7 @@ async fn env_cannot_bypass_the_external_commands_gate() {
     let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
 
     // The control: a direct external command is refused. This also stands in
-    // for the precondition — `allow_external_commands` is private, so the
+    // for the precondition — `allow_unwrapped_commands` is private, so the
     // refusal itself is how the test proves the gate is closed.
 
     let direct = kernel.execute("/bin/echo MARKER").await.expect("exec");

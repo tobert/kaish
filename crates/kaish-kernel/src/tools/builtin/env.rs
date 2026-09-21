@@ -214,7 +214,7 @@ impl Tool for Env {
             // to the same gate every other one does. Without this check `env`
             // went straight to `tokio::process::Command`, so a kernel built
             // with external commands turned off still ran the host binary.
-            if !ctx.allow_external_commands {
+            if !ctx.allow_unwrapped_commands {
                 return ExecResult::failure(
                     127,
                     format!("env: {command}: external commands are disabled on this shell"),

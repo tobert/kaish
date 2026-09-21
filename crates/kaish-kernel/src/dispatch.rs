@@ -228,7 +228,7 @@ impl BackendDispatcher {
         args: &[Arg],
         ctx: &mut ExecContext,
     ) -> ExternalCommandOutcome {
-        if !ctx.allow_external_commands {
+        if !ctx.allow_unwrapped_commands {
             return ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff);
         }
         match self.try_external_on_path(name, args, ctx).await {

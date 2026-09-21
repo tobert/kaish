@@ -77,7 +77,7 @@ impl Tool for Exec {
         };
         parsed.global.apply(ctx);
 
-        if !ctx.allow_external_commands {
+        if !ctx.allow_unwrapped_commands {
             // `exec` is only registered when the `subprocess` capability is
             // compiled in (tools/builtin/mod.rs), so reaching here always
             // means the runtime config turned it off, never that the

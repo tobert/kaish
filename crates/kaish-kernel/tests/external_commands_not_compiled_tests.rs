@@ -1,7 +1,7 @@
 //! Tests for the `subprocess` capability being compiled out entirely.
 //!
 //! `sandbox_mode_tests.rs` and `external_command_tests.rs` cover the runtime
-//! `allow_external_commands: false` case — subprocess is compiled in, but
+//! `allow_unwrapped_commands: false` case — subprocess is compiled in, but
 //! refused by configuration. This file is the other half: no `subprocess`
 //! capability in this binary at all, a build-time fact rather than a config
 //! value, and it gets its own distinct message (see
@@ -25,7 +25,7 @@ async fn not_compiled_reports_a_build_fact_distinct_from_configured_off() {
     // right thing. Without the `subprocess` capability, no runtime config
     // can produce a command execution: the refusal must still fire, and
     // with build-specific wording, not the runtime "disabled" message.
-    let config = KernelConfig::isolated().with_allow_external_commands(true);
+    let config = KernelConfig::isolated().with_allow_unwrapped_commands(true);
     let kernel = Kernel::new(config).expect("kernel");
 
     let result = kernel.execute("/bin/sh -c true").await.expect("execute");
