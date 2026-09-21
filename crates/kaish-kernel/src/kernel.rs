@@ -1954,7 +1954,8 @@ impl Kernel {
         }));
 
         let source = source.to_owned();
-        tokio::spawn(crate::telemetry::bind_current_context(async move {
+        let task_jobs = self.jobs.clone();
+        let task = tokio::spawn(crate::telemetry::bind_current_context(async move {
             let embedder_watcher = embedder_cancel.map(|embedder_cancel| {
                 let cancel = cancel.clone();
                 tokio::spawn(async move {
@@ -2027,9 +2028,9 @@ impl Kernel {
                 );
             }
             jobs.finalize_streams(job_id, &result).await;
-            // The receiver is gone only when the job was removed from the manager.
-            let _ = result_tx.send(result);
+            result
         }));
+        send_job_result(task_jobs, job_id, task, result_tx);
 
         Ok(job_id)
     }
@@ -3767,7 +3768,8 @@ impl Kernel {
 
         // Spawn the background task. Propagate the embedder's trace context
         // across the spawn boundary so the job's spans stay in the same trace.
-        tokio::spawn(crate::telemetry::bind_current_context(async move {
+        let task_jobs = self.jobs.clone();
+        let task = tokio::spawn(crate::telemetry::bind_current_context(async move {
             // runner.run needs a &dyn CommandDispatcher; fork.as_ref()
             // gives us that (Kernel implements CommandDispatcher).
             let mut result = runner.run(&stages, &mut bg_ctx, fork.as_ref()).await;
@@ -3811,10 +3813,9 @@ impl Kernel {
             // finished stream — never a `done:0` job whose output is still
             // arriving.
             jobs.finalize_streams(job_id, &result).await;
-
-            // Send result to JobManager (ignore error if receiver dropped)
-            let _ = tx.send(result);
+            result
         }));
+        send_job_result(task_jobs, job_id, task, tx);
 
         // The announcement is a shell message, not command output: bash writes
         // it to stderr, and stdout stays clean so `$(cmd &)` captures no shell
@@ -7800,6 +7801,39 @@ fn accumulate_raw_stmt_output(
         None => accumulated_out.extend_from_slice(new.text_out().as_bytes()),
     }
     append_stderr(accumulated_err, stderr_published_len, &new.err, new.stderr_published_len);
+}
+
+/// Hand a job task's result to its `JobManager`. A task that panicked ended
+/// without closing the job's streams or producing a result, so this does
+/// both, and publishes the diagnostic it reports.
+fn send_job_result(
+    jobs: Arc<JobManager>,
+    job_id: crate::scheduler::JobId,
+    task: tokio::task::JoinHandle<ExecResult>,
+    result_tx: tokio::sync::oneshot::Sender<ExecResult>,
+) {
+    tokio::spawn(async move {
+        let result = match task.await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(job_id = %job_id, %error, "background job task ended without a result");
+                let result = ExecResult::failure(
+                    1,
+                    format!(
+                        "job {job_id}: task ended without a result ({error}) — a kernel or tool bug, \
+                         not the command's own exit"
+                    ),
+                );
+                if let Some(streams) = jobs.streams(job_id).await {
+                    streams.stderr.write(result.err.as_bytes()).await;
+                }
+                jobs.finalize_streams(job_id, &result).await;
+                result
+            }
+        };
+        // The receiver is gone only when the job was removed from the manager.
+        let _ = result_tx.send(result);
+    });
 }
 
 /// Put drained channel text ahead of a statement's own stderr. In a

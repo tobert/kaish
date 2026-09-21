@@ -397,16 +397,12 @@ impl Job {
                     return false;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    // The sender dropped without sending a result — the
-                    // spawned task's future panicked and unwound before
-                    // `tx.send(result)` ran (GH #247). `execute_background`
-                    // uses this oneshot-channel path exclusively for every
-                    // `&` job, so this is the ONLY place a background-job
-                    // panic surfaces; a wording indistinguishable from an
-                    // ordinary `exit 1` ("job channel closed", previously)
-                    // hid a kernel bug behind what read as a normal command
-                    // failure, and the case went to `tracing::error!` for
-                    // the first time here — it was not logged at all before.
+                    // The sender dropped without sending a result (GH #247).
+                    // The kernel's job tasks send one even when they panic
+                    // (`send_job_result`), so this is a sender dropped some
+                    // other way. A wording indistinguishable from an
+                    // ordinary `exit 1` would hide a kernel bug behind what
+                    // reads as a normal command failure.
                     tracing::error!(
                         job_id = %self.id,
                         command = %self.command,
