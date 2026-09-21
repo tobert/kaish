@@ -3444,7 +3444,16 @@ impl Kernel {
                     Vec::with_capacity(assignments.len());
                 let mut setup_err: Option<anyhow::Error> = None;
                 for assign in assignments {
-                    match self.eval_expr_async(&assign.value, &mut *ctx).await {
+                    // Name the target, matching `Stmt::Assignment`'s
+                    // `with_context` above — without it, a failing `$(...)`
+                    // inside an env prefix (`A=$(false) cmd`) named nothing,
+                    // while the plain-assignment form already said which
+                    // name it was evaluating.
+                    match self
+                        .eval_expr_async(&assign.value, &mut *ctx)
+                        .await
+                        .with_context(|| format!("failed to evaluate assignment to {}", assign.name()))
+                    {
                         Ok(value) => {
                             let mut scope = self.scope.write().await;
                             prior_export
