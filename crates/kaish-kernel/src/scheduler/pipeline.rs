@@ -484,7 +484,7 @@ impl PipelineRunner {
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            let result = self.run_single(&stages[0], ctx, None, dispatcher).await;
+            let result = self.run_single(&stages[0], ctx, dispatcher).await;
             // A lone command is a pipeline of one, and bash reports it:
             // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
             // multi-stage case would leave the previous pipeline's codes
@@ -592,25 +592,23 @@ impl PipelineRunner {
             .await
     }
 
-    /// Run a single command with optional stdin.
+    /// Run a single command.
     ///
     /// The dispatcher handles arg parsing, schema lookup, output format, and execution.
     /// The runner handles stdin setup (redirects + pipeline) and output redirects.
+    ///
+    /// Stdin arrives on `ctx` — from a redirect set up here, or from the
+    /// session. A pipeline's stages go through `run_pipeline` instead, which
+    /// wires each stage's `pipe_stdin` directly.
     async fn run_single(
         &self,
         stage: &PipelineStage,
         ctx: &mut ExecContext,
-        stdin: Option<Vec<u8>>,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Set up stdin from redirects (< file, <<heredoc)
         if let Err(e) = setup_stdin_redirects_for(stage, ctx, dispatcher).await {
             return ExecResult::failure(1, e);
-        }
-
-        // Set stdin from pipeline (overrides redirect stdin)
-        if let Some(input) = stdin {
-            ctx.set_stdin(input);
         }
 
         // Set pipeline position for stdio inheritance decisions
@@ -679,6 +677,22 @@ impl PipelineRunner {
             data_receivers.push(Some(rx));
         }
 
+        // Detached handles, deliberately — a `JoinSet` would be wrong here.
+        //
+        // GH #190 asked for `JoinSet` so a dropped set aborts what it owns.
+        // The drop path is reachable: the REPL races `execute` against SIGINT
+        // and drops the loser, and any embedder wrapping `execute` in a
+        // `timeout` does the same. On that path aborting is the WORSE
+        // cleanup. A detached stage stays alive long enough for the cancel
+        // that follows to reach `wait_or_kill`, which SIGTERMs the child's
+        // process GROUP, waits the grace, then SIGKILLs the group. An abort
+        // drops the `Child` instead and falls back to `kill_on_drop`, a bare
+        // SIGKILL of the direct child pid — so a stage's grandchildren
+        // survive a Ctrl-C that used to kill them.
+        //
+        // The leak the issue worried about is bounded: every stage is joined
+        // below, and the `fork_attached` cancellation cascade owns the
+        // teardown on the one path that skips the join.
         let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
         // Set when stage 0 receives the session's stdin rather than a redirect's.
         // Only then may its remainder be returned at the join.
