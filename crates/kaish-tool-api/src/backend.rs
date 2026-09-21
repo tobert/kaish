@@ -40,7 +40,8 @@ pub trait KernelBackend: Send + Sync {
     ///
     /// Operations apply in order to one snapshot of the file, and the result
     /// is written once. If an operation fails — a CAS `expected` mismatch, an
-    /// offset or line number past the end — the batch stops before the write
+    /// offset or line number past the end, a byte offset inside a multi-byte
+    /// character, or line 0 — the batch stops before the write
     /// and the file keeps every byte it had. A caller holding an error never
     /// has to work out how much of the batch survived.
     ///

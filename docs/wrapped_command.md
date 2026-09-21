@@ -275,8 +275,8 @@ path: the command's `lead`, then each node's `name` (unless `omit_name`) and
 `lead`, then the leaf's, in that order. Every other property — `flags`,
 `positionals`, `tail`, `stdin`, `json_output` — belongs on the leaf that
 actually runs. `build()` refuses a node that declares a flag, a positional, a
-tail, or a stdin posture, naming the node and the property to move onto a
-child. The restriction is deliberate and narrow, kept so it can relax later
+tail, a stdin posture, or `json_output`, naming the node and the property to
+move onto a child. The restriction is deliberate and narrow, kept so it can relax later
 without a declaration having worked around its absence in the meantime. The
 root verb may not declare children — nest with named `verb()` calls instead.
 
@@ -481,7 +481,8 @@ and the two names that collide:
   one level — a nested level checks only against its own siblings. An
   alias that shadows another flag's name counts.
 - A node (a verb with children) that also declares a flag, a positional, a
-  tail, or a stdin posture — those belong on the leaf that runs.
+  tail, a stdin posture, or `json_output` — those belong on the leaf that
+  runs.
 - Children declared on the root verb — nest with named `verb()` calls
   instead.
 - `choices([…])` or `int()` on a switch — a switch binds no value.
@@ -552,8 +553,8 @@ kernel in `crates/kaish-kernel/tests/wrapped_command_exec_tests.rs`.
    Nested verbs: a leaf's argv with every level's `lead` concatenated in
    path order; a bare node's refusal, exit 2, naming its own children; an
    unknown leaf under a node naming that node's children and never the top
-   level's; three levels deep; a node's flag/positional/tail/stdin refused
-   at `build()`.
+   level's; three levels deep; a node's
+   flag/positional/tail/stdin/json_output refused at `build()`.
 2. Injection corpus. Values that look like flags, via literal and via
    variable; `--` inside a value; empty string; `=` inside a value; unicode;
    NUL.

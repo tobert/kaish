@@ -547,9 +547,9 @@ impl WrappedCommand {
         };
 
         // A node selects among its children and never runs itself, so a
-        // flag, positional, tail, or stdin posture on it would describe a
-        // call that never happens. Refuse loudly rather than binding it
-        // silently to whichever leaf the agent picks.
+        // flag, positional, tail, stdin posture, or json_output on it would
+        // describe a call that never happens. Refuse loudly rather than
+        // binding it silently to whichever leaf the agent picks.
         if verb.is_node() {
             if let Some(flag) = verb.flags.first() {
                 bail!(
@@ -575,6 +575,12 @@ impl WrappedCommand {
                 bail!(
                     "'{scope}' declares a stdin posture and child verbs; a node cannot run, \
                      so stdin belongs on the leaf verb that does"
+                );
+            }
+            if verb.json_output {
+                bail!(
+                    "'{scope}' declares json_output() and child verbs; a node cannot run, \
+                     so json_output belongs on the leaf verb that does"
                 );
             }
         }
