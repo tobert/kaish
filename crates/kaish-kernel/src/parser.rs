@@ -1586,7 +1586,7 @@ where
             )))
             .map(pipeline_into_stmt),
         ));
-        let negatable = bang_prefixed(negatable, Stmt::Not);
+        let negatable = bang_prefixed(negatable, Stmt::Not, crate::ast::plan::render_stmt);
 
         // Base statement (without chaining)
         let base_statement = choice((
@@ -2926,13 +2926,6 @@ where
         .boxed()
 }
 
-/// The message every glued `!` is refused with — one constant so the
-/// wording (and the fix it names) can never drift between the statement and
-/// condition productions that both call [`bang_prefixed`].
-const BANG_GLUED_MESSAGE: &str = "`!` needs a space before what it negates — kaish does no \
-     token pasting; write `! true`, not `!true` (bash reads a glued `!true` as a literal \
-     command name, not the `!` operator)";
-
 /// Parse zero or more `!` immediately before `base`, requiring whitespace
 /// between each `!` and whatever follows it — another `!`, or `base` itself.
 ///
@@ -2940,24 +2933,28 @@ const BANG_GLUED_MESSAGE: &str = "`!` needs a space before what it negates — k
 /// so `!true` lexes as the single word `!true` (bash: `!true: command not
 /// found`), never as `!` negating `true`. kaish's lexer emits a standalone
 /// `Bang` token regardless of adjacency, so without this guard `!true` and
-/// `!!true` silently parsed as negation — a divergence from bash that reads
-/// as a working script until the exit code is wrong. This refuses those
-/// glued forms with [`BANG_GLUED_MESSAGE`] instead, checking `Span`
-/// adjacency the same way [`command_parser`]'s "command name and first
-/// argument need a space between them" check does.
+/// `!!true` silently parsed as negation. This refuses those glued forms,
+/// checking `Span` adjacency the same way [`command_parser`]'s "command name
+/// and first argument need a space between them" check does; the emitted
+/// message names the glued text itself (`render`'s job), so `!grep -q x f`
+/// reports itself, not a generic example.
 ///
 /// `wrap` builds the negated node at each level: `Expr::Not` for a
-/// condition, `Stmt::Not` for a statement. Shared by [`condition_parser`]
-/// (`if`/`while`) and the statement-level `!` in `statement_parser`, so both
-/// read the identical rule.
-fn bang_prefixed<'tokens, I, T, W>(
+/// condition, `Stmt::Not` for a statement. `render` renders that level's
+/// node back to text (`render_expr`/`render_stmt`), for the glued-text
+/// message. Shared by [`condition_parser`] (`if`/`while`) and the
+/// statement-level `!` in `statement_parser`, so both read the identical
+/// rule.
+fn bang_prefixed<'tokens, I, T, W, R>(
     base: impl Parser<'tokens, I, T, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
     wrap: W,
+    render: R,
 ) -> impl Parser<'tokens, I, T, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
     T: 'tokens,
     W: Fn(Box<T>) -> T + Clone + 'tokens,
+    R: Fn(&T) -> String + Clone + 'tokens,
 {
     just(Token::Bang)
         .map_with(|_, extra| extra.span())
@@ -2966,9 +2963,20 @@ where
         .then(base.map_with(|b, extra| (b, extra.span())))
         .validate(move |(bangs, (body, body_span)), _, emitter| {
             for (i, bang_span) in bangs.iter().enumerate() {
-                let next_start = bangs.get(i + 1).map(|s| s.start).unwrap_or(body_span.start);
+                let next_is_bang = i + 1 < bangs.len();
+                let next_start = if next_is_bang { bangs[i + 1].start } else { body_span.start };
                 if bang_span.end == next_start {
-                    emitter.emit(Rich::custom(*bang_span, BANG_GLUED_MESSAGE));
+                    // The rest of the glued word: another `!` when this bang
+                    // is glued to a following bang, or the negated node's
+                    // own rendered text when it's glued straight to what it
+                    // negates.
+                    let rest = if next_is_bang { "!".to_string() } else { render(&body) };
+                    emitter.emit(Rich::custom(
+                        *bang_span,
+                        format!(
+                            "`!{rest}`: `!` needs a space before what it negates; write `! {rest}`"
+                        ),
+                    ));
                 }
             }
             let mut result = body;
@@ -3015,7 +3023,7 @@ where
     // bash reads `! true && true` as `(! true) && true`. Repeated so `! ! x`
     // parses, which bash also accepts; `bang_prefixed` refuses a glued `!x`
     // (bash reads that as a command literally named `!x`).
-    let base = bang_prefixed(base, Expr::Not);
+    let base = bang_prefixed(base, Expr::Not, crate::ast::plan::render_expr);
 
     // && has higher precedence than ||
     // First chain with && (higher precedence)
