@@ -256,8 +256,9 @@ an `awk` that never surprises.
   64 MiB budget.
 - **External commands — resolved via `PATH` or a direct path — run against the
   real filesystem** — the VFS sandbox does not apply to them. Block them at
-  runtime with `allow_external_commands=false`, or build without the
-  `subprocess` capability feature and they don't exist at all.
+  runtime with `allow_unwrapped_commands=false` (it allows any program that is
+  not a wrapped command: PATH lookup, `exec`, `spawn`, `env CMD`), or build
+  without the `subprocess` capability feature and they don't exist at all.
 - `--overlay` makes a call copy-on-write: writes stay in memory unless the
   script runs `kaish-vfs commit`.
 - `set -o trash` (or `KAISH_TRASH=1`) diverts deletes and truncating

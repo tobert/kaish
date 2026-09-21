@@ -222,6 +222,49 @@ async fn sandbox_external_commands_blocked() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `allow_external_commands` was renamed to `allow_unwrapped_commands` (the
+// switch never gated wrapped commands, only PATH lookup, `exec`, `spawn`, and
+// `env CMD`; the old name implied otherwise). `with_allow_external_commands`
+// stays as a deprecated forwarding alias so existing embedder code keeps
+// compiling. These two tests read only the `KernelConfig` field, not a live
+// kernel, so unlike `sandbox_external_commands_blocked` above they belong in
+// this file for a different reason: they must pass identically whether
+// `subprocess` is compiled in or not, and this is the file CLAUDE.md's
+// `--no-default-features` CI leg already runs.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[allow(deprecated)]
+fn deprecated_alias_sets_true_same_as_new_builder() {
+    // isolated()'s own default is false, so setting true is a real change,
+    // not a no-op that would pass vacuously.
+    let via_new = KernelConfig::isolated().with_allow_unwrapped_commands(true);
+    let via_deprecated = KernelConfig::isolated().with_allow_external_commands(true);
+    assert_eq!(
+        via_deprecated.allow_unwrapped_commands, via_new.allow_unwrapped_commands,
+        "the deprecated alias must set exactly the field the renamed builder sets"
+    );
+    assert!(via_deprecated.allow_unwrapped_commands);
+}
+
+#[test]
+#[allow(deprecated)]
+fn deprecated_alias_sets_false_same_as_new_builder() {
+    // Starts from a config explicitly forced to true (not one of the presets
+    // whose default tracks `cfg!(feature = "subprocess")`, which would be
+    // false here under `--no-default-features` and make this direction
+    // vacuous on that CI leg) — then flips it off through both spellings.
+    let base = KernelConfig::isolated().with_allow_unwrapped_commands(true);
+    let via_new = base.clone().with_allow_unwrapped_commands(false);
+    let via_deprecated = base.with_allow_external_commands(false);
+    assert_eq!(
+        via_deprecated.allow_unwrapped_commands, via_new.allow_unwrapped_commands,
+        "the deprecated alias must set exactly the field the renamed builder sets"
+    );
+    assert!(!via_deprecated.allow_unwrapped_commands);
+}
+
 #[tokio::test]
 async fn sandbox_help_builtins_lists_available() {
     let k = sandbox_kernel().await;

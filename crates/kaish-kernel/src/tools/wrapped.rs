@@ -6,12 +6,13 @@
 //! unless the declaration put it in flag position.
 //!
 //! This narrows what a kernel can run; it does not widen it.
-//! `allow_external_commands` chooses between "no word spawns anything" and
-//! "every program on `$PATH` spawns, with any arguments." A wrapped command is
-//! the setting between: the executable is pinned at registration, so a changed
-//! `$PATH` changes nothing, and an undeclared verb or flag is refused before
-//! any spawn. Registering wrappers with the switch left `false` is the intended
-//! shape, not a way around it.
+//! `allow_unwrapped_commands` chooses between "only a wrapped command spawns"
+//! and "any program on `$PATH` spawns, with any arguments" — it allows any
+//! program that is not a wrapped command: PATH lookup, `exec`, `spawn`, and
+//! `env CMD`. A wrapped command is the setting between: the executable is
+//! pinned at registration, so a changed `$PATH` changes nothing, and an
+//! undeclared verb or flag is refused before any spawn. Registering wrappers
+//! with the switch left `false` is the intended shape, not a way around it.
 //!
 //! ```no_run
 //! use kaish_kernel::tools::wrapped::{Flag, Positional, Verb, WrappedCommand};

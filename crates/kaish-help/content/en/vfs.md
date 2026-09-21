@@ -90,14 +90,14 @@ passthrough (REPL) mode `/dev` is the real host `/dev` instead.
 
 ## Sandbox Limitations
 
-**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, and `spawn` access the real filesystem directly.
+**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, `spawn`, and `env CMD` access the real filesystem directly.
 
-To block external command execution, set `allow_external_commands=false` in `KernelConfig`:
+To block external command execution, set `allow_unwrapped_commands=false` in `KernelConfig`:
 
 ```rust
-KernelConfig::agent().with_allow_external_commands(false)
+KernelConfig::agent().with_allow_unwrapped_commands(false)
 ```
 
-When disabled, PATH lookups return "command not found" and the `exec`/`spawn` builtins return errors. `KernelConfig::isolated()` sets this to `false` by default.
+When disabled, PATH lookup, `exec`, `spawn`, and `env CMD` are all refused with "external commands are disabled on this shell" and exit 127 — never "command not found", which stays reserved for a name that genuinely isn't resolvable. `KernelConfig::isolated()` sets this to `false` by default.
 
 Prefer builtins over external commands — kaish's in-process builtins (grep, sed, jq, etc.) respect VFS boundaries.

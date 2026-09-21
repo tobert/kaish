@@ -146,7 +146,7 @@ pub enum VfsMountMode {
     /// root are not accessible.
     ///
     /// **Note:** This only restricts VFS (builtin) operations. External commands
-    /// bypass the sandbox entirely — see [`KernelConfig::allow_external_commands`].
+    /// bypass the sandbox entirely — see [`KernelConfig::allow_unwrapped_commands`].
     ///
     /// Mounts:
     /// - `/` → MemoryFs (catches paths outside sandbox)
@@ -220,16 +220,23 @@ pub struct KernelConfig {
     /// Output size limit configuration for agent safety.
     pub output_limit: crate::output_limit::OutputLimitConfig,
 
-    /// Whether external command execution (PATH lookup, `exec`, `spawn`) is allowed.
+    /// Whether an unwrapped command may run: PATH lookup for a word that is
+    /// not a builtin, the `exec` and `spawn` builtins, and `env CMD` (which
+    /// spawns CMD the same way, so it answers to the same gate). A wrapped
+    /// command's program is pinned at registration and never reaches this
+    /// check, so the name is true by construction — it gates any program
+    /// that is *not* a wrapped command.
     ///
-    /// When `true` (default), commands not found as builtins are resolved via PATH
-    /// and executed as child processes. When `false`, only kaish builtins and
-    /// backend-registered tools are available.
+    /// When `true` (default), commands not found as builtins are resolved via
+    /// PATH and executed as child processes. When `false`, those four sites
+    /// are blocked; everything else a kernel can run — builtins,
+    /// backend-registered tools, user-defined `tool`s, wrapped commands,
+    /// `.kai` scripts — is unaffected.
     ///
     /// **Security:** External commands bypass the VFS sandbox entirely — they see
     /// the real filesystem, network, and environment. Set to `false` when running
     /// untrusted input.
-    pub allow_external_commands: bool,
+    pub allow_unwrapped_commands: bool,
 
 
     /// Enable trash-on-delete for rm (set -o trash).
@@ -391,7 +398,7 @@ impl Default for KernelConfig {
                 interactive: false,
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
-                allow_external_commands: cfg!(feature = "subprocess"),
+                allow_unwrapped_commands: cfg!(feature = "subprocess"),
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
                 errexit_enabled: false,
                 initial_vars: HashMap::new(),
@@ -413,7 +420,7 @@ impl Default for KernelConfig {
                 interactive: false,
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
-                allow_external_commands: false,
+                allow_unwrapped_commands: false,
                 trash_enabled: false,
                 errexit_enabled: false,
                 initial_vars: HashMap::new(),
@@ -441,7 +448,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: cfg!(feature = "subprocess"),
+            allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: false,
             errexit_enabled: false,
             initial_vars: HashMap::new(),
@@ -472,7 +479,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: cfg!(feature = "subprocess"),
+            allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: false,
             errexit_enabled: false,
             initial_vars: HashMap::new(),
@@ -511,7 +518,7 @@ impl KernelConfig {
             // at Advisory scope — `--no-ignore` / `kaish-ignore clear` recover.
             ignore_config: crate::ignore_config::IgnoreConfig::interactive(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: cfg!(feature = "subprocess"),
+            allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             errexit_enabled: false,
             initial_vars: HashMap::new(),
@@ -531,7 +538,7 @@ impl KernelConfig {
     /// memory and output. Local filesystem is accessible at its real path (e.g.,
     /// `/home/user`), but sandboxed to `$HOME`. Paths outside the sandbox are not
     /// accessible through builtins. External commands still access the real
-    /// filesystem — use `.with_allow_external_commands(false)` to block them.
+    /// filesystem — use `.with_allow_unwrapped_commands(false)` to block them.
     ///
     /// VFS memory is bounded at 64 MiB per `execute()` call by default (an agent
     /// embedder typically creates a fresh kernel per call). Raise or remove with
@@ -547,7 +554,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
-            allow_external_commands: cfg!(feature = "subprocess"),
+            allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             errexit_enabled: false,
             initial_vars: HashMap::new(),
@@ -579,7 +586,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
-            allow_external_commands: cfg!(feature = "subprocess"),
+            allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             errexit_enabled: false,
             initial_vars: HashMap::new(),
@@ -606,7 +613,7 @@ impl KernelConfig {
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
-            allow_external_commands: false,
+            allow_unwrapped_commands: false,
             trash_enabled: false,
             errexit_enabled: false,
             initial_vars: HashMap::new(),
@@ -655,7 +662,10 @@ impl KernelConfig {
         self
     }
 
-    /// Set whether external command execution is allowed.
+    /// Set whether unwrapped command execution is allowed: PATH lookup for a
+    /// word that is not a builtin, the `exec`/`spawn` builtins, and
+    /// `env CMD`. A wrapped command's program is pinned at registration and
+    /// never reaches this check, so it stays runnable regardless.
     ///
     /// When `false`, commands not found as builtins report that external
     /// commands are disabled on this shell — distinct from "command not
@@ -664,9 +674,15 @@ impl KernelConfig {
     /// (MCP, an embedder's own registry) are unaffected and still resolve.
     /// The `exec` and `spawn` builtins also refuse, with the same wording.
     /// Use this to prevent VFS sandbox bypass via external binaries.
-    pub fn with_allow_external_commands(mut self, allow: bool) -> Self {
-        self.allow_external_commands = allow;
+    pub fn with_allow_unwrapped_commands(mut self, allow: bool) -> Self {
+        self.allow_unwrapped_commands = allow;
         self
+    }
+
+    /// Deprecated alias for [`Self::with_allow_unwrapped_commands`].
+    #[deprecated(since = "0.18.0", note = "renamed to with_allow_unwrapped_commands")]
+    pub fn with_allow_external_commands(self, allow: bool) -> Self {
+        self.with_allow_unwrapped_commands(allow)
     }
 
     /// Enable or disable trash-on-delete at startup.
@@ -818,8 +834,9 @@ pub struct Kernel {
     skip_validation: bool,
     /// When true, standalone external commands inherit stdio for real-time output.
     interactive: bool,
-    /// Whether external command execution is allowed.
-    allow_external_commands: bool,
+    /// Whether an unwrapped command may run (PATH lookup, `exec`, `spawn`,
+    /// `env CMD`). See [`KernelConfig::allow_unwrapped_commands`].
+    allow_unwrapped_commands: bool,
     /// Shared memory budget for all kernel-owned `MemoryFs` mounts.
     ///
     /// `None` when `KernelConfig::vfs_budget_bytes` was `None` (unbounded).
@@ -1235,7 +1252,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, trash_enabled, errexit_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_unwrapped_commands, trash_enabled, errexit_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, .. } = config;
 
         if no_host_side_channel {
             output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
@@ -1269,7 +1286,7 @@ impl Kernel {
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
         exec_ctx.output_limit = output_limit;
-        exec_ctx.allow_external_commands = allow_external_commands;
+        exec_ctx.allow_unwrapped_commands = allow_unwrapped_commands;
         exec_ctx.vfs_budget = vfs_budget.clone();
 
         Ok(Self {
@@ -1315,7 +1332,7 @@ impl Kernel {
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation,
             interactive,
-            allow_external_commands,
+            allow_unwrapped_commands,
             vfs_budget,
             request_timeout,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
@@ -1501,7 +1518,7 @@ impl Kernel {
             skip_validation: self.skip_validation,
             // Forks are never the TTY owner — they run in the background.
             interactive: false,
-            allow_external_commands: self.allow_external_commands,
+            allow_unwrapped_commands: self.allow_unwrapped_commands,
             // Arc-clone the budget so the fork draws from the same pool as the
             // parent — background jobs and scatter workers count against the same
             // cap as foreground writes.
@@ -3616,7 +3633,7 @@ impl Kernel {
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
-            allow_external_commands: self.allow_external_commands,
+            allow_unwrapped_commands: self.allow_unwrapped_commands,
             trash_backend: ec.trash_backend.clone(),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: ec.terminal_state.clone(),
@@ -6122,7 +6139,7 @@ impl Kernel {
     /// Try to execute an external command from PATH.
     #[cfg(feature = "subprocess")]
     async fn try_execute_external(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ExternalCommandOutcome> {
-        if !self.allow_external_commands {
+        if !self.allow_unwrapped_commands {
             return Ok(ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff));
         }
         Ok(match Box::pin(self.try_execute_external_on_path(name, args, &mut *ctx)).await? {
@@ -8655,7 +8672,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_external_commands_still_resolve_a_backend_tool() {
         // Regression guard for the kaijutsu shape: a read-only shell sets
-        // `allow_external_commands: false` (no host subprocess exec) but
+        // `allow_unwrapped_commands: false` (no host subprocess exec) but
         // still registers its own backend tools — e.g. a sandboxed `curl`
         // that reads the network without touching a host binary or the VFS.
         // Refusing external commands must NOT short-circuit the
@@ -8670,7 +8687,7 @@ mod tests {
         let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(mock);
         let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
             .expect("with_backend kernel");
-        assert!(!kernel.allow_external_commands, "isolated() must keep external commands off for this guard to mean anything");
+        assert!(!kernel.allow_unwrapped_commands, "isolated() must keep external commands off for this guard to mean anything");
 
         let result = kernel.execute("curl").await.expect("execution failed");
         assert!(
