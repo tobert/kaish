@@ -363,3 +363,51 @@ async fn a_nested_assignment_fault_names_both_targets() {
         "the original fault must still be reachable: {chain}"
     );
 }
+
+// ── An env-scoped assignment (`A=$(...) cmd`) names its target too ─────
+//
+// `Stmt::EnvScoped` — the inline `NAME=value ... command` prefix — evaluates
+// its assignment expressions with no `with_context` at all, unlike
+// `Stmt::Assignment`'s plain `A=$(...)` form above. A failing value left no
+// name in the error: `{:#}` on `A=$((1/0)) echo hi` showed only "arithmetic
+// error: divides by zero", not which of possibly several env-prefix names
+// the failing value belonged to.
+
+#[tokio::test]
+async fn an_env_scoped_assignment_fault_names_its_target() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("A=$((1/0)) echo hi")
+        .await
+        .expect_err("the env-prefix arithmetic fault must propagate");
+
+    assert_eq!(
+        err.to_string(),
+        "failed to evaluate assignment to A",
+        "Display shows the outermost frame, matching Stmt::Assignment's wording"
+    );
+
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("failed to evaluate assignment to A"),
+        "the env-prefix target must be named: {chain}"
+    );
+    assert!(
+        chain.contains("divides by zero"),
+        "the original fault must still be reachable: {chain}"
+    );
+}
+
+/// Two names in the same env prefix (`A=1 B=$((1/0)) cmd`) — only the one
+/// whose value actually failed is named; evaluation is left-to-right and
+/// stops at the first failure (matching the loop's `break` in kernel.rs).
+#[tokio::test]
+async fn an_env_scoped_assignment_fault_names_the_failing_target_not_an_earlier_one() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("A=1 B=$((1/0)) echo hi")
+        .await
+        .expect_err("the second env-prefix assignment's fault must propagate");
+
+    assert_eq!(err.to_string(), "failed to evaluate assignment to B");
+}
