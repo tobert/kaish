@@ -5213,6 +5213,17 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             exit_code = Some(code);
                             did_spill |= r.did_spill;
+                            // Assign, like the other arms and like the
+                            // top-level loop's `accumulate_result` call
+                            // before it overwrites `result.code` with the
+                            // exit code (kernel.rs ~2683) — `original_code`
+                            // belongs to the exiting statement's OWN result,
+                            // not to an earlier statement that happened to
+                            // spill. Left as `r.did_spill` alone, a spill in
+                            // an earlier statement followed by `exit 5` kept
+                            // that earlier `Some(0)` standing over a code
+                            // that was never remapped.
+                            original_code = r.original_code;
                             break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
@@ -5243,6 +5254,8 @@ impl Kernel {
         if let Some(e) = exec_error {
             let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
             prior.err = accumulated_err;
+            prior.did_spill = did_spill;
+            prior.original_code = original_code;
             return Err(with_prior_output(prior, e));
         }
         let code = exit_code.unwrap_or(last_code);
