@@ -1086,22 +1086,3 @@ async fn env_cannot_bypass_the_external_commands_gate() {
         via_env.err
     );
 }
-
-// ---------------------------------------------------------------------------
-// `allow_external_commands` was renamed to `allow_unwrapped_commands` (the
-// switch never gated wrapped commands, only PATH lookup / `exec` / `spawn`;
-// the old name implied otherwise). `with_allow_external_commands` stays as a
-// deprecated forwarding alias so existing embedder code keeps compiling.
-// ---------------------------------------------------------------------------
-
-#[test]
-#[allow(deprecated)]
-fn deprecated_with_allow_external_commands_still_sets_allow_unwrapped_commands() {
-    let via_new = KernelConfig::isolated().with_allow_unwrapped_commands(true);
-    let via_deprecated = KernelConfig::isolated().with_allow_external_commands(true);
-    assert_eq!(
-        via_deprecated.allow_unwrapped_commands, via_new.allow_unwrapped_commands,
-        "the deprecated alias must set exactly the field the renamed builder sets"
-    );
-    assert!(via_deprecated.allow_unwrapped_commands);
-}

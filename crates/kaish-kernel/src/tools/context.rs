@@ -231,16 +231,22 @@ pub struct ExecContext {
     pub ignore_config: IgnoreConfig,
     /// Output size limit configuration for agent safety.
     pub output_limit: OutputLimitConfig,
-    /// Whether an unwrapped command may run — a word that is not a builtin
-    /// (PATH lookup), plus the `exec` and `spawn` builtins. A wrapped
+    /// Whether an unwrapped command may run: PATH lookup for a word that is
+    /// not a builtin, the `exec` and `spawn` builtins, and `env CMD` (which
+    /// spawns CMD the same way, so it answers to the same gate). A wrapped
     /// command's program is pinned at registration and never reaches this
     /// check, so the name is true by construction: it gates any program
     /// that is *not* a wrapped command.
     ///
-    /// When `false`, PATH lookup, `exec`, and `spawn` are blocked. Only
-    /// kaish builtins and backend-registered tools (MCP) are available.
-    /// A blocked attempt reports [`ExternalCommandsUnavailable::ConfiguredOff`],
-    /// not "command not found".
+    /// When `false`, those four sites are blocked; a blocked attempt reports
+    /// [`ExternalCommandsUnavailable::ConfiguredOff`], not "command not
+    /// found". Everything else a kernel can run — builtins, backend-registered
+    /// tools (MCP), user-defined `tool`s, wrapped commands, `.kai` scripts —
+    /// is unaffected.
+    ///
+    /// `true` for a stand-alone `ExecContext` built outside a kernel (every
+    /// constructor below sets it); the kernel always overwrites it from
+    /// `KernelConfig::allow_unwrapped_commands` at construction.
     pub allow_unwrapped_commands: bool,
     /// Trash backend for safe file deletion.
     ///

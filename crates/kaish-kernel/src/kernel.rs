@@ -221,14 +221,17 @@ pub struct KernelConfig {
     pub output_limit: crate::output_limit::OutputLimitConfig,
 
     /// Whether an unwrapped command may run: PATH lookup for a word that is
-    /// not a builtin, plus the `exec` and `spawn` builtins. A wrapped
+    /// not a builtin, the `exec` and `spawn` builtins, and `env CMD` (which
+    /// spawns CMD the same way, so it answers to the same gate). A wrapped
     /// command's program is pinned at registration and never reaches this
     /// check, so the name is true by construction — it gates any program
     /// that is *not* a wrapped command.
     ///
-    /// When `true` (default), commands not found as builtins are resolved via PATH
-    /// and executed as child processes. When `false`, only kaish builtins and
-    /// backend-registered tools are available.
+    /// When `true` (default), commands not found as builtins are resolved via
+    /// PATH and executed as child processes. When `false`, those four sites
+    /// are blocked; everything else a kernel can run — builtins,
+    /// backend-registered tools, user-defined `tool`s, wrapped commands,
+    /// `.kai` scripts — is unaffected.
     ///
     /// **Security:** External commands bypass the VFS sandbox entirely — they see
     /// the real filesystem, network, and environment. Set to `false` when running
@@ -660,9 +663,9 @@ impl KernelConfig {
     }
 
     /// Set whether unwrapped command execution is allowed: PATH lookup for a
-    /// word that is not a builtin, and the `exec`/`spawn` builtins. A wrapped
-    /// command's program is pinned at registration and never reaches this
-    /// check, so it stays runnable regardless.
+    /// word that is not a builtin, the `exec`/`spawn` builtins, and
+    /// `env CMD`. A wrapped command's program is pinned at registration and
+    /// never reaches this check, so it stays runnable regardless.
     ///
     /// When `false`, commands not found as builtins report that external
     /// commands are disabled on this shell — distinct from "command not
@@ -831,8 +834,8 @@ pub struct Kernel {
     skip_validation: bool,
     /// When true, standalone external commands inherit stdio for real-time output.
     interactive: bool,
-    /// Whether an unwrapped command may run (PATH lookup, `exec`, `spawn`).
-    /// See [`KernelConfig::allow_unwrapped_commands`].
+    /// Whether an unwrapped command may run (PATH lookup, `exec`, `spawn`,
+    /// `env CMD`). See [`KernelConfig::allow_unwrapped_commands`].
     allow_unwrapped_commands: bool,
     /// Shared memory budget for all kernel-owned `MemoryFs` mounts.
     ///

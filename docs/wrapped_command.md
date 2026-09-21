@@ -12,9 +12,9 @@ and this document disagree, fix one and say which.
 
 `allow_unwrapped_commands` is a single switch. It allows any program that is
 not a wrapped command — PATH lookup for a word that is not a builtin, `exec`,
-and `spawn`. Off, nothing spawns. On, every program on `$PATH` spawns, with
-any arguments, and the validator sees each call as an opaque word list. There
-is no setting between those two.
+`spawn`, and `env CMD`. Off, only a wrapped command spawns. On, any program on
+`$PATH` also spawns, with any arguments, and the validator sees each call as
+an opaque word list. There is no setting between those two.
 
 A wrapped command is the setting between. It is an allowlist with a grammar:
 

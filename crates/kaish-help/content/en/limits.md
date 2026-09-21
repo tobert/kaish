@@ -62,7 +62,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | No PTY assumed | TTY works if present, but kaish doesn't allocate one |
 | Output buffered (non-pipeline) | Redirect to file or use in pipeline |
 | Virtual cwd fails | `cd` to real directory before running |
-| Bypass VFS sandbox | Set `allow_unwrapped_commands=false` to block; `exec`/`spawn` also gated |
+| Bypass VFS sandbox | Set `allow_unwrapped_commands=false` to block PATH lookup, `exec`, `spawn`, and `env CMD` |
 
 ## Bash vs kaish
 
