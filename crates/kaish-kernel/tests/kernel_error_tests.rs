@@ -390,6 +390,36 @@ async fn negated_background_pipeline_is_rejected() {
     );
 }
 
+/// The fix names the REAL negated pipeline, not a `cmd` placeholder, and
+/// records the pipeline's first command via `.with_command`, matching the
+/// convention `ScatterWithoutGather`'s sibling check already uses.
+#[tokio::test]
+async fn negated_background_pipeline_message_names_the_real_body() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("! grep -q x f &")
+        .await
+        .expect_err("`! grep -q x f &` must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("must be KernelError::Validation, not {err:?}");
+    };
+    let issue = issues
+        .iter()
+        .find(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline)
+        .unwrap_or_else(|| panic!("expected NegatedBackgroundPipeline (E022): {issues:?}"));
+    assert_eq!(
+        issue.message,
+        "`! grep -q x f &`: `!` cannot negate a background pipeline; negate inside the job — \
+         `f() { ! grep -q x f; }; f &` — or drop the `!`",
+        "the fix must name the real pipeline, not a `cmd` placeholder"
+    );
+    assert_eq!(
+        issue.command.as_deref(),
+        Some("grep"),
+        "must record the pipeline's first command, like ScatterWithoutGather does"
+    );
+}
+
 /// Nesting doesn't dodge the check: the OUTERMOST `!` still wraps a
 /// backgrounded pipeline.
 #[tokio::test]

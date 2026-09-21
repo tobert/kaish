@@ -548,6 +548,8 @@ while ! cmd; do …; done   # and is how kaish spells `until`
 ! true                    # `!` also negates a pipeline as its own statement
 ! a | b                   # binds to the WHOLE pipeline, not just `a`
 !true                     # error — kaish needs a space: write `! true`
+f() { ! cmd; }; f &       # negate inside the job, then background the call
+! cmd &                   # error — kaish refuses; bash silently drops the negation here
 ```
 
 `!` binds to the command (or pipeline) that follows, not to the whole chain:

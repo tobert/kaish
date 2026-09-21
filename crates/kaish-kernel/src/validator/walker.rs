@@ -130,13 +130,24 @@ impl<'a> Validator<'a> {
                     && p.background
                 {
                     let rendered = crate::ast::plan::render_stmt(stmt);
-                    self.issues.push(ValidationIssue::error(
+                    // The fix names the REAL negated pipeline, not a `cmd`
+                    // placeholder — `render_stmt(body)` renders it with the
+                    // trailing ` &` `render_pipeline` always adds for a
+                    // backgrounded pipeline; strip that back off since the
+                    // fix supplies its own `&` after wrapping the job.
+                    let body_rendered = crate::ast::plan::render_stmt(body);
+                    let inner = body_rendered.strip_suffix(" &").unwrap_or(&body_rendered);
+                    let mut issue = ValidationIssue::error(
                         IssueCode::NegatedBackgroundPipeline,
                         format!(
                             "`{rendered}`: `!` cannot negate a background pipeline; negate \
-                             inside the job — `f() {{ ! cmd; }}; f &` — or drop the `!`"
+                             inside the job — `f() {{ ! {inner}; }}; f &` — or drop the `!`"
                         ),
-                    ));
+                    );
+                    if let Some(cmd) = p.stages.first().and_then(|s| s.as_command()) {
+                        issue = issue.with_command(cmd.name.clone());
+                    }
+                    self.issues.push(issue);
                 }
                 self.validate_stmt(body);
             }

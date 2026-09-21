@@ -701,6 +701,8 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 ! grep -q pattern file | wc -l  # binds to the WHOLE pipeline, below && / ||
 ! cmd1 && cmd2                  # ! binds tighter than &&: (! cmd1) && cmd2
 !true                           # error — kaish needs a space: write `! true`
+f() { ! cmd; }; f &             # negate inside the job, then background the call
+! cmd &                         # error — kaish refuses; bash silently drops the negation here
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.
