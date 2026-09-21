@@ -888,17 +888,46 @@ fn render_literal(value: &Value) -> String {
     }
 }
 
-/// Single-quote a word that a shell reader could not take literally.
+/// Single-quote a word that a shell reader could not take literally, or that
+/// would re-lex as a different type than the `Value::String` it is.
 fn quote_word(s: &str) -> String {
     let needs_quotes = s.is_empty()
         || s.chars()
-            .any(|c| c.is_whitespace() || "\"'$`&|;<>(){}[]*?#!~\\".contains(c));
+            .any(|c| c.is_whitespace() || "\"'$`&|;<>(){}[]*?#!~\\".contains(c))
+        || bare_word_changes_type(s);
     if !needs_quotes {
         return s.to_string();
     }
     // `'\''` is the one portable way to put a single quote inside a
     // single-quoted word.
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// True when `s`, written bare (unquoted) in source, would lex as a
+/// numeral or a boolean keyword instead of the string it is — `"1"` reads
+/// back as `Int(1)`, `"1.5"` as `Float(1.5)`, `"0.10"`/`"-0"` as a
+/// `NumericLiteral` (a typed number with non-canonical source text), and
+/// `"true"`/`"false"` as a boolean keyword. A rendered plan is meant to
+/// re-parse to the same value, so any of these must stay quoted.
+///
+/// Runs the real lexer rather than re-deriving its numeral/keyword rules
+/// by hand — a hand-rolled digit/keyword check would drift from the
+/// lexer's actual grammar the day either one changes. A leading-zero
+/// numeral (`"01"`) already lexes bare as [`Token::NumberIdent`], which
+/// parses back to a `Value::String` (`docs/LANGUAGE.md`, "A leading zero
+/// is text") — no quoting needed there, and this function agrees.
+fn bare_word_changes_type(s: &str) -> bool {
+    match crate::lexer::tokenize(s) {
+        Ok(tokens) if tokens.len() == 1 => matches!(
+            tokens[0].token,
+            crate::lexer::Token::Int(_)
+                | crate::lexer::Token::Float(_)
+                | crate::lexer::Token::NumericLiteral(_)
+                | crate::lexer::Token::True
+                | crate::lexer::Token::False
+        ),
+        _ => false,
+    }
 }
 
 fn render_parts(parts: &[StringPart]) -> String {

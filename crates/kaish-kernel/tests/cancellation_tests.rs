@@ -285,6 +285,54 @@ async fn kernel_cancel_kills_running_external() {
     );
 }
 
+/// The `spawn` builtin's child now has its own process group (a sibling
+/// review fix), which meant a `Kernel::cancel()` no longer reached it at
+/// all: `spawn` never raced its wait against `ctx.cancel`, so a Ctrl-C or an
+/// embedder cancellation left `spawn --command sleep 300` running to
+/// completion regardless. This pins the fix on the grandchild case
+/// specifically — `spawn`'s direct child backgrounds a `sleep`, so only a
+/// process-group kill (not `Child::start_kill()`) reaches it.
+#[tokio::test]
+async fn kernel_cancel_kills_spawn_and_its_backgrounded_grandchild() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("grandchild.pid");
+
+    let kernel = kernel_for_test();
+    let kernel_clone = kernel.clone();
+    let pid_file_clone = pid_file.clone();
+
+    // Cancel once the grandchild is actually running (its pid is recorded),
+    // not after a fixed sleep — same reasoning as the test above.
+    tokio::spawn(async move {
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
+        kernel_clone.cancel();
+    });
+
+    let start = Instant::now();
+    let script = format!(
+        r#"spawn --command sh --argv '["-c", "sleep 60 & echo $! > {} ; wait"]'"#,
+        pid_file.display()
+    );
+    let result = kernel.execute(&script).await.expect("execute");
+    let elapsed = start.elapsed();
+
+    // Before the fix, this call blocked for the full 60s `sleep` (or the
+    // grandchild's copy of the stdout pipe kept the drains from ever seeing
+    // EOF) — a bounded wait here is itself part of what the fix proves.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "spawn must return promptly once cancelled, took {elapsed:?}: {result:?}"
+    );
+    assert_eq!(result.code, 130, "cancellation must report 130: {result:?}");
+
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(2)).await,
+        "Kernel::cancel did not kill spawn's grandchild pid {}",
+        pid,
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 5. timeout builtin kills the inner external
 // ════════════════════════════════════════════════════════════════════════════
