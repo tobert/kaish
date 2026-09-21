@@ -3524,6 +3524,23 @@ impl Kernel {
                                 anyhow::anyhow!("{}", message.trim_end()),
                             ));
                         }
+                        // A cancelled body reports its kill as a Normal
+                        // result (130, or 128+signal for a killed child —
+                        // see `spawn.rs`), not an Err, and `execute()`'s
+                        // top-level cancellation remap only fires when the
+                        // FINAL result is not ok. Flipping a cancelled
+                        // nonzero code to 0 would make that remap skip and
+                        // the whole call report success for a run that was
+                        // killed, not completed — a cancellation must never
+                        // read as success. Ask the cancel tokens directly,
+                        // the same check the for/while checkpoints use,
+                        // rather than trust the code alone: a script that
+                        // deliberately writes `exit 130` is not cancelled
+                        // and its `!` must still flip.
+                        if self.is_cancelled() || ctx.cancel.is_cancelled() {
+                            self.update_last_result(&result).await;
+                            return Ok(ControlFlow::ok(result));
+                        }
                         result.code = if result.code == 0 { 1 } else { 0 };
                         self.update_last_result(&result).await;
                         Ok(ControlFlow::ok(result))

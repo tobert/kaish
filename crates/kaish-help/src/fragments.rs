@@ -755,7 +755,8 @@ echo reached               # still runs
 `!` negates a pipeline's exit status, and the negated statement never trips
 `set -e`, whatever that flipped status is. This is a hazard for a common
 idiom: `! grep -q secret f` used as an assertion does not stop a `set -e`
-script, because it always exits 0. Write the check the other way instead —
+script — it exits 1 when `secret` IS in `f` and 0 when it is absent, but
+`set -e` never sees either code. Write the check the other way instead —
 `grep -q secret f && exit 1`.
 
 Env var: `KAISH_TRASH=1` enables trash at startup.

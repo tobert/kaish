@@ -249,6 +249,7 @@ fn not_still_plans_every_command_in_a_negated_compound() {
     // `!` negates the compound's own exit status — the loop body's commands
     // are unaffected and still all appear.
     let plans = plan_program("! for x in a b; do echo ${x}; done").expect("parses");
+    assert_eq!(plans[0].plan.rendered, "! for x in a b; do echo ${x}; done");
     assert_eq!(plans[0].plan.statement_kind, "not");
     assert_eq!(plans[0].plan.commands[0].name, "echo");
     assert_eq!(plans[0].plan.bound_variables, vec!["x".to_string()]);

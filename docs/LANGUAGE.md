@@ -1199,10 +1199,13 @@ echo reached                      # still runs
 ```
 
 This follows bash exactly, and it is a hazard for a common idiom: `!` used as
-an assertion does not stop a `set -e` script. `! grep -q secret f` exits 0
-whether or not `secret` is in `f`, so a script relying on it to abort never
-does. Write the check the other way instead — `grep -q secret f && exit 1` —
-so the failure `set -e` needs to see is the one it actually gets.
+an assertion does not stop a `set -e` script — the negated statement is
+exempt from errexit whatever its flipped status is. `! grep -q secret f`
+exits 1 when `secret` IS in `f` (the case a script wants to catch) and 0
+when it is absent, but `set -e` never sees either code, so a script relying
+on it to abort never does. Write the check the other way instead —
+`grep -q secret f && exit 1` — so the failure `set -e` needs to see is the
+one it actually gets.
 
 `set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
 **1** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,

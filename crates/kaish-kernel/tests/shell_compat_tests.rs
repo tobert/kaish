@@ -1255,8 +1255,11 @@ shell_compat! {
 
 shell_compat! {
     name: errexit_does_not_fire_on_a_negated_true,
-    script: "set -e; ! true; echo reached",
-    eq: "reached",
+    // `echo $?` proves `!` actually flipped `true`'s 0 to 1 — without it this
+    // row would pass equally well if `!` were a no-op, since `true; echo
+    // reached` under `set -e` also prints "reached".
+    script: "set -e; ! true; echo $?; echo reached",
+    eq: "1\nreached",
 }
 
 shell_compat! {
