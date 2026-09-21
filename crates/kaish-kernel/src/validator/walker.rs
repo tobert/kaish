@@ -121,7 +121,30 @@ impl<'a> Validator<'a> {
                 }
                 self.validate_stmt(body);
             }
-            Stmt::Not(body) => self.validate_stmt(body),
+            Stmt::Not(body) => {
+                // `! cmd &` — bash silently drops the negation for a
+                // backgrounded pipeline (`! true & wait $!` reports 0, the
+                // un-negated status): the exit code `!` would flip is never
+                // read before the job scatters into the background, so bash
+                // just never applies it. kaish refuses rather than accept
+                // syntax whose only effect bash throws away — see
+                // `docs/LANGUAGE.md`, "Statement Chaining".
+                if let Stmt::Pipeline(p) = body.as_ref()
+                    && p.background
+                {
+                    self.issues.push(
+                        ValidationIssue::error(
+                            IssueCode::NegatedBackgroundPipeline,
+                            "`!` over a background pipeline (`! cmd &`) is refused — bash \
+                             silently drops the negation there instead of applying it",
+                        )
+                        .with_suggestion(
+                            "negate inside the job instead — `f() { ! cmd; }; f &` — or drop the `!`",
+                        ),
+                    );
+                }
+                self.validate_stmt(body);
+            }
             Stmt::Empty => {}
         }
     }
