@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::{ExecResult, Scope};
 use crate::scheduler::{
-    drain_to_stream_teed, BoundedStream, JobId, JobManager, PipeReader, DEFAULT_STREAM_MAX_SIZE,
+    drain_to_stream_teed_until, BoundedStream, JobId, JobManager, PipeReader, DEFAULT_STREAM_MAX_SIZE,
 };
 use crate::tools::ExecContext;
 
@@ -566,15 +566,21 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         // overflow markers added at the end go to the same stream.
         let stderr_marker_tee = stderr_tee.clone();
 
+        // Stops the drains between chunks on cancel. An abort could land
+        // between a chunk's capture write and its tee write, leaving `err`
+        // holding bytes counted as published that never reached the stream.
+        let drain_stop = tokio_util::sync::CancellationToken::new();
         let stdout_task = stdout_pipe.map(|pipe| {
+            let stop = drain_stop.clone();
             tokio::spawn(async move {
-                drain_to_stream_teed(pipe, stdout_clone, stdout_tee).await;
+                drain_to_stream_teed_until(pipe, stdout_clone, stdout_tee, &stop).await;
             })
         });
 
         let stderr_task = stderr_pipe.map(|pipe| {
+            let stop = drain_stop.clone();
             tokio::spawn(async move {
-                drain_to_stream_teed(pipe, stderr_clone, stderr_tee).await;
+                drain_to_stream_teed_until(pipe, stderr_clone, stderr_tee, &stop).await;
             })
         });
 
@@ -590,28 +596,27 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             Ok(s) => s,
             Err(e) => {
                 // stdin-copy task is aborted by `_stdin_copy_guard` on return.
+                drain_stop.cancel();
                 if let Some(task) = stdout_task {
-                    task.abort();
                     let _ = task.await;
                 }
                 if let Some(task) = stderr_task {
-                    task.abort();
                     let _ = task.await;
                 }
                 return ExecResult::failure(1, format!("{}: failed to wait: {}", label, e));
             }
         };
 
-        // On cancel, abort the drain tasks (the child's pipes are gone;
+        // On cancel, stop the drain tasks (the child's pipes are gone;
         // late output is lost but predictable death beats partial capture).
         // On normal exit, await drains so we don't lose buffered output.
         if cancelled_before_wait || spawn_ctx.cancel.is_cancelled() {
+            drain_stop.cancel();
             if let Some(task) = stdout_task {
-                task.abort();
+                // Ignore join error — the drain task logs its own errors
                 let _ = task.await;
             }
             if let Some(task) = stderr_task {
-                task.abort();
                 let _ = task.await;
             }
         } else {

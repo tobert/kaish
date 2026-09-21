@@ -289,6 +289,47 @@ async fn a_killed_job_keeps_the_bytes_it_already_streamed() {
     );
 }
 
+/// The stderr twin: a kill aborts the external's drain task, possibly between
+/// its capture write and its stream write. The stream must still end holding
+/// exactly the job's `result.err` — no chunk counted as published that never
+/// arrived. A reader polls the stream during the kill, as an embedder would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_killed_job_streams_exactly_its_stderr() {
+    for round in 0..20 {
+        let kernel = std::sync::Arc::new(kernel());
+        kernel
+            .execute("sh -c 'while :; do echo kaish-chatty-stderr-line-with-some-length >&2; done' &")
+            .await
+            .expect("spawn failed");
+        let id = JobId(1);
+        let deadline = Instant::now() + LIVE_TIMEOUT;
+        while stderr_of(&kernel, id).await.len() < 64 * 1024 {
+            assert!(Instant::now() < deadline, "round {round}: nothing streamed before the kill");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let poller = {
+            let kernel = kernel.clone();
+            tokio::spawn(async move {
+                while status_of(&kernel, id).await == "running" {
+                    let _ = kernel.jobs().read_stderr(id).await;
+                }
+            })
+        };
+        kernel.execute("kill %1").await.expect("kill failed");
+        let result = kernel.jobs().wait(id).await.expect("job result");
+        poller.await.expect("poller");
+        let stream = kernel.jobs().read_stderr(id).await.expect("job must exist");
+        assert!(
+            stream == result.err.as_bytes(),
+            "round {round}: stream ({} bytes) must equal result.err ({} bytes); stream tail {:?}, err tail {:?}",
+            stream.len(),
+            result.err.len(),
+            String::from_utf8_lossy(&stream[stream.len().saturating_sub(120)..]),
+            &result.err[result.err.len().saturating_sub(120)..],
+        );
+    }
+}
+
 /// Reading a job that does not exist is `None`, not an empty stream — the
 /// caller can tell "no such job" from "nothing written yet".
 #[tokio::test]
