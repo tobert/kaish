@@ -305,3 +305,32 @@ fn non_identifier_name_with_equals_names_the_whole_word(
 fn identifier_name_with_equals_stays_an_assignment(#[case] source: &str) {
     parse(source).expect("must parse as an assignment");
 }
+
+/// bash removes a backslash-newline before it splits words, so a
+/// continuation flush on both sides joins two words into one. kaish does no
+/// token pasting and refuses that join; the span covers the whole word.
+#[rstest]
+#[case("echo a\\\nb", "a\\\nb")]
+#[case("echo foo\\\n:bar", "foo\\\n:bar")]
+#[case("echo a\\\n*b", "a\\\n*b")]
+#[case("echo $((1+2))\\\nabc", "$((1+2))\\\nabc")]
+fn flush_line_continuation_is_a_glued_word(#[case] source: &str, #[case] expected: &str) {
+    assert_eq!(glued_span_text(source), expected);
+}
+
+/// Whitespace on either side of a continuation separates the words.
+///
+/// The `ShortFlag` cases pin a known gap, not a decision: bash reads
+/// `a\<newline>-b` as the one word `a-b`, and kaish keeps two words because
+/// `is_glue_candidate` excludes `ShortFlag`. If `ShortFlag` becomes a glue
+/// candidate, move these two cases to `flush_line_continuation_is_a_glued_word`.
+#[rstest]
+#[case("echo a \\\nb", r#"(cmd echo (pos (string "a")) (pos (string "b")))"#)]
+#[case("echo a\\\n b", r#"(cmd echo (pos (string "a")) (pos (string "b")))"#)]
+#[case("echo a\\\n-b", r#"(cmd echo (pos (string "a")) (shortflag b))"#)]
+#[case("echo -x\\\ny", r#"(cmd echo (shortflag x) (pos (string "y")))"#)]
+fn spaced_line_continuation_keeps_two_words(#[case] source: &str, #[case] expected: &str) {
+    let program = parse(source).expect("must parse");
+    let rendered = kaish_kernel::ast::sexpr::format_program(&program);
+    assert_eq!(rendered.trim(), expected, "{source:?}");
+}

@@ -14,9 +14,58 @@ use crate::lexer::{self, HereDocData, Token};
 use chumsky::error::RichReason;
 use chumsky::input::{MappedInput, Stream, ValueInput};
 use chumsky::prelude::*;
+use std::cell::RefCell;
 
 /// Span type used throughout the parser.
 pub type Span = SimpleSpan;
+
+thread_local! {
+    /// Line continuations dropped from the current [`parse`] call's tokens,
+    /// as `(start, end)` source offsets. `CACHED_PARSER` is built once per
+    /// thread, so per-call data reaches its closures through here.
+    static CONTINUATION_GAPS: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Installs one [`parse`] call's continuation gaps and restores the previous
+/// set on drop, so a nested `parse` (a quoted `$(...)` body) or a panic
+/// cannot leave the outer call reading the wrong gaps.
+struct ContinuationGapsGuard {
+    saved: Vec<(usize, usize)>,
+}
+
+impl ContinuationGapsGuard {
+    fn install(gaps: Vec<(usize, usize)>) -> Self {
+        let saved = CONTINUATION_GAPS.with(|c| std::mem::replace(&mut *c.borrow_mut(), gaps));
+        Self { saved }
+    }
+}
+
+impl Drop for ContinuationGapsGuard {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.saved);
+        CONTINUATION_GAPS.with(|c| *c.borrow_mut() = saved);
+    }
+}
+
+/// True when two spans touch, or the bytes between them are only dropped
+/// line continuations. bash removes a backslash-newline before it splits
+/// words, so `W\<newline>N` is one word; every adjacency check uses this.
+fn gap_is_only_continuations(prev_end: usize, next_start: usize) -> bool {
+    if prev_end >= next_start {
+        return prev_end == next_start;
+    }
+    CONTINUATION_GAPS.with(|gaps| {
+        let gaps = gaps.borrow();
+        let mut pos = prev_end;
+        while pos < next_start {
+            let Some(gap) = gaps.iter().find(|gap| gap.0 == pos) else {
+                return false;
+            };
+            pos = gap.1;
+        }
+        pos == next_start
+    })
+}
 
 /// The token stream a cached parser reads.
 ///
@@ -1173,7 +1222,7 @@ impl std::error::Error for ParseError {}
 /// Parse kaish source code into a Program AST.
 pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // Tokenize with logos
-    let tokens = lexer::tokenize(source).map_err(|errs| {
+    let (tokens, gaps) = lexer::tokenize_with_continuation_gaps(source).map_err(|errs| {
         errs.into_iter()
             .map(|e| ParseError {
                 span: (e.span.start..e.span.end).into(),
@@ -1187,6 +1236,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
         .into_iter()
         .map(|spanned| (spanned.token, (spanned.span.start..spanned.span.end).into()))
         .collect();
+    let gaps: Vec<(usize, usize)> = gaps.into_iter().map(|s| (s.start, s.end)).collect();
 
     // bash's `${VAR:offset:length}` is checked on the token stream, before the
     // grammar runs, for the reason documented on `command_parser`: a `try_map`
@@ -1257,6 +1307,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // End-of-input span
     let end_span: Span = (source.len()..source.len()).into();
 
+    let _gaps = ContinuationGapsGuard::install(gaps);
     parse_tokens(tokens, end_span, (0..0).into())
 }
 
@@ -1922,7 +1973,9 @@ where
                     let mut index = 0;
                     while index + 1 < items.len() {
                         let start = index;
-                        while index + 1 < items.len() && items[index].1.end == items[index + 1].1.start {
+                        while index + 1 < items.len()
+                            && gap_is_only_continuations(items[index].1.end, items[index + 1].1.start)
+                        {
                             index += 1;
                         }
                         if index > start {
@@ -2194,12 +2247,13 @@ where
         // command alternative and the glued-word diagnosis that names the fix.
         .then(just(Token::Eq).map_with(|_, extra| -> Span { extra.span() }).or_not().rewind())
         .filter(|((_, is_identifier, name_span), equals)| {
-            !(*is_identifier && equals.is_some_and(|span| name_span.end == span.start))
+            !(*is_identifier
+                && equals.is_some_and(|span| gap_is_only_continuations(name_span.end, span.start)))
         })
         .map(|((name, _, name_span), _)| (name, name_span))
         .then(args_list_parser().map_with(|args, extra| -> (Vec<Arg>, Span) { (args, extra.span()) }))
         .validate(|((name, name_span), (args, args_span)), _, emitter| {
-            if !args.is_empty() && name_span.end == args_span.start {
+            if !args.is_empty() && gap_is_only_continuations(name_span.end, args_span.start) {
                 emitter.emit(Rich::custom(
                     args_span,
                     "command name and first argument need a space between them",
@@ -2333,7 +2387,10 @@ fn reject_glued_args<'src>(
     for pair in args.windows(2) {
         let (prev, prev_span) = &pair[0];
         let (next, next_span) = &pair[1];
-        if is_glue_candidate(prev) && is_glue_candidate(next) && prev_span.end == next_span.start {
+        if is_glue_candidate(prev)
+            && is_glue_candidate(next)
+            && gap_is_only_continuations(prev_span.end, next_span.start)
+        {
             return Err(Rich::custom(*next_span, GLUED_ARGS_MESSAGE));
         }
     }
@@ -2507,7 +2564,9 @@ where
     .try_map(
         |(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)),
          span| {
-            if key_span.end != eq_span.start || eq_span.end != value_span.start {
+            if !gap_is_only_continuations(key_span.end, eq_span.start)
+                || !gap_is_only_continuations(eq_span.end, value_span.start)
+            {
                 Err(Rich::custom(
                     span,
                     "a flag and its value must not have spaces around '=' \
@@ -2534,7 +2593,9 @@ where
     .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
     .try_map(|(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)), span| {
         // Check that key ends where = starts and = ends where value starts
-        if key_span.end != eq_span.start || eq_span.end != value_span.start {
+        if !gap_is_only_continuations(key_span.end, eq_span.start)
+            || !gap_is_only_continuations(eq_span.end, value_span.start)
+        {
             Err(Rich::custom(
                 span,
                 "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
@@ -2660,7 +2721,7 @@ where
         .map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) })
         .then(target.clone().map_with(|_, e| e.span()).rewind().or_not())
         .try_map(|((expr, span), glued), _| match glued {
-            Some(next_span) if next_span.start == span.end => Err(Rich::custom(
+            Some(next_span) if gap_is_only_continuations(span.end, next_span.start) => Err(Rich::custom(
                 next_span,
                 "adjacent words with no space between them are not joined into the redirect \
                  target (kaish does no token pasting); quote the whole target, e.g. \
@@ -2983,7 +3044,7 @@ where
             for (i, bang_span) in bangs.iter().enumerate() {
                 let next_is_bang = i + 1 < bangs.len();
                 let next_start = if next_is_bang { bangs[i + 1].start } else { body_span.start };
-                if bang_span.end == next_start {
+                if gap_is_only_continuations(bang_span.end, next_start) {
                     // The rest of the glued word: another `!` when this bang
                     // is glued to a following bang, or the negated node's
                     // own rendered text when it's glued straight to what it
@@ -3844,9 +3905,9 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 
         if is_assign_key_token(tok)
             && let Some((Token::Eq, eq_span)) = tokens.get(i + 1)
-            && eq_span.start == span.end
+            && gap_is_only_continuations(span.end, eq_span.start)
             && let Some((value_span, next_i)) = word_unit(tokens, i + 2)
-            && eq_span.end == value_span.start
+            && gap_is_only_continuations(eq_span.end, value_span.start)
         {
             units.push((span.start..value_span.end).into());
             i = next_i;
@@ -3863,8 +3924,9 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
         // break in it: a name that cannot start an assignment (`./bin=1`)
         // reaches argv as word/`=`/word and must be reported as one word.
         if matches!(tok, Token::Eq)
-            && units.last().is_some_and(|last: &Span| last.end == span.start)
-            && word_unit(tokens, i + 1).is_some_and(|(next, _)| next.start == span.end)
+            && units.last().is_some_and(|last: &Span| gap_is_only_continuations(last.end, span.start))
+            && word_unit(tokens, i + 1)
+                .is_some_and(|(next, _)| gap_is_only_continuations(span.end, next.start))
         {
             units.push(*span);
             i += 1;
@@ -3972,15 +4034,19 @@ fn validate_glued_args(
 ) -> Result<(), Vec<ParseError>> {
     let units = glue_candidate_units(tokens);
     for i in 0..units.len().saturating_sub(1) {
-        if units[i].end != units[i + 1].start {
+        if !gap_is_only_continuations(units[i].end, units[i + 1].start) {
             continue;
         }
         let mut start_idx = i;
-        while start_idx > 0 && units[start_idx - 1].end == units[start_idx].start {
+        while start_idx > 0
+            && gap_is_only_continuations(units[start_idx - 1].end, units[start_idx].start)
+        {
             start_idx -= 1;
         }
         let mut end_idx = i + 1;
-        while end_idx + 1 < units.len() && units[end_idx].end == units[end_idx + 1].start {
+        while end_idx + 1 < units.len()
+            && gap_is_only_continuations(units[end_idx].end, units[end_idx + 1].start)
+        {
             end_idx += 1;
         }
         // The scan walks the whole token stream, so it also finds adjacency

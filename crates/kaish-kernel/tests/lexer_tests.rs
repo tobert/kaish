@@ -1187,3 +1187,26 @@ fn lexer_errors_are_capped() {
         "expected exactly the cap when the input overruns it"
     );
 }
+
+/// A dropped line continuation stays out of every token's span, so no
+/// span-sliced token text (a fused colon or glob word, a numeral's source
+/// text) can carry the backslash-newline.
+#[rstest]
+#[case::colon_run("echo foo\\\n:bar")]
+#[case::glob_run("echo a\\\n*b")]
+#[case::after_arithmetic("echo $((1+2))\\\nabc")]
+#[case::numeral("sleep 5\\\n  && echo done")]
+#[case::leading_zero("echo 007\\\n x")]
+fn line_continuation_stays_out_of_token_spans(#[case] source: &str) {
+    let continuation = source.find("\\\n").expect("fixture has a continuation");
+    let tokens = tokenize(source).expect("must tokenize");
+    for t in &tokens {
+        assert!(
+            t.span.end <= continuation || t.span.start >= continuation + 2,
+            "{source:?}: {:?} at {:?} covers the continuation",
+            t.token,
+            t.span
+        );
+        assert_ne!(t.token, Token::LineContinuation, "{source:?}: leaked {tokens:?}");
+    }
+}

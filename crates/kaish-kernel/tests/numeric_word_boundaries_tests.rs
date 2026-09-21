@@ -98,3 +98,25 @@ async fn literal_words_and_globs_work_as_case_patterns(#[case] word: &str, #[cas
     assert!(result.ok(), "{result:?}");
     assert_eq!(result.text_out(), "match\n");
 }
+
+/// A numeral before a line continuation keeps its own text: the dropped
+/// backslash-newline is not part of its span, so argv gets `5`, not `5\`.
+#[test]
+fn numeral_before_a_line_continuation_keeps_its_text() {
+    let tokens = tokenize("sleep 5\\\n  && echo done").unwrap();
+    assert_eq!(tokens[1].token, Token::Int(5), "{tokens:?}");
+    assert_eq!(tokens[1].span, 6..7);
+    let tokens = tokenize("echo 007\\\n x").unwrap();
+    assert_eq!(tokens[1].token, Token::NumberIdent("007".into()), "{tokens:?}");
+    assert_eq!(tokens[1].span, 5..8);
+}
+
+#[tokio::test]
+async fn numeral_before_a_line_continuation_reaches_argv_exactly() {
+    let kernel = Kernel::new(KernelConfig::isolated()).unwrap();
+    for (source, expected) in [("echo 5\\\n  && echo done", "5\ndone\n"), ("echo 007\\\n x", "007 x\n")] {
+        let result = kernel.execute(source).await.unwrap();
+        assert!(result.ok(), "{source:?}: {result:?}");
+        assert_eq!(result.text_out(), expected, "{source:?}");
+    }
+}

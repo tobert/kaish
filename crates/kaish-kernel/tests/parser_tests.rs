@@ -559,10 +559,9 @@ fn ordinary_glued_argument_keeps_its_pre_existing_error() {
 // parser, but used to keep the original byte spans either side of it — so
 // `!\<newline>true` measured a 2-byte gap between `!` and `true` and read as
 // spaced, silently negating. bash removes a backslash-newline before it even
-// tokenizes, so `!\<newline>true` IS `!true`: one glued word. Fixed at the
-// lexer: a `LineContinuation` flush against the token just kept widens that
-// token's span to swallow it, so the parser's span-adjacency check sees the
-// same zero gap bash would.
+// tokenizes, so `!\<newline>true` IS `!true`: one glued word. The lexer
+// reports each dropped continuation's span beside the tokens, and the
+// parser's adjacency checks treat a gap made only of continuations as no gap.
 
 #[test]
 fn glued_bang_across_a_line_continuation_is_refused() {
