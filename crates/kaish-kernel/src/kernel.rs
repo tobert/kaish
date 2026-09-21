@@ -3546,14 +3546,21 @@ impl Kernel {
                         // see `spawn.rs`), not an Err, and `execute()`'s
                         // top-level cancellation remap only fires when the
                         // FINAL result is not ok. Flipping a cancelled
-                        // nonzero code to 0 would make that remap skip and
-                        // the whole call report success for a run that was
-                        // killed, not completed — a cancellation must never
-                        // read as success. Ask the cancel tokens directly,
-                        // the same check the for/while checkpoints use,
-                        // rather than trust the code alone: a script that
-                        // deliberately writes `exit 130` is not cancelled
-                        // and its `!` must still flip.
+                        // nonzero code to 0 would make that remap skip,
+                        // reporting success for a run that was killed, not
+                        // completed. The guarantee this check gives is
+                        // narrower than "a cancellation never reads as
+                        // success" — a body that genuinely finishes with 0
+                        // right as cancellation lands still reports 0, and
+                        // that race is not this guard's business. What it
+                        // guarantees: a cancelled body's CODE IS NEVER
+                        // FLIPPED into success — a real nonzero kill code
+                        // passes through as-is, never negated to 0. Ask the
+                        // cancel tokens directly, the same check the
+                        // for/while checkpoints use, rather than trust the
+                        // code alone: a script that deliberately writes
+                        // `exit 130` is not cancelled and its `!` must
+                        // still flip.
                         if self.is_cancelled() || ctx.cancel.is_cancelled() {
                             self.update_last_result(&result).await;
                             return Ok(ControlFlow::ok(result));
