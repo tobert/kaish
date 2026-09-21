@@ -54,7 +54,8 @@ not. `stderr` fills from every pipeline stage, not just the last — bash never
 pipes stderr between stages. An external command fills it live, chunk by
 chunk; a builtin, a function call, or any other statement fills it once its
 own redirects apply. `2>file`, `&>file`, and `2>&1` keep a stage's stderr out
-of the node; `>&2` still reaches `stderr`.
+of the node; `>&2` still reaches `stderr`. A `$(...)` in a command's arguments
+runs before its redirects, so its stderr reaches `stderr` either way.
 
 Each node holds at most 10MB and evicts its oldest bytes past that. Redirect
 to a file (`cargo build > /tmp/build.log 2>&1 &`) when the whole output
