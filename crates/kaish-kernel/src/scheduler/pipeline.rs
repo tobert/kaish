@@ -86,6 +86,10 @@ fn fault_result(error: anyhow::Error) -> ExecResult {
         result.err.push('\n');
     }
     result.err.push_str(&ExecResult::terminate_diagnostic(format!("{error:#}")));
+    // The diagnostic just appended is new, whatever `carrier.output` already
+    // carried — force the whole text to be (re)published rather than trust a
+    // stale flag that only ever described the prior output.
+    result.stderr_published = false;
     result
 }
 
@@ -98,6 +102,26 @@ fn redirects_stdout(stage: &PipelineStage) -> bool {
             RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend | RedirectKind::Both | RedirectKind::MergeStdout
         )
     })
+}
+
+/// Whether a stage's redirects send its stderr away from being the job's
+/// stderr: to a file (`2>`, `&>`) or into stdout (`2>&1`). `>&2` is
+/// deliberately absent — it adds content INTO stderr, it does not redirect
+/// stderr itself away, so the stage's own stderr still belongs on the job's
+/// stream (`stdout_sent_to_stderr_reaches_the_stderr_stream`).
+fn redirects_stderr(stage: &PipelineStage) -> bool {
+    stage
+        .redirects()
+        .iter()
+        .any(|redirect| matches!(redirect.kind, RedirectKind::Stderr | RedirectKind::Both | RedirectKind::MergeStderr))
+}
+
+/// Whether a stage's redirects merge its stderr into its stdout (`2>&1`) —
+/// the one case where a stage's stdout gains bytes only once the WHOLE stage
+/// has finished and `apply_redirects` has run, after any live leaf publish
+/// already sent the pre-merge stdout.
+fn merges_stderr_into_stdout(stage: &PipelineStage) -> bool {
+    stage.redirects().iter().any(|redirect| redirect.kind == RedirectKind::MergeStderr)
 }
 
 /// Apply redirects to an execution result.
@@ -538,37 +562,33 @@ impl PipelineRunner {
         let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(1, format!("scatter: {e}")),
-                    format,
-                )
+                let mut result = finalize_scatter_gather_error(ExecResult::failure(1, format!("scatter: {e}")), format);
+                ctx.publish_job_stderr(&mut result).await;
+                return result;
             }
         };
         let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(1, format!("gather: {e}")),
-                    format,
-                )
+                let mut result = finalize_scatter_gather_error(ExecResult::failure(1, format!("gather: {e}")), format);
+                ctx.publish_job_stderr(&mut result).await;
+                return result;
             }
         };
         let scatter_opts = match parse_scatter_options(&scatter_args) {
             Ok(opts) => opts,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(2, format!("scatter: {e}")),
-                    format,
-                )
+                let mut result = finalize_scatter_gather_error(ExecResult::failure(2, format!("scatter: {e}")), format);
+                ctx.publish_job_stderr(&mut result).await;
+                return result;
             }
         };
         let gather_opts = match parse_gather_options(&gather_args) {
             Ok(opts) => opts,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(2, format!("gather: {e}")),
-                    format,
-                )
+                let mut result = finalize_scatter_gather_error(ExecResult::failure(2, format!("gather: {e}")), format);
+                ctx.publish_job_stderr(&mut result).await;
+                return result;
             }
         };
 
@@ -606,29 +626,61 @@ impl PipelineRunner {
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        // Set up stdin from redirects (< file, <<heredoc)
-        if let Err(e) = setup_stdin_redirects_for(stage, ctx, dispatcher).await {
-            return ExecResult::failure(1, e);
-        }
-
         // Set pipeline position for stdio inheritance decisions
         ctx.pipeline_position = PipelinePosition::Only;
 
-        // A redirected stdout goes to its target, not to a job's stream.
-        let stream_output = ctx.background_stream_output;
-        if redirects_stdout(stage) {
-            ctx.background_stream_output = false;
-        }
+        // Set up stdin from redirects (< file, <<heredoc). A failure here
+        // skips dispatch but still runs the stage's own stdout/stderr
+        // redirects and the leaf publish below, the same as a dispatch
+        // failure does — a `cmd < missing 2>file &` sends "no such file" to
+        // the file, not to the job's stream.
+        let mut result = match setup_stdin_redirects_for(stage, ctx, dispatcher).await {
+            Ok(()) => {
+                // A redirected stdout goes to its target, not to a job's stream.
+                let stream_output = ctx.background_stream_output;
+                if redirects_stdout(stage) {
+                    ctx.background_stream_output = false;
+                }
+                // A redirected/merged stderr goes to its target too, not to
+                // the job's stderr stream — this must be decided before
+                // dispatch, or an external command (or a nested dispatch
+                // inside a function/compound) tees its stderr live to the
+                // wrong stream before the redirect ever runs.
+                let stream_stderr = ctx.background_stream_stderr;
+                if redirects_stderr(stage) {
+                    ctx.background_stream_stderr = false;
+                }
 
-        // Execute via dispatcher (full resolution chain)
-        let result = match dispatch_stage(stage, ctx, dispatcher).await {
-            Ok(result) => result,
-            Err(e) => fault_result(e),
+                // Execute via dispatcher (full resolution chain)
+                let result = match dispatch_stage(stage, ctx, dispatcher).await {
+                    Ok(result) => result,
+                    Err(e) => fault_result(e),
+                };
+                ctx.background_stream_output = stream_output;
+                ctx.background_stream_stderr = stream_stderr;
+                result
+            }
+            Err(e) => ExecResult::failure(1, e),
         };
-        ctx.background_stream_output = stream_output;
+
+        // `2>&1` moves this stage's stderr into its stdout, but only once
+        // `apply_redirects` runs below — capture what stdout held before
+        // that, so only the newly merged bytes get published (whatever was
+        // there already reached the stream via the leaf's own live publish).
+        let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(stage).then(|| match result.out_bytes() {
+            Some(bytes) => bytes.to_vec(),
+            None => result.text_out().into_owned().into_bytes(),
+        });
 
         // Apply post-execution redirects
-        apply_redirects(result, stage.redirects(), ctx, dispatcher).await
+        result = apply_redirects(result, stage.redirects(), ctx, dispatcher).await;
+
+        if let Some(prior_out) = prior_out {
+            ctx.publish_job_stdout_suffix(&prior_out, &result).await;
+        }
+        ctx.publish_job_stderr(&mut result).await;
+
+        result
     }
 
     /// Run a multi-command pipeline concurrently.
@@ -774,11 +826,6 @@ impl PipelineRunner {
             // so each concurrent stage's spans stay in the same trace.
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
                 tokio::spawn(crate::telemetry::bind_current_context(async move {
-                // A stdin-redirect setup failure short-circuits this stage.
-                if let Err(e) = stdin_setup {
-                    return (ExecResult::failure(1, e), stage_ctx);
-                }
-
                 // Hand the structured-data sideband receiver to the stage; do
                 // NOT pre-read it. A consuming builtin resolves it via
                 // `ctx.resolve_stdin()`, which drains the pipe first (so a
@@ -788,22 +835,53 @@ impl PipelineRunner {
                 // dropped structured data (`seq 1 3 | jq .` → text → parse error).
                 stage_ctx.stdin_data_rx = data_receiver;
 
-                // A redirected stdout goes to its target, not to a job's stream.
-                if redirects_stdout(&stage) {
-                    stage_ctx.background_stream_output = false;
-                }
-
-                // Execute the stage
-                let mut result = match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
-                    Ok(result) => result,
-                    Err(e) => fault_result(e),
+                // A stdin-redirect setup failure skips dispatch, but the
+                // stage's own stdout/stderr redirects and its leaf publish
+                // still run below — the same treatment `run_single` gives it.
+                let mut result = match stdin_setup {
+                    Ok(()) => {
+                        // A redirected stdout goes to its target, not to a job's stream.
+                        if redirects_stdout(&stage) {
+                            stage_ctx.background_stream_output = false;
+                        }
+                        // A redirected/merged stderr goes to its target too —
+                        // decided before dispatch, or a nested live publish
+                        // (external tee, a function body's own commands)
+                        // reaches the wrong stream before the redirect runs.
+                        if redirects_stderr(&stage) {
+                            stage_ctx.background_stream_stderr = false;
+                        }
+                        match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
+                            Ok(result) => result,
+                            Err(e) => fault_result(e),
+                        }
+                    }
+                    Err(e) => ExecResult::failure(1, e),
                 };
+
+                // `2>&1` moves this stage's stderr into its stdout only once
+                // `apply_redirects` runs below — capture what stdout held
+                // before that so only the newly merged bytes get published.
+                let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(&stage).then(|| match result.out_bytes() {
+                    Some(bytes) => bytes.to_vec(),
+                    None => result.text_out().into_owned().into_bytes(),
+                });
 
                 // Apply post-execution redirects. Use the stage's own
                 // (forked) dispatcher — the borrowed `dispatcher` can't cross
                 // the spawn boundary, and `stage_ctx.dispatcher` is `None` on a
                 // bare kernel, which is exactly the GH #90 gap.
                 result = apply_redirects(result, stage.redirects(), &mut stage_ctx, &*task_dispatcher).await;
+
+                if let Some(prior_out) = prior_out {
+                    stage_ctx.publish_job_stdout_suffix(&prior_out, &result).await;
+                }
+                // Every stage publishes its own stderr live, regardless of
+                // pipeline position — bash never pipes stderr between
+                // stages, unlike stdout. Before the flush below, which is a
+                // SEPARATE mechanism (the foreground/aggregate echo of an
+                // intermediate stage's stderr, not the job's stream).
+                stage_ctx.publish_job_stderr(&mut result).await;
 
                 // Flush buffered stderr to the kernel's stderr stream.
                 // This delivers error output from intermediate pipeline stages

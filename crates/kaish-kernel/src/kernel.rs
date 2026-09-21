@@ -2700,7 +2700,40 @@ impl Kernel {
     }
 
     /// Execute a single statement, returning control flow information.
+    ///
+    /// A `Command`/`Pipeline` statement publishes its own stderr through its
+    /// leaf dispatch, after its redirects apply (`scheduler::pipeline::run_single`/
+    /// `run_pipeline`). Every other statement kind — `[[ ]]`, `(( ))`, `if`/
+    /// `for`/`while`/`case`, `source`, a function return — never reaches that
+    /// leaf, so this wrapper publishes the carried result once here instead.
+    /// One choke point for every non-command statement, recursive by
+    /// construction: a statement nested inside a loop or function body calls
+    /// back into this same wrapper.
     fn execute_stmt_flow<'a>(
+        &'a self,
+        stmt: &'a Stmt,
+        ctx: &'a mut ExecContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut flow = self.execute_stmt_flow_dispatch(stmt, ctx).await?;
+            if !matches!(stmt, Stmt::Command(_) | Stmt::Pipeline(_)) {
+                match &mut flow {
+                    ControlFlow::Normal(result)
+                    | ControlFlow::Break { result, .. }
+                    | ControlFlow::Continue { result, .. }
+                    | ControlFlow::Exit { result, .. } => ctx.publish_job_stderr(result).await,
+                    ControlFlow::Return { value } => ctx.publish_job_stderr(value).await,
+                }
+            }
+            Ok(flow)
+        })
+    }
+
+    /// The actual per-statement-kind dispatch behind [`Self::execute_stmt_flow`].
+    /// Split out so that wrapper can publish the result of every recursive
+    /// call (including the ones this match makes to `execute_stmt_flow`
+    /// itself) without duplicating that logic at each `Stmt` arm.
+    fn execute_stmt_flow_dispatch<'a>(
         &'a self,
         stmt: &'a Stmt,
         ctx: &'a mut ExecContext,
@@ -5074,10 +5107,20 @@ impl Kernel {
             receiver.drain_lossy()
         };
         if !drained.is_empty() {
+            let had_prior_err = !result.err.is_empty();
             if !result.err.is_empty() && !result.err.ends_with('\n') {
                 result.err.push('\n');
             }
             result.err.push_str(&drained);
+            // Drained text came from an intermediate pipeline stage
+            // (`run_pipeline`'s per-stage publish fires for every stage
+            // position, not just Only/Last), so it already reached the job's
+            // stderr stream live. With nothing accumulated yet, the merged
+            // flag is simply "published" (drained text always is); once
+            // there is prior text, appending more published text changes
+            // nothing — the whole is published only when the prior part
+            // also was.
+            result.stderr_published = if had_prior_err { result.stderr_published } else { true };
         }
     }
 
@@ -5128,15 +5171,11 @@ impl Kernel {
         // function body survives instead of being lossy-decoded here.
         let mut accumulated_out: Vec<u8> = Vec::new();
         let mut accumulated_err = String::new();
+        // Whether `accumulated_err` has entirely reached a job's stderr
+        // stream already; see `accumulate_raw_stmt_output`.
+        let mut stderr_published = true;
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-
-        fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
-            match r.out_bytes() {
-                Some(b) => buf.extend_from_slice(b),
-                None => buf.extend_from_slice(r.text_out().as_bytes()),
-            }
-        }
 
         // Track execution error for propagation after cleanup
         let mut exec_error: Option<anyhow::Error> = None;
@@ -5150,14 +5189,11 @@ impl Kernel {
                         let mut receiver = self.stderr_receiver.lock().await;
                         receiver.drain_lossy()
                     };
-                    if !drained.is_empty() {
-                        accumulated_err.push_str(&drained);
-                    }
+                    accumulate_raw_drained(&mut accumulated_err, &mut stderr_published, &drained);
 
                     match flow {
                         ControlFlow::Normal(r) => {
-                            push_out(&mut accumulated_out, &r);
-                            accumulated_err.push_str(&r.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                             last_code = r.code;
                             // A structured VIEW of printed text does not escape as the
                     // substitution's value — `$(cut -f2 f)` is the text `cut`
@@ -5165,21 +5201,18 @@ impl Kernel {
                     last_data = if r.data_is_value { r.data } else { None };
                         }
                         ControlFlow::Return { value } => {
-                            push_out(&mut accumulated_out, &value);
-                            accumulated_err.push_str(&value.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &value);
                             last_code = value.code;
                             last_data = if value.data_is_value { value.data } else { None };
                             break;
                         }
                         ControlFlow::Exit { code, result: r } => {
-                            push_out(&mut accumulated_out, &r);
-                            accumulated_err.push_str(&r.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                             exit_code = Some(code);
                             break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                            push_out(&mut accumulated_out, &r);
-                            accumulated_err.push_str(&r.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                             last_code = r.code;
                             last_data = if r.data_is_value { r.data } else { None };
                         }
@@ -5203,11 +5236,13 @@ impl Kernel {
         if let Some(e) = exec_error {
             let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
             prior.err = accumulated_err;
+            prior.stderr_published = stderr_published;
             return Err(with_prior_output(prior, e));
         }
         let code = exit_code.unwrap_or(last_code);
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
         result.err = accumulated_err;
+        result.stderr_published = stderr_published;
         // Whatever survived the gate above IS a value, so the result says so
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
@@ -5301,16 +5336,15 @@ impl Kernel {
         // caller can preserve it. The final result is text iff valid UTF-8.
         let mut accumulated_out: Vec<u8> = Vec::new();
         let mut accumulated_err = String::new();
+        // Whether `accumulated_err` has entirely reached a job's stderr
+        // stream already; see `accumulate_raw_stmt_output`. A substitution's
+        // stderr IS job stderr (unlike its captured stdout, which is a
+        // value) — the statements inside still publish through their own
+        // leaf, so this tracks the same thing every other raw accumulator
+        // does.
+        let mut stderr_published = true;
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
-
-        // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
-        fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
-            match r.out_bytes() {
-                Some(b) => buf.extend_from_slice(b),
-                None => buf.extend_from_slice(r.text_out().as_bytes()),
-            }
-        }
 
         for stmt in stmts {
             let flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
@@ -5320,8 +5354,8 @@ impl Kernel {
                         let mut receiver = self.stderr_receiver.lock().await;
                         receiver.drain_lossy()
                     };
-                    accumulated_err.push_str(&drained);
-                    return Err(fault_leaving_capture(accumulated_err, error));
+                    accumulate_raw_drained(&mut accumulated_err, &mut stderr_published, &drained);
+                    return Err(fault_leaving_capture(accumulated_err, stderr_published, error));
                 }
             };
 
@@ -5331,29 +5365,24 @@ impl Kernel {
                 let mut receiver = self.stderr_receiver.lock().await;
                 receiver.drain_lossy()
             };
-            if !drained.is_empty() {
-                accumulated_err.push_str(&drained);
-            }
+            accumulate_raw_drained(&mut accumulated_err, &mut stderr_published, &drained);
 
             match flow {
                 ControlFlow::Normal(r)
                 | ControlFlow::Break { result: r, .. }
                 | ControlFlow::Continue { result: r, .. } => {
-                    push_out(&mut accumulated_out, &r);
-                    accumulated_err.push_str(&r.err);
+                    accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                     last_code = r.code;
                     last_data = if r.data_is_value { r.data } else { None };
                 }
                 ControlFlow::Return { value } => {
-                    push_out(&mut accumulated_out, &value);
-                    accumulated_err.push_str(&value.err);
+                    accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &value);
                     last_code = value.code;
                     last_data = if value.data_is_value { value.data } else { None };
                     break;
                 }
                 ControlFlow::Exit { code, result: r } => {
-                    push_out(&mut accumulated_out, &r);
-                    accumulated_err.push_str(&r.err);
+                    accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                     last_code = code;
                     break;
                 }
@@ -5362,6 +5391,7 @@ impl Kernel {
 
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
+        result.stderr_published = stderr_published;
         // Whatever survived the gate above IS a value, so the result says so
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
@@ -5731,15 +5761,11 @@ impl Kernel {
         // stdout/stderr across statements like `execute_user_tool` — a sourced
         // script's earlier statements must not be silently dropped in favor of
         // just the last one.
-        fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
-            match r.out_bytes() {
-                Some(b) => buf.extend_from_slice(b),
-                None => buf.extend_from_slice(r.text_out().as_bytes()),
-            }
-        }
-
         let mut accumulated_out: Vec<u8> = Vec::new();
         let mut accumulated_err = String::new();
+        // Whether `accumulated_err` has entirely reached a job's stderr
+        // stream already; see `accumulate_raw_stmt_output`.
+        let mut stderr_published = true;
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
 
@@ -5754,13 +5780,10 @@ impl Kernel {
                         let mut receiver = self.stderr_receiver.lock().await;
                         receiver.drain_lossy()
                     };
-                    if !drained.is_empty() {
-                        accumulated_err.push_str(&drained);
-                    }
+                    accumulate_raw_drained(&mut accumulated_err, &mut stderr_published, &drained);
                     match flow {
                         ControlFlow::Normal(r) => {
-                            push_out(&mut accumulated_out, &r);
-                            accumulated_err.push_str(&r.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                             last_code = r.code;
                             last_data = if r.data_is_value { r.data.clone() } else { None };
                             self.update_last_result(&r).await;
@@ -5772,20 +5795,20 @@ impl Kernel {
                             ));
                         }
                         ControlFlow::Return { value } => {
-                            push_out(&mut accumulated_out, &value);
-                            accumulated_err.push_str(&value.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &value);
                             let mut result = ExecResult::success_text_or_bytes(accumulated_out)
                                 .with_code(value.code);
                             result.err = accumulated_err;
+                            result.stderr_published = stderr_published;
                             result.data = value.data;
                             return Ok(result);
                         }
                         ControlFlow::Exit { code, result: r } => {
-                            push_out(&mut accumulated_out, &r);
-                            accumulated_err.push_str(&r.err);
+                            accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                             let mut result =
                                 ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
                             result.err = accumulated_err;
+                            result.stderr_published = stderr_published;
                             // Whatever survived the gate above IS a value, so the result says so
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
@@ -5797,6 +5820,7 @@ impl Kernel {
                 Err(e) => {
                     let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
                     prior.err = accumulated_err;
+                    prior.stderr_published = stderr_published;
                     return Err(with_prior_output(prior, e).context(format!("source: {}", path)));
                 }
             }
@@ -5804,6 +5828,7 @@ impl Kernel {
 
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
+        result.stderr_published = stderr_published;
         // Whatever survived the gate above IS a value, so the result says so
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
@@ -5925,15 +5950,11 @@ impl Kernel {
             // Execute script statements — accumulate stdout/stderr across
             // statements like `execute_user_tool`, rather than keeping only the
             // last one's result.
-            fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
-                match r.out_bytes() {
-                    Some(b) => buf.extend_from_slice(b),
-                    None => buf.extend_from_slice(r.text_out().as_bytes()),
-                }
-            }
-
             let mut accumulated_out: Vec<u8> = Vec::new();
             let mut accumulated_err = String::new();
+            // Whether `accumulated_err` has entirely reached a job's stderr
+            // stream already; see `accumulate_raw_stmt_output`.
+            let mut stderr_published = true;
             let mut last_code = 0i64;
             let mut last_data: Option<Value> = None;
             let mut exec_error: Option<anyhow::Error> = None;
@@ -5950,32 +5971,26 @@ impl Kernel {
                             let mut receiver = self.stderr_receiver.lock().await;
                             receiver.drain_lossy()
                         };
-                        if !drained.is_empty() {
-                            accumulated_err.push_str(&drained);
-                        }
+                        accumulate_raw_drained(&mut accumulated_err, &mut stderr_published, &drained);
                         match flow {
                             ControlFlow::Normal(r) => {
-                                push_out(&mut accumulated_out, &r);
-                                accumulated_err.push_str(&r.err);
+                                accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                                 last_code = r.code;
                                 last_data = if r.data_is_value { r.data } else { None };
                             }
                             ControlFlow::Return { value } => {
-                                push_out(&mut accumulated_out, &value);
-                                accumulated_err.push_str(&value.err);
+                                accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &value);
                                 last_code = value.code;
                                 last_data = if value.data_is_value { value.data } else { None };
                                 break;
                             }
                             ControlFlow::Exit { code, result: r } => {
-                                push_out(&mut accumulated_out, &r);
-                                accumulated_err.push_str(&r.err);
+                                accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                                 exit_code = Some(code);
                                 break;
                             }
                             ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                                push_out(&mut accumulated_out, &r);
-                                accumulated_err.push_str(&r.err);
+                                accumulate_raw_stmt_output(&mut accumulated_out, &mut accumulated_err, &mut stderr_published, &r);
                                 last_code = r.code;
                                 last_data = if r.data_is_value { r.data } else { None };
                             }
@@ -5998,11 +6013,13 @@ impl Kernel {
             if let Some(e) = exec_error {
                 let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
                 prior.err = accumulated_err;
+                prior.stderr_published = stderr_published;
                 return Err(with_prior_output(prior, e).context(format!("script: {}", script_path.display())));
             }
             let code = exit_code.unwrap_or(last_code);
             let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
             result.err = accumulated_err;
+            result.stderr_published = stderr_published;
             // Whatever survived the gate above IS a value, so the result says so
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
@@ -7747,7 +7764,57 @@ fn push_diagnostic(err: &mut String, diagnostic: &str) {
     err.push_str(diagnostic);
 }
 
+/// Append one statement's stdout/stderr into the raw accumulators a function
+/// body, a sourced script, or a `$(...)` capture builds its final
+/// `ExecResult` from — the same job as `accumulate_result`, for a caller
+/// that accumulates into raw `Vec<u8>`/`String` buffers instead of an
+/// `ExecResult`. `stderr_published` tracks whether the growing
+/// `accumulated_err` is entirely published already, by the rule
+/// `accumulate_result` uses: appending empty text changes nothing, the
+/// first non-empty piece sets the flag outright, and every piece after that
+/// must ALSO be published to keep it so. Every one of these callers used to
+/// build `accumulated_err` by hand and never track this, so a nested
+/// command's already-published stderr (a function or a sourced script is a
+/// leaf: its whole body runs inside one dispatch that itself gets a stderr
+/// publish once it returns) was published a second time by the wrapping
+/// dispatch's own leaf.
+fn accumulate_raw_stmt_output(
+    accumulated_out: &mut Vec<u8>,
+    accumulated_err: &mut String,
+    stderr_published: &mut bool,
+    new: &ExecResult,
+) {
+    match new.out_bytes() {
+        Some(bytes) => accumulated_out.extend_from_slice(bytes),
+        None => accumulated_out.extend_from_slice(new.text_out().as_bytes()),
+    }
+    if !new.err.is_empty() {
+        *stderr_published = if accumulated_err.is_empty() {
+            new.stderr_published
+        } else {
+            *stderr_published && new.stderr_published
+        };
+        accumulated_err.push_str(&new.err);
+    }
+}
+
+/// Fold drained intermediate-pipeline-stage stderr (`Kernel::
+/// drain_stderr_into`'s channel, read by hand at the raw-accumulator call
+/// sites above) into the same accumulators. Drained text always already
+/// reached the job's stderr stream live (`run_pipeline` publishes every
+/// stage, not only `Only`/`Last`), so it can only add to "published," never
+/// take it away.
+fn accumulate_raw_drained(accumulated_err: &mut String, stderr_published: &mut bool, drained: &str) {
+    if !drained.is_empty() {
+        *stderr_published = if accumulated_err.is_empty() { true } else { *stderr_published };
+        accumulated_err.push_str(drained);
+    }
+}
+
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
+    // Captured before the append below: whether the merged `err` is fully
+    // published depends on whether there was anything before `new`'s text.
+    let had_prior_err = !accumulated.err.is_empty();
     push_stdout_of(accumulated, new);
     accumulated.err.push_str(&new.err);
     accumulated.code = new.code;
@@ -7781,6 +7848,21 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
+    // `err` is a growing concatenation (above). Appending EMPTY text changes
+    // nothing about whether the accumulated text is published, regardless of
+    // `new`'s own flag — an already-published prefix stays published after a
+    // silent statement, and an unpublished prefix stays unpublished (`new`'s
+    // vacuous `false` must not drag a true flag down). With nothing
+    // accumulated yet, the merged flag is simply `new`'s. Once there is
+    // prior non-empty text AND `new` adds more, the merge is fully published
+    // only when BOTH halves were.
+    accumulated.stderr_published = if new.err.is_empty() {
+        accumulated.stderr_published
+    } else if had_prior_err {
+        accumulated.stderr_published && new.stderr_published
+    } else {
+        new.stderr_published
+    };
 }
 
 /// Attach output a block produced before `error` to the error on its way up.
@@ -7803,12 +7885,13 @@ fn with_prior_output(prior: ExecResult, mut error: anyhow::Error) -> anyhow::Err
 
 /// A command substitution captures stdout rather than printing it, so a fault
 /// leaving one keeps only stderr: the block's own and what the error carries.
-fn fault_leaving_capture(captured_err: String, mut error: anyhow::Error) -> anyhow::Error {
+fn fault_leaving_capture(captured_err: String, stderr_published: bool, mut error: anyhow::Error) -> anyhow::Error {
     if let Some(carrier) = error.downcast_mut::<crate::error::FaultWithOutput>() {
         carrier.output.clear_stdout();
     }
     let mut prior = ExecResult::success("");
     prior.err = captured_err;
+    prior.stderr_published = stderr_published;
     with_prior_output(prior, error)
 }
 

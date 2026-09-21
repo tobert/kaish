@@ -47,15 +47,25 @@ pub struct JobStreams {
     /// ([`JobManager::finalize_streams`]), so a reader can tell "no more
     /// coming" from "nothing yet".
     pub stdout: Arc<BoundedStream>,
-    /// The job's stderr. For a `cmd &` job, fed live per chunk by external
-    /// commands in stages that stream stdout, and at completion from the
-    /// job's captured `err` when nothing arrived live. In a job mixing
-    /// builtins and externals, once any external has written stderr the
-    /// completion write is skipped, so a builtin stage's stderr stays in the
-    /// job's `ExecResult` and does not reach this stream.
+    /// The job's stderr. Fed live, and never twice for the same bytes:
     ///
-    /// A whole-program job writes each top-level statement's stderr when the
-    /// statement finishes.
+    /// * **Per chunk**, by the drain task behind an external command running
+    ///   for this job — from every stage, not only `Only`/`Last`, since bash
+    ///   never pipes stderr between stages.
+    /// * **When a builtin, backend tool, or user function returns**, once its
+    ///   own redirects apply (`ExecContext::publish_job_stderr`, called from
+    ///   `scheduler::pipeline::run_single`/`run_pipeline` after
+    ///   `apply_redirects`). Every other stderr-producing statement kind
+    ///   (`[[ ]]`, `(( ))`, `source`, an `if`/`for`/`while`/`case` body, a
+    ///   function return) publishes the same way from `Kernel::
+    ///   execute_stmt_flow`, since it never reaches a pipeline leaf.
+    ///
+    /// Output with another destination is never published: a `2>file`/`&>file`
+    /// redirect, or `2>&1`, whose bytes land on [`Self::stdout`] instead.
+    ///
+    /// A whole-program job (`Kernel::execute_background_with_options`) writes
+    /// each top-level statement's stderr itself when the statement finishes,
+    /// instead of this per-leaf publish.
     pub stderr: Arc<BoundedStream>,
 }
 
@@ -721,23 +731,25 @@ impl JobManager {
 
     /// Close a finished job's streams.
     ///
-    /// stdout is never written here. Every producer of a job's stdout
-    /// publishes as it runs: an external per chunk; a builtin, an embedder
-    /// tool, `--help`, or an AST dump when it returns; gather's rows. Writing
-    /// the captured result on top would repeat it.
-    /// stderr takes the captured `err` only when nothing reached it live.
+    /// Neither stream is written here. Every producer of a job's stdout or
+    /// stderr publishes as it runs: an external per chunk; a builtin, an
+    /// embedder tool, `--help`, or an AST dump when it returns; gather's
+    /// rows; every other statement kind from `Kernel::execute_stmt_flow`.
+    /// Writing the captured result on top would repeat it — see
+    /// [`JobStreams::stdout`] and [`JobStreams::stderr`] for exactly which
+    /// bytes reach each stream and when.
+    ///
+    /// `_result` is accepted for symmetry with callers that already have it
+    /// in hand, and because a future producer this function does not yet
+    /// know about may need it; nothing here reads it today.
     ///
     /// Called by the background task that owns the job, before it hands the
     /// result over, so a reader that sees a terminal `status` also sees a
     /// closed, complete stream.
-    pub async fn finalize_streams(&self, id: JobId, result: &ExecResult) {
+    pub async fn finalize_streams(&self, id: JobId, _result: &ExecResult) {
         let Some(streams) = self.streams(id).await else {
             return;
         };
-
-        if streams.stderr.stats().await.total_written == 0 {
-            streams.stderr.write(result.err.as_bytes()).await;
-        }
 
         streams.stdout.close().await;
         streams.stderr.close().await;

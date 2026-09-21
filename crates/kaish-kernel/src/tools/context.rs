@@ -220,10 +220,14 @@ pub struct ExecContext {
     /// builtin when it returns. False inside `$(...)`, under a stdout
     /// redirect, and in a scatter worker.
     pub background_stream_output: bool,
-    /// Whether an external command also tees its stderr into the job's stderr
-    /// stream wherever `background_stream_output` is on. Set once per job:
-    /// true for `cmd &`, false for a whole-program job, which writes each
-    /// statement's stderr when the statement finishes.
+    /// Whether this dispatch's stderr is its background job's stderr, so it
+    /// is published to the job's stream: an external per chunk, everything
+    /// else once its own redirects apply (`ExecContext::publish_job_stderr`).
+    /// Unlike `background_stream_output`, stderr is not gated on pipeline
+    /// position — bash never pipes stderr between stages, so every stage
+    /// streams its own. False under a redirect that sends stderr elsewhere
+    /// (`2>file`, `&>file`, `2>&1`) and for a whole-program job, which
+    /// publishes each statement's stderr itself when the statement finishes.
     pub background_stream_stderr: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
@@ -446,6 +450,61 @@ impl ExecContext {
             Some(bytes) => streams.stdout.write(bytes).await,
             None => streams.stdout.write(result.text_out().as_bytes()).await,
         }
+    }
+
+    /// Publish `result`'s stderr to this context's background job, once.
+    ///
+    /// Every stage streams its own stderr regardless of pipeline position —
+    /// bash never pipes stderr between stages, unlike stdout — so this is
+    /// gated on the job and `background_stream_stderr` only. A no-op when
+    /// `result` already carries published bytes (an external's live tee, a
+    /// nested dispatch's own leaf publish, or a prior call on this same
+    /// result): `result.stderr_published` is the guard, checked and set here
+    /// so a caller can call this at every point stderr might need to reach
+    /// the stream without double-publishing it.
+    pub(crate) async fn publish_job_stderr(&self, result: &mut ExecResult) {
+        if result.stderr_published || result.err.is_empty() {
+            return;
+        }
+        let (Some(job_id), true, Some(jobs)) =
+            (self.background_job, self.background_stream_stderr, self.job_manager.as_ref())
+        else {
+            return;
+        };
+        let Some(streams) = jobs.streams(job_id).await else {
+            return;
+        };
+        streams.stderr.write(result.err.as_bytes()).await;
+        result.stderr_published = true;
+    }
+
+    /// Publish the stdout bytes a stage's own redirects introduced after
+    /// dispatch — the one case `publish_job_stdout` cannot see. `2>&1`
+    /// merges a stage's stderr into its stdout only once the stage has
+    /// finished and `apply_redirects` has run, by which point a builtin's or
+    /// external's own leaf publish already sent whatever stdout existed
+    /// BEFORE the merge. `prior` is that pre-redirect stdout; only the bytes
+    /// beyond it are new and need publishing.
+    pub(crate) async fn publish_job_stdout_suffix(&self, prior: &[u8], result: &ExecResult) {
+        let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
+            self.background_job,
+            self.background_stream_output,
+            self.pipeline_position,
+            self.job_manager.as_ref(),
+        ) else {
+            return;
+        };
+        let current: Vec<u8> = match result.out_bytes() {
+            Some(bytes) => bytes.to_vec(),
+            None => result.text_out().into_owned().into_bytes(),
+        };
+        if current.len() <= prior.len() || !current.starts_with(prior) {
+            return;
+        }
+        let Some(streams) = jobs.streams(job_id).await else {
+            return;
+        };
+        streams.stdout.write(&current[prior.len()..]).await;
     }
 
     /// Create a new execution context with a VFS (uses LocalBackend without tools).
