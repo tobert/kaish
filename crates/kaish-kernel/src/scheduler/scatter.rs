@@ -587,6 +587,12 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
 ///
 /// Exit codes (A′): `0` all workers ok · `123` any worker failed, partial or
 /// total (timeouts count) — partial-vs-total is distinguished in the rows.
+///
+/// `123` is gather's own aggregate and a worker may return it too, so `$?`
+/// alone cannot separate the two. The rows can: the aggregate means at least
+/// one row is `ok:false`, and a row's `code` is that worker's own. Changing
+/// the aggregate would be worse — `123` is the documented A′ code that
+/// callers already gate on.
 fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult {
     // A worker's binary stdout that can't decode as text is a failure for
     // gather's purposes too — see `result_row`'s hazard doc. Folding it into

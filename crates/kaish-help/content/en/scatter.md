@@ -65,6 +65,10 @@ cat results.jsonl | fromjsonl | scatter | retry ${ITEM[item][host]} | gather  # 
 distinguish via the rows) · `2` usage error. A pipeline's status is its last
 command's, so check gather's code directly or gate with `if`/`&&`.
 
+A worker can exit `123` itself, and `$?` cannot tell that apart from gather's
+aggregate. The rows can: gather's `123` means at least one row has
+`ok:false`, and each row's `code` is that worker's own.
+
 ## Parameters
 
 **scatter:** `--as VAR` (default `ITEM`) — binding name per item. `--limit N`

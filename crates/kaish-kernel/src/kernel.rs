@@ -2541,12 +2541,20 @@ impl Kernel {
 
         let surfaced_warnings = self.validate_parsed(&program, input).await?;
 
-        // Surface opted-in validation warnings to the streaming frontend once,
-        // before any command output. The streaming consumer (`-c`, REPL) prints
-        // per `on_output` and ignores the returned aggregate err; non-streaming
-        // callers (`kernel.execute`) use a noop callback and read the aggregate
-        // `result.err` (prepended at each return below). The two paths are
-        // disjoint, so this prints the advisory exactly once on each.
+        // Surface opted-in validation warnings to the streaming frontend,
+        // before any command output. The same text is ALSO prepended to the
+        // aggregate `result.err` at every return below — the three `Ok`
+        // returns and the fault return — which is what a non-streaming
+        // caller (`kernel.execute`, whose callback is a noop) reads.
+        //
+        // These two are not disjoint. `execute_with_options_streaming` hands
+        // a caller both the callback and the aggregate, so an embedder that
+        // prints each sees the advisory twice. That duplicate is the price of
+        // neither caller losing it: dropping the prepend would hide the
+        // advisory from a streaming embedder that reads only the result, and
+        // dropping the callback would delay it past the output it is meant to
+        // precede. `warning_reaches_both_the_stream_and_the_aggregate` in
+        // tests/mixed_script_name_tests.rs pins what actually happens.
         if !surfaced_warnings.is_empty() {
             let mut advisory = ExecResult::success("");
             advisory.err = surfaced_warnings.clone();
@@ -2607,6 +2615,13 @@ impl Kernel {
                     let error = with_prior_output(partial, error);
                     if let Some(carrier) = error.downcast_ref::<crate::error::FaultWithOutput>() {
                         on_output(&carrier.output);
+                    }
+                    // The advisory rides this return too. The three `Ok`
+                    // returns below prepend it and this one did not, so a
+                    // program that both warned and faulted lost the warning
+                    // from the error it handed back.
+                    if !surfaced_warnings.is_empty() {
+                        result.err = format!("{surfaced_warnings}{}", result.err);
                     }
                     return Err(with_prior_output(std::mem::take(&mut result), error));
                 }
@@ -2708,8 +2723,13 @@ impl Kernel {
                     scope.clear_cmdsubst_code();
                 }
                 // Use async evaluator to support command substitution
+                // Name the target. A fault inside `$(...)` passes through this
+                // same line twice — once for the inner assignment, once for
+                // the outer — and an unnamed context rendered as "failed to
+                // evaluate assignment: failed to evaluate assignment: …",
+                // two frames that said nothing about which was which.
                 let value = self.eval_expr_async(&assign.value, ctx).await
-                    .context("failed to evaluate assignment")?;
+                    .with_context(|| format!("failed to evaluate assignment to {}", assign.name()))?;
                 let mut scope = self.scope.write().await;
                 if assign.path.segments.len() == 1 {
                     // Plain `NAME=value` — no subscript, so `local` applies.

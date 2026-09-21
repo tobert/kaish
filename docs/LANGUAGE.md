@@ -1513,7 +1513,9 @@ done
   `code` 124. Read `ok`, not `code`: `code` is the worker's own, and a worker
   whose stdout is binary is `ok:false` with `code` 0.
 - **Exit codes**: `0` all workers ok · `123` any worker failed (partial or
-  total — the rows carry which) · `2` usage.
+  total — the rows carry which) · `2` usage. A worker can exit `123` itself;
+  `$?` cannot tell that apart from the aggregate, so read the rows —
+  gather's `123` means at least one row has `ok:false`.
 - **Ingress**: a JSON array fans out typed, element-by-element (`1` and `"1"`
   stay distinct); plain text is one string item per line (blank lines skipped,
   whitespace within a line never split). A single non-array object errors
