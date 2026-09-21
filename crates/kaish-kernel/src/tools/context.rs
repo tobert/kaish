@@ -236,13 +236,23 @@ pub struct ExecContext {
     pub ignore_config: IgnoreConfig,
     /// Output size limit configuration for agent safety.
     pub output_limit: OutputLimitConfig,
-    /// Whether external command execution is allowed.
+    /// Whether an unwrapped command may run: PATH lookup for a word that is
+    /// not a builtin, the `exec` and `spawn` builtins, and `env CMD` (which
+    /// spawns CMD the same way, so it answers to the same gate). A wrapped
+    /// command's program is pinned at registration and never reaches this
+    /// check, so the name is true by construction: it gates any program
+    /// that is *not* a wrapped command.
     ///
-    /// When `false`, external commands (PATH lookup, `exec`, `spawn`) are blocked.
-    /// Only kaish builtins and backend-registered tools (MCP) are available.
-    /// A blocked attempt reports [`ExternalCommandsUnavailable::ConfiguredOff`],
-    /// not "command not found".
-    pub allow_external_commands: bool,
+    /// When `false`, those four sites are blocked; a blocked attempt reports
+    /// [`ExternalCommandsUnavailable::ConfiguredOff`], not "command not
+    /// found". Everything else a kernel can run — builtins, backend-registered
+    /// tools (MCP), user-defined `tool`s, wrapped commands, `.kai` scripts —
+    /// is unaffected.
+    ///
+    /// `true` for a stand-alone `ExecContext` built outside a kernel (every
+    /// constructor below sets it); the kernel always overwrites it from
+    /// `KernelConfig::allow_unwrapped_commands` at construction.
+    pub allow_unwrapped_commands: bool,
     /// Trash backend for safe file deletion.
     ///
     /// Always present when the kernel creates the context (even if `set -o trash`
@@ -551,7 +561,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -594,7 +604,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -634,7 +644,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -674,7 +684,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -717,7 +727,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -757,7 +767,7 @@ impl ExecContext {
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -1055,7 +1065,7 @@ impl ExecContext {
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
-            allow_external_commands: self.allow_external_commands,
+            allow_unwrapped_commands: self.allow_unwrapped_commands,
             trash_backend: self.trash_backend.clone(),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: self.terminal_state.clone(),

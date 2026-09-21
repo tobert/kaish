@@ -24,9 +24,9 @@ use tokio::sync::Mutex;
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{exec_context, 
-    schema_from_clap, ExternalCommandsUnavailable, GlobalFlags, Tool, ToolArgs,
-    ToolCtx, ToolSchema,
+use crate::tools::{exec_context,
+    external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable,
+    GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema,
 };
 
 /// Spawn tool: runs an external command as a subprocess and captures output.
@@ -103,16 +103,14 @@ impl Tool for Spawn {
         };
         parsed.global.apply(ctx);
 
-        if !ctx.allow_external_commands {
+        if !ctx.allow_unwrapped_commands {
             // `spawn` is only registered when the `subprocess` capability is
             // compiled in (tools/builtin/mod.rs), so reaching here always
             // means the runtime config turned it off, never that the
             // capability is missing — `ConfiguredOff` is the only reachable
-            // reason.
-            return ExecResult::failure(
-                1,
-                format!("spawn: {}", ExternalCommandsUnavailable::ConfiguredOff.condition()),
-            );
+            // reason. Exit 127, same as PATH lookup and `env CMD` — one
+            // refusal shape for all four gated sites.
+            return external_commands_unavailable_error("spawn", ExternalCommandsUnavailable::ConfiguredOff);
         }
 
         // Get command (required). A binary value goes loud rather than
