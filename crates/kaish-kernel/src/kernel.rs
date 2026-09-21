@@ -3461,7 +3461,16 @@ impl Kernel {
                     Vec::with_capacity(assignments.len());
                 let mut setup_err: Option<anyhow::Error> = None;
                 for assign in assignments {
-                    match self.eval_expr_async(&assign.value, &mut *ctx).await {
+                    // Name the target, matching `Stmt::Assignment`'s
+                    // `with_context` above — without it, a failing `$(...)`
+                    // inside an env prefix (`A=$(false) cmd`) named nothing,
+                    // while the plain-assignment form already said which
+                    // name it was evaluating.
+                    match self
+                        .eval_expr_async(&assign.value, &mut *ctx)
+                        .await
+                        .with_context(|| format!("failed to evaluate assignment to {}", assign.name()))
+                    {
                         Ok(value) => {
                             let mut scope = self.scope.write().await;
                             prior_export
@@ -5237,6 +5246,13 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+        // Sticky, like `accumulate_result`'s `did_spill |=`: truncation is a
+        // fact about output already produced, and a later statement in the
+        // body does not untruncate it. `original_code` is assigned, like
+        // `code`, from whichever statement `last_code` came from — see the
+        // same reasoning in `accumulate_result`.
+        let mut did_spill = false;
+        let mut original_code: Option<i64> = None;
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -5270,18 +5286,34 @@ impl Kernel {
                     // substitution's value — `$(cut -f2 f)` is the text `cut`
                     // printed, the same as `$(awk '{print $2}' f)`.
                     last_data = if r.data_is_value { r.data } else { None };
+                            did_spill |= r.did_spill;
+                            original_code = r.original_code;
                         }
                         ControlFlow::Return { value } => {
                             push_out(&mut accumulated_out, &value);
                             accumulated_err.push_str(&value.err);
                             last_code = value.code;
                             last_data = if value.data_is_value { value.data } else { None };
+                            did_spill |= value.did_spill;
+                            original_code = value.original_code;
                             break;
                         }
                         ControlFlow::Exit { code, result: r } => {
                             push_out(&mut accumulated_out, &r);
                             accumulated_err.push_str(&r.err);
                             exit_code = Some(code);
+                            did_spill |= r.did_spill;
+                            // Assign, like the other arms and like the
+                            // top-level loop's `accumulate_result` call
+                            // before it overwrites `result.code` with the
+                            // exit code (kernel.rs ~2683) — `original_code`
+                            // belongs to the exiting statement's OWN result,
+                            // not to an earlier statement that happened to
+                            // spill. Left as `r.did_spill` alone, a spill in
+                            // an earlier statement followed by `exit 5` kept
+                            // that earlier `Some(0)` standing over a code
+                            // that was never remapped.
+                            original_code = r.original_code;
                             break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
@@ -5289,6 +5321,8 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = if r.data_is_value { r.data } else { None };
+                            did_spill |= r.did_spill;
+                            original_code = r.original_code;
                         }
                     }
                 }
@@ -5310,6 +5344,8 @@ impl Kernel {
         if let Some(e) = exec_error {
             let mut prior = ExecResult::success_text_or_bytes(accumulated_out);
             prior.err = accumulated_err;
+            prior.did_spill = did_spill;
+            prior.original_code = original_code;
             return Err(with_prior_output(prior, e));
         }
         let code = exit_code.unwrap_or(last_code);
@@ -5319,6 +5355,8 @@ impl Kernel {
         // and a further `$( )` around this one keeps it typed.
         result.data_is_value = last_data.is_some();
         result.data = last_data;
+        result.did_spill = did_spill;
+        result.original_code = original_code;
         Ok(result)
     }
 
