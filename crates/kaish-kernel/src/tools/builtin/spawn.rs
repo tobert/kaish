@@ -280,92 +280,133 @@ impl Tool for Spawn {
                 }
             }
 
-        // Wait with optional timeout
-        if let Some(ms) = timeout_ms {
-            let timeout = Duration::from_millis(ms);
+        // Drain both pipes into tasks writing to shared buffers, rather than
+        // letting `wait_with_output()` own them. That future owns everything
+        // it has read, so a timeout OR a cancel used to drop the child's
+        // partial output with it: a child that printed a diagnostic and then
+        // hung reported nothing but the timeout/cancel note. Needed
+        // unconditionally now — a cancel can interrupt either an untimed or
+        // a `--timeout`-bounded wait. Shared buffers also mean an aborted
+        // drain still leaves its bytes here.
+        let captured_stdout = Arc::new(Mutex::new(Vec::new()));
+        let captured_stderr = Arc::new(Mutex::new(Vec::new()));
+        let stdout_task = tokio::spawn(drain_pipe(child.stdout.take(), captured_stdout.clone()));
+        let stderr_task = tokio::spawn(drain_pipe(child.stderr.take(), captured_stderr.clone()));
 
-            // Drain both pipes into tasks writing to shared buffers, rather
-            // than letting `wait_with_output()` own them. That future owns
-            // everything it has read, so the timeout arm used to drop the
-            // child's partial output with it: a child that printed a
-            // diagnostic and then hung reported 124 and nothing else. Shared
-            // buffers also mean an aborted drain still leaves its bytes here.
-            let captured_stdout = Arc::new(Mutex::new(Vec::new()));
-            let captured_stderr = Arc::new(Mutex::new(Vec::new()));
-            let stdout_task = tokio::spawn(drain_pipe(child.stdout.take(), captured_stdout.clone()));
-            let stderr_task = tokio::spawn(drain_pipe(child.stderr.take(), captured_stderr.clone()));
-
-            let mut kill_note = None;
-            let (exit_code, expired) = match tokio::time::timeout(timeout, child.wait()).await {
-                // A child that died by signal has no code. It is not a
-                // timeout, and reading `None` as one would report 124 and a
-                // "timed out" line for a segfault.
-                Ok(Ok(status)) => (status.code(), false),
-                Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
-                Err(_) => {
-                    // Kill first: a reader reaches EOF only once every write
-                    // end of the pipe is closed. Kill the whole process
-                    // group — `child.start_kill()` alone only reaches the
-                    // direct child, and a grandchild it backgrounded (and
-                    // any pipe write-end fd that grandchild inherited)
-                    // would otherwise survive the timeout.
-                    #[cfg(unix)]
-                    let kill_result = match child_pgid {
-                        Some(pgid) => nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
-                            .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
-                        // No pid to target (spawn raced a reap) — nothing
-                        // left to kill.
-                        None => Ok(()),
-                    };
-                    #[cfg(not(unix))]
-                    let kill_result = child.start_kill();
-                    match kill_result {
-                        // Unreachable for an unreaped child on Unix. Report
-                        // it and skip the wait, which would have nothing to
-                        // reap; `kill_on_drop` is still the backstop.
-                        Err(e) => kill_note = Some(format!("spawn: failed to kill after timeout: {e}")),
-                        Ok(()) => {
-                            if let Err(e) = child.wait().await {
-                                return ExecResult::failure(1, format!("spawn: failed to wait: {}", e));
-                            }
-                        }
-                    }
-                    (None, true)
-                }
-            };
-
-            // Bounded join. The child is reaped, so everything it wrote is
-            // already in the pipe buffer and the drains need only a moment
-            // to pick it up. On Unix the process-group kill above reaches
-            // a grandchild too, closing its copy of the write end — but
-            // the kill and the drain race, and on a non-Unix target
-            // `start_kill()` only ever reached the direct child, so a
-            // grandchild holding the write end could still keep EOF from
-            // arriving. The grace collects what is there and then stops
-            // waiting either way; the bytes are in the shared buffers
-            // regardless.
-            let stdout = finish_drain(stdout_task, &captured_stdout).await;
-            let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
-
-            if let Some(note) = kill_note {
-                append_line(&mut stderr, note.as_bytes());
-            }
-            if expired {
-                append_line(
-                    &mut stderr,
-                    format!("spawn: {}: timed out after {}ms", command, ms).as_bytes(),
-                );
-                // 124 is `timeout(1)`'s code, and the partial output the child
-                // did produce rides along with it.
-                capture_to_result(Some(124), stdout, stderr)
-            } else {
-                capture_to_result(exit_code, stdout, stderr)
+        // Race the wait against `ctx.cancel` the way the shared spawner's
+        // `wait_or_kill` (kernel.rs) does — `biased` so an already-fired
+        // token wins over a child that happens to exit at the same instant.
+        // Without this race, a Ctrl-C or an embedder/job cancellation never
+        // reached `spawn`'s child at all: `child.wait()`/`wait_with_output()`
+        // only resolves when the child exits on its own or the `--timeout`
+        // deadline elapses.
+        enum WaitOutcome {
+            Exited(Option<i32>),
+            TimedOut,
+            Cancelled,
+        }
+        let outcome = if let Some(ms) = timeout_ms {
+            tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => WaitOutcome::Cancelled,
+                r = tokio::time::timeout(Duration::from_millis(ms), child.wait()) => match r {
+                    // A child that died by signal has no code. It is not a
+                    // timeout, and reading `None` as one would report 124 and
+                    // a "timed out" line for a segfault.
+                    Ok(Ok(status)) => WaitOutcome::Exited(status.code()),
+                    Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
+                    Err(_) => WaitOutcome::TimedOut,
+                },
             }
         } else {
-            match child.wait_with_output().await {
-                Ok(output) => capture_to_result(output.status.code(), output.stdout, output.stderr),
-                Err(e) => ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
+            tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => WaitOutcome::Cancelled,
+                r = child.wait() => match r {
+                    Ok(status) => WaitOutcome::Exited(status.code()),
+                    Err(e) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
+                },
             }
+        };
+
+        // Bound before the match below consumes `outcome` — the combined
+        // `TimedOut | Cancelled` arm runs the identical kill, but the two
+        // still need to report differently afterward (124 + a timeout line
+        // vs. a cancel note and the top-level cancel normalization).
+        let was_timeout = matches!(outcome, WaitOutcome::TimedOut);
+        let was_cancelled = matches!(outcome, WaitOutcome::Cancelled);
+
+        let mut kill_note = None;
+        let (exit_code, expired, cancelled) = match outcome {
+            WaitOutcome::Exited(code) => (code, false, false),
+            WaitOutcome::TimedOut | WaitOutcome::Cancelled => {
+                // Kill first: a reader reaches EOF only once every write end
+                // of the pipe is closed. Kill the whole process group —
+                // `child.start_kill()` alone only reaches the direct child,
+                // and a grandchild it backgrounded (and any pipe write-end
+                // fd that grandchild inherited) would otherwise survive
+                // either a timeout or a cancel.
+                #[cfg(unix)]
+                let kill_result = match child_pgid {
+                    Some(pgid) => nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
+                    // No pid to target (spawn raced a reap) — nothing
+                    // left to kill.
+                    None => Ok(()),
+                };
+                #[cfg(not(unix))]
+                let kill_result = child.start_kill();
+                match kill_result {
+                    // Unreachable for an unreaped child on Unix. Report
+                    // it and skip the wait, which would have nothing to
+                    // reap; `kill_on_drop` is still the backstop.
+                    Err(e) => kill_note = Some(format!("spawn: failed to kill: {e}")),
+                    Ok(()) => {
+                        if let Err(e) = child.wait().await {
+                            return ExecResult::failure(1, format!("spawn: failed to wait: {}", e));
+                        }
+                    }
+                }
+                (None, was_timeout, was_cancelled)
+            }
+        };
+
+        // Bounded join. The child is reaped, so everything it wrote is
+        // already in the pipe buffer and the drains need only a moment
+        // to pick it up. On Unix the process-group kill above reaches
+        // a grandchild too, closing its copy of the write end — but
+        // the kill and the drain race, and on a non-Unix target
+        // `start_kill()` only ever reached the direct child, so a
+        // grandchild holding the write end could still keep EOF from
+        // arriving. The grace collects what is there and then stops
+        // waiting either way; the bytes are in the shared buffers
+        // regardless.
+        let stdout = finish_drain(stdout_task, &captured_stdout).await;
+        let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
+
+        if let Some(note) = kill_note {
+            append_line(&mut stderr, note.as_bytes());
+        }
+        if expired {
+            append_line(
+                &mut stderr,
+                format!("spawn: {}: timed out after {}ms", command, timeout_ms.unwrap_or_default()).as_bytes(),
+            );
+            // 124 is `timeout(1)`'s code, and the partial output the child
+            // did produce rides along with it.
+            capture_to_result(Some(124), stdout, stderr)
+        } else if cancelled {
+            append_line(&mut stderr, format!("spawn: {}: cancelled", command).as_bytes());
+            // No fixed code here, unlike the timeout arm's 124: the caller's
+            // cancellation token drives the reported code. `exit_code` is
+            // `None` (the child died by SIGKILL), which `capture_to_result`
+            // maps to -1 — a failure, which is what the top-level cancel
+            // normalization (`Kernel::execute_with_options`,
+            // `execute_background_with_options`) needs to see before it
+            // rewrites the final code to the documented 130.
+            capture_to_result(exit_code, stdout, stderr)
+        } else {
+            capture_to_result(exit_code, stdout, stderr)
         }
     }
 }
