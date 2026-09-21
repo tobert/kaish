@@ -370,6 +370,60 @@ fn parser_precedence_deeply_chained() {
     parse_and_snapshot("precedence_deeply_chained", "a || b || c && d && e");
 }
 
+// =============================================================================
+// STATEMENT-LEVEL ! (PIPELINE NEGATION)
+// =============================================================================
+//
+// `!` binds to the whole pipeline, below `&&`/`||` — bash's reading. See
+// docs/LANGUAGE.md, "Shell Options" for the errexit exemption this carries.
+
+#[test]
+fn parser_stmt_not_command() {
+    parse_and_snapshot("stmt_not_command", "! true");
+}
+
+#[test]
+fn parser_stmt_not_pipeline() {
+    // `!` negates the WHOLE pipeline's status, not just the first stage.
+    parse_and_snapshot("stmt_not_pipeline", "! a | b");
+}
+
+#[test]
+fn parser_stmt_not_and_chain() {
+    // `!` binds tighter than `&&`: `! a && b` is `(! a) && b`, not `!(a && b)`.
+    parse_and_snapshot("stmt_not_and_chain", "! a && b");
+}
+
+#[test]
+fn parser_stmt_or_chain_not() {
+    // Same precedence rule on the right of `||`.
+    parse_and_snapshot("stmt_or_chain_not", "a || ! b");
+}
+
+#[test]
+fn parser_stmt_not_double() {
+    // `! !` double-negates, matching bash's `! ! true`.
+    parse_and_snapshot("stmt_not_double", "! ! true");
+}
+
+#[test]
+fn parser_stmt_not_test_expr() {
+    // A `[[ ]]` is a compound command in bash's grammar too — `!` applies.
+    parse_and_snapshot("stmt_not_test_expr", "! [[ -f /nonexistent ]]");
+}
+
+#[test]
+fn parser_stmt_not_arith() {
+    parse_and_snapshot("stmt_not_arith", "! (( 0 ))");
+}
+
+#[test]
+fn parser_stmt_not_compound() {
+    // `!` also negates a compound statement's own exit status (bash allows
+    // `! for …; done`, `! if …; fi`).
+    parse_and_snapshot("stmt_not_compound", "! for x in 1 2; do\n    echo ${x}\ndone");
+}
+
 #[test]
 fn parser_if_command_with_args() {
     // Command with arguments as condition

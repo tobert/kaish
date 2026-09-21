@@ -195,3 +195,61 @@ fn background_propagates_through_a_command_substitution_inside_arithmetic() {
         "without `&` neither command is backgrounded — control for a hardcoded `true`"
     );
 }
+
+// ── Statement-level `!` (pipeline negation) — `rendered` round-trips the
+// source verbatim and `statement_kind` reports "not", regardless of what the
+// negated body is (a single command, a multi-stage pipeline, or a compound
+// statement). Planning is parse information, so a negated statement's own
+// commands are still every command the body would run — `!` does not hide
+// them.
+
+#[test]
+fn not_round_trips_a_bare_command() {
+    let plans = plan_program("! true").expect("parses");
+    assert_eq!(plans[0].plan.rendered, "! true");
+    assert_eq!(plans[0].plan.statement_kind, "not");
+    assert_eq!(plans[0].plan.commands[0].name, "true");
+}
+
+#[test]
+fn not_round_trips_the_whole_pipeline() {
+    // `!` binds to the WHOLE pipeline — `rendered` keeps both stages under
+    // the single leading `!`, not just the first one.
+    let plans = plan_program("! a | b").expect("parses");
+    assert_eq!(plans[0].plan.rendered, "! a | b");
+    assert_eq!(plans[0].plan.statement_kind, "not");
+    assert_eq!(
+        plans[0].plan.commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"],
+    );
+}
+
+#[test]
+fn not_binds_tighter_than_and_and_or() {
+    // `! a && b` is `(! a) && b` — the statement_kind is "and_chain", not
+    // "not", because `&&` is the outermost node.
+    let plans = plan_program("! a && b").expect("parses");
+    assert_eq!(plans[0].plan.rendered, "! a && b");
+    assert_eq!(plans[0].plan.statement_kind, "and_chain");
+
+    let plans = plan_program("a || ! b").expect("parses");
+    assert_eq!(plans[0].plan.rendered, "a || ! b");
+    assert_eq!(plans[0].plan.statement_kind, "or_chain");
+}
+
+#[test]
+fn not_round_trips_double_negation() {
+    let plans = plan_program("! ! true").expect("parses");
+    assert_eq!(plans[0].plan.rendered, "! ! true");
+    assert_eq!(plans[0].plan.statement_kind, "not");
+}
+
+#[test]
+fn not_still_plans_every_command_in_a_negated_compound() {
+    // `!` negates the compound's own exit status — the loop body's commands
+    // are unaffected and still all appear.
+    let plans = plan_program("! for x in a b; do echo ${x}; done").expect("parses");
+    assert_eq!(plans[0].plan.statement_kind, "not");
+    assert_eq!(plans[0].plan.commands[0].name, "echo");
+    assert_eq!(plans[0].plan.bound_variables, vec!["x".to_string()]);
+}

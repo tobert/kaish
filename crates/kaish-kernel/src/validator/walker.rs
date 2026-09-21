@@ -121,6 +121,7 @@ impl<'a> Validator<'a> {
                 }
                 self.validate_stmt(body);
             }
+            Stmt::Not(body) => self.validate_stmt(body),
             Stmt::Empty => {}
         }
     }

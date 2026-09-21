@@ -84,6 +84,22 @@ async fn fault_under_negation_aborts() {
     }
 }
 
+/// `Stmt::Not` — the statement-level `!` — is a separate AST node and a
+/// separate interpreter arm from the `Expr::Not` a condition uses above, so
+/// it needs its own coverage: a fault under a BARE `! expr` (no enclosing
+/// `if`) must abort exactly the same way, not get coerced to a flipped exit
+/// code.
+#[tokio::test]
+async fn fault_under_statement_level_negation_aborts() {
+    for (name, expr) in FAULTS {
+        let script = format!("x=abc; ! {expr}");
+        assert!(
+            aborts(&script).await,
+            "{name} must abort under a bare statement-level `!`"
+        );
+    }
+}
+
 #[tokio::test]
 async fn fault_as_the_left_operand_of_and_aborts() {
     for (name, expr) in FAULTS {

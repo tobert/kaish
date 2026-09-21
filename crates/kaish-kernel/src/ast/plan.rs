@@ -460,6 +460,7 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
             collect_stmt(left, background, out);
             collect_stmt(right, background, out);
         }
+        Stmt::Not(body) => collect_stmt(body, background, out),
         Stmt::EnvScoped { assignments, body } => {
             for a in assignments {
                 out.bind_path(&a.path);
@@ -629,6 +630,7 @@ pub(crate) fn render_stmt(stmt: &Stmt) -> String {
             let prefix: Vec<String> = assignments.iter().map(render_assignment).collect();
             format!("{} {}", prefix.join(" "), render_stmt(body))
         }
+        Stmt::Not(body) => format!("! {}", render_stmt(body)),
         Stmt::Empty => String::new(),
     }
 }

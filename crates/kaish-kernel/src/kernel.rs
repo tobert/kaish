@@ -3481,6 +3481,72 @@ impl Kernel {
                     None => flow,
                 }
             }
+            Stmt::Not(body) => {
+                // `!` binds to the whole pipeline `body` names and consumes
+                // its exit code as a boolean — errexit must not fire from
+                // INSIDE it (bash: `set -e; ! true; echo reached` prints
+                // `reached`), so suppress it around `body` the same way
+                // `&&`/`||`'s left side does, then restore it before this
+                // statement's own (flipped) result is reported. This arm
+                // never checks `error_exit_enabled()` itself, so the
+                // negated statement is exempt from `set -e` whatever its
+                // flipped result is — the exemption other arms opt IN to by
+                // checking it, this one opts OUT of by never asking.
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.suppress_errexit();
+                }
+                let body_flow = match self.execute_stmt_flow(body, &mut *ctx).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let mut scope = self.scope.write().await;
+                        scope.unsuppress_errexit();
+                        return Err(e);
+                    }
+                };
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.unsuppress_errexit();
+                }
+                match body_flow {
+                    ControlFlow::Normal(mut result) => {
+                        self.drain_stderr_into(&mut result).await;
+                        // A fault is "could not decide", not a boolean to
+                        // flip — coercing it into a decided 0/1 would let a
+                        // wrong conclusion stand in for a comparison that
+                        // never happened (see `ExecResult::fault`, which
+                        // names `!` as one of the boolean consumers a fault
+                        // must abort rather than answer).
+                        if result.fault {
+                            let message = std::mem::take(&mut result.err);
+                            return Err(with_prior_output(
+                                result,
+                                anyhow::anyhow!("{}", message.trim_end()),
+                            ));
+                        }
+                        result.code = if result.code == 0 { 1 } else { 0 };
+                        self.update_last_result(&result).await;
+                        Ok(ControlFlow::ok(result))
+                    }
+                    // break/continue/return/exit leave the statement before
+                    // `!` gets anything to flip — the signal itself is not a
+                    // status this negates, so it passes through untouched.
+                    mut other => {
+                        match &mut other {
+                            ControlFlow::Break { result, .. }
+                            | ControlFlow::Continue { result, .. }
+                            | ControlFlow::Exit { result, .. } => {
+                                self.drain_stderr_into(result).await;
+                            }
+                            ControlFlow::Return { value } => {
+                                self.drain_stderr_into(value).await;
+                            }
+                            ControlFlow::Normal(_) => unreachable!("matched above"),
+                        }
+                        Ok(other)
+                    }
+                }
+            }
             Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
         })

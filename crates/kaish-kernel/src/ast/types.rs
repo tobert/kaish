@@ -50,6 +50,15 @@ pub enum Stmt {
     /// and do not persist after it — distinct from a plain `Assignment`, which
     /// is persistent. `body` is always a command or pipeline.
     EnvScoped { assignments: Vec<Assignment>, body: Box<Stmt> },
+    /// Negated pipeline: `! a | b`, `! true`, `! for x in …; do …; done`.
+    ///
+    /// Binds to the whole pipeline `body` names, below `&&`/`||` — `! a | b
+    /// && c` is `(! (a | b)) && c`, bash's reading. `body`'s own exit code
+    /// flips (0 becomes 1, nonzero becomes 0); its stdout/stderr pass
+    /// through unchanged. A negated statement is exempt from `set -e`
+    /// whatever its (flipped) result — see `docs/LANGUAGE.md`, "Shell
+    /// Options".
+    Not(Box<Stmt>),
     /// Empty statement (newline or semicolon only)
     Empty,
 }
@@ -75,6 +84,7 @@ impl Stmt {
             Stmt::AndChain { .. } => "and_chain",
             Stmt::OrChain { .. } => "or_chain",
             Stmt::EnvScoped { .. } => "env_scoped",
+            Stmt::Not(_) => "not",
             Stmt::Empty => "empty",
         }
     }

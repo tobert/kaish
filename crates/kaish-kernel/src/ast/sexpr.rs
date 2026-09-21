@@ -65,6 +65,7 @@ pub fn format_stmt(stmt: &Stmt) -> String {
             let assigns: Vec<String> = assignments.iter().map(format_assignment).collect();
             format!("(env-scoped ({}) {})", assigns.join(" "), format_stmt(body))
         }
+        Stmt::Not(body) => format!("(not {})", format_stmt(body)),
         Stmt::Empty => "(empty)".to_string(),
     }
 }

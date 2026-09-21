@@ -1558,6 +1558,27 @@ where
         ))
         .boxed();
 
+        // `!` negates a pipeline (spec: bash's reading) — the statement-level
+        // sibling of the `!` `condition_parser` already accepts inside `if`/
+        // `while`. It applies to test/arith/pipeline alike: a `[[ ]]` or
+        // `(( ))` is a compound command in bash's grammar too, eligible for
+        // `!` same as any other pipeline stage (`! [[ -f x ]]`, `! (( 0 ))`
+        // both parse in bash). Repeated so `! ! x` parses, matching
+        // `condition_parser`'s `!` and bash's own `! !`.
+        let negatable = choice((
+            test_expr_stmt_parser().map(Stmt::Test),
+            arith_cond_parser().map(Stmt::Arith),
+            // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
+            pipeline_parser(choice((
+                compound.map(|s| PipelineStage::Compound(Box::new(s))),
+                command_stage_parser(),
+            )))
+            .map(pipeline_into_stmt),
+        ));
+        let negatable = just(Token::Bang)
+            .repeated()
+            .foldr(negatable, |_, inner| Stmt::Not(Box::new(inner)));
+
         // Base statement (without chaining)
         let base_statement = choice((
             just(Token::Newline).to(Stmt::Empty),
@@ -1571,14 +1592,7 @@ where
             continue_stmt,
             return_stmt,
             exit_stmt,
-            test_expr_stmt_parser().map(Stmt::Test),
-            arith_cond_parser().map(Stmt::Arith),
-            // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
-            pipeline_parser(choice((
-                compound.map(|s| PipelineStage::Compound(Box::new(s))),
-                command_stage_parser(),
-            )))
-            .map(pipeline_into_stmt),
+            negatable,
         ))
         .boxed();
 
@@ -2245,6 +2259,7 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
             stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)
         }
         Stmt::EnvScoped { body, .. } => stmt_has_ambiguous_stdin(body),
+        Stmt::Not(body) => stmt_has_ambiguous_stdin(body),
         Stmt::Assignment(_)
         | Stmt::Break(_)
         | Stmt::Continue(_)
