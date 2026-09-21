@@ -972,22 +972,10 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                 // `(`/`)` sitting inside a quoted argument of the
                 // substitution itself (`$(echo "(")`).
                 let remainder: String = chars.clone().collect();
-                let close = lexer::tokenize(&remainder).ok().and_then(|toks| {
-                    let toks: Vec<(Token, Span)> = toks
-                        .into_iter()
-                        .map(|sp| (sp.token, (sp.span.start..sp.span.end).into()))
-                        .collect();
-                    find_cmd_subst_close(&toks).map(|idx| toks[idx].1)
-                });
-                // No close — or a remainder that does not even tokenize —
-                // means the substitution ran past the closing quote. Report
-                // it before `parse` sees the body: the body can be a valid
-                // program on its own (`echo hi`), so falling back to it runs
-                // a substitution nobody closed, and the plan then renders a
-                // `)` the writer never typed.
-                let Some(rparen_span) = close else {
-                    return Err("unterminated command substitution: missing `)`".to_string());
-                };
+                // A missing close is reported before `parse` sees the body:
+                // the body can be a valid program on its own (`echo hi`), so
+                // falling back to it runs a substitution nobody closed.
+                let rparen_span = quoted_cmd_subst_close(&remainder)?;
                 let (cmd_content, consume_bytes) =
                     (remainder[..rparen_span.start].to_string(), rparen_span.end);
                 let mut consumed = 0usize;
@@ -1218,6 +1206,36 @@ impl std::fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+/// Find the `)` that closes a quoted `$(`, given the text after the `$(`.
+///
+/// Text after that `)` is string text, not shell code, so a lexer error
+/// there (`"$(echo hi) it's"`) does not count. A lexer error before any
+/// close is the body's own error and is reported as the lexer states it.
+fn quoted_cmd_subst_close(remainder: &str) -> Result<Span, String> {
+    fn close_in(source: &str) -> Result<Option<Span>, Vec<lexer::Spanned<lexer::LexerError>>> {
+        let tokens: Vec<(Token, Span)> = lexer::tokenize(source)?
+            .into_iter()
+            .map(|spanned| (spanned.token, (spanned.span.start..spanned.span.end).into()))
+            .collect();
+        Ok(find_cmd_subst_close(&tokens).map(|index| tokens[index].1))
+    }
+    let missing = || "unterminated command substitution: missing `)`".to_string();
+    let errors = match close_in(remainder) {
+        Ok(close) => return close.ok_or_else(missing),
+        Err(errors) => errors,
+    };
+    let first = errors
+        .iter()
+        .min_by_key(|error| error.span.start)
+        .unwrap_or_else(|| unreachable!("tokenize failed without an error"));
+    if let Some(before_error) = remainder.get(..first.span.start)
+        && let Ok(Some(close)) = close_in(before_error)
+    {
+        return Ok(close);
+    }
+    Err(format!("lexer error: {}", first.token))
+}
 
 /// Parse kaish source code into a Program AST.
 pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {

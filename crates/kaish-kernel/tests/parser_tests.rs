@@ -617,6 +617,25 @@ fn glued_bang_inside_a_quoted_command_substitution_surfaces_its_message() {
     );
 }
 
+/// A lexer error inside a quoted `$(...)` names itself, not a missing `)`.
+#[test]
+fn backtick_inside_a_quoted_command_substitution_surfaces_the_lexer_error() {
+    let errors = parse(r#"echo "$(echo `date`)""#).expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("backticks are not supported"),
+        "must name the backtick, not a missing `)`: {errors:?}"
+    );
+}
+
+/// Text after the closing `)` is string text, not shell code: an apostrophe
+/// or backtick there is literal and must not fail the substitution.
+#[rstest]
+#[case(r#"echo "$(echo hi) it's""#)]
+#[case(r#"echo "$(echo hi) `x`""#)]
+fn string_text_after_a_quoted_command_substitution_is_literal(#[case] source: &str) {
+    parse(source).expect("text after `)` is literal");
+}
+
 #[test]
 fn glued_bang_inside_a_heredoc_command_substitution_surfaces_its_message() {
     let errors =
