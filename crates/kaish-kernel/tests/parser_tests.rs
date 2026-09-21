@@ -424,6 +424,120 @@ fn parser_stmt_not_compound() {
     parse_and_snapshot("stmt_not_compound", "! for x in 1 2; do\n    echo ${x}\ndone");
 }
 
+// `!` also wraps the signal statements — bash accepts `! exit 3` and
+// `! break`/`! continue`/`! return` syntactically (they fail at RUNTIME, not
+// parse time, if the position doesn't apply — same as a bare `break` outside
+// a loop). The interpreter passes their ControlFlow through `Stmt::Not`
+// untouched, so this is a parser-only change; see shell_compat_tests.rs for
+// the runtime-behavior rows.
+
+#[test]
+fn parser_stmt_not_exit() {
+    parse_and_snapshot("stmt_not_exit", "! exit 3");
+}
+
+#[test]
+fn parser_stmt_not_return() {
+    parse_and_snapshot("stmt_not_return", "! return 2");
+}
+
+#[test]
+fn parser_stmt_not_break() {
+    parse_and_snapshot("stmt_not_break", "! break");
+}
+
+#[test]
+fn parser_stmt_not_continue() {
+    parse_and_snapshot("stmt_not_continue", "! continue");
+}
+
+// =============================================================================
+// GLUED `!` IS REFUSED (statement and condition position)
+// =============================================================================
+//
+// bash's `!` is a reserved word needing a token boundary on both sides:
+// `!true` lexes as the single word `!true` (bash: `!true: command not
+// found`), never as `!` negating `true`. kaish's lexer emits a standalone
+// `Bang` token regardless of adjacency, so without a check `!true` and
+// `!!true` would silently parse as negation — a real divergence from bash
+// that reads as a working script until the exit code is wrong. `!` needs a
+// space, in both the statement position (this file's new work) and the
+// condition position (`if`/`while`, pre-existing).
+
+#[rstest]
+#[case("!true")]
+#[case("!!true")]
+#[case("! !true")]
+#[case("!grep")]
+#[case("!break")]
+#[case("!continue")]
+#[case("!return")]
+#[case("!exit 3")]
+#[case("if !true; then echo yes; fi")]
+#[case("while !cmd; do :; done")]
+fn glued_bang_is_refused(#[case] input: &str) {
+    expect_parse_error(input);
+}
+
+#[test]
+fn glued_bang_error_names_the_fix() {
+    let errors = parse("!true").expect_err("`!true` must be refused");
+    assert!(
+        errors[0].message.contains("! true"),
+        "the error must name the fix (a spaced `! true`): {errors:?}"
+    );
+}
+
+/// `! !true` is refused for the INNER glued pair, not the outer spaced one —
+/// the first `!` (properly spaced from the second `!`) must not be blamed.
+#[test]
+fn glued_bang_after_a_spaced_bang_blames_the_right_one() {
+    let errors = parse("! !true").expect_err("`! !true` must be refused");
+    assert_eq!(errors.len(), 1, "exactly one glue, not two: {errors:?}");
+    assert_eq!(
+        errors[0].span.start, 2,
+        "must blame the SECOND `!` (glued to `true`), not the first"
+    );
+}
+
+// Forms that must keep parsing exactly as before: a properly spaced `!`
+// (statement and condition position), `!=` (a distinct token, not `!`
+// followed by `=`), arithmetic's own `!` (a separate sub-lexer), an
+// already-spaced `[[ ! ]]` (TestExpr::Not, deliberately untouched — that
+// production is out of scope for this check), `!` inside quotes, and an
+// ordinary glued ARGUMENT (`echo hi!`), which keeps the pre-existing
+// glued-argument error, unrelated to this one.
+
+#[rstest]
+#[case("! true")]
+#[case("! ! true")]
+#[case("if ! true; then echo yes; fi")]
+#[case("while ! cmd; do :; done")]
+#[case("[[ 1 != 2 ]]")]
+#[case("(( ! 0 ))")]
+#[case("[[ ! -f x ]]")]
+#[case("[[ !-f x ]]")] // TestExpr::Not is deliberately out of scope
+#[case(r#"echo "!true""#)]
+#[case("echo '!true'")]
+fn unaffected_bang_forms_still_parse(#[case] input: &str) {
+    parse(input).unwrap_or_else(|e| panic!("{input:?} must still parse: {e:?}"));
+}
+
+#[test]
+fn ordinary_glued_argument_keeps_its_pre_existing_error() {
+    // `echo hi!` and `echo !x` were already refused by the PRE-EXISTING
+    // glued-ARGUMENT check (`reject_glued_args`) before this work — pin
+    // that the message is still that one, not the new glued-`!` message,
+    // proving the two checks are independent.
+    for input in ["echo hi!", "echo !x"] {
+        let errors = parse(input).expect_err("must still be refused (pre-existing behavior)");
+        assert!(
+            errors[0].message.contains("adjacent words with no space"),
+            "{input:?} must keep the pre-existing glued-argument message: {errors:?}"
+        );
+    }
+}
+
 #[test]
 fn parser_if_command_with_args() {
     // Command with arguments as condition

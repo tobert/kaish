@@ -1563,9 +1563,20 @@ where
         // `while`. It applies to test/arith/pipeline alike: a `[[ ]]` or
         // `(( ))` is a compound command in bash's grammar too, eligible for
         // `!` same as any other pipeline stage (`! [[ -f x ]]`, `! (( 0 ))`
-        // both parse in bash). Repeated so `! ! x` parses, matching
-        // `condition_parser`'s `!` and bash's own `! !`.
+        // both parse in bash). `break`/`continue`/`return`/`exit` are
+        // included too — bash accepts `! exit 3` syntactically (it fails at
+        // runtime only if the signal position doesn't apply, same as a bare
+        // `break` outside a loop) — and the interpreter passes their
+        // ControlFlow through `Stmt::Not` untouched, so wrapping them here
+        // costs nothing new on the execution side. Repeated so `! ! x`
+        // parses, matching `condition_parser`'s `!` and bash's own `! !`;
+        // `bang_prefixed` refuses a glued `!x` the same way `condition_parser`
+        // does (bash reads that as a command literally named `!x`).
         let negatable = choice((
+            break_stmt,
+            continue_stmt,
+            return_stmt,
+            exit_stmt,
             test_expr_stmt_parser().map(Stmt::Test),
             arith_cond_parser().map(Stmt::Arith),
             // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
@@ -1575,9 +1586,7 @@ where
             )))
             .map(pipeline_into_stmt),
         ));
-        let negatable = just(Token::Bang)
-            .repeated()
-            .foldr(negatable, |_, inner| Stmt::Not(Box::new(inner)));
+        let negatable = bang_prefixed(negatable, Stmt::Not);
 
         // Base statement (without chaining)
         let base_statement = choice((
@@ -1588,10 +1597,6 @@ where
             // Shell-style functions (use $1, $2 positional params)
             posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
             bash_function_parser(stmt.clone()).map(Stmt::ToolDef),   // function name { }
-            break_stmt,
-            continue_stmt,
-            return_stmt,
-            exit_stmt,
             negatable,
         ))
         .boxed();
@@ -2921,6 +2926,59 @@ where
         .boxed()
 }
 
+/// The message every glued `!` is refused with — one constant so the
+/// wording (and the fix it names) can never drift between the statement and
+/// condition productions that both call [`bang_prefixed`].
+const BANG_GLUED_MESSAGE: &str = "`!` needs a space before what it negates — kaish does no \
+     token pasting; write `! true`, not `!true` (bash reads a glued `!true` as a literal \
+     command name, not the `!` operator)";
+
+/// Parse zero or more `!` immediately before `base`, requiring whitespace
+/// between each `!` and whatever follows it — another `!`, or `base` itself.
+///
+/// bash's `!` is a reserved word: it needs a token boundary on both sides,
+/// so `!true` lexes as the single word `!true` (bash: `!true: command not
+/// found`), never as `!` negating `true`. kaish's lexer emits a standalone
+/// `Bang` token regardless of adjacency, so without this guard `!true` and
+/// `!!true` silently parsed as negation — a divergence from bash that reads
+/// as a working script until the exit code is wrong. This refuses those
+/// glued forms with [`BANG_GLUED_MESSAGE`] instead, checking `Span`
+/// adjacency the same way [`command_parser`]'s "command name and first
+/// argument need a space between them" check does.
+///
+/// `wrap` builds the negated node at each level: `Expr::Not` for a
+/// condition, `Stmt::Not` for a statement. Shared by [`condition_parser`]
+/// (`if`/`while`) and the statement-level `!` in `statement_parser`, so both
+/// read the identical rule.
+fn bang_prefixed<'tokens, I, T, W>(
+    base: impl Parser<'tokens, I, T, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+    wrap: W,
+) -> impl Parser<'tokens, I, T, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    T: 'tokens,
+    W: Fn(Box<T>) -> T + Clone + 'tokens,
+{
+    just(Token::Bang)
+        .map_with(|_, extra| extra.span())
+        .repeated()
+        .collect::<Vec<Span>>()
+        .then(base.map_with(|b, extra| (b, extra.span())))
+        .validate(move |(bangs, (body, body_span)), _, emitter| {
+            for (i, bang_span) in bangs.iter().enumerate() {
+                let next_start = bangs.get(i + 1).map(|s| s.start).unwrap_or(body_span.start);
+                if bang_span.end == next_start {
+                    emitter.emit(Rich::custom(*bang_span, BANG_GLUED_MESSAGE));
+                }
+            }
+            let mut result = body;
+            for _ in 0..bangs.len() {
+                result = wrap(Box::new(result));
+            }
+            result
+        })
+}
+
 /// Condition parser: supports [[ ]] test expressions and commands with && / || chaining.
 ///
 /// Shell semantics: conditions are commands whose exit codes determine truthiness.
@@ -2955,10 +3013,9 @@ where
 
     // `!` negates the command that follows it, BEFORE `&&`/`||` fold below —
     // bash reads `! true && true` as `(! true) && true`. Repeated so `! ! x`
-    // parses, which bash also accepts.
-    let base = just(Token::Bang)
-        .repeated()
-        .foldr(base, |_, inner| Expr::Not(Box::new(inner)));
+    // parses, which bash also accepts; `bang_prefixed` refuses a glued `!x`
+    // (bash reads that as a command literally named `!x`).
+    let base = bang_prefixed(base, Expr::Not);
 
     // && has higher precedence than ||
     // First chain with && (higher precedence)

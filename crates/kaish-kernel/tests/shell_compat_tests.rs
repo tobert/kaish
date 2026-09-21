@@ -1348,6 +1348,26 @@ shell_compat! {
     absent: "reached",
 }
 
+// ---- `!` also wraps the signal statements (exit/return) ------------------
+// bash accepts `! exit N` and `! return N` syntactically — the signal itself
+// leaves before `!` gets anything to flip, so the exit/return code is
+// untouched, not negated.
+
+shell_compat! {
+    name: bang_exit_leaves_the_code_untouched,
+    // `!` does not flip an `exit` code — the script leaves with exit 3, and
+    // nothing after `! exit 3` ever runs.
+    script: "! exit 3; echo after",
+    exit: 3,
+    absent: "after",
+}
+
+shell_compat! {
+    name: bang_return_leaves_the_code_untouched,
+    script: "f() { ! return 2; }; f; echo \"rc=$?\"",
+    eq: "rc=2",
+}
+
 shell_compat! {
     name: quoted_leading_hash_is_literal,
     script: "echo '#3'",

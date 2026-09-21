@@ -700,6 +700,7 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 ! true                          # negates a pipeline's exit status: 0 → 1
 ! grep -q pattern file | wc -l  # binds to the WHOLE pipeline, below && / ||
 ! cmd1 && cmd2                  # ! binds tighter than &&: (! cmd1) && cmd2
+!true                           # error — kaish needs a space: write `! true`
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.

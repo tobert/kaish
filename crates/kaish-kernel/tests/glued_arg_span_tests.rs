@@ -125,6 +125,7 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
         ("cat > $DIR/out.txt", "redirect target"),
         ("for x in $(echo foo)/b; do echo $x; done", "for-loop items"),
         ("./bin$x", "command name and first argument need a space"),
+        ("!true", "needs a space"),
         ("x={msg: hello world}", "record value: unexpected word"),
         ("echo ${x:1:2}", "kaish slices with brackets"),
         ("echo $(foo", "unterminated command substitution"),
@@ -165,7 +166,9 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
 #[test]
 fn parser_custom_guard_count_is_pinned() {
     const PARSER_SOURCE: &str = include_str!("../src/parser.rs");
-    const EXPECTED: usize = 14;
+    // 15: `bang_prefixed`'s glued-`!` guard (BANG_GLUED_MESSAGE) is new —
+    // see the `"!true"` row above.
+    const EXPECTED: usize = 15;
     let found = PARSER_SOURCE.matches("Rich::custom(").count();
     assert_eq!(
         found, EXPECTED,
