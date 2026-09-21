@@ -117,15 +117,17 @@ thread_local! {
 /// - Special variables: `${?}` → LastExitCode, `${$}` → CurrentPid
 /// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}` → VarRef
 /// - Default values: `${VAR:-default}` → VarWithDefault (with nested expansion support)
-fn parse_var_expr(raw: &str) -> Expr {
+///
+/// A default word that fails to parse (`${x:-$(echo hi}`) is an error.
+fn parse_var_expr(raw: &str) -> Result<Expr, String> {
     // Special case: ${?} is the last exit code (same as $?)
     if raw == "${?}" {
-        return Expr::LastExitCode;
+        return Ok(Expr::LastExitCode);
     }
 
     // Special case: ${$} is the current PID (same as $$)
     if raw == "${$}" {
-        return Expr::CurrentPid;
+        return Ok(Expr::CurrentPid);
     }
 
     // Check for default value syntax: ${VAR:-default}
@@ -136,22 +138,12 @@ fn parse_var_expr(raw: &str) -> Expr {
         // Extract default value (between :- and }) and recursively parse it,
         // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
-        // TODO: this discards a real error. `parse_interpolated_string` now
-        // reports an unterminated `$(`, but this path returns `Expr` and has
-        // nowhere to put a failure, so `echo ${x:-$(echo hi}` still exits 0
-        // with the body kept as literal text — the same silent shape the
-        // quoted path just stopped doing. Closing it needs the check on the
-        // token stream, where `validate_interpolated_strings` already lives;
-        // it only inspects `Token::String` today and would have to read a
-        // `VarRef`'s default word too.
-        let default_word = unquote_default_word(default_str);
-        let default = parse_interpolated_string(&default_word)
-            .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
-        return Expr::VarWithDefault { path, default };
+        let default = parse_interpolated_string(&unquote_default_word(default_str))?;
+        return Ok(Expr::VarWithDefault { path, default });
     }
 
     // Regular variable path
-    Expr::VarRef(parse_varpath(raw))
+    Ok(Expr::VarRef(parse_varpath(raw)))
 }
 
 /// Detect bash's `${VAR:offset:length}` substring form and explain the kaish
@@ -3482,21 +3474,11 @@ where
             {
                 return Err(Rich::custom(span, msg));
             }
-            // `${x:-WORD}`'s default word expands like a double-quoted string,
-            // and `parse_var_expr` returns an `Expr` with nowhere to put a
-            // failure — so a malformed `$(` inside the word was kept as
-            // literal text and the whole statement ran. Checked here, at the
-            // grammar, rather than on the token stream: a nested default word
-            // (`$(echo ${x:-$(echo hi})`) is a `VarRef` at whatever depth it
-            // occurs, so this one rule reaches every nesting.
-            if let Some(colon) = find_default_separator(&raw)
-                && raw.len() > colon + 3
-                && let Err(msg) =
-                    parse_interpolated_string(&unquote_default_word(&raw[colon + 2..raw.len() - 1]))
-            {
-                return Err(Rich::custom(span, msg));
-            }
-            Ok(parse_var_expr(&raw))
+            // `${x:-WORD}`'s default word expands like a double-quoted
+            // string. Checked at the grammar, not the token stream, so a
+            // nested default word (`$(echo ${x:-$(echo hi})`) is reached at
+            // every depth.
+            parse_var_expr(&raw).map_err(|msg| Rich::custom(span, msg))
         }),
         select! { Token::SimpleVarRef(name) => Expr::VarRef(VarPath::simple(name)) },
     ))
