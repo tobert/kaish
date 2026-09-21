@@ -916,6 +916,8 @@ fn w008_stays_quiet_through_test_where_the_value_is_not_in_the_source() {
         r#"test "abc" == "abc""#,
         "test 1 -eq 1",
         r#"test "1.5" -gt 1"#,
+        "test $x -eq 1",
+        "test $x -eq $y",
     ] {
         let issues = kaish_kernel::validator::validate_program(source).expect("parses");
         assert!(
@@ -923,6 +925,45 @@ fn w008_stays_quiet_through_test_where_the_value_is_not_in_the_source() {
                 .iter()
                 .any(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand),
             "{source} must not warn: {issues:?}",
+        );
+    }
+}
+
+// ── `test`'s validate() judges each operand independently (kaibo review) ──
+//
+// The first version bailed out (`return Vec::new()`) whenever ANY word in
+// the expression was the `<dynamic>` placeholder (an unevaluated `$x` or
+// `$(cmd)`) — a blanket suppression the `[[ ]]` walker's per-operand
+// judgment (`walker.rs`'s `check_numeric_literal_operand`) never had.
+
+/// `test abc -eq $y`: the literal `abc` is still in the source and still
+/// cannot succeed against `-eq`, regardless of what `$y` resolves to —
+/// `[[ abc -eq $y ]]` already warns here, and `test` must agree.
+#[test]
+fn w008_still_fires_through_test_when_the_other_operand_is_dynamic() {
+    for source in ["test abc -eq $y", "test $y -eq abc"] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+    }
+}
+
+/// `test $x -a $y`: the compound operator `-a` is a literal word in the
+/// source — the validator classifies it regardless of what `$x`/`$y`
+/// resolve to — so E020 must still fire, not be swallowed by the two
+/// dynamic operands sitting on either side of it.
+#[test]
+fn e020_still_fires_through_test_when_the_operands_are_dynamic() {
+    for source in ["test $x -a $y", "test $x -o $y"] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::TestCompoundOperator),
+            "{source}: expected E020, got {issues:?}"
         );
     }
 }

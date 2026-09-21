@@ -101,12 +101,21 @@ impl Tool for Test {
             .collect();
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
 
-        // A placeholder means an unevaluated expansion; its runtime value is
-        // unknown, so judging it would report a program that may be fine.
-        if words.contains(&"<dynamic>") {
-            return Vec::new();
-        }
-
+        // Each slot is judged on its OWN word, never by whether some OTHER
+        // slot holds a placeholder for an unevaluated expansion (`$x`,
+        // `$(cmd)`) — bailing out whenever ANY word was dynamic (the first
+        // version of this check) cost two things the `[[ ]]` walker doesn't
+        // lose: `test abc -eq $y` stayed silent about the literal `abc`
+        // (`[[ abc -eq $y ]]` still warns — `walker.rs`'s
+        // `check_numeric_literal_operand` judges each operand of a
+        // `TestExpr::Comparison` independently), and `test $x -a $y` lost
+        // E020 on the literal `-a`, even though the operator ITSELF was
+        // never in question. `is_compound_op`/`is_numeric_binary_op` only
+        // ever match a literal spelling, so a dynamic word in the operator
+        // slot just answers "not a match" on its own, with no bail needed;
+        // `numeric_literal_operand_issues` below carries its own per-operand
+        // dynamic guard for the same reason.
+        //
         // Same slots `eval_test`/`eval_primary` read: skip the leading `!`
         // run, then the operator is the first word of a two-operand primary
         // and the middle word of a three-operand one. Anything longer is
@@ -211,9 +220,14 @@ const COMPOUND_HINT: &str =
 /// exactly like `[[ abc -eq 1 ]]`.
 ///
 /// `operands` is already sliced to the leading-`!`-stripped primary; only the
-/// three-operand shape (`LEFT OP RIGHT`) has operand slots to check. A
-/// dynamic operand (`$x`, `$(cmd)`) never reaches here — `validate` returns
-/// early on any `<dynamic>` placeholder before this is called.
+/// three-operand shape (`LEFT OP RIGHT`) has operand slots to check. Each of
+/// `LEFT`/`RIGHT` is judged on its own: a dynamic operand (`$x`, `$(cmd)` —
+/// the `<dynamic>` placeholder) is skipped, but a LITERAL sibling of a
+/// dynamic operand still gets judged (`test abc -eq $y` warns about `abc`,
+/// same as `[[ abc -eq $y ]]`) — an unrelated unknown must not blind the
+/// check to the operand that IS in the source. The operator itself must
+/// still be a literal numeric spelling; a dynamic operator (`test $x $op
+/// $y`) can't be classified at all, so nothing here fires.
 fn numeric_literal_operand_issues(operands: &[Value]) -> Vec<ValidationIssue> {
     if operands.len() != 3 {
         return Vec::new();
@@ -224,6 +238,7 @@ fn numeric_literal_operand_issues(operands: &[Value]) -> Vec<ValidationIssue> {
     }
     [&operands[0], &operands[2]]
         .into_iter()
+        .filter(|operand| !is_dynamic_placeholder(operand))
         .filter_map(|operand| {
             let reason = crate::interpreter::numeric_operand_refusal(operand)?;
             Some(
@@ -236,6 +251,15 @@ fn numeric_literal_operand_issues(operands: &[Value]) -> Vec<ValidationIssue> {
             )
         })
         .collect()
+}
+
+/// True for the `<dynamic>` placeholder `expr_to_placeholder`
+/// (`validator/walker.rs`) substitutes for an expansion validation cannot
+/// evaluate (`$x`, `$(cmd)`, …). A genuine literal string that happens to
+/// read `"<dynamic>"` is indistinguishable from the placeholder at this
+/// layer — an accepted, existing limitation of the sentinel, not new here.
+fn is_dynamic_placeholder(value: &Value) -> bool {
+    matches!(value, Value::String(s) if s == "<dynamic>")
 }
 
 fn is_numeric_binary_op(s: &str) -> bool {
