@@ -14,7 +14,7 @@ use kaish_kernel::ast::Value;
 use kaish_kernel::scheduler::JobId;
 use kaish_kernel::{Kernel, KernelConfig};
 
-/// Well past the kill grace (2s) and still far short of the 60s sleep.
+/// Well past `kill %N`'s default kill grace (2s), far short of the 60s sleep.
 const PROMPT: Duration = Duration::from_secs(8);
 
 fn kernel_at(dir: &Path) -> Arc<Kernel> {

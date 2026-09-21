@@ -640,7 +640,7 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
                 _ = spawn_ctx.cancel.cancelled() => {
                     interrupted_after_exit = true;
                     #[cfg(unix)]
-                    signal_leftover_group(kill_target.as_ref(), spawn_ctx.kill_grace);
+                    signal_leftover_group(kill_target.as_ref());
                     drain_stop.cancel();
                     drains.await;
                 }
@@ -701,20 +701,17 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
     }
 }
 
-/// SIGTERM what is left of an exited command's process group, then SIGKILL
-/// it after `grace`. The command itself is already reaped, so nothing here
-/// can wait for the group to exit.
+/// SIGKILL what is left of an exited command's process group, at once.
+///
+/// The command is already reaped, so its pid pins nothing: a group id stays
+/// reserved only while a member lives. Signalling now reaches the members
+/// that still hold the pipe; a delayed signal could land on an unrelated
+/// group that reused the id after these members died.
 #[cfg(unix)]
-fn signal_leftover_group(target: Option<&crate::pidfd::KillTarget>, grace: std::time::Duration) {
+fn signal_leftover_group(target: Option<&crate::pidfd::KillTarget>) {
     use nix::sys::signal::Signal;
     let Some(target) = target else {
         return;
     };
-    target.signal_pg(Signal::SIGTERM);
-    // The group id is the reaped command's pid; `signal_pg` needs only that.
-    let group = crate::pidfd::KillTarget::from_pid(target.pid());
-    tokio::spawn(async move {
-        tokio::time::sleep(grace).await;
-        group.signal_pg(Signal::SIGKILL);
-    });
+    target.signal_pg(Signal::SIGKILL);
 }
