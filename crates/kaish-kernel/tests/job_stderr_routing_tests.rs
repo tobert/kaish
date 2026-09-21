@@ -215,3 +215,20 @@ async fn substitution_stderr_is_job_stderr() {
     assert!(sub < after, "out of order: {err:?}");
     assert_eq!(streams.stdout, "got value\n");
 }
+
+/// An external whose stderr overflows the capture ring gets a truncation
+/// marker in its `err`. Its bytes were teed live, so the marker is the one
+/// thing the stream still needs, and it gets it once.
+#[tokio::test]
+async fn capture_overflow_marker_reaches_the_stream_once() {
+    let kernel = kernel();
+    let streams = run_job(
+        &kernel,
+        "sh -c 'head -c 11000000 /dev/zero | tr \"\\0\" x >&2' &",
+    )
+    .await;
+    let marker = "[stderr truncated:";
+    assert_eq!(streams.result_err.matches(marker).count(), 1, "the result carries the marker");
+    assert_eq!(streams.stderr.matches(marker).count(), 1, "the stream carries the marker once");
+    assert!(streams.stderr.trim_end().ends_with("to spill to disk]"), "the marker follows the live bytes");
+}

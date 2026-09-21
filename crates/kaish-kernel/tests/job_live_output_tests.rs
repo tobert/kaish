@@ -428,3 +428,55 @@ async fn whole_program_substitution_stderr_is_job_stderr() {
     let err = stderr_of(&kernel, id).await;
     assert_eq!(err.matches("kaish-no-such-file").count(), 1, "substitution stderr, once: {err:?}");
 }
+
+/// Each producer's stderr reaches a `cmd &` job's stream when it finishes,
+/// not when the job does: `first` must be readable while the job still runs
+/// and before `second` exists. Every case sleeps between the two.
+#[rstest::rstest]
+#[case::builtin_in_an_if(
+    "if true; then cat /kaish-live-first; sleep 2; cat /kaish-live-second; fi &"
+)]
+#[case::test_fault_in_an_if(
+    "if true; then [[ 1 -eq kaish-live-first ]]; sleep 2; cat /kaish-live-second; fi &"
+)]
+#[case::builtin_in_a_function(
+    "f() { cat /kaish-live-first; sleep 2; cat /kaish-live-second; }; f &"
+)]
+#[case::first_stage_of_a_top_level_pipeline(
+    "cat /kaish-live-first | sleep 2 | if true; then cat > /dev/null; cat /kaish-live-second; fi &"
+)]
+#[case::first_stage_of_a_nested_pipeline(
+    "if true; then cat /kaish-live-first | sleep 2; cat /kaish-live-second; fi &"
+)]
+#[case::substitution_under_a_redirect(
+    "if true; then echo \"$(cat /kaish-live-first)\" 2>/dev/null; sleep 2; cat /kaish-live-second; fi &"
+)]
+#[case::left_of_an_or_chain(
+    "if true; then cat /kaish-live-first || sleep 2; cat /kaish-live-second; fi &"
+)]
+#[tokio::test]
+async fn job_stderr_is_live_per_producer(#[case] program: &str) {
+    let kernel = kernel();
+    kernel.execute(program).await.expect("spawn failed");
+    let id = JobId(1);
+
+    let deadline = Instant::now() + LIVE_TIMEOUT;
+    loop {
+        let status = status_of(&kernel, id).await;
+        let err = stderr_of(&kernel, id).await;
+        if err.contains("kaish-live-first") {
+            assert_eq!(status, "running", "stderr held the first message only after the job finished: {err:?}");
+            assert!(!err.contains("kaish-live-second"), "stderr arrived as one buffer: {err:?}");
+            break;
+        }
+        assert_eq!(status, "running", "job finished before its first stderr reached the stream: {err:?}");
+        assert!(Instant::now() < deadline, "the first stderr never reached the stream while the job ran");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let result = kernel.jobs().wait(id).await.expect("job result");
+    let err = stderr_of(&kernel, id).await;
+    assert_eq!(err.matches("kaish-live-first").count(), 1, "{err:?}");
+    assert_eq!(err.matches("kaish-live-second").count(), 1, "{err:?}");
+    assert_eq!(err, result.err, "the stream must equal the job's result.err");
+}
