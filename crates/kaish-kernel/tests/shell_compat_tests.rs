@@ -1229,3 +1229,31 @@ shell_compat! {
     script: "echo '#3'",
     eq: "#3",
 }
+
+// ---- redirects apply left to right, with dup semantics -----------------
+// `2>&1` copies wherever stdout points at that moment. `> f 2>&1` sends both
+// to f; `2>&1 > f` sends stderr to the old stdout and stdout to f.
+
+shell_compat! {
+    name: redirect_stdout_then_merge_sends_both_to_the_file,
+    script: "ls /kaish-compat-nonexistent > /tmp/kaish-compat-redir-a 2>&1; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-a)\"",
+    eq: "lines:1",
+}
+
+shell_compat! {
+    name: merge_then_redirect_stdout_sends_stderr_to_the_old_stdout,
+    script: "ls /kaish-compat-nonexistent 2>&1 > /tmp/kaish-compat-redir-b | wc -l; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-b)\"",
+    eq: "1\nlines:0",
+}
+
+shell_compat! {
+    name: both_redirect_sends_both_to_the_file,
+    script: "ls /kaish-compat-nonexistent &> /tmp/kaish-compat-redir-c; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-c)\"",
+    eq: "lines:1",
+}
+
+shell_compat! {
+    name: stderr_to_file_then_stdout_to_stderr_sends_both_to_the_file,
+    script: "echo kaish-compat-out 2> /tmp/kaish-compat-redir-d 1>&2; echo \"file:$(cat /tmp/kaish-compat-redir-d)\"",
+    eq: "file:kaish-compat-out",
+}

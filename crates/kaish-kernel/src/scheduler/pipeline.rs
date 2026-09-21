@@ -102,179 +102,171 @@ fn assert_stderr_unpublished(result: &ExecResult) {
 /// Whether a stage's redirects send its stdout away from its pipeline
 /// position: to a file (`>`, `>>`, `&>`) or to stderr (`>&2`).
 fn redirects_stdout(stage: &PipelineStage) -> bool {
-    stage.redirects().iter().any(|redirect| {
-        matches!(
-            redirect.kind,
-            RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend | RedirectKind::Both | RedirectKind::MergeStdout
-        )
-    })
+    redirect_sinks(stage.redirects()).stdout != Sink::Stdout
 }
 
 /// Whether a stage's redirects send its stderr away from being the job's
-/// stderr: to a file (`2>`, `&>`) or into stdout (`2>&1`). `>&2` is
-/// deliberately absent — it adds content INTO stderr, it does not redirect
-/// stderr itself away, so the stage's own stderr still belongs on the job's
-/// stream (`stdout_sent_to_stderr_reaches_the_stderr_stream`).
+/// stderr: to a file (`2>`, `&>`) or into stdout (`2>&1`). `>&2` alone
+/// adds content INTO stderr, so the stage's own stderr still belongs on the
+/// job's stream (`stdout_sent_to_stderr_reaches_the_stderr_stream`).
 fn redirects_stderr(stage: &PipelineStage) -> bool {
-    stage
-        .redirects()
-        .iter()
-        .any(|redirect| matches!(redirect.kind, RedirectKind::Stderr | RedirectKind::Both | RedirectKind::MergeStderr))
+    redirect_sinks(stage.redirects()).stderr != Sink::Stderr
 }
 
-/// Whether a stage's redirects merge its stderr into its stdout (`2>&1`) —
-/// the one case where a stage's stdout gains bytes only once the WHOLE stage
-/// has finished and `apply_redirects` has run, after any live leaf publish
-/// already sent the pre-merge stdout.
+/// Whether a stage's stderr ends in its own stdout (`2>&1` while fd 1 is
+/// still stdout) — the one case where a stage's stdout gains bytes only
+/// once the WHOLE stage has finished and `apply_redirects` has run, after any
+/// live leaf publish already sent the pre-merge stdout.
 fn merges_stderr_into_stdout(stage: &PipelineStage) -> bool {
-    stage.redirects().iter().any(|redirect| redirect.kind == RedirectKind::MergeStderr)
+    redirect_sinks(stage.redirects()).stderr == Sink::Stdout
+}
+
+/// Where a file descriptor points while redirects are applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sink {
+    /// The command's own stdout: the pipe, the capture, or the terminal.
+    Stdout,
+    /// The command's own stderr.
+    Stderr,
+    /// The file opened by the redirect at this index in `RedirectSinks::files`.
+    File(usize),
+}
+
+/// Where fd 1 and fd 2 point once every redirect has applied, and the file
+/// redirects in the order they open.
+struct RedirectSinks<'a> {
+    stdout: Sink,
+    stderr: Sink,
+    files: Vec<&'a Redirect>,
+}
+
+/// Resolve redirects left to right, as bash does: `2>&1` copies wherever
+/// fd 1 points at that moment. `> f 2>&1` sends both streams to `f`;
+/// `2>&1 > f` sends stderr to the old stdout and stdout to `f`.
+fn redirect_sinks(redirects: &[Redirect]) -> RedirectSinks<'_> {
+    let mut sinks = RedirectSinks { stdout: Sink::Stdout, stderr: Sink::Stderr, files: Vec::new() };
+    for redirect in redirects {
+        let file = Sink::File(sinks.files.len());
+        match redirect.kind {
+            RedirectKind::MergeStderr => sinks.stderr = sinks.stdout,
+            RedirectKind::MergeStdout => sinks.stdout = sinks.stderr,
+            RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend => {
+                sinks.files.push(redirect);
+                sinks.stdout = file;
+            }
+            RedirectKind::Stderr => {
+                sinks.files.push(redirect);
+                sinks.stderr = file;
+            }
+            RedirectKind::Both => {
+                sinks.files.push(redirect);
+                sinks.stdout = file;
+                sinks.stderr = file;
+            }
+            // Pre-execution redirects - already handled before command execution
+            RedirectKind::Stdin | RedirectKind::HereDoc(_) | RedirectKind::HereString => {}
+        }
+    }
+    sinks
+}
+
+/// A file a redirect opened, and the bytes that end up there.
+struct RedirectFile {
+    path: String,
+    append: bool,
+    data: Vec<u8>,
 }
 
 /// Apply redirects to an execution result.
 ///
 /// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
-/// Post-execution redirects (stdout/stderr to file, merge) applied here.
-/// Redirects are processed left-to-right per POSIX.
+/// Post-execution redirects (stdout/stderr to file, merge) applied here, to
+/// the fds `redirect_sinks` resolves. The output moves only after every
+/// target is evaluated, in order.
 pub(crate) async fn apply_redirects(
     mut result: ExecResult,
     redirects: &[Redirect],
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
-    // Defer materialization of OutputData → result.out to individual redirect
-    // handlers. File redirects (Overwrite/Append) can stream OutputData directly
-    // to disk via write_canonical(), avoiding OOM on large structured output.
-    // Merge redirects and the fallthrough path materialize on demand.
-    for redir in redirects {
-        match redir.kind {
-            RedirectKind::MergeStderr => {
-                // 2>&1 - append stderr to stdout
-                // Ensure output is materialized for merge
+    let sinks = redirect_sinks(redirects);
+    let (stdout_sink, stderr_sink) = (sinks.stdout, sinks.stderr);
+    let mut files: Vec<RedirectFile> = Vec::with_capacity(sinks.files.len());
+    for redirect in sinks.files {
+        let path = match eval_redirect_target(&redirect.target, ctx, dispatcher).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+        };
+        files.push(RedirectFile { path, append: redirect.kind == RedirectKind::StdoutAppend, data: Vec::new() });
+    }
+
+    // stdout goes first, then stderr, wherever both land together.
+    if stdout_sink != Sink::Stdout {
+        if stdout_sink == Sink::Stderr && result.is_bytes() {
+            // Binary stdout can't be folded into text stderr without
+            // corruption — fail loud instead.
+            return ExecResult::failure(
+                1,
+                "redirect: cannot merge binary stdout into stderr (1>&2) — \
+                 redirect it to a file or pipe through base64/xxd",
+            );
+        }
+        // A binary result moves its raw bytes; structured output serializes
+        // straight to bytes (`take_output_for_stream`), as a pipe does.
+        let stdout: Vec<u8> = if let Some(bytes) = result.out_bytes() {
+            bytes.to_vec()
+        } else if let Some(output) = result.take_output_for_stream() {
+            let mut buf = Vec::new();
+            if let Err(e) = output.write_canonical(&mut buf, None) {
+                return ExecResult::failure(1, format!("redirect: {e}"));
+            }
+            buf
+        } else {
+            result.text_out().into_owned().into_bytes()
+        };
+        // stdout went elsewhere: drop out/output AND the .data sideband, or a
+        // structured result leaks past `x=$(cmd > f)` and `cmd >&2 | consumer`.
+        result.clear_stdout();
+        let stderr = if stderr_sink == Sink::Stderr {
+            String::new()
+        } else {
+            assert_stderr_unpublished(&result);
+            std::mem::take(&mut result.err)
+        };
+        match stdout_sink {
+            // `1>&2` over a text result: the bytes are valid UTF-8.
+            Sink::Stderr => result.err.push_str(&String::from_utf8_lossy(&stdout)),
+            Sink::File(index) => files[index].data.extend_from_slice(&stdout),
+            Sink::Stdout => unreachable!("handled by the enclosing branch"),
+        }
+        match stderr_sink {
+            Sink::Stdout => result.push_out(&stderr),
+            Sink::File(index) => files[index].data.extend_from_slice(stderr.as_bytes()),
+            Sink::Stderr => {}
+        }
+    } else if stderr_sink != Sink::Stderr && !result.err.is_empty() {
+        assert_stderr_unpublished(&result);
+        let stderr = std::mem::take(&mut result.err);
+        match stderr_sink {
+            Sink::Stdout => {
                 result.materialize();
-                if !result.err.is_empty() {
-                    assert_stderr_unpublished(&result);
-                    let err = std::mem::take(&mut result.err);
-                    result.push_out(&err);
-                }
+                result.push_out(&stderr);
             }
-            RedirectKind::MergeStdout => {
-                // 1>&2 or >&2 - append stdout to stderr (a text stream).
-                // Binary stdout can't be folded into text stderr without
-                // corruption — fail loud instead.
-                if result.is_bytes() {
-                    return ExecResult::failure(
-                        1,
-                        "redirect: cannot merge binary stdout into stderr (1>&2) — \
-                         redirect it to a file or pipe through base64/xxd",
-                    );
-                }
-                result.materialize();
-                if !result.text_out().is_empty() {
-                    let out = result.text_out().into_owned();
-                    result.err.push_str(&out);
-                }
-                // `1>&2` is still a stdout redirect: stdout went to stderr, so
-                // drop out/output AND the .data sideband (same as a file
-                // redirect), or a structured result leaks past `x=$(cmd >&2)`
-                // and `cmd >&2 | consumer`. Unconditional so a .data-only,
-                // empty-.out result is cleared too.
-                result.clear_stdout();
-            }
-            RedirectKind::StdoutOverwrite => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                // A binary result writes its raw bytes (no lossy decode).
-                if let Some(bytes) = result.out_bytes() {
-                    if let Err(e) = redirect_write(ctx, &path, bytes).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Some(output) = result.take_output_for_stream() {
-                    // Stream OutputData directly to file if available
-                    let mut buf = Vec::new();
-                    if let Err(e) = output.write_canonical(&mut buf, None) {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    if let Err(e) = redirect_write(ctx, &path, &buf).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                // stdout went to the file: drop out/output AND the .data sideband.
-                result.clear_stdout();
-            }
-            RedirectKind::StdoutAppend => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                // A binary result appends its raw bytes (no lossy decode).
-                if let Some(bytes) = result.out_bytes() {
-                    if let Err(e) = redirect_append(ctx, &path, bytes).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Some(output) = result.take_output_for_stream() {
-                    // Stream OutputData directly if available
-                    let mut buf = Vec::new();
-                    if let Err(e) = output.write_canonical(&mut buf, None) {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    if let Err(e) = redirect_append(ctx, &path, &buf).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                // stdout went to the file: drop out/output AND the .data sideband.
-                result.clear_stdout();
-            }
-            RedirectKind::Stderr => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                assert_stderr_unpublished(&result);
-                if let Err(e) = redirect_write(ctx, &path, result.err.as_bytes()).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                result.err.clear();
-            }
-            RedirectKind::Both => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                // Build the combined bytes: raw binary stdout (no lossy decode),
-                // or structured output streamed straight to a byte buffer via
-                // `take_output_for_stream`/`write_canonical` — same lazy path
-                // `>`/`>>` use above — instead of forcing it through one
-                // `String` first (`text_out()`'s canonical-string fallback).
-                // Falls back to the text form only when neither applies.
-                // Followed by stderr.
-                let mut combined: Vec<u8> = if let Some(b) = result.out_bytes() {
-                    b.to_vec()
-                } else if let Some(output) = result.take_output_for_stream() {
-                    let mut buf = Vec::new();
-                    if let Err(e) = output.write_canonical(&mut buf, None) {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    buf
-                } else {
-                    result.text_out().into_owned().into_bytes()
-                };
-                assert_stderr_unpublished(&result);
-                combined.extend_from_slice(result.err.as_bytes());
-                if let Err(e) = redirect_write(ctx, &path, &combined).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                // both streams went to the file: drop stdout (incl. .data) + stderr.
-                result.clear_stdout();
-                result.err.clear();
-            }
-            // Pre-execution redirects - already handled before command execution
-            RedirectKind::Stdin | RedirectKind::HereDoc(_) | RedirectKind::HereString => {}
+            Sink::File(index) => files[index].data.extend_from_slice(stderr.as_bytes()),
+            Sink::Stderr => {}
+        }
+    }
+
+    // Every opened file is written, empty or not: `> f` creates or truncates
+    // `f` even when nothing ends up there.
+    for file in &files {
+        let written = if file.append {
+            redirect_append(ctx, &file.path, &file.data).await
+        } else {
+            redirect_write(ctx, &file.path, &file.data).await
+        };
+        if let Err(e) = written {
+            return ExecResult::failure(1, format!("redirect: {e}"));
         }
     }
     // No trailing materialize. Every reader of a result goes through
@@ -283,8 +275,7 @@ pub(crate) async fn apply_redirects(
     // tree in here bought nothing and cost the structured form. Keeping it
     // means an embedder can render an `ls` listing itself, and the pipe's own
     // `take_output_for_stream()` fast path (which requires `.out` empty) can
-    // actually fire. Redirects that replace the text materialize themselves,
-    // above.
+    // actually fire.
     result
 }
 
@@ -668,7 +659,10 @@ impl PipelineRunner {
         // `apply_redirects` runs below — capture what stdout held before
         // that, so only the newly merged bytes get published (whatever was
         // there already reached the stream via the leaf's own live publish).
+        // Stdout that went elsewhere was never published live, so none of
+        // what ends up in stdout is prior.
         let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(stage).then(|| match result.out_bytes() {
+            _ if redirects_stdout(stage) => Vec::new(),
             Some(bytes) => bytes.to_vec(),
             None => result.text_out().into_owned().into_bytes(),
         });
@@ -862,7 +856,10 @@ impl PipelineRunner {
                 // `2>&1` moves this stage's stderr into its stdout only once
                 // `apply_redirects` runs below — capture what stdout held
                 // before that so only the newly merged bytes get published.
+                // Stdout that went elsewhere was never published live, so none of
+                // what ends up in stdout is prior.
                 let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(&stage).then(|| match result.out_bytes() {
+                    _ if redirects_stdout(&stage) => Vec::new(),
                     Some(bytes) => bytes.to_vec(),
                     None => result.text_out().into_owned().into_bytes(),
                 });

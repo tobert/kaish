@@ -256,3 +256,33 @@ async fn execute_on_a_background_fork_publishes_its_stderr_once() {
     }
     assert_eq!(stream, result.err);
 }
+
+/// Redirects apply left to right with dup semantics, in a job as in the
+/// foreground. Each case: the program (with `{f}` for a file), the file's
+/// expected content, and the job's expected stdout and stderr streams.
+#[rstest::rstest]
+#[case::stdout_to_file_then_merge("ls /kaish-redir-missing > {f} 2>&1 &", true, "", "")]
+#[case::merge_then_stdout_to_file("ls /kaish-redir-missing 2>&1 > {f} &", false, "kaish-redir-missing", "")]
+#[case::both_to_file("ls /kaish-redir-missing &> {f} &", true, "", "")]
+#[case::stderr_to_file_then_stdout_to_stderr("ls /kaish-redir-missing 2> {f} 1>&2 &", true, "", "")]
+#[tokio::test]
+async fn redirect_order_decides_where_job_stderr_lands(
+    #[case] program: &str,
+    #[case] file_has_error: bool,
+    #[case] stdout_has: &str,
+    #[case] stderr_has: &str,
+) {
+    let path = temp_path(&format!("order-{}", program.replace(|c: char| !c.is_ascii_alphanumeric(), "")));
+    let program = program.replace("{f}", &path.display().to_string());
+    let streams = run_job(&kernel(), &program).await;
+    let written = std::fs::read_to_string(&path).expect("redirect target written");
+    std::fs::remove_file(&path).expect("remove redirect target");
+    assert_eq!(written.contains("kaish-redir-missing"), file_has_error, "{program}: file {written:?}");
+    if stdout_has.is_empty() {
+        assert_eq!(streams.stdout, "", "{program}");
+    } else {
+        assert_eq!(streams.stdout.matches(stdout_has).count(), 1, "{program}: {:?}", streams.stdout);
+    }
+    assert_eq!(streams.stderr, stderr_has, "{program}");
+    assert_eq!(streams.stderr, streams.result_err, "{program}");
+}
