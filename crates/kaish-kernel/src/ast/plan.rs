@@ -925,7 +925,7 @@ fn render_part(part: &StringPart) -> String {
     }
 }
 
-fn render_test(test: &TestExpr) -> String {
+pub(crate) fn render_test(test: &TestExpr) -> String {
     match test {
         TestExpr::FileTest { op, path } => format!("{} {}", op, render_expr(path)),
         TestExpr::StringTest { op, value } => format!("{} {}", op, render_expr(value)),

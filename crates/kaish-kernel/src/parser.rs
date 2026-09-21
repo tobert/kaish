@@ -2903,16 +2903,18 @@ where
     //
     // Precedence: ! (highest) > && > ||
 
-    // Unary NOT binds tighter than `&&`/`||`, so it must recurse at the
-    // unary level — `! A || B` is `(!A) || B`, NOT `!(A || B)`. The inner
-    // `recursive` lets `!` chain (`! ! expr`) while bottoming out at a
-    // primary test, so the bang never swallows a following `&&`/`||` operand.
-    let unary = recursive(|unary| {
-        let not_expr = just(Token::Bang)
-            .ignore_then(unary)
-            .map(|expr| TestExpr::Not { expr: Box::new(expr) });
-        choice((not_expr, primary_test.clone()))
-    });
+    // Unary NOT binds tighter than `&&`/`||`, so it applies at the unary
+    // level — `! A || B` is `(!A) || B`, NOT `!(A || B)`. `bang_prefixed`
+    // folds `! ! ! expr` on its own (its internal `just(Token::Bang)
+    // .repeated()` needs no external recursion to chain), and refuses a
+    // glued `!` (`[[ !-f x ]]`, `[[ !$x == y ]]`) the same way the
+    // statement-level `!` and `condition_parser`'s `!` do — Amy's call was
+    // to refuse a glued `!` everywhere, not just where it was first caught.
+    let unary = bang_prefixed(
+        primary_test.clone(),
+        |inner| TestExpr::Not { expr: inner },
+        crate::ast::plan::render_test,
+    );
 
     // AND level: unary && unary && ...
     let and_expr = unary.clone().foldl(
@@ -2993,6 +2995,11 @@ where
                             "`!{rest}`: `!` needs a space before what it negates; write `! {rest}`"
                         ),
                     ));
+                    // Report only the FIRST glued pair — `!!true` is one
+                    // mistake to fix, not two: once the earliest `!` in the
+                    // glued run is spaced out, the rest of the run parses
+                    // fresh and any real remaining glue reports on its own.
+                    break;
                 }
             }
             let mut result = body;

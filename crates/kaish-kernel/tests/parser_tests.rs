@@ -452,7 +452,7 @@ fn parser_stmt_not_continue() {
 }
 
 // =============================================================================
-// GLUED `!` IS REFUSED (statement and condition position)
+// GLUED `!` IS REFUSED (statement, condition, and `[[ ]]` position)
 // =============================================================================
 //
 // bash's `!` is a reserved word needing a token boundary on both sides:
@@ -461,8 +461,9 @@ fn parser_stmt_not_continue() {
 // `Bang` token regardless of adjacency, so without a check `!true` and
 // `!!true` would silently parse as negation — a real divergence from bash
 // that reads as a working script until the exit code is wrong. `!` needs a
-// space, in both the statement position (this file's new work) and the
-// condition position (`if`/`while`, pre-existing).
+// space everywhere it negates: the statement position, the condition
+// position (`if`/`while`), and inside `[[ ]]` (`TestExpr::Not`) — Amy's call
+// was to refuse a glued `!` in general, not just where it was first caught.
 
 #[rstest]
 #[case("!true")]
@@ -475,6 +476,8 @@ fn parser_stmt_not_continue() {
 #[case("!exit 3")]
 #[case("if !true; then echo yes; fi")]
 #[case("while !cmd; do :; done")]
+#[case("[[ !-f x ]]")]
+#[case("[[ !$x == y ]]")]
 fn glued_bang_is_refused(#[case] input: &str) {
     expect_parse_error(input);
 }
@@ -500,13 +503,25 @@ fn glued_bang_after_a_spaced_bang_blames_the_right_one() {
     );
 }
 
+/// `!!true` is ONE mistake (a run of two glued `!`s glued to `true`), not
+/// two — only the first glued pair is reported. Fixing the first `!` and
+/// re-running surfaces any real remaining glue on its own.
+#[test]
+fn glued_bang_run_reports_only_the_first_pair() {
+    let errors = parse("!!true").expect_err("`!!true` must be refused");
+    assert_eq!(errors.len(), 1, "expected exactly one error for a glued run: {errors:?}");
+    assert!(
+        errors[0].message.contains("!!"),
+        "the first pair reported must be the `!!` glue itself: {errors:?}"
+    );
+}
+
 // Forms that must keep parsing exactly as before: a properly spaced `!`
-// (statement and condition position), `!=` (a distinct token, not `!`
-// followed by `=`), arithmetic's own `!` (a separate sub-lexer), an
-// already-spaced `[[ ! ]]` (TestExpr::Not, deliberately untouched — that
-// production is out of scope for this check), `!` inside quotes, and an
-// ordinary glued ARGUMENT (`echo hi!`), which keeps the pre-existing
-// glued-argument error, unrelated to this one.
+// (statement, condition, and `[[ ]]` position — including double negation),
+// `!=` (a distinct token, not `!` followed by `=`), arithmetic's own `!` (a
+// separate sub-lexer), `!` inside quotes, and an ordinary glued ARGUMENT
+// (`echo hi!`), which keeps the pre-existing glued-argument error, unrelated
+// to this one.
 
 #[rstest]
 #[case("! true")]
@@ -516,7 +531,7 @@ fn glued_bang_after_a_spaced_bang_blames_the_right_one() {
 #[case("[[ 1 != 2 ]]")]
 #[case("(( ! 0 ))")]
 #[case("[[ ! -f x ]]")]
-#[case("[[ !-f x ]]")] // TestExpr::Not is deliberately out of scope
+#[case("[[ ! ! -f x ]]")]
 #[case(r#"echo "!true""#)]
 #[case("echo '!true'")]
 fn unaffected_bang_forms_still_parse(#[case] input: &str) {
@@ -1337,8 +1352,10 @@ fn one_stmt_sexpr(input: &str) -> String {
     "test a != b",
     r#"(cmd test (pos (string "a")) (pos (string "!=")) (pos (string "b")))"#
 )]
-// Leading-`!` negation sugar (kaish has no `! cmd` pipeline negation, so this
-// is the only negation path for the builtin).
+// Leading `!` as a `test` OPERAND, not kaish's own statement-level `!`
+// negation: `test`'s raw-argv binding takes it as a literal positional
+// string (POSIX's `test ! -f x` negation operand), distinct from
+// `! test -f x`, which negates the whole command's exit status via grammar.
 #[case(
     "test ! -f x",
     r#"(cmd test (pos (string "!")) (shortflag f) (pos (string "x")))"#
