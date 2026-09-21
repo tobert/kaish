@@ -292,7 +292,7 @@ impl ScatterGatherRunner {
             // false-positive request timeouts that kill the worker.
             // `child_for_pipeline` clones exactly what a worker
             // needs in one shot — watchdog, vfs_budget, aliases, ignore_config,
-            // output_limit, allow_external_commands, backend, cwd, scope,
+            // output_limit, allow_unwrapped_commands, backend, cwd, scope,
             // dispatcher — replacing the manual field-copy that was easy to let
             // drift (and that dropped the watchdog). `base_ctx` is a borrow (not
             // `'static`), so the child MUST be built here and MOVED into the
