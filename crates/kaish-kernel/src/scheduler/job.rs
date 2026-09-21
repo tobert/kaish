@@ -52,20 +52,18 @@ pub struct JobStreams {
     /// * **Per chunk**, by the drain task behind an external command running
     ///   for this job — from every stage, not only `Only`/`Last`, since bash
     ///   never pipes stderr between stages.
-    /// * **When a builtin, backend tool, or user function returns**, once its
-    ///   own redirects apply (`ExecContext::publish_job_stderr`, called from
-    ///   `scheduler::pipeline::run_single`/`run_pipeline` after
-    ///   `apply_redirects`). Every other stderr-producing statement kind
-    ///   (`[[ ]]`, `(( ))`, `source`, an `if`/`for`/`while`/`case` body, a
-    ///   function return) publishes the same way from `Kernel::
-    ///   execute_stmt_flow`, since it never reaches a pipeline leaf.
+    /// * **When each statement ends**, including one nested in a loop, `if`,
+    ///   or function body (`Kernel::execute_stmt_flow`), and when each
+    ///   pipeline stage ends. A statement's stderr is final by then: its
+    ///   redirects have applied. `ExecResult::stderr_published_len` records
+    ///   how much of `err` the stream holds, so only the rest is written.
     ///
     /// Output with another destination is never published: a `2>file`/`&>file`
     /// redirect, or `2>&1`, whose bytes land on [`Self::stdout`] instead.
     ///
     /// A whole-program job (`Kernel::execute_background_with_options`) writes
     /// each top-level statement's stderr itself when the statement finishes,
-    /// instead of this per-leaf publish.
+    /// instead of this per-statement publish.
     pub stderr: Arc<BoundedStream>,
 }
 

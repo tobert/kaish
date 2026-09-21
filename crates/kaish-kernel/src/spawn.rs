@@ -562,10 +562,9 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             .as_ref()
             .filter(|_| spawn_ctx.background_stream_stderr)
             .map(|s| s.stderr.clone());
-        // Captured before `stderr_tee` moves into the drain task below: tells
-        // the leaf publish at the end of this function whether the captured
-        // stderr already reached the job's stream live, chunk by chunk.
-        let stderr_was_teed = stderr_tee.is_some();
+        // Kept past the drain task below, which takes `stderr_tee`: the
+        // overflow markers added at the end go to the same stream.
+        let stderr_marker_tee = stderr_tee.clone();
 
         let stdout_task = stdout_pipe.map(|pipe| {
             tokio::spawn(async move {
@@ -641,13 +640,12 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         // oldest bytes and bumped `bytes_evicted`, but nothing ever read that
         // counter, so a >10MB stdout reported clean success with its head
         // quietly gone (GH #191). Surface it loudly instead.
-        let stderr_overflowed = stderr_stream.has_overflowed().await;
-        if stderr_overflowed {
+        let mut markers = String::new();
+        if stderr_stream.has_overflowed().await {
             let stats = stderr_stream.stats().await;
-            stderr = format!("{}{stderr}", stats.overflow_marker("stderr"));
+            markers.push_str(&stats.overflow_marker("stderr"));
         }
-        let stdout_overflowed = stdout_stream.has_overflowed().await;
-        if stdout_overflowed {
+        if stdout_stream.has_overflowed().await {
             // The marker goes in stderr, never prepended into `result`'s
             // stdout payload: stdout may be binary
             // (`success_text_or_bytes` yields a `Bytes` result for
@@ -660,18 +658,18 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             // tracks stdout, matching the enabled-limit path's contract
             // (stderr overflow alone doesn't remap the exit code).
             let stats = stdout_stream.stats().await;
-            stderr = format!("{}{stderr}", stats.overflow_marker("stdout"));
+            markers.insert_str(0, &stats.overflow_marker("stdout"));
             result.did_spill = true;
         }
+        // The tee already sent the captured stderr live, so all of `err` is
+        // published once the markers reach the stream too. They lead `err`
+        // but follow the live bytes on the stream.
+        if let Some(tee) = &stderr_marker_tee {
+            tee.write(markers.as_bytes()).await;
+        }
+        stderr.insert_str(0, &markers);
+        result.stderr_published_len = if stderr_marker_tee.is_some() { stderr.len() } else { 0 };
         result.err = stderr;
-        // The tee above already sent this stage's raw captured stderr to the
-        // job stream live, chunk by chunk, so the leaf publish (called on
-        // this result once redirects apply) must not repeat it. An overflow
-        // marker prepended just above was never part of that live stream —
-        // when one was added, leave the whole text unpublished instead: the
-        // leaf republishes it, a rare double-send of the captured bytes,
-        // rather than silently dropping the marker.
-        result.stderr_published = stderr_was_teed && !stderr_overflowed && !stdout_overflowed;
         result
     }
 }

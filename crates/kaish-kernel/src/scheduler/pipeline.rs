@@ -76,7 +76,7 @@ fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat
 
 /// A command that faults becomes its failed result: the output it produced
 /// before the fault, then the full cause chain, exit 1.
-fn fault_result(error: anyhow::Error) -> ExecResult {
+pub(crate) fn fault_result(error: anyhow::Error) -> ExecResult {
     let mut result = error
         .downcast_ref::<crate::error::FaultWithOutput>()
         .map(|carrier| carrier.output.clone())
@@ -86,11 +86,17 @@ fn fault_result(error: anyhow::Error) -> ExecResult {
         result.err.push('\n');
     }
     result.err.push_str(&ExecResult::terminate_diagnostic(format!("{error:#}")));
-    // The diagnostic just appended is new, whatever `carrier.output` already
-    // carried — force the whole text to be (re)published rather than trust a
-    // stale flag that only ever described the prior output.
-    result.stderr_published = false;
     result
+}
+
+/// A stderr redirect moves `err` away from the job's stream, which is only
+/// right if none of it was published: the redirect turned publishing off
+/// before the stage ran (`redirects_stderr`).
+fn assert_stderr_unpublished(result: &ExecResult) {
+    assert_eq!(
+        result.stderr_published_len, 0,
+        "stderr reached the job's stream before its redirect moved it"
+    );
 }
 
 /// Whether a stage's redirects send its stdout away from its pipeline
@@ -146,6 +152,7 @@ pub(crate) async fn apply_redirects(
                 // Ensure output is materialized for merge
                 result.materialize();
                 if !result.err.is_empty() {
+                    assert_stderr_unpublished(&result);
                     let err = std::mem::take(&mut result.err);
                     result.push_out(&err);
                 }
@@ -228,6 +235,7 @@ pub(crate) async fn apply_redirects(
                     Ok(p) => p,
                     Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                 };
+                assert_stderr_unpublished(&result);
                 if let Err(e) = redirect_write(ctx, &path, result.err.as_bytes()).await {
                     return ExecResult::failure(1, format!("redirect: {e}"));
                 }
@@ -256,6 +264,7 @@ pub(crate) async fn apply_redirects(
                 } else {
                     result.text_out().into_owned().into_bytes()
                 };
+                assert_stderr_unpublished(&result);
                 combined.extend_from_slice(result.err.as_bytes());
                 if let Err(e) = redirect_write(ctx, &path, &combined).await {
                     return ExecResult::failure(1, format!("redirect: {e}"));
@@ -562,33 +571,25 @@ impl PipelineRunner {
         let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => {
-                let mut result = finalize_scatter_gather_error(ExecResult::failure(1, format!("scatter: {e}")), format);
-                ctx.publish_job_stderr(&mut result).await;
-                return result;
+                return finalize_scatter_gather_error(ExecResult::failure(1, format!("scatter: {e}")), format);
             }
         };
         let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => {
-                let mut result = finalize_scatter_gather_error(ExecResult::failure(1, format!("gather: {e}")), format);
-                ctx.publish_job_stderr(&mut result).await;
-                return result;
+                return finalize_scatter_gather_error(ExecResult::failure(1, format!("gather: {e}")), format);
             }
         };
         let scatter_opts = match parse_scatter_options(&scatter_args) {
             Ok(opts) => opts,
             Err(e) => {
-                let mut result = finalize_scatter_gather_error(ExecResult::failure(2, format!("scatter: {e}")), format);
-                ctx.publish_job_stderr(&mut result).await;
-                return result;
+                return finalize_scatter_gather_error(ExecResult::failure(2, format!("scatter: {e}")), format);
             }
         };
         let gather_opts = match parse_gather_options(&gather_args) {
             Ok(opts) => opts,
             Err(e) => {
-                let mut result = finalize_scatter_gather_error(ExecResult::failure(2, format!("gather: {e}")), format);
-                ctx.publish_job_stderr(&mut result).await;
-                return result;
+                return finalize_scatter_gather_error(ExecResult::failure(2, format!("gather: {e}")), format);
             }
         };
 
@@ -678,7 +679,6 @@ impl PipelineRunner {
         if let Some(prior_out) = prior_out {
             ctx.publish_job_stdout_suffix(&prior_out, &result).await;
         }
-        ctx.publish_job_stderr(&mut result).await;
 
         result
     }
@@ -878,9 +878,7 @@ impl PipelineRunner {
                 }
                 // Every stage publishes its own stderr live, regardless of
                 // pipeline position — bash never pipes stderr between
-                // stages, unlike stdout. Before the flush below, which is a
-                // SEPARATE mechanism (the foreground/aggregate echo of an
-                // intermediate stage's stderr, not the job's stream).
+                // stages, unlike stdout.
                 stage_ctx.publish_job_stderr(&mut result).await;
 
                 // Flush buffered stderr to the kernel's stderr stream.
@@ -890,8 +888,9 @@ impl PipelineRunner {
                 // stderr goes through the pipe as expected.
                 if !result.err.is_empty() {
                     if let Some(ref stderr) = stage_ctx.stderr {
-                        stderr.write_str(&result.err);
+                        stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
                         result.err.clear();
+                        result.stderr_published_len = 0;
                     }
                 }
 

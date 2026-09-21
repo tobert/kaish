@@ -166,15 +166,33 @@ impl Tool for Timeout {
                     // "sleep: interrupted"). Append rather than overwrite so
                     // that inner detail isn't lost.
                     let note = format!("timeout: timed out after {}", duration_str);
-                    result.err = ExecResult::terminate_diagnostic(if result.err.is_empty() {
-                        note
-                    } else {
-                        format!("{}\n{}", note, result.err)
-                    });
+                    // The note leads `err`, but the inner stderr may already
+                    // be on the job's stream: publish the rest of it, then
+                    // the bytes this adds, so all of `err` is published once.
+                    ctx.publish_job_stderr(&mut result).await;
+                    let inner_published = result.stderr_published_len == result.err.len();
+                    let inner = std::mem::take(&mut result.err);
+                    let mut added = String::new();
+                    if !inner.is_empty() && !inner.ends_with('\n') {
+                        added.push('\n');
+                    }
+                    added.push_str(&note);
+                    added.push('\n');
+                    result.err = format!("{note}\n{inner}");
+                    if !result.err.ends_with('\n') {
+                        result.err.push('\n');
+                    }
+                    result.stderr_published_len = 0;
+                    if inner_published && ctx.publishes_job_stderr() {
+                        ctx.write_job_stderr(added.as_bytes()).await;
+                        result.stderr_published_len = result.err.len();
+                    }
                 }
                 result
             }
-            Err(e) => ExecResult::failure(1, format!("timeout: {e:#}")),
+            // Keep what the command wrote before it faulted, as a failed
+            // pipeline stage does.
+            Err(e) => crate::scheduler::pipeline::fault_result(e.context("timeout")),
         }
     }
 }

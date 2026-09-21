@@ -27,7 +27,15 @@ use tokio::sync::mpsc;
 /// `tokio::spawn` boundaries without `Arc<Mutex<..>>`.
 #[derive(Clone, Debug)]
 pub struct StderrStream {
-    sender: mpsc::UnboundedSender<Vec<u8>>,
+    sender: mpsc::UnboundedSender<StderrChunk>,
+}
+
+/// One write to the stream, with how many of its leading bytes a background
+/// job's stderr stream already holds.
+#[derive(Debug)]
+pub(crate) struct StderrChunk {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) published_len: usize,
 }
 
 /// Receiving end of the stderr stream.
@@ -35,7 +43,7 @@ pub struct StderrStream {
 /// Owned by the kernel. Call `drain_lossy()` to collect all pending bytes
 /// as a UTF-8 string (with lossy decode at this boundary).
 pub struct StderrReceiver {
-    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+    receiver: mpsc::UnboundedReceiver<StderrChunk>,
 }
 
 /// Create a new stderr stream pair.
@@ -53,9 +61,20 @@ impl StderrStream {
     /// Non-blocking. If the receiver has been dropped, the data is silently
     /// discarded (same as writing to a closed pipe).
     pub fn write(&self, data: &[u8]) {
+        self.write_partly_published(data, 0);
+    }
+
+    /// Write bytes whose first `published_len` already reached the job's
+    /// stderr stream, so the drain site publishes only the rest.
+    pub(crate) fn write_partly_published(&self, data: &[u8], published_len: usize) {
+        assert!(
+            published_len <= data.len(),
+            "stderr chunk claims {published_len} published bytes of {}",
+            data.len()
+        );
         if !data.is_empty() {
             // Ignore send errors — receiver dropped means nobody is listening
-            let _ = self.sender.send(data.to_vec());
+            let _ = self.sender.send(StderrChunk { bytes: data.to_vec(), published_len });
         }
     }
 
@@ -76,15 +95,39 @@ impl StderrReceiver {
     ///
     /// Returns an empty string if no messages are pending.
     /// Non-blocking — returns immediately with whatever is available.
+    ///
+    /// For a context that never publishes to a job's stderr stream: a chunk
+    /// that was already published there panics, because this drain cannot
+    /// account for it.
     pub fn drain_lossy(&mut self) -> String {
-        let mut buf = Vec::new();
+        let chunks = self.drain_chunks();
+        assert!(
+            chunks.iter().all(|chunk| chunk.published_len == 0),
+            "a published stderr chunk reached a drain that cannot account for it"
+        );
+        lossy_text(&chunks)
+    }
+
+    /// Drain all pending chunks, keeping each one's published length.
+    pub(crate) fn drain_chunks(&mut self) -> Vec<StderrChunk> {
+        let mut chunks = Vec::new();
         while let Ok(chunk) = self.receiver.try_recv() {
-            buf.extend_from_slice(&chunk);
+            chunks.push(chunk);
         }
-        if buf.is_empty() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&buf).into_owned()
-        }
+        chunks
+    }
+}
+
+/// Concatenate chunks and decode once, so a character split across two
+/// chunks is reassembled.
+pub(crate) fn lossy_text(chunks: &[StderrChunk]) -> String {
+    let mut buf = Vec::new();
+    for chunk in chunks {
+        buf.extend_from_slice(&chunk.bytes);
+    }
+    if buf.is_empty() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&buf).into_owned()
     }
 }

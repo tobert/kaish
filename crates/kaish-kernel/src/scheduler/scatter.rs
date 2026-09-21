@@ -168,11 +168,7 @@ impl ScatterGatherRunner {
             let data = ctx.take_stdin_data();
             let text = match ctx.read_stdin_to_text().await {
                 Ok(s) => s.unwrap_or_default(),
-                Err(e) => {
-                    let mut result = ExecResult::failure(2, format!("scatter: {e}"));
-                    ctx.publish_job_stderr(&mut result).await;
-                    return result;
-                }
+                Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
             };
             (text, data)
         } else {
@@ -206,11 +202,7 @@ impl ScatterGatherRunner {
         // Extract items from structured data or text
         let items = match extract_items(data.as_ref(), &text) {
             Ok(items) => items,
-            Err(msg) => {
-                let mut result = ExecResult::failure(1, msg);
-                ctx.publish_job_stderr(&mut result).await;
-                return result;
-            }
+            Err(msg) => return ExecResult::failure(1, msg),
         };
         if items.is_empty() {
             return ExecResult::success("");
@@ -239,7 +231,7 @@ impl ScatterGatherRunner {
         // when gather was the pipeline's last command, so a trailing
         // `gather > file | jq` silently skipped the file and let the
         // unredirected rows flow to `jq` instead.
-        let mut gathered = apply_redirects(gathered, gather_redirects, ctx, &*self.sequential_dispatcher).await;
+        let gathered = apply_redirects(gathered, gather_redirects, ctx, &*self.sequential_dispatcher).await;
 
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.
@@ -247,7 +239,6 @@ impl ScatterGatherRunner {
             // gather's rows are built here rather than by a dispatched
             // command, so nothing else publishes them to a job stream.
             ctx.publish_job_stdout(&gathered).await;
-            ctx.publish_job_stderr(&mut gathered).await;
             gathered
         } else {
             ctx.set_stdin_with_data(

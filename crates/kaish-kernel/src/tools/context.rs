@@ -222,7 +222,8 @@ pub struct ExecContext {
     pub background_stream_output: bool,
     /// Whether this dispatch's stderr is its background job's stderr, so it
     /// is published to the job's stream: an external per chunk, everything
-    /// else once its own redirects apply (`ExecContext::publish_job_stderr`).
+    /// else when its statement or pipeline stage ends
+    /// (`ExecContext::publish_job_stderr`).
     /// Unlike `background_stream_output`, stderr is not gated on pipeline
     /// position — bash never pipes stderr between stages, so every stage
     /// streams its own. False under a redirect that sends stderr elsewhere
@@ -452,30 +453,44 @@ impl ExecContext {
         }
     }
 
-    /// Publish `result`'s stderr to this context's background job, once.
-    ///
-    /// Every stage streams its own stderr regardless of pipeline position —
-    /// bash never pipes stderr between stages, unlike stdout — so this is
-    /// gated on the job and `background_stream_stderr` only. A no-op when
-    /// `result` already carries published bytes (an external's live tee, a
-    /// nested dispatch's own leaf publish, or a prior call on this same
-    /// result): `result.stderr_published` is the guard, checked and set here
-    /// so a caller can call this at every point stderr might need to reach
-    /// the stream without double-publishing it.
+    /// Whether stderr produced in this context belongs on its background
+    /// job's stderr stream: a `cmd &` job, and no redirect has sent stderr
+    /// elsewhere. Every stage streams its own stderr regardless of pipeline
+    /// position — bash never pipes stderr between stages, unlike stdout.
+    pub(crate) fn publishes_job_stderr(&self) -> bool {
+        self.background_job.is_some() && self.background_stream_stderr && self.job_manager.is_some()
+    }
+
+    /// Publish the part of `result.err` the job's stream does not hold yet,
+    /// `err[stderr_published_len..]`, and mark all of `err` published. A
+    /// no-op outside a publishing context, so it is safe to call at every
+    /// point stderr may need to reach the stream.
     pub(crate) async fn publish_job_stderr(&self, result: &mut ExecResult) {
-        if result.stderr_published || result.err.is_empty() {
+        let published = result.stderr_published_len;
+        assert!(
+            published <= result.err.len() && result.err.is_char_boundary(published),
+            "stderr published length {published} does not fit err of {} bytes",
+            result.err.len()
+        );
+        if published == result.err.len() || !self.publishes_job_stderr() {
             return;
         }
-        let (Some(job_id), true, Some(jobs)) =
-            (self.background_job, self.background_stream_stderr, self.job_manager.as_ref())
-        else {
+        self.write_job_stderr(&result.err.as_bytes()[published..]).await;
+        result.stderr_published_len = result.err.len();
+    }
+
+    /// Write `bytes` to the job's stderr stream when this context publishes.
+    pub(crate) async fn write_job_stderr(&self, bytes: &[u8]) {
+        if bytes.is_empty() || !self.publishes_job_stderr() {
+            return;
+        }
+        let (Some(job_id), Some(jobs)) = (self.background_job, self.job_manager.as_ref()) else {
             return;
         };
-        let Some(streams) = jobs.streams(job_id).await else {
-            return;
-        };
-        streams.stderr.write(result.err.as_bytes()).await;
-        result.stderr_published = true;
+        // A job removed from the manager has no reader left.
+        if let Some(streams) = jobs.streams(job_id).await {
+            streams.stderr.write(bytes).await;
+        }
     }
 
     /// Publish the stdout bytes a stage's own redirects introduced after

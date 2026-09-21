@@ -160,15 +160,13 @@ pub struct ExecResult {
     /// application-level hints, etc.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baggage: BTreeMap<String, String>,
-    /// Whether this result's `err` has already reached a background job's
-    /// `/v/jobs/N/stderr` stream. Set by whichever site actually published
-    /// the bytes — an external command's live tee, or a leaf dispatch's own
-    /// publish once its redirects apply — so a wrapper that copies this
-    /// result's `err` into its own (`timeout`, an `if`/`for`/`while` body, a
-    /// function return) does not publish the same bytes a second time.
+    /// How many leading bytes of `err` a background job's `/v/jobs/N/stderr`
+    /// stream already holds. Publishing writes `err[stderr_published_len..]`
+    /// and advances this to `err.len()`, so text appended after a publish is
+    /// published once and text published before is never sent again.
     /// Internal plumbing, not part of the wire contract: never serialized.
     #[serde(skip)]
-    pub stderr_published: bool,
+    pub stderr_published_len: usize,
 }
 
 impl ExecResult {
@@ -204,7 +202,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 
@@ -229,7 +227,7 @@ impl ExecResult {
                 original_code: None,
                 content_type: None,
                 baggage: BTreeMap::new(),
-                stderr_published: false,
+                stderr_published_len: 0,
             },
         }
     }
@@ -268,7 +266,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 
@@ -293,7 +291,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 
@@ -322,7 +320,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 
@@ -344,7 +342,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 
@@ -365,7 +363,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 
@@ -388,7 +386,7 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            stderr_published: false,
+            stderr_published_len: 0,
         }
     }
 

@@ -56,6 +56,7 @@ mod stream;
 pub use job::{Job, JobId, JobInfo, JobManager, JobStatus, JobStreams};
 pub use pipe_stream::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
 pub use stderr_stream::{stderr_stream, StderrReceiver, StderrStream};
+pub(crate) use stderr_stream::lossy_text;
 pub use stream::{
     drain_to_stream, drain_to_stream_teed, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE,
 };
