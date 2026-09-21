@@ -1226,8 +1226,33 @@ source text, so it touches no filesystem and needs no capability feature.
 
 The output is always a JSON object, so a caller parses one shape whatever
 happened: `{"statements": [...]}` and exit **0**, or `{"errors": [...]}` and
-exit **2** — the same usage code a builtin returns for bad argv. Both shapes
-also carry `kaish_version` (bare semver, e.g. `"0.17.0"`), `kaish_git_hash`
+exit **2** — the same usage code a builtin returns for bad argv.
+
+A plan that exits 0 can still hold a statement the runtime refuses:
+`[[ "abc" -eq 1 ]]` plans cleanly and faults with exit 2 the moment it runs.
+Those carry a `warnings` array, present only when there is something in it,
+so a caller that reads `statements` alone is unchanged:
+
+```console
+$ kaish --plan '[[ "abc" -eq 1 ]]'
+{"statements":[…],"warnings":[{"code":"W008","message":"this comparison
+cannot succeed: type error: expected numeric operand, got non-numeric string
+\"abc\"","suggestion":"compare with `==` for text, or give the operand a
+numeric value"}],"kaish_version":"0.18.0",…}
+```
+
+The plan exits **0** for that program, because the program runs. `warnings`
+never means "unrunnable" — `errors` does, and only `errors` does. Every
+issue object in either array carries a `code`; route on it rather than on
+message text. `start`/`end` appear only when the issue refers to a position
+in the source.
+
+The `warnings` array holds only what the runtime will refuse, never the
+validator's advisory warnings. `UndefinedCommand` fires on every external
+command a program calls, and publishing it here would put a line in the plan
+of every program that runs `cargo`.
+
+Both shapes also carry `kaish_version` (bare semver, e.g. `"0.17.0"`), `kaish_git_hash`
 (short hash, or `"unknown"` when kaish was built with no `.git` present — a
 crates.io tarball build, for instance), and `kaish_build_date`
 (`YYYY-MM-DD`) at the top level, so a caller windowing measurements by

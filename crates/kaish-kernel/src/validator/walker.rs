@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    PipelineStage, Program, SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment,
+    PipelineStage, Program, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
+    VarSegment,
     WhileLoop,
     Value,
 };
@@ -554,9 +555,24 @@ impl<'a> Validator<'a> {
         match test {
             TestExpr::FileTest { path, .. } => self.validate_expr(path),
             TestExpr::StringTest { value, .. } => self.validate_expr(value),
-            TestExpr::Comparison { left, right, .. } => {
+            TestExpr::Comparison { left, op, right } => {
                 self.validate_expr(left);
                 self.validate_expr(right);
+                // A numeric op with a literal operand is decidable here: the
+                // value is in the source, so a fault that would only appear
+                // at runtime can be reported to a caller inspecting a plan.
+                if matches!(
+                    op,
+                    TestCmpOp::NumEq
+                        | TestCmpOp::NumNotEq
+                        | TestCmpOp::NumGt
+                        | TestCmpOp::NumLt
+                        | TestCmpOp::NumGtEq
+                        | TestCmpOp::NumLtEq
+                ) {
+                    self.check_numeric_literal_operand(left);
+                    self.check_numeric_literal_operand(right);
+                }
             }
             TestExpr::And { left, right } | TestExpr::Or { left, right } => {
                 self.validate_test(left);
@@ -568,6 +584,31 @@ impl<'a> Validator<'a> {
                 self.validate_expr(right);
             }
         }
+    }
+
+    /// Report a literal operand a numeric `[[ ]]` op will refuse.
+    ///
+    /// Literals only, nothing computed: a `$VAR` or a `$(...)` holds a value
+    /// the validator cannot see, and guessing at one would report a fault for
+    /// a comparison that succeeds. The refusal itself comes from the same
+    /// function the runtime uses, so the two cannot disagree about what
+    /// counts as a number.
+    fn check_numeric_literal_operand(&mut self, expr: &Expr) {
+        let Expr::Literal(value) = expr else {
+            return;
+        };
+        let Some(reason) = crate::interpreter::numeric_operand_refusal(value) else {
+            return;
+        };
+        self.issues.push(
+            ValidationIssue::warning(
+                IssueCode::NonNumericTestOperand,
+                format!("this comparison cannot succeed: {reason}"),
+            )
+            .with_suggestion(
+                "compare with `==` for text, or give the operand a numeric value",
+            ),
+        );
     }
 
     /// Validate an expression.
