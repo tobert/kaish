@@ -204,20 +204,29 @@ impl Tool for Spawn {
         // the same real-path resolution `try_execute_external_on_path` does
         // for every other external command — not the kaish process's own OS
         // cwd, which is a different directory once a script has `cd`ed.
-        // `virtual_cwd_error` refuses loudly rather than silently falling
-        // back to the process cwd when the shell's cwd has no real
-        // filesystem location (an overlay, an in-memory VFS mount, `/dev`).
+        // `virtual_cwd_error` refuses loudly (127) rather than silently
+        // falling back to the process cwd when a cwd has no real filesystem
+        // location (an overlay, an in-memory VFS mount, `/dev`) — one shape
+        // for both the explicit and the default case, not two.
+        //
+        // A resolved-but-missing directory (a real mount, but that specific
+        // subpath doesn't exist) is a different failure and gets its own
+        // message naming the cwd: without this check, `cmd.spawn()` would
+        // fail on the chdir and report a raw ENOENT blaming the COMMAND
+        // ("spawn: /bin/true: No such file or directory") for a problem
+        // that is the cwd's, not the command's.
         let cwd_path = match &cwd {
             Some(dir) => {
                 let vfs_cwd = ctx.resolve_path(dir);
                 match ctx.backend.resolve_real_path(&vfs_cwd) {
-                    Some(p) => p,
-                    None => {
+                    Some(p) if p.is_dir() => p,
+                    Some(p) => {
                         return ExecResult::failure(
                             1,
-                            format!("spawn: cwd '{}' is not on a real filesystem", vfs_cwd.display()),
+                            format!("spawn: cwd '{}' does not exist or is not a directory", p.display()),
                         )
                     }
+                    None => return virtual_cwd_error(&command_name, &vfs_cwd),
                 }
             }
             None => match ctx.backend.resolve_real_path(&ctx.cwd) {
@@ -762,6 +771,63 @@ mod tests {
         assert!(result.ok(), "spawn failed: {}", result.err);
         // Output should contain /tmp (or its resolved path like /private/tmp on macOS)
         assert!(result.text_out().contains("tmp"), "expected tmp in output: {}", result.text_out());
+    }
+
+    /// kaibo round-3 finding: an explicit `--cwd` on a virtual path (no real
+    /// filesystem location) returned exit 1 with spawn's own ad hoc message,
+    /// while the default (no `--cwd`) virtual-cwd case already used
+    /// `virtual_cwd_error` (127) — one condition, two shapes. Both must
+    /// refuse the same way.
+    #[tokio::test]
+    async fn test_spawn_explicit_cwd_on_virtual_path_refuses_with_127() {
+        // "/" is MemoryFs only (no LocalFs mount) — virtual.
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+        args.named.insert("cwd".to_string(), Value::String("/".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 127, "must match the default virtual-cwd case: {result:?}");
+        assert!(
+            result.err.contains("real filesystem"),
+            "should use the shared virtual_cwd_error wording: {result:?}"
+        );
+    }
+
+    /// kaibo round-3 finding: `--cwd /some/real/mount/does-not-exist` (a
+    /// real filesystem, but the specific directory is missing) failed at
+    /// `cmd.spawn()` with a raw ENOENT blaming the COMMAND ("spawn: /bin/true:
+    /// No such file or directory") — true of the OS error, but misleading:
+    /// the command exists, the cwd doesn't. The message must name the cwd.
+    #[tokio::test]
+    async fn test_spawn_explicit_cwd_missing_directory_names_the_cwd_not_the_command() {
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+        args.named.insert(
+            "cwd".to_string(),
+            Value::String("/tmp/kaish-spawn-cwd-does-not-exist-xyz".into()),
+        );
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a missing cwd directory must refuse: {result:?}");
+        assert!(
+            result.err.contains("kaish-spawn-cwd-does-not-exist-xyz"),
+            "error must name the cwd that doesn't exist: {result:?}"
+        );
+        assert!(
+            !result.err.contains("/bin/true:"),
+            "error must not blame the command for the cwd's own problem: {result:?}"
+        );
     }
 
     #[tokio::test]
