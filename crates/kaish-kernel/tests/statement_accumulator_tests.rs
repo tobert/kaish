@@ -216,6 +216,24 @@ async fn a_spill_before_the_last_statement_stays_and_its_code_does_not() {
     failures.assert_none();
 }
 
+/// With the limit off after the spill, the wrapper's own output check has
+/// nothing oversize to find, so only the body's result can report the spill.
+#[tokio::test]
+async fn a_spill_before_the_limit_is_turned_off_stays() {
+    let mut failures = Failures::default();
+    for wrapper in WRAPPERS {
+        let kernel = kernel().await;
+        kernel.execute("set -o output-limit=64").await.unwrap();
+        let run = define(&kernel, wrapper, "seq 1 5000; set +o output-limit; echo after").await;
+        let result = kernel.execute(&run).await.unwrap();
+        failures.check(
+            result.did_spill,
+            format!("{wrapper}: seq's output was truncated: did_spill={} code={}", result.did_spill, result.code),
+        );
+    }
+    failures.assert_none();
+}
+
 #[tokio::test]
 async fn a_spill_before_an_error_survives_on_the_failed_result() {
     let mut failures = Failures::default();
@@ -323,6 +341,29 @@ async fn a_value_binds_typed_through_a_substitution() {
         bound(&kernel, "echo before; fromjson '[1,2]'").await,
         Some(Value::Json(serde_json::json!([1, 2])))
     );
+}
+
+/// The comparison above runs both sides through a `$(…)` block, so it cannot
+/// see a rule broken in both. These values are fixed.
+#[tokio::test]
+async fn a_text_view_binds_text_and_a_value_binds_typed_in_every_wrapper() {
+    let mut failures = Failures::default();
+    for wrapper in WRAPPERS {
+        let kernel = kernel().await;
+        let run = define(&kernel, wrapper, "printf 'a\\tb\\n' > /t; cut -f2 /t").await;
+        let text = bound(&kernel, &run).await;
+        failures.check(
+            text == Some(Value::String("b".to_string())),
+            format!("{wrapper}: `cut` printed text: {text:?}"),
+        );
+        let run = define(&kernel, wrapper, "echo before; fromjson '[1,2]'").await;
+        let typed = bound(&kernel, &run).await;
+        failures.check(
+            typed == Some(Value::Json(serde_json::json!([1, 2]))),
+            format!("{wrapper}: `fromjson` returned a value: {typed:?}"),
+        );
+    }
+    failures.assert_none();
 }
 
 /// `return` leaves a function body and a sourced file the same way.
