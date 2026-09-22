@@ -1,9 +1,9 @@
-//! Cross-backend symlink conformance cases.
+//! Cross-backend conformance cases.
 //!
-//! Each case gets a fresh, empty writable root and exercises one symlink
-//! behavior against the [`Filesystem`] trait. An embedder runs the whole
-//! suite against its own backend via [`run_all`], supplying an adapter
-//! that builds a fresh root per case.
+//! Each case gets a fresh, empty writable root and exercises one behavior
+//! against the [`Filesystem`] trait — mostly symlinks, plus the error-shape
+//! cases below. An embedder runs the whole suite against its own backend
+//! via [`run_all`], supplying an adapter that builds a fresh root per case.
 
 use crate::Filesystem;
 use std::future::Future;
@@ -789,6 +789,45 @@ pub async fn rename_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> 
     Ok(())
 }
 
+/// A missing path's `io::Error`, once it crosses into a `BackendError`,
+/// names the `NotFound` phrase exactly once, and never repeats the path.
+/// `impl From<io::Error> for BackendError` (kaish-types) adds the phrase
+/// exactly once, via `BackendError::NotFound`'s `#[error("not found: {0}")]`
+/// — a backend is responsible for never baking that same phrase into its
+/// own message. `ls` against a backend that got this wrong once read
+/// "not found: not found: /nope".
+///
+/// The path itself is not required to appear: `LocalFs` reports the OS's
+/// own errno text ("No such file or directory"), which never names the
+/// path at all — a separate change is tracking that gap. `MemoryFs` and
+/// `OverlayFs` do name it, and must never double it either.
+pub async fn a_missing_path_names_the_phrase_once(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    let path = Path::new("nope");
+    let io_err = match fs.stat(path).await {
+        Ok(entry) => {
+            return Err(format!("expected stat({}) to fail, got {entry:?}", path.display()));
+        }
+        Err(e) => e,
+    };
+    let backend_err: kaish_types::backend::BackendError = io_err.into();
+    let rendered = backend_err.to_string();
+    let phrase_count = rendered.matches("not found").count();
+    if phrase_count != 1 {
+        return Err(format!(
+            "expected \"not found\" exactly once, got {phrase_count} in: {rendered:?}"
+        ));
+    }
+    let path_count = rendered.matches("nope").count();
+    if path_count > 1 {
+        return Err(format!(
+            "expected the path at most once, got {path_count} in: {rendered:?}"
+        ));
+    }
+    Ok(())
+}
+
 // Adapts an async case fn to the boxed-future `Case` fn-pointer shape. The
 // local `adapt` fn is a fresh item per invocation, so names never collide.
 macro_rules! case {
@@ -825,6 +864,7 @@ pub const CASES: &[(&str, Case)] = &[
     case!(rename_refuses_the_root),
     case!(canonicalize_of_an_escaping_symlink_stays_in_bounds),
     case!(canonicalize_allows_a_missing_final_component_only),
+    case!(a_missing_path_names_the_phrase_once),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

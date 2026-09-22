@@ -191,9 +191,12 @@ impl Filesystem for DevFs {
             return Ok(Self::NAMES.iter().map(|n| Self::entry(n)).collect());
         }
         if Self::device(path).is_some() {
+            // The path alone — `ErrorKind::NotADirectory` already says what
+            // happened, and `BackendError::NotDirectory`'s Display adds
+            // "not a directory:" once when this crosses that boundary.
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                format!("not a directory: /dev/{}", path.display()),
+                format!("/dev/{}", path.display()),
             ));
         }
         Err(Self::not_found(path))
