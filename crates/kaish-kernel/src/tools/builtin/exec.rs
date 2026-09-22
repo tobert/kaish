@@ -30,6 +30,15 @@ use super::spawn::resolve_in_path;
 /// Exec tool: replaces the current process (POSIX `exec`).
 pub struct Exec;
 
+/// Serializes SIGPIPE capture/exec/restore (see the `///` comment at its one
+/// call site, in `execute`) across every `exec` invocation in this process.
+/// `std::sync::Mutex`, not a `tokio` lock: the whole guarded sequence is
+/// synchronous — `Command::exec()` is a blocking syscall, never an `.await`
+/// point — so there is no risk of holding this across an await and no
+/// benefit to an async-aware lock.
+#[cfg(unix)]
+static SIGPIPE_EXEC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// clap-derived argv layer for exec.
 ///
 /// `trailing_var_arg` + `allow_hyphen_values` because exec is a passthrough —
@@ -161,41 +170,76 @@ impl Tool for Exec {
             // its life. The next write to a closed pipe then kills it
             // instead of erroring.
             //
-            // SAFETY: `SigDfl` is a well-defined, safe signal disposition
-            // (no custom handler code runs). `nix::sigaction` always both
-            // sets AND returns the PRIOR disposition — there is no
-            // "query-only" variant in its safe API — so the value set here
-            // is a deliberate throwaway: `exec()` is about to force SIGPIPE
-            // to default anyway on its way to the exec syscall, so setting
-            // it to `SigDfl` ourselves first changes nothing observable,
-            // and `old_sigpipe` is what we actually came here for.
-            #[allow(unsafe_code)]
-            let old_sigpipe = unsafe {
-                nix::sys::signal::sigaction(
-                    nix::sys::signal::Signal::SIGPIPE,
-                    &nix::sys::signal::SigAction::new(
-                        nix::sys::signal::SigHandler::SigDfl,
-                        nix::sys::signal::SaFlags::empty(),
-                        nix::sys::signal::SigSet::empty(),
-                    ),
-                )
-            };
-
-            // exec() replaces the process — on success it never returns
-            let err = cmd.exec();
-
-            // If we get here, exec failed: restore whatever SIGPIPE
-            // disposition this process actually had before, rather than
-            // leaving it defaulted.
+            // Capture-then-restore is not atomic against another thread's
+            // own `exec()` call: thread A captures SigIgn, calls exec()
+            // (setting SigDfl), and before A restores, thread B captures —
+            // seeing SigDfl — calls its own exec(), then faithfully
+            // restores SigDfl. The leak is then permanent: B's "restore"
+            // wrote back the wrong value, because signal disposition is
+            // process-wide, not per-thread. `SIGPIPE_EXEC_LOCK` serializes
+            // capture+exec+restore across every `exec` call in this
+            // process, so whichever thread runs the sequence always
+            // captures the real prior disposition. Caught by kaibo running
+            // `cargo insta test --check` (parallel lib tests): three
+            // concurrent exec failures — this test plus
+            // test_exec_command_not_found and test_exec_absolute_path_
+            // not_found — is exactly this race's shape, and it reproduced
+            // reliably (4 of 5 unlocked runs failed) before this fix.
             //
-            // SAFETY: restoring a disposition this same process already
-            // held is always safe — no new handler code, no fd or
-            // allocator assumptions (we are back in normal process
-            // context, not inside a fork/pre_exec window).
-            #[allow(unsafe_code)]
-            if let Ok(old) = old_sigpipe {
-                let _ = unsafe { nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGPIPE, &old) };
-            }
+            // Even serialized, a window remains: between exec()'s reset and
+            // this thread's restore, ANOTHER thread — doing anything else
+            // entirely, not calling exec() — that writes to an already-
+            // closed pipe would still die on SIGPIPE, because the
+            // disposition is process-wide and genuinely SigDfl for that
+            // whole window. That window is inherent to calling
+            // `CommandExt::exec()` at all on a multi-threaded process and
+            // cannot be closed from here; the lock only prevents two execs
+            // from corrupting EACH OTHER's restore, not a plain write
+            // racing an in-flight exec.
+            let err = {
+                let _sigpipe_guard = SIGPIPE_EXEC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+                // SAFETY: `SigDfl` is a well-defined, safe signal
+                // disposition (no custom handler code runs).
+                // `nix::sigaction` always both sets AND returns the PRIOR
+                // disposition — there is no "query-only" variant in its
+                // safe API — so the value set here is a deliberate
+                // throwaway: `exec()` is about to force SIGPIPE to default
+                // anyway on its way to the exec syscall, so setting it to
+                // `SigDfl` ourselves first changes nothing observable, and
+                // `old_sigpipe` is what we actually came here for.
+                #[allow(unsafe_code)]
+                let old_sigpipe = unsafe {
+                    nix::sys::signal::sigaction(
+                        nix::sys::signal::Signal::SIGPIPE,
+                        &nix::sys::signal::SigAction::new(
+                            nix::sys::signal::SigHandler::SigDfl,
+                            nix::sys::signal::SaFlags::empty(),
+                            nix::sys::signal::SigSet::empty(),
+                        ),
+                    )
+                };
+
+                // exec() replaces the process — on success it never
+                // returns, so the lock guard above is simply leaked with
+                // the rest of this process image; nothing here runs again.
+                let err = cmd.exec();
+
+                // If we get here, exec failed: restore whatever SIGPIPE
+                // disposition this process actually had before, rather
+                // than leaving it defaulted.
+                //
+                // SAFETY: restoring a disposition this same process
+                // already held is always safe — no new handler code, no
+                // fd or allocator assumptions (we are back in normal
+                // process context, not inside a fork/pre_exec window).
+                #[allow(unsafe_code)]
+                if let Ok(old) = old_sigpipe {
+                    let _ = unsafe { nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGPIPE, &old) };
+                }
+
+                err
+            };
 
             ExecResult::failure(126, format!("exec: {}: {}", command, err))
         }
@@ -282,6 +326,19 @@ mod tests {
     /// whole `cargo test --lib` run once `exec`'s own tests (which exercise
     /// this failure path) ran before any test writing to a broken pipe.
     ///
+    /// kaibo round-6 finding: `cargo test --lib` (which defaults to
+    /// parallel test threads) reproduced a SECOND bug the round-5 fix
+    /// introduced — capture-then-restore raced against the OTHER two
+    /// exec-failure tests in this file (`test_exec_command_not_found`,
+    /// `test_exec_absolute_path_not_found`), all three running
+    /// concurrently in one process. This test's own QUERY must take the
+    /// same `SIGPIPE_EXEC_LOCK` production code now holds across
+    /// capture/exec/restore (see the comment at that lock's definition):
+    /// without it, the query below could observe a DIFFERENT concurrent
+    /// exec call's transient SigDfl — the residual window documented
+    /// there — and fail for a reason that has nothing to do with this
+    /// test's own exec call.
+    ///
     /// The query is a round-trip: setting SIGPIPE to `SigIgn` and reading
     /// back the PRIOR disposition nix's `sigaction` returns, since nix's
     /// safe API has no "query only" form. This is non-destructive for the
@@ -301,6 +358,11 @@ mod tests {
 
         let result = Exec.execute(args, &mut ctx).await;
         assert!(!result.ok(), "exec of a nonexistent command must fail: {result:?}");
+
+        // Same lock `execute` holds across capture/exec/restore — without
+        // it, this query races every OTHER concurrently-running exec
+        // failure in the process, not just this test's own call.
+        let _sigpipe_guard = SIGPIPE_EXEC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         // SAFETY: SigIgn is a well-defined, safe signal disposition (no
         // custom handler code runs); this is a read via round-trip, not a
