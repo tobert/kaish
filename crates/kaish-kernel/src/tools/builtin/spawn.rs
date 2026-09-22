@@ -358,6 +358,39 @@ impl Tool for Spawn {
         // swap) at the instant the timer wakes tells the two apart: if it is
         // already cancelled, the real cancellation reached this child's
         // token first via child-token propagation, and the timer backs off.
+        //
+        // Two narrower races remain, both accepted rather than closed:
+        //
+        // 1. Check-to-store: a parent cancel landing in the gap between
+        //    `!parent_cancel.is_cancelled()` reading false and the two
+        //    statements right after it running still reports 124, not 130 —
+        //    the read and the store aren't one atomic operation, and the two
+        //    signals (a `CancellationToken` and this `AtomicBool`) have no
+        //    shared lock to combine them under. The window is nanoseconds
+        //    wide (a load, a store, and a token cancel — no `.await` between
+        //    them), and at that exact boundary one cause has to be treated
+        //    as first; nothing in this design makes that call any more
+        //    "correct," only narrower.
+        // 2. Abort doesn't preempt a running body: `timer.abort()` below
+        //    only takes effect at the timer task's next `.await` — on a
+        //    multi-thread runtime, if the timer's sleep has already elapsed
+        //    and its body is mid-execution (past the parent-cancel check,
+        //    about to store/cancel) at the very instant `spawn_process`
+        //    returns, the abort can land too late to stop it. The result is
+        //    the same shape as race 1: a child that finished on its own
+        //    right at the deadline can still see `timed_out` flip true a
+        //    moment later.
+        //
+        // Neither race can misreport a child that actually failed as
+        // success, or vice versa — they can only mislabel WHICH of two
+        // simultaneous "the run is over" signals (timeout, cancel, natural
+        // exit) gets named in the diagnostic, at a boundary where more than
+        // one is true at once. And the `!result.ok()` guard on the cancel
+        // arm below (and this file's own trap-and-exit-0 test) still holds
+        // regardless: a child that installs a trap and exits 0 on its own
+        // keeps that 0 on either race, because the mislabeling is confined
+        // to the diagnostic and the 124/130 rewrite, never to a result the
+        // child's own exit already made ok().
         let timed_out = Arc::new(AtomicBool::new(false));
         let timer = timeout_ms.map(|ms| {
             let deadline_token = spawn_ctx.cancel.child_token();
