@@ -377,3 +377,123 @@ async fn a_return_after_a_value_binds_the_same_in_function_and_source() {
     let from_source = bound(&kernel, &run).await;
     assert_eq!(from_function, from_source);
 }
+
+// --- signals carry no value ---------------------------------------------------
+//
+// `break`, `continue`, `exit`, and `return` carry no value of their own. The
+// value from the last statement that ran before the signal survives it.
+
+fn list() -> Option<Value> {
+    Some(Value::Json(serde_json::json!([1, 2])))
+}
+
+/// The signal directly in the sequence, and raised inside a block the
+/// sequence runs.
+const EXIT_BODIES: [&str; 3] = [
+    "fromjson '[1,2]'; exit 0",
+    "if true; then fromjson '[1,2]'; exit 0; fi",
+    "while true; do fromjson '[1,2]'; exit 0; done",
+];
+
+#[tokio::test]
+async fn exit_keeps_the_value_in_a_substitution() {
+    let mut failures = Failures::default();
+    for body in EXIT_BODIES {
+        let value = bound(&kernel().await, body).await;
+        failures.check(value == list(), format!("$({body}): bound {value:?}"));
+    }
+    failures.assert_none();
+}
+
+#[tokio::test]
+async fn exit_keeps_the_value_in_every_wrapper() {
+    let mut failures = Failures::default();
+    for body in EXIT_BODIES {
+        for wrapper in WRAPPERS {
+            let kernel = kernel().await;
+            let run = define(&kernel, wrapper, body).await;
+            let value = bound(&kernel, &run).await;
+            failures.check(value == list(), format!("{wrapper} `{body}`: bound {value:?}"));
+        }
+    }
+    failures.assert_none();
+}
+
+#[tokio::test]
+async fn exit_keeps_the_value_at_top_level() {
+    let mut failures = Failures::default();
+    for body in EXIT_BODIES {
+        let result = kernel().await.execute(body).await.unwrap();
+        failures.check(
+            result.data == list() && result.data_is_value,
+            format!("`{body}`: data={:?} data_is_value={}", result.data, result.data_is_value),
+        );
+    }
+    failures.assert_none();
+}
+
+#[tokio::test]
+async fn return_keeps_the_value_in_function_and_source() {
+    let bodies = [
+        "fromjson '[1,2]'; return",
+        "if true; then fromjson '[1,2]'; return; fi",
+        "while true; do fromjson '[1,2]'; return; done",
+    ];
+    let mut failures = Failures::default();
+    for body in bodies {
+        for wrapper in ["function", "source"] {
+            let kernel = kernel().await;
+            let run = define(&kernel, wrapper, body).await;
+            let value = bound(&kernel, &run).await;
+            failures.check(value == list(), format!("{wrapper} `{body}`: bound {value:?}"));
+        }
+    }
+    failures.assert_none();
+}
+
+/// A signal keeps the last statement's value, not the last value seen:
+/// text printed after the value replaces it.
+#[tokio::test]
+async fn exit_after_text_binds_the_text() {
+    let body = "fromjson '[1,2]'; seq 1 2; exit 0";
+    let mut failures = Failures::default();
+    let direct = bound(&kernel().await, body).await;
+    let text = Some(Value::String("[1,2]1\n2".to_string()));
+    failures.check(direct == text, format!("$({body}): bound {direct:?}"));
+    for wrapper in WRAPPERS {
+        let kernel = kernel().await;
+        let run = define(&kernel, wrapper, body).await;
+        let value = bound(&kernel, &run).await;
+        failures.check(value == text, format!("{wrapper} `{body}`: bound {value:?}"));
+    }
+    failures.assert_none();
+}
+
+/// Only the value passes the signal. `exit N` sets the code, and the
+/// statement before it no longer decides a condition.
+#[tokio::test]
+async fn exit_sets_the_status_while_the_value_survives() {
+    let mut failures = Failures::default();
+    for wrapper in WRAPPERS {
+        let k = kernel().await;
+        let run = define(&k, wrapper, "fromjson '[1,2]'; exit 3").await;
+        let result = k.execute(&run).await.unwrap();
+        failures.check(
+            result.code == 3 && result.data == list(),
+            format!("{wrapper}: want code 3 and the value: code={} data={:?}", result.code, result.data),
+        );
+
+        let k = kernel().await;
+        let run = define(&k, wrapper, "test 1 -eq abc; exit 0").await;
+        let outcome = k.execute(&format!("if {run}; then echo y; else echo n; fi")).await;
+        let decided = matches!(&outcome, Ok(result) if result.text_out() == "y\n");
+        failures.check(decided, format!("{wrapper}: `exit 0` decides the body: {outcome:?}"));
+
+        let k = kernel().await;
+        k.execute("set -o output-limit=64").await.unwrap();
+        let run = define(&k, wrapper, "seq 1 5000; set +o output-limit; exit 0").await;
+        let result = k.execute(&run).await.unwrap();
+        failures.check(result.did_spill, format!("{wrapper}: the spill before `exit` stays: {result:?}"));
+    }
+    failures.assert_none();
+}
