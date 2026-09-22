@@ -259,15 +259,29 @@ impl Tool for Spawn {
         // apart afterward: `ctx.cancel` itself is never touched, so a real
         // cancellation is still readable from it once `spawn_process`
         // returns. Mirrors the `timeout` builtin's own token derivation.
+        //
+        // The timer claims the kill only if it is the first cause: a
+        // SIGTERM-ignoring child stays alive for the whole `kill_grace`
+        // window a `kill %1` (or any other parent cancellation) already
+        // opened, and a `--timeout` shorter than that grace elapses squarely
+        // inside it. Storing `timed_out = true` unconditionally there
+        // reported `killed:124` for a job that `kill %1` — not the deadline —
+        // actually killed. Checking the PARENT token (never touched by this
+        // swap) at the instant the timer wakes tells the two apart: if it is
+        // already cancelled, the real cancellation reached this child's
+        // token first via child-token propagation, and the timer backs off.
         let timed_out = Arc::new(AtomicBool::new(false));
         let timer = timeout_ms.map(|ms| {
             let deadline_token = spawn_ctx.cancel.child_token();
             spawn_ctx.cancel = deadline_token.clone();
             let timed_out = timed_out.clone();
+            let parent_cancel = ctx.cancel.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
-                timed_out.store(true, Ordering::SeqCst);
-                deadline_token.cancel();
+                if !parent_cancel.is_cancelled() {
+                    timed_out.store(true, Ordering::SeqCst);
+                    deadline_token.cancel();
+                }
             })
         });
 
@@ -295,7 +309,7 @@ impl Tool for Spawn {
                 &mut result.err,
                 &format!("spawn: {}: timed out after {}ms", command, timeout_ms.unwrap_or_default()),
             );
-        } else if ctx.cancel.is_cancelled() {
+        } else if ctx.cancel.is_cancelled() && !result.ok() {
             // 130 is the documented cancellation code (`sleep`'s own
             // `ctx.cancel` arm returns it the same way). A foreground call
             // gets 130 either way — `Kernel::execute_with_options`'s
@@ -307,6 +321,13 @@ impl Tool for Spawn {
             // cancel-aware rewrite. Reporting 130 here directly, rather than
             // relying on a normalization only one of spawn's two callers
             // applies, is what makes `killed:130` true for both.
+            //
+            // `!result.ok()` matches the same guard `Kernel`'s own two cancel
+            // sites use (kernel.rs's `execute_streaming_inner` and
+            // `execute_with_options`): the token, not the code — a child
+            // that already exited 0 before the token tripped keeps its
+            // result, rather than a coincidental later cancellation
+            // relabeling a real success as killed.
             result.code = 130;
             append_line(&mut result.err, &format!("spawn: {}: cancelled", command));
         }
@@ -562,6 +583,31 @@ mod tests {
             result.text_out().contains("IS_EXPORTED=visible"),
             "an exported scope var must reach the child: {}",
             result.text_out()
+        );
+    }
+
+    /// kaibo round-3 finding: the cancel arm rewrote ANY result to 130 on
+    /// token state alone. `ctx.cancel` pre-cancelled before `/bin/true` even
+    /// starts exercises `wait_or_kill`'s own `biased` race in
+    /// `spawn_process`'s favor of a natural exit already ready at the first
+    /// poll — the child still runs and exits 0, but the token is cancelled
+    /// throughout the whole call. The `!result.ok()` guard (matching
+    /// `Kernel`'s own two cancel sites) must keep that 0, not relabel a
+    /// child that finished cleanly as killed.
+    #[tokio::test]
+    async fn test_spawn_cancel_arm_keeps_a_clean_exit() {
+        let mut ctx = make_ctx();
+        ctx.cancel.cancel();
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert_eq!(
+            result.code, 0,
+            "a child that exited 0 must keep that code even though ctx.cancel \
+             was already cancelled for the whole call: {result:?}"
         );
     }
 

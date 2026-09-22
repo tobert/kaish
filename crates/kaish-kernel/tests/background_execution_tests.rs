@@ -642,6 +642,71 @@ async fn kill_terminates_spawn_background_job_with_130() {
     assert_eq!(status.text_out().trim(), "killed:130", "err: {}", status.err);
 }
 
+/// kaibo round-3 finding (HIGH): `spawn --timeout`'s deadline timer claimed
+/// `timed_out = true` unconditionally whenever it woke, even when the
+/// eventual kill's real cause was the caller's own cancellation (`kill %1`)
+/// arriving first. A child that ignores SIGTERM stays alive for the whole
+/// `kill_grace` window before the escalation to SIGKILL actually ends it —
+/// if `--timeout` is shorter than that grace, its deadline elapses squarely
+/// inside the window `kill %1` already opened, misattributing the result to
+/// 124 "timed out" instead of the correct 130 "cancelled".
+#[cfg(all(unix, feature = "subprocess", feature = "localfs"))]
+#[tokio::test]
+async fn kill_before_the_deadline_reports_130_not_124() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ready = dir.path().join("ready");
+    let kernel = kaish_kernel::Kernel::new(
+        kaish_kernel::KernelConfig::agent_with_root(dir.path().to_path_buf())
+            .with_allow_unwrapped_commands(true)
+            .with_kill_grace(Duration::from_millis(800)),
+    )
+    .expect("failed to create kernel")
+    .into_arc();
+
+    // `trap : TERM` ignores SIGTERM (`:` is the POSIX no-op) — recorded via a
+    // marker file BEFORE `kill %1` runs, so it never races the child's own
+    // startup (a kill that beat the trap's installation would hit the
+    // default disposition and die on the very first SIGTERM, never reaching
+    // the grace window this test means to exercise). The hang is a builtin
+    // `while`/`:` busy-loop, not `sleep N`: a forked `sleep` sits in the same
+    // process group as `sh` and would die from the group-wide SIGTERM on its
+    // own default disposition regardless of `sh`'s trap, ending the job
+    // immediately and never reaching the grace window either. Only the
+    // SIGKILL at the end of the 800ms grace can end it; `--timeout 300` sits
+    // comfortably inside that grace once `kill %1` opens it.
+    kernel
+        .execute(r#"spawn --command sh --argv '["-c", "trap : TERM; touch ready; while :; do :; done"]' --timeout 300 &"#)
+        .await
+        .expect("execute");
+    let setup_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < setup_deadline,
+            "SETUP FAILED — the child never installed its SIGTERM trap in time; \
+             this is not the race the test means to prove"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let start = std::time::Instant::now();
+    let r = kernel.execute("kill %1").await.expect("execute");
+    assert_eq!(r.code, 0, "kill %1 should succeed: {}", r.err);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "kill must return within kill_grace + a few seconds, took {:?}",
+        start.elapsed()
+    );
+
+    let status = kernel.execute("cat /v/jobs/1/status").await.expect("execute");
+    assert_eq!(
+        status.text_out().trim(),
+        "killed:130",
+        "a job kill landing before --timeout's own deadline must report the \
+         cancellation, not misattribute it to the timeout: err={}",
+        status.err
+    );
+}
+
 /// GH #244: `kill --no-wait %N` returns as soon as the termination is
 /// dispatched; the job unwinds asynchronously and lands on `Killed`.
 #[tokio::test]

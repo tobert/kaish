@@ -113,7 +113,15 @@ async fn a_signal_death_inside_the_timeout_is_not_reported_as_one() {
     let script = r#"spawn --command sh --argv '["-c", "kill -9 $$"]' --timeout 10000"#;
     let result = kernel.execute(script).await.expect("kernel execute");
 
-    assert_ne!(result.code, 124, "the child died by signal, well inside the timeout");
+    // kaibo round-3 finding: `assert_ne!(_, 124)` alone can pass on a
+    // DIFFERENT spawn failure (e.g. `sh` not resolving) as easily as on the
+    // real fix — pinning the exact signal-death code (128 + SIGKILL) proves
+    // the child actually ran and killed itself, not that spawn failed some
+    // other way that also happens not to be 124.
+    assert_eq!(
+        result.code, 137,
+        "the child died by SIGKILL (128+9), well inside the timeout: {result:?}"
+    );
     assert!(
         !result.err.contains("timed out"),
         "no timeout diagnostic belongs on a signal death: {:?}",
