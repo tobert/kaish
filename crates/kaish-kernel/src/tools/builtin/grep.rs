@@ -1285,11 +1285,8 @@ struct GrepOptions {
 /// encoding label). Match-not-found is *not* an error — it returns an
 /// empty `RenderResult` with `match_count == 0`.
 ///
-/// Only [`grep_lines_structured_checkpointed`]'s unit tests call this
-/// directly now — production dispatch goes through the checkpointed,
-/// chunked counterpart, kept `#[cfg(test)]` as their one-call parity
-/// reference.
-#[cfg(test)]
+/// [`grep_lines_structured_checkpointed`] searches in chunks, and calls this
+/// for one whole-buffer search when `-A`/`-B`/`-C` asks for context lines.
 fn grep_lines_structured(
     input: &[u8],
     matcher: &RegexMatcher,
@@ -1316,16 +1313,15 @@ enum GrepScanError {
 /// the thread past the deadline the same way the unchecked `seq` loop did.
 ///
 /// Runs the search in `ExecContext::STREAM_CHUNK_SIZE` windows, cut at the
-/// nearest line boundary, checkpointing between them. `Searcher::search_slice`
-/// resets its context-tracking state on every call, so a match whose
-/// before/after context would reach across a chunk boundary gets whatever
-/// context lines are available on its own side of the boundary rather than
-/// the full requested count — no line is ever dropped or duplicated, only a
-/// boundary match's context can come up short. Every existing fixture is
-/// well under one chunk, and the incident this fixes (`grep -B2 -A2 zzz`
-/// over a file `zzz` never appears in) never reaches a match at all, so this
-/// gap is unexercised today. Stitching context across chunks is a known gap,
-/// not attempted here.
+/// nearest line boundary, checkpointing between them.
+///
+/// `-A`/`-B`/`-C` searches the whole buffer in one call instead, after a
+/// checkpoint. `Searcher::search_slice` resets its context tracking on every
+/// call, so a match within NUM lines of a chunk boundary would print fewer
+/// context lines than asked for — a wrong answer, where an uninterruptible
+/// search is only a slow one. That one call is not interruptible: a context
+/// grep over a file larger than one chunk runs to the end, and a script
+/// timeout lands after it.
 async fn grep_lines_structured_checkpointed(
     ctx: &mut ExecContext,
     input: &[u8],
@@ -1333,6 +1329,13 @@ async fn grep_lines_structured_checkpointed(
     opts: &GrepOptions,
     filename: Option<&str>,
 ) -> Result<RenderResult, GrepScanError> {
+    if opts.before_context.unwrap_or(0) > 0 || opts.after_context.unwrap_or(0) > 0 {
+        if ctx.checkpoint().await.is_err() {
+            return Err(GrepScanError::Interrupted);
+        }
+        return grep_lines_structured(input, matcher, opts, filename).map_err(GrepScanError::Msg);
+    }
+
     let mut searcher = build_searcher(opts).map_err(GrepScanError::Msg)?;
     let mut combined = RenderResult {
         text: String::new(),
