@@ -91,7 +91,19 @@ impl Tool for Wc {
                 Ok(i) => i.unwrap_or_default(),
                 Err(e) => return ExecResult::failure(1, format!("wc: {e}")),
             };
-            let (lc, wc, cc, bc, invalid_utf8) = count_content(&input);
+            // Same chunked counter the file path uses via `read_file_chunked`,
+            // with the same per-chunk checkpoint: stdin is already fully read
+            // into `input` above, but `count_content` counted it in one
+            // uninterruptible pass, which a script timeout could not stop
+            // mid-scan (`wc -l < big.txt`).
+            let mut counter = WcCounter::default();
+            for chunk in input.chunks(ExecContext::STREAM_CHUNK_SIZE as usize) {
+                if ctx.checkpoint().await.is_err() {
+                    return Interrupted.result("wc");
+                }
+                counter.push(chunk);
+            }
+            let (lc, wc, cc, bc, invalid_utf8) = counter.finish();
             if invalid_utf8 && (chars_only || words_only || show_all) {
                 return ExecResult::failure(1, format!("wc: {INVALID_UTF8_HINT}"));
             }
@@ -194,7 +206,7 @@ const INVALID_UTF8_HINT: &str =
 ///
 /// Fed arbitrary byte chunks via [`push`](WcCounter::push), it produces the
 /// same `(lines, words, chars, bytes, invalid_utf8)` tuple as
-/// [`count_content`] over the concatenation — without ever holding the whole
+/// `count_content` over the concatenation — without ever holding the whole
 /// input. The trick is to carry the trailing partial line (the bytes after the
 /// last `\n`) between chunks, so complete lines are only counted once their
 /// bytes are all present. Because `\n` is a word/line separator and never part
@@ -268,6 +280,11 @@ impl WcCounter {
 
 /// Count lines, words, chars, and bytes in content, plus whether the content
 /// failed strict UTF-8 decode.
+///
+/// Only its unit tests call this directly now — production dispatch goes
+/// through `WcCounter`'s chunked, checkpointed path, kept `#[cfg(test)]` as
+/// their one-shot parity reference.
+#[cfg(test)]
 fn count_content(input: &[u8]) -> (usize, usize, usize, usize, bool) {
     // Byte and line counts are pure byte-level operations — exact for binary
     // too, regardless of UTF-8 validity. `wc -l` counts newline characters

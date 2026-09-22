@@ -175,6 +175,51 @@ async fn request_timeout_stops_a_busy_builtin(#[case] script: &str) {
     );
 }
 
+/// A fresh isolated kernel with `/tmp/huge.txt` populated with 20,000,000
+/// lines — ten times [`kernel_with_big_file`]'s file. The cases below all
+/// measured under `HANG_DEADLINE` at 2,000,000 lines: `grep -c`/`-B2 -A2`/
+/// stdin finished in 47-59ms, `wc -l < …` in 150ms, `checksum < …` in
+/// 214ms — close enough to the 50ms deadline that some runs beat it and
+/// reached code 0/1 (finished, not interrupted) instead of 124, proving
+/// nothing. Ten times the input keeps every one of those comfortably over
+/// the deadline.
+async fn kernel_with_huge_file() -> Kernel {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+    let setup = kernel
+        .execute("seq 1 20000000 > /tmp/huge.txt")
+        .await
+        .expect("execute");
+    assert_eq!(setup.code, 0, "setup must succeed: {}", setup.err);
+    kernel
+}
+
+/// grep's complex-flag path (`-c`/`-q`/`-l`/`-o`/`-A`/`-B`/`-C`) hands the
+/// whole buffer to `grep_lines_structured_checkpointed` in `ExecContext::
+/// STREAM_CHUNK_SIZE` chunks; `-B2 -A2` is the exact shape of the incident
+/// that started this branch (a model ran `xxd FILE | grep -m 6 -B2 -A2
+/// PATTERN` and the call never returned). stdin paths (`<` redirect) are a
+/// separate code path from the file path above for grep, wc, and checksum —
+/// each read stdin whole and processed it in one uninterruptible pass before
+/// this branch. A separate, larger fixture from
+/// [`request_timeout_stops_a_busy_builtin`] above — see
+/// [`kernel_with_huge_file`] for why.
+#[rstest]
+#[case::grep_count("grep -c zzz /tmp/huge.txt")]
+#[case::grep_context("grep -B2 -A2 zzz /tmp/huge.txt")]
+#[case::grep_stdin("grep zzz < /tmp/huge.txt")]
+#[case::wc_stdin("wc -l < /tmp/huge.txt")]
+#[case::checksum_stdin("checksum < /tmp/huge.txt")]
+#[tokio::test]
+async fn request_timeout_stops_a_busy_builtin_whole_buffer(#[case] script: &str) {
+    let kernel = kernel_with_huge_file().await;
+    let (result, took) = run_with_deadline(&kernel, script).await;
+    assert_eq!(result.code, 124, "`{script}`: err: {}", result.err);
+    assert!(
+        took < Duration::from_secs(3),
+        "`{script}` took {took:?}; the timeout stops the work, it does not wait for it to finish"
+    );
+}
+
 // `cat` and `cmp` have no case here. `cat` checkpoints only its piped paths:
 // its single-file path keeps the unranged `backend.read`, because a chunked
 // read never ends on an endless device like `/dev/zero`, and the unranged read

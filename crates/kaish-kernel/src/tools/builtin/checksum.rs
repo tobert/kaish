@@ -134,7 +134,18 @@ impl Tool for Checksum {
                 Ok(i) => i.unwrap_or_default(),
                 Err(e) => return ExecResult::failure(1, format!("checksum: {e}")),
             };
-            let hash = compute_hash(&input, &algo);
+            // Same chunked `StreamHasher` the file path drives via
+            // `read_file_chunked`, with the same per-chunk checkpoint —
+            // `compute_hash` hashed stdin in one uninterruptible pass, which a
+            // script timeout could not stop mid-hash (`checksum < big.txt`).
+            let mut hasher = StreamHasher::new(&algo);
+            for chunk in input.chunks(ExecContext::STREAM_CHUNK_SIZE as usize) {
+                if ctx.checkpoint().await.is_err() {
+                    return Interrupted.result("checksum");
+                }
+                hasher.update(chunk);
+            }
+            let hash = hasher.finalize_hex();
             let text = format!("{}  -", hash);
             // Table convention (OutputData::to_json): first header binds to
             // node.name, remaining headers to cells — so HASH is the name.
@@ -282,7 +293,7 @@ impl Checksum {
 /// One variant per supported algorithm — `digest::Digest` gives each a uniform
 /// `update`/`finalize`, but the concrete types come from three crates, so the
 /// enum dispatches. `new` panics on an unvalidated algorithm; callers validate
-/// the name before constructing one (same contract as [`compute_hash`]).
+/// the name before constructing one (same contract as `compute_hash`).
 enum StreamHasher {
     Sha256(sha2::Sha256),
     Sha1(sha1::Sha1),
@@ -317,6 +328,11 @@ impl StreamHasher {
 }
 
 /// Compute hash of bytes using the specified algorithm.
+///
+/// Only its unit tests call this directly now — production dispatch goes
+/// through `StreamHasher`'s chunked, checkpointed path, kept `#[cfg(test)]`
+/// as their one-shot parity reference.
+#[cfg(test)]
 fn compute_hash(data: &[u8], algo: &str) -> String {
     match algo {
         "sha256" => hex_encode(sha2::Sha256::digest(data).as_slice()),
