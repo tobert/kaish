@@ -815,6 +815,7 @@ impl PipelineRunner {
 
             let data_sender = if i < last_idx { data_senders[i].take() } else { None };
             let data_receiver = if i > 0 { data_receivers[i - 1].take() } else { None };
+            let reads_from_pipe = i > 0;
 
             // Propagate the embedder's trace context across the spawn boundary
             // so each concurrent stage's spans stay in the same trace.
@@ -852,6 +853,17 @@ impl PipelineRunner {
                     }
                     Err(e) => ExecResult::failure(1, e),
                 };
+
+                // Close the read end now that the stage is done reading, so the
+                // stage writing into it gets a broken pipe, the way `head -1`
+                // gives one. Held until the join instead, a stage that stops
+                // before reading everything (a usage error, say) leaves its
+                // writer blocked on a full pipe, and the join waits on that
+                // writer first. Stage 0 keeps its reader: that is the session's
+                // stdin, returned at the join.
+                if reads_from_pipe {
+                    stage_ctx.pipe_stdin = None;
+                }
 
                 // `2>&1` moves this stage's stderr into its stdout only once
                 // `apply_redirects` runs below — capture what stdout held
