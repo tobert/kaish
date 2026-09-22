@@ -3553,7 +3553,9 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.suppress_errexit();
                 }
-                let body_flow = match self.execute_stmt_flow(body, &mut *ctx).await {
+                // Unpublished, like an `&&`/`||` left operand: a faulting
+                // body becomes an error whose message is rendered later.
+                let body_flow = match self.execute_stmt_flow_dispatch(body, &mut *ctx).await {
                     Ok(f) => f,
                     Err(e) => {
                         let mut scope = self.scope.write().await;
@@ -3567,7 +3569,6 @@ impl Kernel {
                 }
                 match body_flow {
                     ControlFlow::Normal(mut result) => {
-                        self.drain_stderr_into(&mut result, ctx).await;
                         // A fault is "could not decide", not a boolean to
                         // flip — coercing it into a decided 0/1 would let a
                         // wrong conclusion stand in for a comparison that
@@ -3583,6 +3584,8 @@ impl Kernel {
                                 anyhow::anyhow!("{}", message.trim_end()),
                             ));
                         }
+                        ctx.publish_job_stderr(&mut result).await;
+                        self.drain_stderr_into(&mut result, ctx).await;
                         // A cancelled body reports its kill as a Normal
                         // result (130, or 128+signal for a killed child —
                         // see `spawn.rs`), not an Err, and `execute()`'s
@@ -3619,9 +3622,11 @@ impl Kernel {
                             ControlFlow::Break { result, .. }
                             | ControlFlow::Continue { result, .. }
                             | ControlFlow::Exit { result, .. } => {
+                                ctx.publish_job_stderr(result).await;
                                 self.drain_stderr_into(result, ctx).await;
                             }
                             ControlFlow::Return { value } => {
+                                ctx.publish_job_stderr(value).await;
                                 self.drain_stderr_into(value, ctx).await;
                             }
                             ControlFlow::Normal(_) => unreachable!("matched above"),
