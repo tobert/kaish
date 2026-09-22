@@ -376,9 +376,7 @@ impl<'a> Validator<'a> {
                 self.issues.push(
                     ValidationIssue::error(
                         IssueCode::RedirectInputIsOutput,
-                        format!(
-                            "redirect: {path} is both input and output; write to a temp file, then mv it over {path}"
-                        ),
+                        crate::scheduler::pipeline::same_file_message(path, &redirect.kind),
                     )
                     .with_command(cmd.name.clone()),
                 );

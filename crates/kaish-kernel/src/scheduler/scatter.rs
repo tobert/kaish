@@ -161,8 +161,8 @@ impl ScatterGatherRunner {
         // gather reads its workers' results; a `<` would have nothing to feed.
         if gather_redirects.iter().any(|redirect| is_input(&redirect.kind)) {
             return ExecResult::failure(
-                1,
-                "gather: reads its workers' results, not stdin; remove the <, <<, or <<< redirect",
+                2,
+                "gather: takes no input redirect; it reads its workers' results. Remove the <, <<, or <<<",
             );
         }
         // gather's own targets open before anything in the pipeline runs, so a

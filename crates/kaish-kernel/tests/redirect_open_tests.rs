@@ -138,8 +138,11 @@ async fn gather_input_redirect_is_refused() {
     let kernel = kernel_at(dir.path());
 
     let r = kernel.execute("seq 1 2 | scatter | echo $ITEM | gather < in.txt").await.expect("execute");
-    assert_eq!(r.code, 1, "{r:?}");
-    assert!(r.err.contains("gather"), "{r:?}");
+    assert_eq!(r.code, 2, "{r:?}");
+    assert_eq!(
+        r.err.trim_end(),
+        "gather: takes no input redirect; it reads its workers' results. Remove the <, <<, or <<<",
+    );
 }
 
 /// Targets computed at runtime are compared as resolved paths, not

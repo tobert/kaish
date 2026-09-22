@@ -299,14 +299,17 @@ pub(crate) async fn open_redirects(
     Ok(opened)
 }
 
-/// The refusal for a file that is both `<` input and an output target:
-/// opening the output would truncate the input before the command reads it.
-/// Paths compare after symlinks and `.`/`..` resolve, not as spelled.
+/// The refusal for a file that is both `<` input and an output target.
+/// `>`, `2>`, and `&>` would empty the input before the command reads it;
+/// `>>` would feed the command its own output (`cat < f >> f` never ends).
+/// Only an input that exists is compared, so a missing input reports its
+/// own error when it opens. Paths compare after symlinks and `.`/`..`
+/// resolve, not as spelled.
 async fn same_file_hazard(redirects: &[Redirect], targets: &[Option<String>], ctx: &ExecContext) -> Option<String> {
     let mut inputs = Vec::new();
     for (redirect, target) in redirects.iter().zip(targets) {
         if let (RedirectKind::Stdin, Some(path)) = (&redirect.kind, target)
-            && let Some(canonical) = canonical_target(ctx, path).await
+            && let Ok(canonical) = ctx.backend.canonicalize(&ctx.resolve_path(path), false).await
         {
             inputs.push(canonical);
         }
@@ -319,12 +322,31 @@ async fn same_file_hazard(redirects: &[Redirect], targets: &[Option<String>], ct
             && let Some(canonical) = canonical_target(ctx, path).await
             && inputs.contains(&canonical)
         {
-            return Some(format!(
-                "redirect: {path} is both input and output; write to a temp file, then mv it over {path}"
-            ));
+            return Some(same_file_message(path, &redirect.kind));
         }
     }
     None
+}
+
+/// The same-file refusal's text, shared with the validator's E023.
+pub(crate) fn same_file_message(path: &str, kind: &RedirectKind) -> String {
+    match kind {
+        RedirectKind::StdoutAppend => format!(
+            "redirect: {path} is both input and output (>> feeds the command its own output); \
+             write to a temp file, then append that to {path}"
+        ),
+        other => {
+            let operator = match other {
+                RedirectKind::Stderr => "2>",
+                RedirectKind::Both => "&>",
+                _ => ">",
+            };
+            format!(
+                "redirect: {path} is both input and output ({operator} empties it before it is read); \
+                 write to a temp file, then mv it over {path}"
+            )
+        }
+    }
 }
 
 /// `path` with every symlink and `.`/`..` resolved, the final component
@@ -343,21 +365,19 @@ async fn canonical_target(ctx: &ExecContext, path: &str) -> Option<PathBuf> {
 async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<OpenedFile, String> {
     use crate::backend::{BackendError, WriteMode};
     let resolved = ctx.resolve_path(path);
-    let missing_directory = |directory: &Path| {
-        format!(
+    let missing_directory = |directory: Option<&Path>| match directory {
+        Some(directory) => format!(
             "redirect: {path}: no such file or directory; create the directory first: mkdir -p {}",
             directory.display()
-        )
+        ),
+        None => format!("redirect: {path}: no such file or directory"),
     };
-    let spelled_directory = Path::new(path)
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .or_else(|| resolved.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("/"));
     let canonical = match ctx.backend.canonicalize(&resolved, true).await {
         Ok(canonical) => canonical,
-        Err(BackendError::NotFound(_)) => return Err(missing_directory(&spelled_directory)),
+        Err(BackendError::NotFound(_)) => {
+            let directory = missing_directory_of(ctx, path, &resolved).await;
+            return Err(missing_directory(directory.as_deref()));
+        }
         Err(e) => return Err(redirect_error(path, &e)),
     };
     // A dangling symlink's target can sit in a missing directory too.
@@ -365,7 +385,7 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
         match ctx.backend.stat(parent).await {
             Ok(entry) if entry.is_dir() => {}
             Ok(_) => return Err(format!("redirect: {path}: not a directory")),
-            Err(BackendError::NotFound(_)) => return Err(missing_directory(parent)),
+            Err(BackendError::NotFound(_)) => return Err(missing_directory(Some(parent))),
             Err(e) => return Err(redirect_error(path, &e)),
         }
     }
@@ -376,6 +396,31 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
     };
     opened.map_err(|e| redirect_error(path, &e))?;
     Ok(OpenedFile { path: path.to_string(), resolved, append })
+}
+
+/// The directory `mkdir -p` must create for `path` to open, or `None` when
+/// it cannot be named with certainty. Checks the spelled parent, then one
+/// symlink hop at `path`; a name is returned only once `stat` confirms it is
+/// missing, so the hint never names a directory that exists.
+async fn missing_directory_of(ctx: &ExecContext, path: &str, resolved: &Path) -> Option<PathBuf> {
+    let is_missing = |directory: PathBuf| async move {
+        let found = ctx.backend.stat(&ctx.resolve_path(&directory.to_string_lossy())).await;
+        matches!(found, Err(crate::backend::BackendError::NotFound(_))).then_some(directory)
+    };
+    let spelled_parent = Path::new(path).parent().filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = spelled_parent
+        && let Some(directory) = is_missing(parent.to_path_buf()).await
+    {
+        return Some(directory);
+    }
+    let link_target = ctx.backend.read_link(resolved).await.ok()?;
+    let target_parent = link_target.parent().filter(|parent| !parent.as_os_str().is_empty())?;
+    let directory = if target_parent.is_absolute() {
+        target_parent.to_path_buf()
+    } else {
+        spelled_parent.map_or_else(|| target_parent.to_path_buf(), |parent| parent.join(target_parent))
+    };
+    is_missing(directory).await
 }
 
 /// `redirect: PATH: REASON`, the reason taken from the error's kind so the
@@ -752,6 +797,23 @@ impl PipelineRunner {
         // this is the ONE place the format gets applied (GH #222).
         let format = (has_json_flag(&scatter_cmd.args) || has_json_flag(&gather_cmd.args))
             .then_some(OutputFormat::Json);
+
+        // The runner reads scatter's items from the stage before it and never
+        // opens scatter's own redirects, so refuse them rather than drop them.
+        if !scatter_cmd.redirects.is_empty() {
+            let input = scatter_cmd.redirects.iter().find_map(|redirect| match (&redirect.kind, &redirect.target) {
+                (RedirectKind::Stdin, Expr::Literal(Value::String(path))) => Some(path.as_str()),
+                _ => None,
+            });
+            let fix = match input {
+                Some(path) => format!("pipe its input in: cat {path} | scatter | ..."),
+                None => "remove the redirect from scatter".to_string(),
+            };
+            return finalize_scatter_gather_error(
+                ExecResult::failure(2, format!("scatter: takes no redirects in a scatter ... gather pipeline; {fix}")),
+                format,
+            );
+        }
 
         // Parse options from scatter and gather commands
         // These are builtins with simple key=value syntax, no schema-driven parsing needed.
