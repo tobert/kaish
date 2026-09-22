@@ -220,14 +220,14 @@ impl Filesystem for DevFs {
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             format!("/dev is read-only: cannot create {}", path.display()),
         ))
     }
 
     async fn remove(&self, path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             format!("/dev is read-only: cannot remove {}", path.display()),
         ))
     }

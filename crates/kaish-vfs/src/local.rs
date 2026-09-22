@@ -73,7 +73,7 @@ impl LocalFs {
     fn check_writable(&self) -> io::Result<()> {
         if self.read_only {
             Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::ReadOnlyFilesystem,
                 "filesystem is read-only",
             ))
         } else {
@@ -720,7 +720,7 @@ mod tests {
 
         let result = fs.write(Path::new("test.txt"), b"data").await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ReadOnlyFilesystem);
 
         cleanup(&dir).await;
     }
