@@ -196,10 +196,13 @@ impl Tool for Spawn {
         let clear_env = args.has_flag("clear-env");
 
         // Working directory: an explicit `--cwd` resolves through the VFS,
-        // same as before. With none given, snapshot the kernel process's own
-        // cwd — `spawn` has never followed the shell's logical `cwd` here
-        // (unlike the external-command path), and `spawn_process` needs a
-        // concrete `PathBuf` rather than "leave it unset".
+        // same as before. With none given, use the SHELL's cwd (`ctx.cwd`),
+        // the same real-path resolution `try_execute_external_on_path` does
+        // for every other external command — not the kaish process's own OS
+        // cwd, which is a different directory once a script has `cd`ed.
+        // `virtual_cwd_error` refuses loudly rather than silently falling
+        // back to the process cwd when the shell's cwd has no real
+        // filesystem location (an overlay, an in-memory VFS mount, `/dev`).
         let cwd_path = match &cwd {
             Some(dir) => {
                 let vfs_cwd = ctx.resolve_path(dir);
@@ -213,9 +216,9 @@ impl Tool for Spawn {
                     }
                 }
             }
-            None => match std::env::current_dir() {
-                Ok(p) => p,
-                Err(e) => return ExecResult::failure(1, format!("spawn: failed to get current directory: {e}")),
+            None => match ctx.backend.resolve_real_path(&ctx.cwd) {
+                Some(p) => p,
+                None => return virtual_cwd_error(&command_name, &ctx.cwd),
             },
         };
 
@@ -469,10 +472,18 @@ mod tests {
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 
+    /// `spawn`'s default cwd (no `--cwd` given) is now `ctx.cwd` resolved to
+    /// a real filesystem location, matching the external-command path —
+    /// so every test here needs one, not just `test_spawn_with_cwd`. `/tmp`
+    /// is mounted as `LocalFs` and set as `ctx.cwd`, same real directory
+    /// `test_spawn_with_cwd` already points `--cwd` at.
     fn make_ctx() -> ExecContext {
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
-        ExecContext::new(Arc::new(vfs))
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        ctx.cwd = PathBuf::from("/tmp");
+        ctx
     }
 
     #[tokio::test]

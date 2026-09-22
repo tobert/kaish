@@ -611,12 +611,18 @@ async fn v_jobs_status_reports_killed() {
 /// Needs its own kernel, not the shared `setup()`: `spawn` is an external
 /// command and `KernelConfig::isolated()` (every other test in this file)
 /// refuses those with exit 127 — a real regression here would otherwise be
-/// masked by that refusal, not proven by it.
-#[cfg(all(unix, feature = "subprocess"))]
+/// masked by that refusal, not proven by it. Also needs a real filesystem
+/// backing (`agent_with_root`, not `isolated`'s `NoLocal`): `spawn` with no
+/// `--cwd` now resolves the shell's cwd to a real directory the same way the
+/// external-command path does, and `NoLocal` mounts everything in memory —
+/// there is no real directory anywhere to resolve.
+#[cfg(all(unix, feature = "subprocess", feature = "localfs"))]
 #[tokio::test]
 async fn kill_terminates_spawn_background_job_with_130() {
+    let dir = tempfile::tempdir().expect("tempdir");
     let kernel = kaish_kernel::Kernel::new(
-        kaish_kernel::KernelConfig::isolated().with_allow_unwrapped_commands(true),
+        kaish_kernel::KernelConfig::agent_with_root(dir.path().to_path_buf())
+            .with_allow_unwrapped_commands(true),
     )
     .expect("failed to create kernel")
     .into_arc();

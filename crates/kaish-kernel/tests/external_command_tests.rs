@@ -642,6 +642,58 @@ async fn spawn_clear_env_starts_empty_then_applies_env() {
     assert_eq!(with_env.text_out().trim(), "present");
 }
 
+// ============================================================================
+// `spawn` default cwd — mirrors the shell's `cd`, not the kaish process's own
+// OS working directory.
+// ============================================================================
+
+#[tokio::test]
+async fn spawn_without_cwd_uses_the_shells_cwd_not_the_process_cwd() {
+    let kernel = repl_kernel();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_string_lossy().to_string();
+    kernel.execute(&format!("cd {path}")).await.unwrap();
+
+    let result = kernel.execute("spawn --command pwd").await.unwrap();
+    assert!(result.ok(), "spawn pwd should succeed: {result:?}");
+    assert!(
+        result.text_out().contains(&path),
+        "spawn with no --cwd must run in the shell's cwd ({path}), got: {:?}",
+        result.text_out()
+    );
+}
+
+#[cfg(feature = "overlay")]
+#[tokio::test]
+async fn spawn_without_cwd_refuses_a_virtual_shell_cwd() {
+    // Same shape as `external_command_under_overlay_gives_friendly_virtual_cwd_error`:
+    // an overlay cwd has no real filesystem location, so `spawn` with no
+    // `--cwd` override must refuse loudly rather than silently falling back
+    // to the kaish process's own OS cwd.
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut vars = HashMap::new();
+    vars.insert(
+        "PATH".to_string(),
+        Value::String(std::env::var("PATH").unwrap_or_default()),
+    );
+    let config = KernelConfig::agent_with_root(dir.path().to_path_buf())
+        .with_overlay(true)
+        .with_trash(false)
+        .with_allow_unwrapped_commands(true)
+        .with_initial_vars(vars);
+    let kernel = Kernel::new(config).expect("overlay kernel");
+
+    let result = kernel.execute("spawn --command true").await.unwrap();
+    assert_eq!(result.code, 127, "must refuse, not silently spawn in the process cwd: {result:?}");
+    assert!(
+        result.err.contains("real filesystem"),
+        "should explain the actual cause: {result:?}"
+    );
+}
+
 // Linux-gated + absolute path so the external spawn is unconditionally taken.
 // The Decision-D export guard fires at spawn time, so it needs a real binary —
 // a nonexistent path errors on resolution before the guard is reached.
