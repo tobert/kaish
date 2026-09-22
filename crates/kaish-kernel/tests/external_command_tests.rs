@@ -115,6 +115,23 @@ async fn external_resolution_is_hermetic_no_os_path_fallback() {
 }
 
 #[tokio::test]
+async fn spawn_command_resolution_is_hermetic_no_os_path_fallback() {
+    // Same shape as `external_resolution_is_hermetic_no_os_path_fallback`:
+    // `spawn`'s own `--command` resolution used to fall back to
+    // `std::env::var("PATH")` when kaish's scope had none, a hermeticity
+    // leak the external-command path never had. `printenv` is a real
+    // external present on every Linux PATH, so resolving it here would
+    // prove the leak.
+    let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // initial_vars empty → no PATH
+    let result = kernel.execute("spawn --command printenv").await.unwrap();
+    assert_eq!(
+        result.code, 127,
+        "with no PATH in scope, spawn's own resolution must report \
+         command-not-found, not fall back to the OS PATH: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn exporting_a_structured_value_to_a_subprocess_is_a_loud_error() {
     // A list/record can't cross the process boundary; the external spawn refuses
     // rather than silently JSON-serializing it into the child's environment.
@@ -550,23 +567,27 @@ async fn env_prefix_reaches_subprocess_then_does_not_leak() {
 async fn spawn_child_does_not_see_an_unexported_os_var() {
     // Same shape as `external_command_is_hermetic_by_default`: cargo always
     // sets PATH for the test process, but a kernel with no `initial_vars`
-    // never exports it, so a spawned child must not see it either. `spawn`'s
-    // own `--command` resolution has a separate OS-PATH fallback for finding
-    // the binary to run (unlike the external-command path) — that fallback
-    // is what lets `printenv` resolve at all here; it is not what this test
-    // is about. This test is about what the CHILD's environment contains.
+    // never exports it, so a spawned child must not see it either. An
+    // absolute path (`spawn` no longer has an OS-PATH fallback of its own —
+    // see `spawn_command_resolution_is_hermetic_no_os_path_fallback`)
+    // sidesteps spawn's own `--command` resolution entirely, so a failure
+    // here can only mean the CHILD's own `printenv PATH` came up empty.
+    // Asserting printenv's own "var not found" exit code (1), not just
+    // `!ok()`, proves the child actually ran rather than spawn failing to
+    // resolve or launch it at all (a different failure with the same
+    // `!ok()`-and-empty-stdout shape).
     assert!(
         std::env::var_os("PATH").is_some(),
         "test precondition: cargo should set PATH"
     );
     let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // no initial_vars
     let result = kernel
-        .execute("spawn --command printenv --argv PATH")
+        .execute("spawn --command /usr/bin/printenv --argv PATH")
         .await
         .unwrap();
-    assert!(
-        !result.ok(),
-        "printenv PATH must fail inside the spawned child: {result:?}"
+    assert_eq!(
+        result.code, 1,
+        "printenv's own exit code for a missing var, proving the child ran: {result:?}"
     );
     assert!(
         result.text_out().trim().is_empty(),
@@ -585,14 +606,14 @@ async fn spawn_child_sees_exported_and_initial_vars() {
     let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
 
     let initial = kernel
-        .execute("spawn --command printenv --argv MY_INITIAL")
+        .execute("spawn --command /usr/bin/printenv --argv MY_INITIAL")
         .await
         .unwrap();
     assert!(initial.ok(), "initial_vars must reach the spawned child: {initial:?}");
     assert_eq!(initial.text_out().trim(), "from_initial");
 
     let exported = kernel
-        .execute("export MY_EXPORTED=from_export; spawn --command printenv --argv MY_EXPORTED")
+        .execute("export MY_EXPORTED=from_export; spawn --command /usr/bin/printenv --argv MY_EXPORTED")
         .await
         .unwrap();
     assert!(exported.ok(), "an exported var must reach the spawned child: {exported:?}");
@@ -609,7 +630,7 @@ async fn spawn_env_flag_overrides_an_exported_var() {
     let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
 
     let result = kernel
-        .execute(r#"spawn --command printenv --argv MY_VAR --env '{"MY_VAR":"overridden"}'"#)
+        .execute(r#"spawn --command /usr/bin/printenv --argv MY_VAR --env '{"MY_VAR":"overridden"}'"#)
         .await
         .unwrap();
     assert!(result.ok(), "spawn --env should succeed: {result:?}");
@@ -625,17 +646,20 @@ async fn spawn_clear_env_starts_empty_then_applies_env() {
     vars.insert("MY_VAR".to_string(), Value::String("exported_value".into()));
     let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
 
-    // `--clear-env` drops even the kernel's own exported vars.
+    // `--clear-env` drops even the kernel's own exported vars. Asserting the
+    // exact code (1, printenv's own "var not found") rather than just
+    // `!ok()` proves the child ran under a genuinely cleared env, not that
+    // spawn failed to launch it at all.
     let cleared = kernel
-        .execute("spawn --command printenv --argv MY_VAR --clear-env")
+        .execute("spawn --command /usr/bin/printenv --argv MY_VAR --clear-env")
         .await
         .unwrap();
-    assert!(!cleared.ok(), "--clear-env must drop exported vars too: {cleared:?}");
+    assert_eq!(cleared.code, 1, "--clear-env must drop exported vars too: {cleared:?}");
     assert!(cleared.text_out().trim().is_empty());
 
     // `--env` still applies on top of the cleared environment.
     let with_env = kernel
-        .execute(r#"spawn --command printenv --argv ONLY --clear-env --env '{"ONLY":"present"}'"#)
+        .execute(r#"spawn --command /usr/bin/printenv --argv ONLY --clear-env --env '{"ONLY":"present"}'"#)
         .await
         .unwrap();
     assert!(with_env.ok(), "--env on top of --clear-env should succeed: {with_env:?}");

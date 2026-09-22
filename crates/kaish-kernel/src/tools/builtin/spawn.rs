@@ -124,20 +124,24 @@ impl Tool for Spawn {
             Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
         };
 
-        // Resolve command path (PATH lookup if not absolute)
+        // Resolve command path (PATH lookup if not absolute). The kernel
+        // never reads the OS env — a frontend that wants host PATH seeds it
+        // via `initial_vars` (the REPL does, with `os_env_vars()`), same as
+        // the external-command path (`try_execute_external_on_path`). No
+        // PATH in scope means nothing resolves; refuse immediately with the
+        // same "command not found" shape a PATH-miss reports there, rather
+        // than falling through to a bare, unresolved name and letting the
+        // OS's own exec report whatever it finds (or an OS-level PATH
+        // default kaish has no control over).
         let command = if command_name.starts_with('/') || command_name.starts_with("./") {
             command_name.clone()
         } else {
-            // Try to find in PATH
-            let path_var = ctx
-                .scope
-                .get("PATH")
-                .map(value_to_string)
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
-
+            let path_var = ctx.scope.get("PATH").map(value_to_string).unwrap_or_default();
             match resolve_in_path(&command_name, &path_var) {
                 Some(resolved) => resolved,
-                None => command_name.clone(), // Fall back to name, let OS report error
+                None => {
+                    return ExecResult::failure(127, format!("spawn: {}: command not found", command_name))
+                }
             }
         };
 
@@ -587,27 +591,47 @@ mod tests {
     }
 
     /// kaibo round-3 finding: the cancel arm rewrote ANY result to 130 on
-    /// token state alone. `ctx.cancel` pre-cancelled before `/bin/true` even
-    /// starts exercises `wait_or_kill`'s own `biased` race in
-    /// `spawn_process`'s favor of a natural exit already ready at the first
-    /// poll — the child still runs and exits 0, but the token is cancelled
-    /// throughout the whole call. The `!result.ok()` guard (matching
-    /// `Kernel`'s own two cancel sites) must keep that 0, not relabel a
-    /// child that finished cleanly as killed.
+    /// token state alone. `ctx.cancel` cancels from a concurrent task after
+    /// 50ms, not before the call: `wait_or_kill` sends the SIGTERM the
+    /// instant it observes a cancelled token, so cancelling before the
+    /// child even runs raced its own `trap : TERM` installation and killed
+    /// it before the trap existed to ignore anything — a genuine SIGTERM
+    /// death (128+15), not the clean-exit case this test means to prove.
+    /// 50ms is ample for `sh` to install the trap and be well into its
+    /// (builtin-only, no forked `sleep`) busy loop before the cancel fires;
+    /// the loop then ignores the SIGTERM and exits 0 on its own, comfortably
+    /// inside the 20s grace (generous against a heavily oversubscribed box
+    /// stretching the loop's own CPU time). A forked `sleep N` was tried
+    /// first and rejected: it sits in `sh`'s own process group and dies
+    /// from the group-wide SIGTERM on ITS OWN default disposition
+    /// regardless of `sh`'s trap, and `sh` (POSIX, no `set -e`) would then
+    /// just continue to exit 0 anyway — passing for the wrong reason,
+    /// without the trap ever having to protect anything. The `!result.ok()`
+    /// guard (matching `Kernel`'s own two cancel sites) must keep the clean
+    /// exit, not relabel it as killed.
     #[tokio::test]
     async fn test_spawn_cancel_arm_keeps_a_clean_exit() {
         let mut ctx = make_ctx();
-        ctx.cancel.cancel();
+        ctx.kill_grace = Duration::from_secs(20);
+        let cancel = ctx.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
 
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("/bin/true".into()));
+            .insert("command".to_string(), Value::String("/bin/sh".into()));
+        args.named.insert(
+            "argv".to_string(),
+            Value::String(r#"["-c", "trap : TERM; i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done"]"#.into()),
+        );
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert_eq!(
             result.code, 0,
-            "a child that exited 0 must keep that code even though ctx.cancel \
-             was already cancelled for the whole call: {result:?}"
+            "a child that exited 0 on its own, inside the kill grace, must keep \
+             that code even though ctx.cancel fired mid-run: {result:?}"
         );
     }
 
@@ -638,6 +662,13 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_path_resolution() {
         let mut ctx = make_ctx();
+        // spawn's own `--command` resolution reads PATH from scope only (the
+        // kernel never reads the OS env) — seeding it here from this test
+        // PROCESS's real PATH is fixture code reading OS env, which is fine;
+        // it is not spawn reaching into the OS on its own.
+        ctx.scope
+            .set_exported("PATH", Value::String(std::env::var("PATH").unwrap_or_default()));
+
         let mut args = ToolArgs::new();
         // Use command name instead of full path
         args.named
@@ -662,7 +693,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("pwd".into()));
+            .insert("command".to_string(), Value::String("/bin/pwd".into()));
         args.named
             .insert("cwd".to_string(), Value::String("/tmp".into()));
 
@@ -677,7 +708,7 @@ mod tests {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("sleep".into()));
+            .insert("command".to_string(), Value::String("/bin/sleep".into()));
         args.named
             .insert("argv".to_string(), Value::String("10".into()));
         // Timeout after 100ms
@@ -745,7 +776,7 @@ mod tests {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("echo".into()));
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
         args.named
             .insert("argv".to_string(), Value::String("quick".into()));
         // Long timeout that won't trigger

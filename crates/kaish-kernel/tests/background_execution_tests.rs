@@ -619,10 +619,19 @@ async fn v_jobs_status_reports_killed() {
 #[cfg(all(unix, feature = "subprocess", feature = "localfs"))]
 #[tokio::test]
 async fn kill_terminates_spawn_background_job_with_130() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
     let dir = tempfile::tempdir().expect("tempdir");
+    // `spawn`'s own `--command` resolution has no OS-PATH fallback (the
+    // kernel never reads the OS env) — `sleep` needs PATH in scope to
+    // resolve, same as `repl_kernel()` in external_command_tests.rs.
+    let mut vars = HashMap::new();
+    vars.insert("PATH".to_string(), Value::String(std::env::var("PATH").unwrap_or_default()));
     let kernel = kaish_kernel::Kernel::new(
         kaish_kernel::KernelConfig::agent_with_root(dir.path().to_path_buf())
-            .with_allow_unwrapped_commands(true),
+            .with_allow_unwrapped_commands(true)
+            .with_initial_vars(vars),
     )
     .expect("failed to create kernel")
     .into_arc();
@@ -653,12 +662,21 @@ async fn kill_terminates_spawn_background_job_with_130() {
 #[cfg(all(unix, feature = "subprocess", feature = "localfs"))]
 #[tokio::test]
 async fn kill_before_the_deadline_reports_130_not_124() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
     let dir = tempfile::tempdir().expect("tempdir");
     let ready = dir.path().join("ready");
+    // `spawn`'s own `--command` resolution has no OS-PATH fallback — `sh`
+    // needs PATH in scope to resolve, same as `repl_kernel()` in
+    // external_command_tests.rs.
+    let mut vars = HashMap::new();
+    vars.insert("PATH".to_string(), Value::String(std::env::var("PATH").unwrap_or_default()));
     let kernel = kaish_kernel::Kernel::new(
         kaish_kernel::KernelConfig::agent_with_root(dir.path().to_path_buf())
             .with_allow_unwrapped_commands(true)
-            .with_kill_grace(Duration::from_millis(800)),
+            .with_kill_grace(Duration::from_millis(800))
+            .with_initial_vars(vars),
     )
     .expect("failed to create kernel")
     .into_arc();

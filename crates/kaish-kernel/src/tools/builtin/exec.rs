@@ -97,15 +97,13 @@ impl Tool for Exec {
             Err(e) => return ExecResult::failure(1, format!("exec: {e}")),
         };
 
-        // Resolve command path
+        // Resolve command path. The kernel never reads the OS env — a
+        // frontend that wants host PATH seeds it via `initial_vars`. No PATH
+        // in scope means nothing resolves, same as the external-command path.
         let command = if command_name.starts_with('/') || command_name.starts_with("./") {
             command_name.clone()
         } else {
-            let path_var = ctx
-                .scope
-                .get("PATH")
-                .map(value_to_string)
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+            let path_var = ctx.scope.get("PATH").map(value_to_string).unwrap_or_default();
 
             match resolve_in_path(&command_name, &path_var) {
                 Some(resolved) => resolved,
