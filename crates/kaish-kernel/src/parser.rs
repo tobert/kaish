@@ -674,28 +674,26 @@ fn parse_interpolated_string_spanned(
                 push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
                 i += 2; // consume "$("
                 pos += 2;
-                let mut cmd_content = String::new();
-                let mut depth = 1;
-                let mut closed = false;
-                while let Some(&c) = chars_vec.get(i) {
+                // Find the matching ')' the same way the quoted double-quoted
+                // form does (`parse_interpolated_string`): tokenize what
+                // remains and walk it with `find_cmd_subst_close` instead of
+                // counting raw `(`/`)` characters. A per-character count
+                // can't tell a case-branch pattern's unpaired `)`
+                // (`case $x in a) …`) from a real close, and it also
+                // miscounts a literal `(`/`)` sitting inside a quoted
+                // argument of the substitution itself (`$(echo "(")`).
+                let remainder: String = chars_vec[i..].iter().collect();
+                // A missing close is reported before `parse` sees the body:
+                // the body can be a valid program on its own (`echo hi`), so
+                // falling back to it runs a substitution nobody closed.
+                let rparen_span = quoted_cmd_subst_close(&remainder)?;
+                let cmd_content = remainder[..rparen_span.start].to_string();
+                let mut consumed_bytes = 0usize;
+                while consumed_bytes < rparen_span.end {
+                    let Some(&c) = chars_vec.get(i) else { break };
                     i += 1;
                     pos += c.len_utf8();
-                    if c == '(' {
-                        depth += 1;
-                        cmd_content.push(c);
-                    } else if c == ')' {
-                        depth -= 1;
-                        if depth == 0 {
-                            closed = true;
-                            break;
-                        }
-                        cmd_content.push(c);
-                    } else {
-                        cmd_content.push(c);
-                    }
-                }
-                if !closed {
-                    return Err("unterminated command substitution: missing `)`".to_string());
+                    consumed_bytes += c.len_utf8();
                 }
                 // Both silent fallbacks are closed here rather than by reusing
                 // `parse_interpolated_string`: a heredoc body is not the inside

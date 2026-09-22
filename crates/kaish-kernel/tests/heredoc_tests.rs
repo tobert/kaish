@@ -178,3 +178,32 @@ async fn nested_pipeline_command_substitution_in_body() {
         .expect("ok");
     assert_eq!(r.text_out(), "hello world\n");
 }
+
+/// A `case` pattern's unpaired `)` (`a)`) is not the substitution's own
+/// close — the heredoc-body `$(...)` scanner used to count raw `(`/`)`
+/// characters and closed at that first `)`, truncating the body to `case a
+/// in a` (missing `esac`) and leaving `echo hit;; esac)` as literal text.
+#[tokio::test]
+async fn nested_case_statement_in_body() {
+    let k = setup().await;
+    let r = k
+        .execute("cat <<EOF\nbefore $(case a in a) echo hit;; esac) after\nEOF")
+        .await
+        .expect("ok");
+    assert_eq!(r.text_out(), "before hit after\n");
+}
+
+/// A quoted `)` inside the substitution's own argument is not the
+/// substitution's close either — the same raw-character count also
+/// miscounts a literal paren sitting inside a quoted string.
+#[tokio::test]
+async fn quoted_paren_inside_body_command_substitution() {
+    let k = setup().await;
+    let r = k
+        .execute(r#"cat <<EOF
+out: $(echo ")") end
+EOF"#)
+        .await
+        .expect("ok");
+    assert_eq!(r.text_out(), "out: ) end\n");
+}
