@@ -40,7 +40,11 @@ struct SpawnArgs {
     #[arg(long = "command")]
     command: Option<String>,
 
-    /// Arguments as JSON array or single string.
+    /// Arguments as a JSON array or a single string. Alternatively, list
+    /// them as trailing positionals after the command (`spawn cmd a b c`,
+    /// or `spawn --command cmd a b c`) — each positional is exactly one
+    /// literal argument, with no JSON parsing. Combining `--argv` with
+    /// positional arguments is an error; use one form or the other.
     #[arg(long = "argv")]
     argv: Option<String>,
 
@@ -68,7 +72,8 @@ struct SpawnArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Command and its arguments (alternative to `--command` / `--argv`).
+    /// Command and its arguments, as trailing positionals — an alternative
+    /// to `--command`/`--argv`. Each word is exactly one literal argument.
     command_argv: Vec<String>,
 }
 
@@ -145,16 +150,55 @@ impl Tool for Spawn {
             }
         };
 
-        // Get argv (optional). Decision D: a collection *element* (or a record
-        // as the whole argv) can't cross the process boundary — loud, not a
-        // silent JSON stringify. spawn's argv is legitimately a list of
-        // strings, so only nested collections trip the guard.
-        let argv = match args.get_named("argv").or_else(|| args.get_positional(1)) {
-            Some(v) => match extract_string_array(v) {
-                Ok(argv) => argv,
-                Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
-            },
-            None => Vec::new(),
+        // Get argv (optional). Two spellings, mutually exclusive:
+        // `--argv` (a JSON array or a single string — `extract_string_array`,
+        // Decision D: a collection *element*, or a record as the whole argv,
+        // can't cross the process boundary), or the command's own trailing
+        // positionals (`spawn /bin/echo a b c`, or `spawn --command
+        // /bin/echo hello`) — the published, documented alternative that a
+        // published `command_argv` schema field with no reader behind it
+        // used to silently drop (kaibo round-4 finding: `spawn /bin/echo a b
+        // c` ran `echo a` with `b c` gone; `spawn --command /bin/echo hello`
+        // ran `echo` with NO arguments at all).
+        //
+        // A positional word is one literal argument — no JSON sniffing, the
+        // one thing that sets it apart from `--argv`'s single-string
+        // spelling (`extract_positional_argv_element`'s own doc explains
+        // why). Which positionals count as "the argv part" depends on
+        // whether the command itself came from a positional: a named
+        // `--command` consumes none, so every positional is argv; a bare
+        // command word (`spawn /bin/echo ...`) consumes positional 0, so
+        // argv starts at 1.
+        let command_from_positional = args.get_named("command").is_none();
+        let argv_positionals: &[Value] = if command_from_positional {
+            args.positional.get(1..).unwrap_or(&[])
+        } else {
+            &args.positional
+        };
+        let argv = match args.get_named("argv") {
+            Some(v) => {
+                if !argv_positionals.is_empty() {
+                    return ExecResult::failure(
+                        2,
+                        "spawn: cannot combine --argv with additional positional arguments; use one form or the other"
+                            .to_string(),
+                    );
+                }
+                match extract_string_array(v) {
+                    Ok(argv) => argv,
+                    Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
+                }
+            }
+            None => {
+                let mut out = Vec::with_capacity(argv_positionals.len());
+                for v in argv_positionals {
+                    match extract_positional_argv_element(v) {
+                        Ok(mut words) => out.append(&mut words),
+                        Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
+                    }
+                }
+                out
+            }
         };
 
         // Get env (optional). A shape that isn't a record, a JSON-object
@@ -506,6 +550,29 @@ fn extract_string_array(value: &Value) -> Result<Vec<String>, String> {
         // --argv 60` types `60` as `Value::Int` (kaish's typed argv
         // barewords), and it must still reach the child as the text "60".
         other => Ok(vec![value_to_string(other)]),
+    }
+}
+
+/// One element of the positional-argv form (`spawn /bin/echo a b c`, or
+/// `spawn --command /bin/echo hello`).
+///
+/// A bareword positional is exactly one literal argument, even if its text
+/// happens to start with `[` — unlike `extract_string_array`'s `String` arm,
+/// which exists for `--argv`'s compact single-flag spelling of a whole
+/// array. A shell word is never silently re-parsed as JSON just because it
+/// looks like one; that would make `spawn echo '[not json'` (a perfectly
+/// ordinary literal argument) behave differently from `spawn echo '[1,2]'`
+/// depending on whether the text happens to parse.
+///
+/// A genuine typed array in this slot (e.g. an unflattened list
+/// substitution landing as one `Value::Json` array, not text) still expands
+/// into its own elements — the type carries the structure, not the text —
+/// applying the same Decision-D per-element guard `extract_string_array`'s
+/// array arm uses; a record or binary here is refused the same way too.
+fn extract_positional_argv_element(value: &Value) -> Result<Vec<String>, String> {
+    match value {
+        Value::String(s) => Ok(vec![s.clone()]),
+        other => extract_string_array(other),
     }
 }
 
@@ -1060,6 +1127,82 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(!result.ok(), "binary argv must refuse, not become a placeholder string: {result:?}");
         assert!(result.err.contains("argv"), "should name the flag: {}", result.err);
+    }
+
+    /// kaibo round-4 finding: `command_argv: Vec<String>` is published in
+    /// spawn's own schema and documented as "an alternative to
+    /// `--command`/`--argv`", but nothing ever read it — argv extraction
+    /// only ever looked at ONE positional (`args.get_positional(1)`).
+    /// `spawn /bin/echo a b c` ran `echo a`, silently dropping `b` and `c`.
+    #[tokio::test]
+    async fn test_spawn_bareword_form_reads_all_trailing_positionals() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::String("a".into()));
+        args.positional.push(Value::String("b".into()));
+        args.positional.push(Value::String("c".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "a b c");
+    }
+
+    /// kaibo round-4 finding, the other shape of the same bug: with
+    /// `--command` given by name, no positional is the command, so ALL of
+    /// them should be argv — but the old single-positional read
+    /// (`args.get_positional(1)`) looked at INDEX 1, which is empty when
+    /// the only positional is the lone trailing word. `spawn --command
+    /// /bin/echo hello` ran `echo` with no arguments at all, silently
+    /// dropping `hello`.
+    #[tokio::test]
+    async fn test_spawn_command_flag_with_trailing_positional_argv() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.positional.push(Value::String("hello".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "hello");
+    }
+
+    /// A positional argv word is literal, unlike `--argv`'s single-string
+    /// spelling: it must NOT be JSON-sniffed just because its text starts
+    /// with `[` — `extract_positional_argv_element`'s own doc explains why
+    /// (a shell word must not behave differently depending on whether its
+    /// text happens to parse as JSON).
+    #[tokio::test]
+    async fn test_spawn_positional_argv_word_is_not_json_sniffed() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::String(r#"[1,2]"#.into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(
+            result.text_out().trim(),
+            "[1,2]",
+            "a literal positional word must reach the child verbatim, not get JSON-parsed into two words"
+        );
+    }
+
+    /// `--argv` and additional positional arguments are mutually exclusive
+    /// spellings — combining them is a usage error, not a silent pick-one.
+    #[tokio::test]
+    async fn test_spawn_argv_flag_and_positional_args_conflict_loudly() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::String("extra".into()));
+        args.named
+            .insert("argv".to_string(), Value::String("hello".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "combining --argv with positional args must refuse: {result:?}");
+        assert!(result.err.contains("--argv"), "should name the conflicting flag: {}", result.err);
     }
 
     /// kaibo round-3 finding: `--env` given a kaish record (`Value::Json`
