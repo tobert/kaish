@@ -279,6 +279,9 @@ impl Tool for Tree {
         let mut root_has_error = false;
 
         while let Some((dir, depth)) = stack.pop() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("tree");
+            }
             // Check max depth
             if let Some(max) = max_depth
                 && depth >= max {
