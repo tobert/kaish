@@ -1532,10 +1532,11 @@ cat /v/jobs/1/stdout        # Whatever the build has printed so far
 
 `stdout` and `stderr` are live for an **external** command run by the job:
 its drain task tees each 8 KiB chunk into the node as the child emits it.
-A builtin publishes its stdout when it returns, so a job mixing both reads
-in order. GH #240 had removed both nodes because they filled only once, at
-completion, while four docs promised a live stream — they are back on the
-terms the docs always claimed.
+A builtin, a function call, or any other statement publishes its stdout and
+stderr when it returns, so a job mixing both reads in order. GH #240 had
+removed both nodes because they filled only once, at completion, while four
+docs promised a live stream — they are back on the terms the docs always
+claimed.
 
 Three limits, stated because an embedder polling these needs to predict them:
 
@@ -1547,11 +1548,16 @@ Three limits, stated because an embedder polling these needs to predict them:
 - **Only the job's own stdout reaches `stdout`.** An upstream stage's output
   is the next stage's stdin, `$(...)` output is a value, a redirected stdout
   goes to its target, and a scatter worker's stdout is gather's input; none
-  of it is published. `stderr` takes an external command's stderr live
-  when the command ends its pipeline. A builtin's stderr, and an earlier
-  stage's, reach the node at completion, and only when nothing arrived live;
-  otherwise they stay in the job's `ExecResult`. A whole-program job writes
-  each top-level statement's stderr when the statement finishes.
+  of it is published. `stderr` publishes from every stage, not only the
+  last — bash never pipes stderr between stages, so `a | b` streams both
+  `a`'s and `b`'s stderr, in the order each command produced it. An
+  external tees it live, chunk by chunk; a builtin, a function call, or any
+  other statement publishes once its own redirects apply. `2>file`,
+  `&>file`, and `2>&1` keep a stage's stderr out of the node (`2>&1`'s bytes
+  land in `stdout` instead); `>&2` still reaches `stderr`, since only the
+  destination of the command's own stdout changed. A whole-program job
+  writes each top-level statement's stderr when the statement finishes,
+  instead of this per-stage publish.
 - **Each node is a 10 MB ring** that evicts its oldest bytes. A job that
   outruns it loses its head, not its tail; redirect to a file
   (`cmd > /tmp/out.log &`) when the whole output matters.

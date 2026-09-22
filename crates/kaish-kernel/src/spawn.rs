@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::{ExecResult, Scope};
 use crate::scheduler::{
-    drain_to_stream_teed, BoundedStream, JobId, JobManager, PipeReader, DEFAULT_STREAM_MAX_SIZE,
+    drain_to_stream_teed_until, BoundedStream, JobId, JobManager, PipeReader, DEFAULT_STREAM_MAX_SIZE,
 };
 use crate::tools::ExecContext;
 
@@ -562,16 +562,25 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             .as_ref()
             .filter(|_| spawn_ctx.background_stream_stderr)
             .map(|s| s.stderr.clone());
+        // Kept past the drain task below, which takes `stderr_tee`: the
+        // overflow markers added at the end go to the same stream.
+        let stderr_marker_tee = stderr_tee.clone();
 
+        // Stops the drains between chunks on cancel. An abort could land
+        // between a chunk's capture write and its tee write, leaving `err`
+        // holding bytes counted as published that never reached the stream.
+        let drain_stop = tokio_util::sync::CancellationToken::new();
         let stdout_task = stdout_pipe.map(|pipe| {
+            let stop = drain_stop.clone();
             tokio::spawn(async move {
-                drain_to_stream_teed(pipe, stdout_clone, stdout_tee).await;
+                drain_to_stream_teed_until(pipe, stdout_clone, stdout_tee, &stop).await;
             })
         });
 
         let stderr_task = stderr_pipe.map(|pipe| {
+            let stop = drain_stop.clone();
             tokio::spawn(async move {
-                drain_to_stream_teed(pipe, stderr_clone, stderr_tee).await;
+                drain_to_stream_teed_until(pipe, stderr_clone, stderr_tee, &stop).await;
             })
         });
 
@@ -587,31 +596,23 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             Ok(s) => s,
             Err(e) => {
                 // stdin-copy task is aborted by `_stdin_copy_guard` on return.
+                drain_stop.cancel();
                 if let Some(task) = stdout_task {
-                    task.abort();
                     let _ = task.await;
                 }
                 if let Some(task) = stderr_task {
-                    task.abort();
                     let _ = task.await;
                 }
                 return ExecResult::failure(1, format!("{}: failed to wait: {}", label, e));
             }
         };
 
-        // On cancel, abort the drain tasks (the child's pipes are gone;
+        let mut interrupted_after_exit = false;
+        // On cancel, stop the drain tasks (the child's pipes are gone;
         // late output is lost but predictable death beats partial capture).
         // On normal exit, await drains so we don't lose buffered output.
         if cancelled_before_wait || spawn_ctx.cancel.is_cancelled() {
-            if let Some(task) = stdout_task {
-                task.abort();
-                let _ = task.await;
-            }
-            if let Some(task) = stderr_task {
-                task.abort();
-                let _ = task.await;
-            }
-        } else {
+            drain_stop.cancel();
             if let Some(task) = stdout_task {
                 // Ignore join error — the drain task logs its own errors
                 let _ = task.await;
@@ -619,9 +620,38 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             if let Some(task) = stderr_task {
                 let _ = task.await;
             }
+        } else {
+            // The child exited, but a grandchild it left in the background
+            // can hold its pipes open. Wait for EOF, as bash's `$(...)` does,
+            // until a cancel: then signal the process group and stop.
+            let drains = async {
+                if let Some(task) = stdout_task {
+                    // Ignore join error — the drain task logs its own errors
+                    let _ = task.await;
+                }
+                if let Some(task) = stderr_task {
+                    let _ = task.await;
+                }
+            };
+            tokio::pin!(drains);
+            tokio::select! {
+                biased;
+                _ = &mut drains => {}
+                _ = spawn_ctx.cancel.cancelled() => {
+                    interrupted_after_exit = true;
+                    #[cfg(unix)]
+                    signal_leftover_group(kill_target.as_ref());
+                    drain_stop.cancel();
+                    drains.await;
+                }
+            }
         }
 
-        let code = crate::kernel::exit_code_from_status(&status);
+        let code = if interrupted_after_exit {
+            130
+        } else {
+            crate::kernel::exit_code_from_status(&status)
+        };
 
         // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
         // result, so `curl url`, `curl url > file.bin`, etc. keep binary
@@ -637,9 +667,10 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         // oldest bytes and bumped `bytes_evicted`, but nothing ever read that
         // counter, so a >10MB stdout reported clean success with its head
         // quietly gone (GH #191). Surface it loudly instead.
+        let mut markers = String::new();
         if stderr_stream.has_overflowed().await {
             let stats = stderr_stream.stats().await;
-            stderr = format!("{}{stderr}", stats.overflow_marker("stderr"));
+            markers.push_str(&stats.overflow_marker("stderr"));
         }
         if stdout_stream.has_overflowed().await {
             // The marker goes in stderr, never prepended into `result`'s
@@ -654,10 +685,33 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             // tracks stdout, matching the enabled-limit path's contract
             // (stderr overflow alone doesn't remap the exit code).
             let stats = stdout_stream.stats().await;
-            stderr = format!("{}{stderr}", stats.overflow_marker("stdout"));
+            markers.insert_str(0, &stats.overflow_marker("stdout"));
             result.did_spill = true;
         }
+        // The tee already sent the captured stderr live, so all of `err` is
+        // published once the markers reach the stream too. They lead `err`
+        // but follow the live bytes on the stream.
+        if let Some(tee) = &stderr_marker_tee {
+            tee.write(markers.as_bytes()).await;
+        }
+        stderr.insert_str(0, &markers);
+        result.stderr_published_len = if stderr_marker_tee.is_some() { stderr.len() } else { 0 };
         result.err = stderr;
         result
     }
+}
+
+/// SIGKILL what is left of an exited command's process group, at once.
+///
+/// The command is already reaped, so its pid pins nothing: a group id stays
+/// reserved only while a member lives. Signalling now reaches the members
+/// that still hold the pipe; a delayed signal could land on an unrelated
+/// group that reused the id after these members died.
+#[cfg(unix)]
+fn signal_leftover_group(target: Option<&crate::pidfd::KillTarget>) {
+    use nix::sys::signal::Signal;
+    let Some(target) = target else {
+        return;
+    };
+    target.signal_pg(Signal::SIGKILL);
 }

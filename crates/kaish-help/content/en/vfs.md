@@ -50,9 +50,12 @@ node in one write — and so does `cargo build | tee log &`, because `tee` is a
 builtin. Drop the `| tee`; the job's stream is the log.
 Only the job's own output reaches `stdout`. An earlier pipeline stage's
 output, `$(...)` output, a redirected stdout, and a scatter worker's output do
-not. `stderr` fills live from an external command at the end of its pipeline.
-Other stderr, from a builtin or an earlier stage, arrives when the job ends,
-and only if nothing reached `stderr` live.
+not. `stderr` fills from every pipeline stage, not just the last — bash never
+pipes stderr between stages. An external command fills it live, chunk by
+chunk; a builtin, a function call, or any other statement fills it once its
+own redirects apply. `2>file`, `&>file`, and `2>&1` keep a stage's stderr out
+of the node; `>&2` still reaches `stderr`. A `$(...)` in a command's arguments
+runs before its redirects, so its stderr reaches `stderr` either way.
 
 Each node holds at most 10MB and evicts its oldest bytes past that. Redirect
 to a file (`cargo build > /tmp/build.log 2>&1 &`) when the whole output

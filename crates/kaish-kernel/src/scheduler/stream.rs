@@ -278,9 +278,23 @@ where
 /// which belongs to this one command, is. Closing the job's stream is the job's
 /// own business, once every command in it has finished.
 pub async fn drain_to_stream_teed<R>(
+    reader: R,
+    stream: Arc<BoundedStream>,
+    tee: Option<Arc<BoundedStream>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    drain_to_stream_teed_until(reader, stream, tee, &tokio_util::sync::CancellationToken::new()).await
+}
+
+/// [`drain_to_stream_teed`] that also stops when `stop` fires. It stops only
+/// between chunks, so a chunk in `stream` is always in `tee` too — unlike
+/// aborting the task, which can land between the two writes.
+pub(crate) async fn drain_to_stream_teed_until<R>(
     mut reader: R,
     stream: Arc<BoundedStream>,
     tee: Option<Arc<BoundedStream>>,
+    stop: &tokio_util::sync::CancellationToken,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -288,7 +302,12 @@ pub async fn drain_to_stream_teed<R>(
 
     let mut buf = [0u8; 8192];
     loop {
-        match reader.read(&mut buf).await {
+        let read = tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            read = reader.read(&mut buf) => read,
+        };
+        match read {
             Ok(0) => break, // EOF
             Ok(n) => {
                 stream.write(&buf[..n]).await;
@@ -383,6 +402,32 @@ mod tests {
             !tee.is_closed().await,
             "the job's stream must stay open for the next command in the job"
         );
+    }
+
+    /// Stopping a drain (a killed command) never splits a chunk between the
+    /// capture and the tee: the capture becomes the result's `err`, counted
+    /// as published because the tee sent it.
+    #[tokio::test]
+    async fn stopping_a_drain_keeps_capture_and_tee_equal() {
+        use tokio::io::AsyncWriteExt;
+        let primary = Arc::new(BoundedStream::new(1024));
+        let tee = Arc::new(BoundedStream::new(1024));
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"chunk").await.expect("write");
+        // Hold the tee so the drain is mid-chunk when it is stopped.
+        let tee_guard = tee.inner.write().await;
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = {
+            let (primary, tee, stop) = (primary.clone(), tee.clone(), stop.clone());
+            tokio::spawn(async move { drain_to_stream_teed_until(reader, primary, Some(tee), &stop).await })
+        };
+        while primary.read().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        stop.cancel();
+        drop(tee_guard);
+        task.await.expect("drain task");
+        assert_eq!(tee.read().await, primary.read().await);
     }
 
     #[tokio::test]

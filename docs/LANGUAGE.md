@@ -612,6 +612,10 @@ tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
 cmd 2>&1 | tee log.txt          # capture both streams
 
+# Redirects apply left to right; `2>&1` copies where stdout points then.
+cmd > log.txt 2>&1              # both streams to log.txt
+cmd 2>&1 > log.txt              # stderr to the old stdout, stdout to log.txt
+
 # A redirect target is a SINGLE word — quote it when it interpolates.
 # Command substitution runs in the target (and in here-doc bodies).
 echo hi > "$dir/out.log"        # correct

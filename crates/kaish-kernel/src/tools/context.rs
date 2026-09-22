@@ -220,10 +220,15 @@ pub struct ExecContext {
     /// builtin when it returns. False inside `$(...)`, under a stdout
     /// redirect, and in a scatter worker.
     pub background_stream_output: bool,
-    /// Whether an external command also tees its stderr into the job's stderr
-    /// stream wherever `background_stream_output` is on. Set once per job:
-    /// true for `cmd &`, false for a whole-program job, which writes each
-    /// statement's stderr when the statement finishes.
+    /// Whether this dispatch's stderr is its background job's stderr, so it
+    /// is published to the job's stream: an external per chunk, everything
+    /// else when its statement or pipeline stage ends
+    /// (`ExecContext::publish_job_stderr`).
+    /// Unlike `background_stream_output`, stderr is not gated on pipeline
+    /// position — bash never pipes stderr between stages, so every stage
+    /// streams its own. False under a redirect that sends stderr elsewhere
+    /// (`2>file`, `&>file`, `2>&1`) and for a whole-program job, which
+    /// publishes each statement's stderr itself when the statement finishes.
     pub background_stream_stderr: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
@@ -456,6 +461,75 @@ impl ExecContext {
             Some(bytes) => streams.stdout.write(bytes).await,
             None => streams.stdout.write(result.text_out().as_bytes()).await,
         }
+    }
+
+    /// Whether stderr produced in this context belongs on its background
+    /// job's stderr stream: a `cmd &` job, and no redirect has sent stderr
+    /// elsewhere. Every stage streams its own stderr regardless of pipeline
+    /// position — bash never pipes stderr between stages, unlike stdout.
+    pub(crate) fn publishes_job_stderr(&self) -> bool {
+        self.background_job.is_some() && self.background_stream_stderr && self.job_manager.is_some()
+    }
+
+    /// Publish the part of `result.err` the job's stream does not hold yet,
+    /// `err[stderr_published_len..]`, and mark all of `err` published. A
+    /// no-op outside a publishing context, so it is safe to call at every
+    /// point stderr may need to reach the stream.
+    pub(crate) async fn publish_job_stderr(&self, result: &mut ExecResult) {
+        let published = result.stderr_published_len;
+        assert!(
+            published <= result.err.len() && result.err.is_char_boundary(published),
+            "stderr published length {published} does not fit err of {} bytes",
+            result.err.len()
+        );
+        if published == result.err.len() || !self.publishes_job_stderr() {
+            return;
+        }
+        self.write_job_stderr(&result.err.as_bytes()[published..]).await;
+        result.stderr_published_len = result.err.len();
+    }
+
+    /// Write `bytes` to the job's stderr stream when this context publishes.
+    pub(crate) async fn write_job_stderr(&self, bytes: &[u8]) {
+        if bytes.is_empty() || !self.publishes_job_stderr() {
+            return;
+        }
+        let (Some(job_id), Some(jobs)) = (self.background_job, self.job_manager.as_ref()) else {
+            return;
+        };
+        // A job removed from the manager has no reader left.
+        if let Some(streams) = jobs.streams(job_id).await {
+            streams.stderr.write(bytes).await;
+        }
+    }
+
+    /// Publish the stdout bytes a stage's own redirects introduced after
+    /// dispatch — the one case `publish_job_stdout` cannot see. `2>&1`
+    /// merges a stage's stderr into its stdout only once the stage has
+    /// finished and `apply_redirects` has run, by which point a builtin's or
+    /// external's own leaf publish already sent whatever stdout existed
+    /// BEFORE the merge. `prior` is that pre-redirect stdout; only the bytes
+    /// beyond it are new and need publishing.
+    pub(crate) async fn publish_job_stdout_suffix(&self, prior: &[u8], result: &ExecResult) {
+        let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
+            self.background_job,
+            self.background_stream_output,
+            self.pipeline_position,
+            self.job_manager.as_ref(),
+        ) else {
+            return;
+        };
+        let current: Vec<u8> = match result.out_bytes() {
+            Some(bytes) => bytes.to_vec(),
+            None => result.text_out().into_owned().into_bytes(),
+        };
+        if current.len() <= prior.len() || !current.starts_with(prior) {
+            return;
+        }
+        let Some(streams) = jobs.streams(job_id).await else {
+            return;
+        };
+        streams.stdout.write(&current[prior.len()..]).await;
     }
 
     /// Create a new execution context with a VFS (uses LocalBackend without tools).
