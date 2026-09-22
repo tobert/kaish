@@ -205,6 +205,21 @@ impl Tool for Diff {
             return ExecResult::with_output_and_text(data, String::new());
         }
 
+        // `TextDiff::from_lines` and `unified_diff()` below are opaque calls
+        // into the `similar` crate with no yield point of their own, so once
+        // the diff starts a script timeout cannot stop it. Walk both files
+        // first, checkpointing each line: for input large enough to make the
+        // diff itself slow, this pass — cheaper than the diff it precedes —
+        // already yields the watchdog a turn and stops here instead of ever
+        // starting the diff.
+        for content in [&content1, &content2] {
+            for _ in content.lines() {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("diff");
+                }
+            }
+        }
+
         // Generate diff using similar's built-in unified format
         let diff = TextDiff::from_lines(&content1, &content2);
 
@@ -228,7 +243,10 @@ impl Tool for Diff {
             .to_string();
 
         let output = if colorize {
-            colorize_unified_output(&plain)
+            match colorize_unified_output(&plain, ctx).await {
+                Ok(s) => s,
+                Err(i) => return i.result("diff"),
+            }
         } else {
             plain
         };
@@ -315,10 +333,14 @@ fn diff_to_json<'a>(
 }
 
 /// Apply ANSI color codes to pre-formatted unified diff output.
-fn colorize_unified_output(plain: &str) -> String {
+async fn colorize_unified_output(
+    plain: &str,
+    ctx: &mut crate::tools::ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
     let mut output = String::with_capacity(plain.len() + 256);
 
     for line in plain.lines() {
+        ctx.checkpoint().await?;
         if line.starts_with("---") || line.starts_with("+++") {
             output.push_str("\x1b[1m");
             output.push_str(line);
@@ -341,7 +363,7 @@ fn colorize_unified_output(plain: &str) -> String {
         output.push('\n');
     }
 
-    output
+    Ok(output)
 }
 
 #[cfg(test)]

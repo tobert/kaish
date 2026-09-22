@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tr tool: translate, squeeze, or delete characters.
 pub struct Tr;
@@ -90,49 +90,66 @@ impl Tool for Tr {
 
         let output = if delete {
             // Delete mode: remove all characters in (the possibly-complemented)
-            // set1 — `tr -cd '[:digit:]'` keeps only digits.
-            input
-                .chars()
-                .filter(|c| !in_set1(c))
-                .collect::<String>()
+            // set1 — `tr -cd '[:digit:]'` keeps only digits. A manual loop
+            // (rather than `.filter().collect()`) so the checkpoint covers
+            // this whole O(n) pass.
+            let mut result = String::with_capacity(input.len());
+            for c in input.chars() {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("tr");
+                }
+                if !in_set1(&c) {
+                    result.push(c);
+                }
+            }
+            result
         } else if let Some(ref c2) = chars2 {
             // Translate mode. Plain: a char in set1 maps positionally to set2.
             // Complement: every char in the complement (i.e. NOT in the original
             // set1) maps to set2's *last* char — a simplification of GNU's
             // positional mapping that's right whenever set2 is a single char
             // (the overwhelmingly common `tr -c SET ' '` idiom).
-            let translated: String = input
-                .chars()
-                .map(|c| {
-                    if complement {
-                        if in_set1(&c) {
-                            *c2.last().unwrap_or(&c)
-                        } else {
-                            c
-                        }
+            let mut translated = String::with_capacity(input.len());
+            for c in input.chars() {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("tr");
+                }
+                let out_c = if complement {
+                    if in_set1(&c) {
+                        *c2.last().unwrap_or(&c)
                     } else {
-                        translate_char(c, &chars1, c2)
+                        c
                     }
-                })
-                .collect();
+                } else {
+                    translate_char(c, &chars1, c2)
+                };
+                translated.push(out_c);
+            }
 
             if squeeze {
                 // Squeeze only the characters translation can actually emit. In
                 // complement mode that's just set2's last char; otherwise all of
                 // set2. (Squeezing all of set2 in complement mode would wrongly
                 // collapse pass-through set1 chars that happen to be in set2.)
-                if complement {
+                let squeezed = if complement {
                     let last: Vec<char> = c2.last().copied().into_iter().collect();
-                    squeeze_chars(&translated, &last)
+                    squeeze_chars(&translated, &last, ctx).await
                 } else {
-                    squeeze_chars(&translated, c2)
+                    squeeze_chars(&translated, c2, ctx).await
+                };
+                match squeezed {
+                    Ok(s) => s,
+                    Err(i) => return i.result("tr"),
                 }
             } else {
                 translated
             }
         } else if squeeze {
             // Squeeze-only mode: squeeze runs of chars in the (complemented) set1.
-            squeeze_set(&input, |c| in_set1(c))
+            match squeeze_set(&input, |c| in_set1(c), ctx).await {
+                Ok(s) => s,
+                Err(i) => return i.result("tr"),
+            }
         } else {
             return ExecResult::failure(1, "tr: SET2 required for translation");
         };
@@ -301,21 +318,34 @@ fn translate_char(c: char, set1: &[char], set2: &[char]) -> char {
 }
 
 /// Squeeze repeated characters from a set.
-fn squeeze_chars(input: &str, squeeze_set: &[char]) -> String {
-    squeeze_set_pred(input, |c| squeeze_set.contains(c))
+async fn squeeze_chars(
+    input: &str,
+    squeeze_set: &[char],
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
+    squeeze_set_pred(input, |c| squeeze_set.contains(c), ctx).await
 }
 
 /// Squeeze runs of characters matching `in_set` (predicate form, so `-c`
 /// complement squeezing can invert membership).
-fn squeeze_set(input: &str, in_set: impl Fn(&char) -> bool) -> String {
-    squeeze_set_pred(input, in_set)
+async fn squeeze_set(
+    input: &str,
+    in_set: impl Fn(&char) -> bool,
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
+    squeeze_set_pred(input, in_set, ctx).await
 }
 
-fn squeeze_set_pred(input: &str, in_set: impl Fn(&char) -> bool) -> String {
+async fn squeeze_set_pred(
+    input: &str,
+    in_set: impl Fn(&char) -> bool,
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
     let mut result = String::new();
     let mut prev: Option<char> = None;
 
     for c in input.chars() {
+        ctx.checkpoint().await?;
         let should_squeeze = in_set(&c) && prev == Some(c);
         if !should_squeeze {
             result.push(c);
@@ -323,7 +353,7 @@ fn squeeze_set_pred(input: &str, in_set: impl Fn(&char) -> bool) -> String {
         prev = Some(c);
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]

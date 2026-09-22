@@ -145,7 +145,18 @@ impl Tool for Tail {
         // Line mode: `-n N` = last N lines; `-n +N` = from line N (1-based).
         let (count, from_start) = parse_line_spec(&args);
 
-        let all_lines: Vec<&str> = input.lines().collect();
+        // Only the last `count` lines end up in the output, but every line
+        // must still be seen to find that tail — so a large file makes this
+        // collection itself the expensive O(n) pass. Collect via a
+        // checkpointed loop rather than `.lines().collect()` so a script
+        // timeout can stop it.
+        let mut all_lines: Vec<&str> = Vec::new();
+        for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("tail");
+            }
+            all_lines.push(line);
+        }
         let total = all_lines.len();
         let skip_count = if from_start {
             // From line N: skip the first N-1 lines (`+1` = whole input).
@@ -224,7 +235,13 @@ impl Tail {
                             if i > 0 { output.push('\n'); }
                             output.push_str(&format!("==> {} <==\n", path));
                         }
-                        let all_lines: Vec<&str> = content.lines().collect();
+                        let mut all_lines: Vec<&str> = Vec::new();
+                        for line in content.lines() {
+                            if ctx.checkpoint().await.is_err() {
+                                return kaish_tool_api::Interrupted.result("tail");
+                            }
+                            all_lines.push(line);
+                        }
                         let skip = if from_start {
                             count.saturating_sub(1).min(all_lines.len())
                         } else {

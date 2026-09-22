@@ -135,7 +135,18 @@ impl Tool for Sort {
 
         let delimiter = parsed.delimiter.clone();
 
-        let mut lines: Vec<&str> = input.lines().collect();
+        // `Vec::sort_by` below is one long synchronous call with no yield
+        // point of its own, so once it starts a script timeout cannot stop
+        // it. Collecting via a checkpointed loop rather than `.lines().collect()`
+        // means large input large enough to make the sort itself slow is
+        // already caught here — before the uninterruptible sort ever starts.
+        let mut lines: Vec<&str> = Vec::new();
+        for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("sort");
+            }
+            lines.push(line);
+        }
 
         // Sort with the appropriate comparator.
         lines.sort_by(|a, b| {
