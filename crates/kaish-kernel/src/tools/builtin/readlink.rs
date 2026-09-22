@@ -156,35 +156,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_readlink_canonicalize_dotdot_only() {
-        let mut ctx = make_ctx();
+    async fn test_readlink_canonicalize_dotdot_resolves_to_the_real_path() {
+        // Two independent lexical folds sit between this operand and
+        // MemoryFs: ExecContext::resolve_path (context.rs `normalize_path`)
+        // folds `.`/`..` before the path reaches the backend, and
+        // VfsRouter::canonicalize (`lexical_absolute`) folds again before
+        // routing to a mount. Pin the fold by its actual effect — the
+        // printed canonical path — rather than by an error message's
+        // wording, which is not a contract either fold owes.
+        use crate::vfs::Filesystem;
+
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.mkdir(Path::new("path")).await.unwrap();
+        mem.write(Path::new("path/file"), b"content").await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
         let mut args = ToolArgs::new();
         args.positional
             .push(Value::String("/some/../path/./file".into()));
         args.flags.insert("f".to_string());
 
         let result = Readlink.execute(args, &mut ctx).await;
-        // Two independent lexical folds sit between this operand and
-        // MemoryFs: ExecContext::resolve_path (context.rs `normalize_path`)
-        // folds `.`/`..` before the path reaches the backend, and
-        // VfsRouter::canonicalize (`lexical_absolute`) folds again before
-        // routing to a mount. Either one alone turns
-        // "/some/../path/./file" into "path/file", so "some" never gets an
-        // lstat; only breaking BOTH makes "some" reach MemoryFs. "path" is
-        // the missing INTERMEDIATE component there, which errors regardless
-        // of readlink -f's allow-missing-FINAL semantics.
-        // The error's leading "readlink: <operand>: " always echoes the raw,
-        // unfolded operand (so it names "some" no matter what); the part
-        // AFTER that echo is what proves a fold happened, and it must name
-        // the post-fold "path", not "some".
+        assert!(result.ok(), "expected success, got err: {}", result.err);
+        assert_eq!(result.text_out().trim(), "/path/file");
+    }
+
+    #[tokio::test]
+    async fn test_readlink_canonicalize_dotdot_still_errors_on_a_missing_intermediate() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/some/../path/./file".into()));
+        args.flags.insert("f".to_string());
+
+        // "/some/../path/./file" folds to "path/file"; on an empty MemoryFs
+        // "path" is a missing INTERMEDIATE component, which readlink -f's
+        // allow-missing-FINAL semantics does not cover either way — the
+        // fold still has to run before this failure is even reachable.
+        let result = Readlink.execute(args, &mut ctx).await;
         assert!(!result.ok(), "expected failure, got {}", result.text_out());
-        assert!(
-            result.err.trim_end().ends_with("path"),
-            "expected the underlying not-found error to name the missing \
-             intermediate component \"path\" (proving \"/some/..\" folded away \
-             before MemoryFs ever saw \"some\"): {}",
-            result.err
-        );
     }
 
     #[tokio::test]
