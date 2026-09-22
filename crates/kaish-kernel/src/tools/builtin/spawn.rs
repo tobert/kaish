@@ -968,18 +968,45 @@ mod tests {
         assert_eq!(result.text_out().trim(), "60");
     }
 
-    /// The one `--argv` shape that does stay a loud error: binary crossing
-    /// the process boundary, matching every other Decision-D guard in this
-    /// file (a `[binary: N bytes]` placeholder substituted in as the actual
-    /// argument text would be worse than dropping it).
+    /// A NAMED `--argv=<bytes>` never reaches `extract_string_array` at all:
+    /// `ToolArgs::to_argv()` (called at the very top of `execute`, before
+    /// `extract_string_array` is invoked) refuses ANY named `Value::Bytes`
+    /// with `ToolArgvError::BinaryNamedValue` — a generic guard shared by
+    /// every builtin, unrelated to spawn's own Decision-D logic. This test
+    /// only pins that generic, upstream guard; it does NOT exercise
+    /// `extract_string_array`'s own `Value::Bytes` arm. Verified by mutation:
+    /// gutting that arm (`Value::Bytes(_) => Ok(vec![])`) left this test
+    /// green.
     #[tokio::test]
-    async fn test_spawn_argv_binary_scalar_is_a_loud_error() {
+    async fn test_spawn_argv_named_binary_scalar_is_a_loud_error() {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.named
             .insert("command".to_string(), Value::String("/bin/echo".into()));
         args.named
             .insert("argv".to_string(), Value::Bytes(vec![0xff, 0x00]));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "binary argv must refuse, not become a placeholder string: {result:?}");
+        assert!(result.err.contains("argv"), "should name the flag: {}", result.err);
+    }
+
+    /// The shape that actually reaches `extract_string_array`'s own
+    /// Decision-D guard: a POSITIONAL `Value::Bytes` (e.g. `spawn /bin/echo
+    /// $binary_var`). `ToolArgs::to_argv()` renders a positional `Bytes` as
+    /// an inert `[binary: N bytes]` placeholder rather than erroring (it's a
+    /// validation-only sink — see `value_to_argv_token`'s doc comment), so
+    /// this value survives past the top-of-`execute` `to_argv()` call and
+    /// reaches `args.get_positional(1)` — and therefore
+    /// `extract_string_array` — as the real `Value::Bytes`, unlike the named
+    /// case above. This is the test that actually pins the Decision-D guard
+    /// this file's comments describe.
+    #[tokio::test]
+    async fn test_spawn_argv_positional_binary_scalar_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::Bytes(vec![0xff, 0x00]));
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(!result.ok(), "binary argv must refuse, not become a placeholder string: {result:?}");
