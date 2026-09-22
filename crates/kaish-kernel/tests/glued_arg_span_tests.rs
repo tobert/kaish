@@ -318,6 +318,40 @@ fn flush_line_continuation_is_a_glued_word(#[case] source: &str, #[case] expecte
     assert_eq!(glued_span_text(source), expected);
 }
 
+/// A paste with no variable or command substitution on either side (bare
+/// punctuation) cannot be fixed by either of the generic examples — neither
+/// `/tmp/$(echo x).txt` nor `$dir/out.txt` involves a bare word like this.
+/// The message must show the actual refused word instead.
+#[test]
+fn punctuation_only_glue_quotes_the_actual_word() {
+    let errors = parse("echo ===").expect_err("must be a parse error");
+    assert_eq!(errors.len(), 1, "expected exactly one error: {errors:?}");
+    let message = &errors[0].message;
+    assert!(
+        message.contains(r#"quote the whole word, e.g. "===""#),
+        "should quote the refused word itself: {message}"
+    );
+    assert!(
+        !message.contains("/tmp/$(echo x).txt"),
+        "a punctuation-only paste has no variable or substitution side, so the \
+         var/subst example must not appear: {message}"
+    );
+}
+
+/// A paste where one side is a variable or command substitution keeps the
+/// existing generic examples — they fit that shape.
+#[rstest]
+#[case("echo $dir/out.txt")]
+#[case("echo /tmp/$(echo x).txt")]
+fn variable_or_cmdsubst_glue_keeps_the_generic_examples(#[case] source: &str) {
+    let errors = parse(source).expect_err("must be a parse error");
+    let message = &errors[0].message;
+    assert!(
+        message.contains("/tmp/$(echo x).txt") && message.contains("$dir/out.txt"),
+        "a variable/substitution paste keeps both existing examples: {message}"
+    );
+}
+
 /// Whitespace on either side of a continuation separates the words.
 ///
 /// The `ShortFlag` cases pin a known gap, not a decision: bash reads

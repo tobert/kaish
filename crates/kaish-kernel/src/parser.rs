@@ -1319,6 +1319,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
 
     let _gaps = ContinuationGapsGuard::install(gaps);
     parse_tokens(tokens, end_span, (0..0).into())
+        .map_err(|errors| name_the_glued_word(source, errors))
 }
 
 /// Parse an already-tokenized slice into a `Program`, running the same
@@ -2413,6 +2414,43 @@ fn reject_glued_args<'src>(
 const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are not joined into \
      one argument (kaish does no token pasting); quote the whole word, e.g. \
      \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
+
+/// Replace [`GLUED_ARGS_MESSAGE`]'s generic example with the actual refused
+/// word, when neither side of the paste is a variable or command
+/// substitution — a bare-punctuation paste (`echo ===`) has no `/tmp/`,
+/// no `$(echo x).txt`, and no `$dir` to relate to, so the shipped examples
+/// were pointing at a shape that never occurred.
+///
+/// Runs once, here at the top of [`parse`], after every internal rescan
+/// (`validate_glued_args`, `is_glued_args_error`) has already settled on the
+/// final span: `error.span` is the exact word chumsky is naming, so slicing
+/// `source` at that span is always the right word, never a guess. `$` is the
+/// only way a variable (`$VAR`, `${VAR}`) or a command substitution (`$(…)`)
+/// spells itself, so its absence is what licenses the swap.
+fn name_the_glued_word(source: &str, errors: Vec<ParseError>) -> Vec<ParseError> {
+    errors
+        .into_iter()
+        .map(|error| {
+            if error.message != GLUED_ARGS_MESSAGE {
+                return error;
+            }
+            let Some(word) = source.get(error.span.start..error.span.end) else {
+                return error;
+            };
+            if word.contains('$') {
+                return error;
+            }
+            ParseError {
+                message: format!(
+                    "adjacent words with no space between them are not joined into \
+                     one argument (kaish does no token pasting); quote the whole \
+                     word, e.g. {word:?}"
+                ),
+                span: error.span,
+            }
+        })
+        .collect()
+}
 
 /// True when `e` is `reject_glued_args`'s own rejection and nothing else —
 /// the only case where [`validate_glued_args`] may restate the span.
