@@ -486,3 +486,52 @@ async fn faulting_condition_command_prints_its_diagnostic_once(#[case] body: &st
     }
     assert_job_matches_foreground(&setup, "f &").await;
 }
+
+/// A negated statement drains the stderr channel itself before flipping its
+/// code; a `|` pipe's non-last stage reaches the job stream only through it.
+#[tokio::test]
+async fn negated_pipeline_nested_in_a_compound_matches_foreground() {
+    assert_job_matches_foreground(
+        "",
+        "if true; then ! cat /kaish-corpus-negated-missing | wc -l; fi &",
+    )
+    .await;
+}
+
+/// A fault under `!` becomes the block's error. Its message is published when
+/// that error is rendered, not also when the negated body returned.
+#[rstest::rstest]
+#[case::test_expression("f() { ! [[ 1 -eq abc ]]; }")]
+#[case::published_body("f() { ! if true; then cat /kaish-corpus-negated-body; [[ 1 -eq abc ]]; fi; }")]
+#[tokio::test]
+async fn negated_fault_matches_foreground(#[case] setup: &str) {
+    assert_job_matches_foreground(setup, "f &").await;
+}
+
+#[tokio::test]
+async fn negated_builtin_error_matches_foreground() {
+    assert_job_matches_foreground("", "if true; then ! cat /kaish-corpus-negated-builtin; fi &").await;
+}
+
+/// A fault under `!` wrapped in `timeout`: the error `timeout` renders must
+/// still carry the fault's message, in a job as in the foreground.
+#[rstest::rstest]
+#[case::negated("f() { ! [[ 1 -eq abc ]]; }")]
+#[case::chain("f() { [[ 1 -eq abc ]] && echo x; }")]
+#[tokio::test]
+async fn timeout_wrapped_fault_matches_foreground(#[case] setup: &str) {
+    assert_job_matches_foreground(setup, "timeout 5 f &").await;
+}
+
+/// KNOWN BUG, pinned: a substitution's stderr is drained after the command's
+/// own stderr, so `result.err` lists `a` before `b` while the job stream has
+/// them in the order they ran (`b` first, as bash prints). When this passes,
+/// remove the `ignore` and this note.
+#[rstest::rstest]
+#[case::negated("f() { ! cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\"; }")]
+#[case::chain("f() { cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\" && true; }")]
+#[ignore = "known bug: drained substitution stderr is appended after the command's own stderr"]
+#[tokio::test]
+async fn substitution_stderr_ahead_of_a_negated_or_chained_command_matches_foreground(#[case] setup: &str) {
+    assert_job_matches_foreground(setup, "f &").await;
+}
