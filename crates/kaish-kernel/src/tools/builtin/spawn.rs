@@ -242,16 +242,24 @@ impl Tool for Spawn {
         };
         env.extend(env_vars);
 
-        // Handle stdin — forward raw bytes so binary survives into the child.
-        // `StdinPolicy::Null` (not an empty `Piped`) so a command reading
-        // stdin sees immediate EOF rather than a pipe that never closes.
-        let stdin_data = match ctx.read_stdin_to_bytes().await {
-            Ok(d) => d,
-            Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
-        };
-        let stdin = match stdin_data {
-            Some(data) => StdinPolicy::Piped { prefix: Some(data), pipe: None },
-            None => StdinPolicy::Null,
+        // Handle stdin — take the buffered prefix and the live pipe (if any)
+        // WITHOUT draining, same as `try_execute_external_on_path`
+        // (kernel.rs). `read_stdin_to_bytes()` reads the pipe to EOF before
+        // spawning anything, so a caller feeding spawn a live pipe (e.g. via
+        // `Kernel::execute_with_pipe_stdin`, or any other command whose
+        // stdin is a still-open reader) used to block spawning the child at
+        // all until that pipe closed, however long that took — see the
+        // `test_spawn_streams_stdin_instead_of_draining_to_eof_first` unit
+        // test below. `StdinPolicy::Piped`'s `pipe` field streams it to the
+        // child AFTER spawn instead. `Null` (not an empty `Piped`) so a
+        // command reading stdin with neither present sees immediate EOF
+        // rather than a pipe that never closes.
+        let pipe_stdin = ctx.pipe_stdin.take();
+        let stdin_bytes = ctx.take_stdin();
+        let stdin = if pipe_stdin.is_some() || stdin_bytes.is_some() {
+            StdinPolicy::Piped { prefix: stdin_bytes, pipe: pipe_stdin }
+        } else {
+            StdinPolicy::Null
         };
 
         let mut spawn_ctx = SpawnContext::from_exec_context(ctx);
@@ -540,6 +548,59 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(&*result.text_out(), "hello world");
+    }
+
+    /// kaibo round-3 finding: `spawn` used to drain its stdin to EOF
+    /// (`ctx.read_stdin_to_bytes()`, which reads a live pipe to completion)
+    /// BEFORE even spawning the child, unlike the shared spawner's
+    /// `StdinPolicy::Piped { pipe: Some(..), .. }` arm (spawn.rs's own
+    /// module docs; `try_execute_external_on_path` never drains eagerly
+    /// either). A live `scheduler::pipe_stream()` feeds one line, then
+    /// sleeps 5s before writing a second and closing — the same seam
+    /// `Kernel::execute_with_pipe_stdin` uses for a frontend's own live
+    /// process stdin, so this exercises spawn.rs's stdin handling directly
+    /// without kaish's `A | B` pipeline in the way (a pipeline hands a
+    /// stage its full input only once the upstream stage RETURNS, never
+    /// chunk by chunk, so a script-level `slow-producer | spawn ...` would
+    /// prove the pipeline's own buffering, not spawn's). `head -n1` reads
+    /// the first line and exits; a draining spawn would block on the
+    /// pipe's 5s-delayed second write (and its close) before `head` ever
+    /// started, an eagerly-streaming one lets it finish almost at once.
+    #[tokio::test]
+    async fn test_spawn_streams_stdin_instead_of_draining_to_eof_first() {
+        use crate::scheduler::pipe_stream;
+        use tokio::io::AsyncWriteExt;
+
+        let mut ctx = make_ctx();
+        let (mut writer, reader) = pipe_stream(8192);
+        ctx.pipe_stdin = Some(reader);
+
+        tokio::spawn(async move {
+            let _ = writer.write_all(b"line1\n").await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = writer.write_all(b"line2\n").await;
+            // Dropping `writer` here closes the pipe (EOF).
+        });
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/head".into()));
+        args.named
+            .insert("argv".to_string(), Value::String(r#"["-n1"]"#.into()));
+
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(10), Spawn.execute(args, &mut ctx))
+            .await
+            .expect("spawn must not hang waiting for the pipe's 5s-delayed second write");
+        let elapsed = start.elapsed();
+
+        assert!(result.ok(), "head failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "line1");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "spawn must stream stdin to head as it arrives, not drain the pipe \
+             to EOF before head ever starts: took {elapsed:?}"
+        );
     }
 
     #[tokio::test]

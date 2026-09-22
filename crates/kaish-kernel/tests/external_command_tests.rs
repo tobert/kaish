@@ -949,8 +949,10 @@ async fn external_binary_output_redirects_raw() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawn_forwards_and_captures_binary() {
-    // Binary into an external command's stdin (forwarded raw) and back out
-    // (captured as bytes): xxd -r -p makes the 0xFF byte, cat echoes it.
+    // Binary into an external command's stdin (forwarded raw, through the
+    // same streaming StdinPolicy::Piped path spawn_streams_stdin_instead_
+    // of_draining_to_eof_first pins directly) and back out (captured as
+    // bytes): xxd -r -p makes the 0xFF byte, cat echoes it.
     let kernel = repl_kernel();
     let r = kernel
         .execute("echo ff | xxd -r -p | spawn --command cat")
@@ -959,6 +961,18 @@ async fn spawn_forwards_and_captures_binary() {
     assert!(r.is_bytes(), "binary round-trip through cat should be Bytes");
     assert_eq!(r.out_bytes(), Some(&[0xffu8][..]));
 }
+
+// spawn's own stdin streaming (vs. its old eager-drain-to-EOF) is pinned as
+// a unit test in spawn.rs (test_spawn_streams_stdin_instead_of_draining_to_
+// eof_first), not here: kaish's `A | B` pipeline hands a stage its full
+// input only once the upstream stage RETURNS (never chunk by chunk — see
+// job_live_output_tests.rs's own doc comment on this), so a script-level
+// `slow-producer | spawn ...` proves the pipeline's own stage-to-stage
+// handoff, not spawn's stdin handling — confirmed by `yes | head` alone
+// (no spawn involved) hanging identically. The unit test instead feeds
+// spawn a live `scheduler::PipeReader` directly, the same seam
+// `Kernel::execute_with_pipe_stdin` uses for a frontend's own live process
+// stdin, bypassing the pipeline entirely.
 
 // ============================================================================
 // Bounded-Stream Overflow Tests (GH #191)
