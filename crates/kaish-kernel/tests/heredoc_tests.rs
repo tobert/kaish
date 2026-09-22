@@ -207,3 +207,30 @@ EOF"#)
         .expect("ok");
     assert_eq!(r.text_out(), "out: ) end\n");
 }
+
+/// A `$(...)` nested inside another `$(...)`, both inside an unquoted
+/// heredoc body — `CmdSubstFrame::Subst` push/pop must track depth across
+/// two levels, not just find the first `)`.
+#[tokio::test]
+async fn nested_command_substitution_inside_body_command_substitution() {
+    let k = setup().await;
+    let r = k
+        .execute("cat <<EOF\nouter $(echo $(echo inner) end)\nEOF")
+        .await
+        .expect("ok");
+    assert_eq!(r.text_out(), "outer inner end\n");
+}
+
+/// A `)` inside a `#` comment, inside the substitution, is not the
+/// substitution's own close either — the scanner is token-based, and a
+/// comment token runs to end of line, so the real close is the `)` on the
+/// next line.
+#[tokio::test]
+async fn comment_paren_inside_body_command_substitution() {
+    let k = setup().await;
+    let r = k
+        .execute("cat <<EOF\n$(echo hi # ) not a close\n)\nEOF")
+        .await
+        .expect("ok");
+    assert_eq!(r.text_out(), "hi\n");
+}
