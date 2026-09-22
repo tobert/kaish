@@ -2270,10 +2270,23 @@ impl Kernel {
                 }
             }
         }
+        // Wrapped so a trip is visible here: a fork polling the check cancels
+        // its OWN token (a pipeline stage's is a child), which never reaches
+        // this call's token, so the exit-code remap below reads the flag.
+        let interrupt_tripped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
+            let flag = interrupt_tripped.clone();
             #[allow(clippy::expect_used)]
             let mut slot = self.interrupt.lock().expect("interrupt poisoned");
-            *slot = opts.interrupt.clone();
+            *slot = opts.interrupt.clone().map(|check| {
+                std::sync::Arc::new(move || {
+                    let tripped = check();
+                    if tripped {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    tripped
+                }) as std::sync::Arc<dyn Fn() -> bool + Send + Sync>
+            });
         }
         let _interrupt_guard = ClearInterrupt(self);
 
@@ -2519,9 +2532,14 @@ impl Kernel {
                     let mut tail = ExecResult::success("");
                     tail.err = diagnostic;
                     cb_ref(&tail);
-                } else if effective_cancel.is_cancelled() && !result.ok() {
+                } else if effective_cancel.is_cancelled()
+                    || interrupt_tripped.load(std::sync::atomic::Ordering::SeqCst)
+                {
                     // The token, not the code: a killed child exits 128+signal,
-                    // and `exit 143` alone is not a cancel.
+                    // and `exit 143` alone is not a cancel. Unconditional, like
+                    // the timeout's 124: a pipeline takes its last stage's code,
+                    // and that stage often ends at 0 on the short input a
+                    // cancelled upstream left it.
                     result.code = 130;
                 }
                 result

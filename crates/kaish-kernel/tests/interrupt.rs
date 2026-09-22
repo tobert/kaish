@@ -188,3 +188,33 @@ async fn interrupt_stops_a_busy_loop_inside_a_pipeline_stage() {
     assert_eq!(r.code, 130, "interrupt maps to SIGINT-style exit 130; err: {}", r.err);
     assert!(polls.load(Ordering::Relaxed) >= 3, "check was actually polled");
 }
+
+/// A cancelled call reports 130 even when its last stage finished on its own.
+///
+/// `seq | wc -l` is the shape: the interrupt stops `seq`, its pipe closes, and
+/// `wc` counts what arrived, reaches EOF and exits 0. A pipeline takes its last
+/// stage's code, so the call used to report success with a truncated count —
+/// the answer a script would then act on. A timeout already overrides the code
+/// unconditionally (124); a cancel now does the same.
+#[tokio::test]
+async fn an_interrupted_pipeline_does_not_report_its_last_stage_success() {
+    let k = kernel();
+    let polls = Arc::new(AtomicU32::new(0));
+    let seen = polls.clone();
+    let opts = ExecuteOptions::new()
+        .with_interrupt(Arc::new(move || seen.fetch_add(1, Ordering::Relaxed) >= 3));
+
+    let r = tokio::time::timeout(
+        HANG,
+        k.execute_with_options("seq 1 50000000 | wc -l", opts),
+    )
+    .await
+    .expect("the pipeline did not return within the outer HANG timeout")
+    .expect("interrupted execute returns a result, not an error");
+    assert_eq!(
+        r.code, 130,
+        "a cancelled call reports the cancel, not wc's exit 0 over partial input; out={:?} err: {}",
+        r.text_out(),
+        r.err
+    );
+}
