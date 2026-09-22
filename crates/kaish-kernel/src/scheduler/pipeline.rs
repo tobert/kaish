@@ -854,17 +854,6 @@ impl PipelineRunner {
                     Err(e) => ExecResult::failure(1, e),
                 };
 
-                // Close the read end now that the stage is done reading, so the
-                // stage writing into it gets a broken pipe, the way `head -1`
-                // gives one. Held until the join instead, a stage that stops
-                // before reading everything (a usage error, say) leaves its
-                // writer blocked on a full pipe, and the join waits on that
-                // writer first. Stage 0 keeps its reader: that is the session's
-                // stdin, returned at the join.
-                if reads_from_pipe {
-                    stage_ctx.pipe_stdin = None;
-                }
-
                 // `2>&1` moves this stage's stderr into its stdout only once
                 // `apply_redirects` runs below — capture what stdout held
                 // before that so only the newly merged bytes get published.
@@ -880,7 +869,24 @@ impl PipelineRunner {
                 // (forked) dispatcher — the borrowed `dispatcher` can't cross
                 // the spawn boundary, and `stage_ctx.dispatcher` is `None` on a
                 // bare kernel, which is exactly the GH #90 gap.
+                //
+                // Isolate the write end, never the read end
+                // (`pipeline_nested_dispatch_tests.rs`): a redirect *target*
+                // can itself be a `$(…)` that reads this stage's own stdin
+                // (`echo piped | echo x > "pre-$(cat)-post"`), so
+                // `stage_ctx.pipe_stdin` must still be live here.
                 result = apply_redirects(result, stage.redirects(), &mut stage_ctx, &*task_dispatcher).await;
+
+                // Close the read end now that the stage (redirects included)
+                // is done reading, so the stage writing into it gets a broken
+                // pipe, the way `head -1` gives one. Held until the join
+                // instead, a stage that stops before reading everything (a
+                // usage error, say) leaves its writer blocked on a full pipe,
+                // and the join waits on that writer first. Stage 0 keeps its
+                // reader: that is the session's stdin, returned at the join.
+                if reads_from_pipe {
+                    stage_ctx.pipe_stdin = None;
+                }
 
                 if let Some(prior_out) = prior_out {
                     stage_ctx.publish_job_stdout_suffix(&prior_out, &result).await;

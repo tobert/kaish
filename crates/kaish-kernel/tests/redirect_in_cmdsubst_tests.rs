@@ -218,3 +218,31 @@ async fn pipeline_stage_cmdsubst_redirect_target_writes_file() {
     let f = kernel.execute("cat g.txt").await.expect("cat");
     assert_eq!(f.text_out().trim(), "piped", "the pipeline redirect target resolved: {f:?}");
 }
+
+/// A redirect target's `$(…)` can read the SAME stage's own stdin — the
+/// boundary `pipeline_nested_dispatch_tests.rs`'s
+/// `substitution_still_consumes_the_stage_stdin` pins for a stage's
+/// arguments applies to its redirect target too: isolate the write end,
+/// never the read end. Before the fix, `run_pipeline` dropped
+/// `stage_ctx.pipe_stdin` right after dispatch and before `apply_redirects`
+/// ran, so `$(cat)` in the redirect target here saw an already-closed reader
+/// instead of the piped bytes, and the file's name lost the middle piece.
+#[tokio::test]
+async fn redirect_target_cmdsubst_reads_the_stage_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute(r#"echo piped | echo x > "pre-$(cat)-post""#)
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "{r:?}");
+
+    let ls = kernel.execute("ls").await.expect("ls");
+    assert!(
+        ls.text_out().contains("pre-piped-post"),
+        "the redirect target's $(cat) must see the stage's own stdin, not an \
+         already-closed reader: {}",
+        ls.text_out()
+    );
+}
