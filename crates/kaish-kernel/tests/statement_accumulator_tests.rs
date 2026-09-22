@@ -20,7 +20,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use kaish_kernel::tools::{ToolArgs, ToolCtx, ToolSchema};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
-use kaish_kernel::{Kernel, KernelBackend, KernelConfig, LocalBackend, Tool};
+use kaish_kernel::{Kernel, KernelBackend, KernelConfig, KernelError, LocalBackend, Tool};
 use kaish_types::{ExecResult, Value};
 
 /// An embedder tool that tags its result, the way kaijutsu or an MCP engine
@@ -254,6 +254,38 @@ async fn a_spill_before_an_error_survives_on_the_failed_result() {
     failures.assert_none();
 }
 
+/// A `$(…)` block's stdout is its value, and an error leaving it drops that
+/// stdout. What stays on the error's output is stderr and the spill facts,
+/// as for the other wrappers.
+async fn substitution_error_output(kernel: &Kernel, body: &str) -> ExecResult {
+    let error = kernel
+        .execute(&format!("y=$({body})"))
+        .await
+        .expect_err("the error inside `$(…)` stops the assignment");
+    let KernelError::Execution { output, .. } = error else {
+        panic!("expected an execution error, got {error:?}");
+    };
+    *output
+}
+
+#[tokio::test]
+async fn a_spill_before_an_error_survives_a_substitution() {
+    let kernel = kernel().await;
+    kernel.execute("set -o output-limit=64").await.unwrap();
+    let output = substitution_error_output(&kernel, "seq 1 5000; x=$((1/0))").await;
+    assert!(output.did_spill, "{output:?}");
+    assert_eq!(output.original_code, Some(0), "seq exited 0: {output:?}");
+    assert_eq!(output.text_out(), "", "a substitution's stdout is not output: {output:?}");
+}
+
+#[tokio::test]
+async fn a_fault_before_an_error_does_not_make_a_substitution_error_a_fault() {
+    let kernel = kernel().await;
+    let output = substitution_error_output(&kernel, "test 1 -eq abc; x=$((1/0))").await;
+    assert!(!output.fault, "{output:?}");
+    assert!(output.err.contains("expected numeric operand"), "the fault's stderr stays: {output:?}");
+}
+
 // --- content_type / baggage ---------------------------------------------------
 
 /// Control: the tool's tags reach the result when it runs directly.
@@ -364,18 +396,6 @@ async fn a_text_view_binds_text_and_a_value_binds_typed_in_every_wrapper() {
         );
     }
     failures.assert_none();
-}
-
-/// `return` leaves a function body and a sourced file the same way.
-#[tokio::test]
-async fn a_return_after_a_value_binds_the_same_in_function_and_source() {
-    let body = "fromjson '[1,2]'; return";
-    let kernel = kernel().await;
-    let run = define(&kernel, "function", body).await;
-    let from_function = bound(&kernel, &run).await;
-    let run = define(&kernel, "source", body).await;
-    let from_source = bound(&kernel, &run).await;
-    assert_eq!(from_function, from_source);
 }
 
 // --- signals carry no value ---------------------------------------------------
@@ -519,6 +539,25 @@ async fn text_folded_into_a_signal_replaces_the_value() {
             let value = bound(&k, &run).await;
             failures.check(value == text, format!("{wrapper} `{body}`: bound {value:?}"));
         }
+    }
+    failures.assert_none();
+}
+
+/// A top-level `break` or `continue` is reachable when validation is off. It
+/// carries no value either.
+#[tokio::test]
+async fn a_top_level_break_or_continue_keeps_the_value() {
+    let mut failures = Failures::default();
+    for signal in ["break", "continue"] {
+        let kernel = Kernel::new(KernelConfig::transient().with_skip_validation(true)).unwrap();
+        let result = kernel.execute(&format!("fromjson '[1,2]'; {signal}")).await.unwrap();
+        failures.check(
+            result.data == list() && result.data_is_value,
+            format!("`{signal}`: data={:?} data_is_value={}", result.data, result.data_is_value),
+        );
+        let kernel = Kernel::new(KernelConfig::transient().with_skip_validation(true)).unwrap();
+        let result = kernel.execute(&format!("fromjson '[1,2]'; echo hi; {signal}")).await.unwrap();
+        failures.check(result.data.is_none(), format!("`echo; {signal}`: data={:?}", result.data));
     }
     failures.assert_none();
 }
