@@ -40,17 +40,22 @@ struct SpawnArgs {
     #[arg(long = "command")]
     command: Option<String>,
 
-    /// Arguments as a JSON array or a single string. Alternatively, list
-    /// them as trailing positionals after the command (`spawn cmd a b c`,
-    /// or `spawn --command cmd a b c`) — each positional is exactly one
-    /// literal argument, with no JSON parsing. Combining `--argv` with
-    /// positional arguments is an error; use one form or the other.
+    /// Arguments as a JSON array or a single string. A JSON array element
+    /// that isn't a string is stringified (`1` becomes `"1"`); a nested
+    /// array or record is refused. A value starting with `[` that doesn't
+    /// parse as a JSON array is refused too, not read as one literal
+    /// argument. Alternatively, list arguments as trailing positionals
+    /// after the command (`spawn cmd a b c`, or `spawn --command cmd a b
+    /// c`) — each positional is exactly one literal argument, with no JSON
+    /// parsing. Combining `--argv` with positional arguments is an error;
+    /// use one form or the other.
     #[arg(long = "argv")]
     argv: Option<String>,
 
     /// Environment variables added to the child, as a record or a JSON
-    /// object string. Applied on top of kaish's exported variables, or
-    /// alone with `--clear-env`.
+    /// object string. A non-string value is stringified (`1` becomes
+    /// `"1"`); a list or record VALUE is refused, naming the key. Applied
+    /// on top of kaish's exported variables, or alone with `--clear-env`.
     #[arg(long = "env")]
     env: Option<String>,
 
@@ -487,6 +492,27 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
+/// Convert a parsed JSON array into an argv list: each element becomes one
+/// argument (a string as itself, any other scalar stringified — `1` becomes
+/// `"1"`, matching a bareword's own typed-scalar handling), and a nested
+/// array or object anywhere in it is a loud error, never a silent drop or a
+/// JSON re-stringify. The one function both `Value::Json(Array)` (an actual
+/// typed array) and a JSON-array-shaped `--argv` STRING route through, so
+/// the two spellings of "argv is a JSON array" agree.
+fn json_array_to_argv(arr: &[serde_json::Value]) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &Value::Json(v.clone())) {
+            return Err(msg);
+        }
+        out.push(match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+    }
+    Ok(out)
+}
+
 /// Extract an array of strings from a Value.
 ///
 /// Supports:
@@ -505,35 +531,34 @@ fn value_to_string(value: &Value) -> String {
 /// so the collection-boundary message matches every other boundary.
 fn extract_string_array(value: &Value) -> Result<Vec<String>, String> {
     match value {
-        Value::Json(serde_json::Value::Array(arr)) => {
-            let mut out = Vec::with_capacity(arr.len());
-            for v in arr {
-                if let Some(msg) = crate::interpreter::structured_boundary_error(
-                    "a command argument",
-                    &Value::Json(v.clone()),
-                ) {
-                    return Err(msg);
-                }
-                out.push(match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                });
-            }
-            Ok(out)
-        }
+        Value::Json(serde_json::Value::Array(arr)) => json_array_to_argv(arr),
         Value::Json(obj @ serde_json::Value::Object(_)) => Err(
             crate::interpreter::structured_boundary_error("a command argument", &Value::Json(obj.clone()))
                 .unwrap_or_else(|| "argv must be a list of strings".to_string()),
         ),
         Value::String(s) => {
-            // Try to parse as JSON array
-            if s.starts_with('[')
-                && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
-                    return Ok(arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect());
-                }
+            // A string starting with `[` is read as JSON-array TEXT — the
+            // compact single-flag spelling of a whole array (`--argv
+            // '[1,2]'`). kaibo round-4 finding: this used to
+            // `.filter_map(|v| v.as_str()...)`, which silently DROPPED any
+            // non-string element (`--argv '[1,2]'` became an empty argv,
+            // `--argv '["a",[1]]'` became just `["a"]`) instead of the
+            // Value::Json(Array) arm's own stringify-scalars/refuse-nested
+            // rule just above — two different rules for the same JSON
+            // shape, depending only on which Value variant it arrived as.
+            // Same fix applies to an unparseable `[`-prefixed string
+            // (`--argv '[1,2'`): it used to fall through and become ONE
+            // literal argument, "[1,2", while `--env`'s equivalent already
+            // errored on an unparseable object-shaped string — inconsistent
+            // for the same mistake (a truncated/malformed structured
+            // value). Both now go through `json_array_to_argv` or refuse
+            // loudly, matching `--env`'s shape exactly.
+            if s.starts_with('[') {
+                return match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+                    Ok(arr) => json_array_to_argv(&arr),
+                    Err(e) => Err(format!("argv must be a JSON array, got a string that doesn't parse as one: {e}")),
+                };
+            }
             // Plain string is one argument — no implicit whitespace splitting
             Ok(vec![s.clone()])
         }
@@ -576,6 +601,31 @@ fn extract_positional_argv_element(value: &Value) -> Result<Vec<String>, String>
     }
 }
 
+/// Convert a parsed JSON object into an env var list: each value becomes one
+/// string (a string as itself, any other scalar stringified — `1` becomes
+/// `"1"`, matching `json_array_to_argv`'s own rule and `hermetic_env`'s
+/// stringify-scalars treatment of kaish's own exported vars), and a nested
+/// array or object as a value is a loud error naming the key, never a
+/// silent drop. The one function both `Value::Json(Object)` (a record) and
+/// a JSON-object-shaped `--env` STRING route through, so the two spellings
+/// of "env is a JSON object" agree.
+fn json_object_to_env(obj: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        if let Some(msg) =
+            crate::interpreter::structured_boundary_error(&format!("the value of env var '{k}'"), &Value::Json(v.clone()))
+        {
+            return Err(msg);
+        }
+        let text = match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        out.push((k.clone(), text));
+    }
+    Ok(out)
+}
+
 /// Extract a string→string mapping from a Value.
 ///
 /// Supports:
@@ -586,18 +636,15 @@ fn extract_positional_argv_element(value: &Value) -> Result<Vec<String>, String>
 ///
 /// A shape that is none of these — a scalar, an array, or a string that
 /// doesn't parse as a JSON object — is a loud error rather than a silent
-/// "no env vars at all".
+/// "no env vars at all". Neither spelling silently drops a key whose value
+/// isn't a JSON string either (kaibo round-4 finding: `.filter_map(|(k, v)|
+/// v.as_str()...)` used to do exactly that — `--env '{"FOO": 1}'` ran with
+/// no `FOO` at all) — see `json_object_to_env`.
 fn extract_string_object(value: &Value) -> Result<Vec<(String, String)>, String> {
     match value {
-        Value::Json(serde_json::Value::Object(obj)) => Ok(obj
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect()),
+        Value::Json(serde_json::Value::Object(obj)) => json_object_to_env(obj),
         Value::String(s) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s) {
-            Ok(obj) => Ok(obj
-                .iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()),
+            Ok(obj) => json_object_to_env(&obj),
             Err(e) => Err(format!("env must be a JSON object, got a string that doesn't parse as one: {e}")),
         },
         other => Err(format!(
@@ -1245,5 +1292,127 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(!result.ok(), "a non-object env must refuse, not silently run with no env vars: {result:?}");
         assert!(result.err.contains("env"), "should name the flag: {}", result.err);
+    }
+
+    /// kaibo round-4 finding: a JSON-array-shaped `--argv` STRING (as
+    /// opposed to an actual `Value::Json` array) used
+    /// `.filter_map(|v| v.as_str()...)`, silently DROPPING any non-string
+    /// element — `--argv '[1,2]'` ran with an EMPTY argv, not `["1", "2"]`.
+    #[tokio::test]
+    async fn test_spawn_argv_json_string_stringifies_non_string_elements() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named
+            .insert("argv".to_string(), Value::String("[1,2]".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(
+            result.text_out().trim(),
+            "1 2",
+            "non-string JSON array elements must be stringified, not dropped"
+        );
+    }
+
+    /// Same bug, mixed shape: `--argv '["a",[1]]'` used to drop the whole
+    /// nested-array element via `filter_map`, silently becoming `["a"]`
+    /// instead of refusing the structural boundary violation loudly (the
+    /// `Value::Json(Array)` arm already refused this correctly — only the
+    /// String-parsed arm had the silent-drop bug).
+    #[tokio::test]
+    async fn test_spawn_argv_json_string_refuses_nested_array_element() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named
+            .insert("argv".to_string(), Value::String(r#"["a",[1]]"#.into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a nested array element must refuse, not silently drop: {result:?}");
+    }
+
+    /// kaibo round-4 finding: `--argv '[1,2'` (unparseable, but starts with
+    /// `[`) used to fall through to "plain string, one argument" and run
+    /// with the literal text `"[1,2"` as a single argument — while `--env`'s
+    /// equivalent (an unparseable `{`-shaped string) already refused
+    /// loudly. The two are now consistent: both refuse.
+    #[tokio::test]
+    async fn test_spawn_argv_unparseable_bracket_string_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named.insert("argv".to_string(), Value::String("[1,2".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(
+            !result.ok(),
+            "an unparseable `[`-prefixed argv string must refuse, not become one literal argument: {result:?}"
+        );
+    }
+
+    /// kaibo round-4 finding: `--env '{"FOO": 1}'` used
+    /// `.filter_map(|(k, v)| v.as_str()...)`, silently dropping the `FOO`
+    /// key entirely (a non-string value) rather than stringifying it —
+    /// `printenv` would see no `FOO` at all.
+    #[tokio::test]
+    async fn test_spawn_env_json_string_stringifies_non_string_values() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named
+            .insert("env".to_string(), Value::String(r#"{"FOO": 1}"#.into()));
+        args.flags.insert("clear-env".to_string());
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(
+            result.text_out().contains("FOO=1"),
+            "a non-string JSON value must be stringified into the env var, not dropped: {}",
+            result.text_out()
+        );
+    }
+
+    /// Same bug, record spelling: a `Value::Json` object with a non-string
+    /// value hit the same `filter_map` drop.
+    #[tokio::test]
+    async fn test_spawn_env_record_stringifies_non_string_values() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert(
+            "env".to_string(),
+            Value::Json(serde_json::json!({"FOO": 1, "BAR": true})),
+        );
+        args.flags.insert("clear-env".to_string());
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(result.text_out().contains("FOO=1"), "{}", result.text_out());
+        assert!(result.text_out().contains("BAR=true"), "{}", result.text_out());
+    }
+
+    /// A record env value that is itself a nested list/record can't cross
+    /// the process boundary — refused loudly, naming the key, never a
+    /// silent drop or a JSON re-stringify.
+    #[tokio::test]
+    async fn test_spawn_env_refuses_nested_collection_value() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert(
+            "env".to_string(),
+            Value::Json(serde_json::json!({"FOO": [1, 2]})),
+        );
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a nested-collection env value must refuse, not silently drop: {result:?}");
+        assert!(result.err.contains("FOO"), "should name the key: {}", result.err);
     }
 }
