@@ -16,6 +16,8 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::read_repeatable_strings;
+#[cfg(feature = "subprocess")]
+use super::spawn::resolve_in_path;
 use crate::tools::{exec_context, external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::ValidationIssue;
 
@@ -322,7 +324,26 @@ async fn execute_with_env(
     clear: bool,
 ) -> ExecResult {
     use tokio::process::Command;
-    let mut cmd = Command::new(command);
+
+    // Resolve command path (PATH lookup if not absolute), same as
+    // spawn/exec/which: the kernel never reads the OS env, so a frontend
+    // that wants host PATH seeds it via `initial_vars`. `Command::new`
+    // resolves a bare name through the OS's OWN PATH when handed one
+    // directly — a hermeticity leak the other three external-command
+    // builtins already closed (kaibo round-4 finding: `env` was the one
+    // spawn site left reaching the host PATH on its own). No PATH in scope
+    // means nothing resolves; refuse with the same "command not found"
+    // shape spawn/exec/which already use.
+    let resolved_command = if command.starts_with('/') || command.starts_with("./") {
+        command.to_string()
+    } else {
+        let path_var = ctx.scope.get("PATH").map(value_to_string).unwrap_or_default();
+        match resolve_in_path(command, &path_var) {
+            Some(resolved) => resolved,
+            None => return ExecResult::failure(127, format!("env: {command}: command not found")),
+        }
+    };
+    let mut cmd = Command::new(&resolved_command);
     cmd.args(args);
 
     if clear {
@@ -529,5 +550,29 @@ mod tests {
         assert!(result.ok());
         assert!(result.text_out().contains('\0'));
         assert!(!result.text_out().ends_with('\n'));
+    }
+
+    /// kaibo round-4 finding: `env CMD` was the one external-command site
+    /// PATH removal (round 3) missed — `execute_with_env` handed a bare
+    /// command name straight to `Command::new`, which resolves it through
+    /// the HOST's own PATH, even when kaish's scope has none. `ls` is a
+    /// real command present on every Linux PATH, mirroring
+    /// `which.rs::test_which_is_hermetic_no_os_path_fallback` and
+    /// `spawn.rs`'s own `spawn_command_resolution_is_hermetic_no_os_path_
+    /// fallback`.
+    #[cfg(feature = "subprocess")]
+    #[tokio::test]
+    async fn test_env_command_is_hermetic_no_os_path_fallback() {
+        let mut ctx = make_ctx(); // fresh scope, no PATH set at all
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("ls".into()));
+
+        let result = Env.execute(args, &mut ctx).await;
+        assert!(
+            !result.ok(),
+            "with no PATH in scope, `env` must not fall back to the OS PATH: {result:?}"
+        );
+        assert_eq!(result.code, 127, "should refuse with the same command-not-found shape as spawn/exec/which: {result:?}");
     }
 }
