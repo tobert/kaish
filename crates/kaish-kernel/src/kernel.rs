@@ -2696,7 +2696,7 @@ impl Kernel {
                 ControlFlow::Break { result: mut r, .. } | ControlFlow::Continue { result: mut r, .. } => {
                     join_drained_stderr(&drained_stderr, drained_published_len, &mut r);
                     on_output(&r);
-                    accumulate_result(&mut result, &r);
+                    accumulate_signal_result(&mut result, &r);
                 }
             }
         }
@@ -5469,8 +5469,7 @@ impl Kernel {
                 Err(error) => {
                     let (err, published_len) = accumulated.stderr_mut();
                     self.drain_stderr_onto(err, published_len, ctx, false).await;
-                    let prior = accumulated.into_prior_output();
-                    return Err(fault_leaving_capture(prior.err, prior.stderr_published_len, error));
+                    return Err(fault_leaving_capture(accumulated.into_prior_output(), error));
                 }
             };
 
@@ -8034,21 +8033,21 @@ fn with_prior_output(prior: ExecResult, mut error: anyhow::Error) -> anyhow::Err
         carrier.output = merged;
         return error;
     }
-    if prior.text_out().is_empty() && prior.err.is_empty() && prior.out_bytes().is_none() {
+    // A spill is a fact about output even when none of it is left to show.
+    if prior.text_out().is_empty() && prior.err.is_empty() && prior.out_bytes().is_none() && !prior.did_spill {
         return error;
     }
     anyhow::Error::new(crate::error::FaultWithOutput { output: prior, error })
 }
 
 /// A command substitution captures stdout rather than printing it, so a fault
-/// leaving one keeps only stderr: the block's own and what the error carries.
-fn fault_leaving_capture(captured_err: String, stderr_published_len: usize, mut error: anyhow::Error) -> anyhow::Error {
+/// leaving one drops stdout: the block's own and what the error carries.
+/// Stderr and the spill facts stay.
+fn fault_leaving_capture(mut prior: ExecResult, mut error: anyhow::Error) -> anyhow::Error {
     if let Some(carrier) = error.downcast_mut::<crate::error::FaultWithOutput>() {
         carrier.output.clear_stdout();
     }
-    let mut prior = ExecResult::success("");
-    prior.err = captured_err;
-    prior.stderr_published_len = stderr_published_len;
+    prior.clear_stdout();
     with_prior_output(prior, error)
 }
 
