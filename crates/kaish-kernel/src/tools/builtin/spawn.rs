@@ -15,14 +15,14 @@
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+use crate::spawn::{OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy};
 use crate::tools::builtin::get_path_string;
 use crate::tools::{exec_context,
     external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable,
@@ -192,211 +192,97 @@ impl Tool for Spawn {
         // Get clear_env flag
         let clear_env = args.has_flag("clear-env");
 
-        // Build command
-        let mut cmd = Command::new(&command);
-        cmd.args(&argv);
-        // Backstop: kill the OS process if this Command/Child is dropped
-        // before we have waited on it — an early return between the spawn
-        // and the wait would otherwise leave the child running, a real leak
-        // for a long-lived agent. The timeout arm below kills explicitly so
-        // it can read the child's partial output first. Mirrors the same
-        // call in dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
-        cmd.kill_on_drop(true);
-
-        // Set working directory if specified
-        if let Some(ref dir) = cwd {
-            let vfs_cwd = ctx.resolve_path(dir);
-            // Resolve VFS path to real filesystem path
-            let real_cwd = match ctx.backend.resolve_real_path(&vfs_cwd) {
-                Some(p) => p,
-                None => {
-                    return ExecResult::failure(
-                        1,
-                        format!("spawn: cwd '{}' is not on a real filesystem", vfs_cwd.display()),
-                    )
+        // Working directory: an explicit `--cwd` resolves through the VFS,
+        // same as before. With none given, snapshot the kernel process's own
+        // cwd — `spawn` has never followed the shell's logical `cwd` here
+        // (unlike the external-command path), and `spawn_process` needs a
+        // concrete `PathBuf` rather than "leave it unset".
+        let cwd_path = match &cwd {
+            Some(dir) => {
+                let vfs_cwd = ctx.resolve_path(dir);
+                match ctx.backend.resolve_real_path(&vfs_cwd) {
+                    Some(p) => p,
+                    None => {
+                        return ExecResult::failure(
+                            1,
+                            format!("spawn: cwd '{}' is not on a real filesystem", vfs_cwd.display()),
+                        )
+                    }
                 }
-            };
-            cmd.current_dir(&real_cwd);
-        }
+            }
+            None => match std::env::current_dir() {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("spawn: failed to get current directory: {e}")),
+            },
+        };
 
-        if clear_env {
-            cmd.env_clear();
-        }
-
-        for (key, value) in &env_vars {
-            cmd.env(key, value);
-        }
+        // Env: hermetic (`--clear-env`) starts empty; otherwise inherit this
+        // process's own environment, same as leaving `Command::env_clear()`
+        // uncalled did before. `--env` entries are applied after either
+        // base, so they win on a name collision — `spawn_process` always
+        // clears first and takes exactly what it is given, so the ambient
+        // vars have to be listed explicitly here now.
+        let mut env: Vec<(String, String)> = if clear_env { Vec::new() } else { std::env::vars().collect() };
+        env.extend(env_vars);
 
         // Handle stdin — forward raw bytes so binary survives into the child.
+        // `StdinPolicy::Null` (not an empty `Piped`) so a command reading
+        // stdin sees immediate EOF rather than a pipe that never closes.
         let stdin_data = match ctx.read_stdin_to_bytes().await {
             Ok(d) => d,
             Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
         };
-        cmd.stdin(if stdin_data.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
+        let stdin = match stdin_data {
+            Some(data) => StdinPolicy::Piped { prefix: Some(data), pipe: None },
+            None => StdinPolicy::Null,
+        };
+
+        let mut spawn_ctx = SpawnContext::from_exec_context(ctx);
+
+        // `--timeout` is spawn's own deadline, independent of whatever
+        // cancellation the caller's `ctx.cancel` already carries. A child
+        // token lets `spawn_process`'s SIGTERM-grace-SIGKILL cascade reach
+        // this child on either signal, while `timed_out` tells the two
+        // apart afterward: `ctx.cancel` itself is never touched, so a real
+        // cancellation is still readable from it once `spawn_process`
+        // returns. Mirrors the `timeout` builtin's own token derivation.
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timer = timeout_ms.map(|ms| {
+            let deadline_token = spawn_ctx.cancel.child_token();
+            spawn_ctx.cancel = deadline_token.clone();
+            let timed_out = timed_out.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                timed_out.store(true, Ordering::SeqCst);
+                deadline_token.cancel();
+            })
         });
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
 
-        // Put the child in its own process group, same mechanism the
-        // shared spawner uses (`crate::spawn::spawn_process`'s
-        // `setpgid(0, 0)` in `pre_exec`, also duplicated in
-        // `dispatch.rs`) — so a timeout's kill below can reach a
-        // grandchild the child backgrounded (`sh -c 'sleep 100 & wait'`),
-        // not just the direct child. Without this, `--timeout` killed the
-        // direct child and left the grandchild running, and if the
-        // grandchild still held the stdout/stderr pipe open, the drains
-        // below never reached EOF either.
-        #[cfg(unix)]
-        // SAFETY: setpgid is async-signal-safe per POSIX; safe to call
-        // between fork and exec.
-        #[allow(unsafe_code)]
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
-                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
-            });
-        }
-
-        // Spawn the process
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => return ExecResult::failure(127, format!("spawn: {}: {}", command, e)),
-        };
-        // Captured right after spawn, before any wait/kill can reap the
-        // child and clear `Child::id()`. `setpgid(0, 0)` above makes this
-        // pid double as the child's own process-group id.
-        #[cfg(unix)]
-        let child_pgid = child.id().map(|id| nix::unistd::Pid::from_raw(id as i32));
-
-        // Write stdin if present
-        if let Some(data) = stdin_data
-            && let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                if let Err(e) = stdin.write_all(&data).await {
-                    return ExecResult::failure(1, format!("spawn: failed to write stdin: {}", e));
-                }
-            }
-
-        // Drain both pipes into tasks writing to shared buffers, rather than
-        // letting `wait_with_output()` own them. That future owns everything
-        // it has read, so a timeout OR a cancel used to drop the child's
-        // partial output with it: a child that printed a diagnostic and then
-        // hung reported nothing but the timeout/cancel note. Needed
-        // unconditionally now — a cancel can interrupt either an untimed or
-        // a `--timeout`-bounded wait. Shared buffers also mean an aborted
-        // drain still leaves its bytes here.
-        let captured_stdout = Arc::new(Mutex::new(Vec::new()));
-        let captured_stderr = Arc::new(Mutex::new(Vec::new()));
-        let stdout_task = tokio::spawn(drain_pipe(child.stdout.take(), captured_stdout.clone()));
-        let stderr_task = tokio::spawn(drain_pipe(child.stderr.take(), captured_stderr.clone()));
-
-        // Race the wait against `ctx.cancel` the way the shared spawner's
-        // `wait_or_kill` (kernel.rs) does — `biased` so an already-fired
-        // token wins over a child that happens to exit at the same instant.
-        // Without this race, a Ctrl-C or an embedder/job cancellation never
-        // reached `spawn`'s child at all: `child.wait()`/`wait_with_output()`
-        // only resolves when the child exits on its own or the `--timeout`
-        // deadline elapses.
-        enum WaitOutcome {
-            Exited(Option<i32>),
-            TimedOut,
-            Cancelled,
-        }
-        let outcome = if let Some(ms) = timeout_ms {
-            tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => WaitOutcome::Cancelled,
-                r = tokio::time::timeout(Duration::from_millis(ms), child.wait()) => match r {
-                    // A child that died by signal has no code. It is not a
-                    // timeout, and reading `None` as one would report 124 and
-                    // a "timed out" line for a segfault.
-                    Ok(Ok(status)) => WaitOutcome::Exited(status.code()),
-                    Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
-                    Err(_) => WaitOutcome::TimedOut,
-                },
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => WaitOutcome::Cancelled,
-                r = child.wait() => match r {
-                    Ok(status) => WaitOutcome::Exited(status.code()),
-                    Err(e) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
-                },
-            }
+        let request = SpawnRequest {
+            executable: PathBuf::from(&command),
+            argv,
+            cwd: cwd_path,
+            env,
+            stdin,
+            output: OutputPolicy::Captured,
+            label: format!("spawn: {command}"),
         };
 
-        // Bound before the match below consumes `outcome` — the combined
-        // `TimedOut | Cancelled` arm runs the identical kill, but the two
-        // still need to report differently afterward (124 + a timeout line
-        // vs. a cancel note and the top-level cancel normalization).
-        let was_timeout = matches!(outcome, WaitOutcome::TimedOut);
-        let was_cancelled = matches!(outcome, WaitOutcome::Cancelled);
-
-        let mut kill_note = None;
-        let (exit_code, expired, cancelled) = match outcome {
-            WaitOutcome::Exited(code) => (code, false, false),
-            WaitOutcome::TimedOut | WaitOutcome::Cancelled => {
-                // Kill first: a reader reaches EOF only once every write end
-                // of the pipe is closed. Kill the whole process group —
-                // `child.start_kill()` alone only reaches the direct child,
-                // and a grandchild it backgrounded (and any pipe write-end
-                // fd that grandchild inherited) would otherwise survive
-                // either a timeout or a cancel.
-                #[cfg(unix)]
-                let kill_result = match child_pgid {
-                    Some(pgid) => nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
-                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
-                    // No pid to target (spawn raced a reap) — nothing
-                    // left to kill.
-                    None => Ok(()),
-                };
-                #[cfg(not(unix))]
-                let kill_result = child.start_kill();
-                match kill_result {
-                    // Unreachable for an unreaped child on Unix. Report
-                    // it and skip the wait, which would have nothing to
-                    // reap; `kill_on_drop` is still the backstop.
-                    Err(e) => kill_note = Some(format!("spawn: failed to kill: {e}")),
-                    Ok(()) => {
-                        if let Err(e) = child.wait().await {
-                            return ExecResult::failure(1, format!("spawn: failed to wait: {}", e));
-                        }
-                    }
-                }
-                (None, was_timeout, was_cancelled)
-            }
-        };
-
-        // Bounded join. The child is reaped, so everything it wrote is
-        // already in the pipe buffer and the drains need only a moment
-        // to pick it up. On Unix the process-group kill above reaches
-        // a grandchild too, closing its copy of the write end — but
-        // the kill and the drain race, and on a non-Unix target
-        // `start_kill()` only ever reached the direct child, so a
-        // grandchild holding the write end could still keep EOF from
-        // arriving. The grace collects what is there and then stops
-        // waiting either way; the bytes are in the shared buffers
-        // regardless.
-        let stdout = finish_drain(stdout_task, &captured_stdout).await;
-        let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
-
-        if let Some(note) = kill_note {
-            append_line(&mut stderr, note.as_bytes());
+        let mut result = crate::spawn::spawn_process(request, &spawn_ctx).await;
+        if let Some(timer) = timer {
+            timer.abort();
         }
-        if expired {
-            append_line(
-                &mut stderr,
-                format!("spawn: {}: timed out after {}ms", command, timeout_ms.unwrap_or_default()).as_bytes(),
-            );
+
+        if timed_out.load(Ordering::SeqCst) {
             // 124 is `timeout(1)`'s code, and the partial output the child
-            // did produce rides along with it.
-            capture_to_result(Some(124), stdout, stderr)
-        } else if cancelled {
-            append_line(&mut stderr, format!("spawn: {}: cancelled", command).as_bytes());
+            // did produce rides along with it — `spawn_process` keeps
+            // whatever it captured before the kill.
+            result.code = 124;
+            append_line(
+                &mut result.err,
+                &format!("spawn: {}: timed out after {}ms", command, timeout_ms.unwrap_or_default()),
+            );
+        } else if ctx.cancel.is_cancelled() {
             // 130 is the documented cancellation code (`sleep`'s own
             // `ctx.cancel` arm returns it the same way). A foreground call
             // gets 130 either way — `Kernel::execute_with_options`'s
@@ -408,82 +294,21 @@ impl Tool for Spawn {
             // cancel-aware rewrite. Reporting 130 here directly, rather than
             // relying on a normalization only one of spawn's two callers
             // applies, is what makes `killed:130` true for both.
-            capture_to_result(Some(130), stdout, stderr)
-        } else {
-            capture_to_result(exit_code, stdout, stderr)
+            result.code = 130;
+            append_line(&mut result.err, &format!("spawn: {}: cancelled", command));
         }
+        result
     }
 }
 
-/// How long a reaped child's drains get to pick up what is already buffered
-/// before the wait is abandoned. Only a grandchild holding the pipe's write
-/// end open makes this matter.
-const DRAIN_GRACE: Duration = Duration::from_millis(200);
-
-/// Read one child pipe to EOF into a shared buffer.
-///
-/// The buffer is shared so an abandoned drain still leaves the bytes it read.
-/// A read error ends the drain and is returned rather than discarded.
-async fn drain_pipe<R>(pipe: Option<R>, into: Arc<Mutex<Vec<u8>>>) -> Option<std::io::Error>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    use tokio::io::AsyncReadExt;
-    let mut pipe = pipe?;
-    let mut chunk = [0u8; 8192];
-    loop {
-        match pipe.read(&mut chunk).await {
-            Ok(0) => return None,
-            Ok(n) => into.lock().await.extend_from_slice(&chunk[..n]),
-            Err(e) => return Some(e),
-        }
+/// Append a line to a text diagnostic, adding the separator only when the
+/// text already there does not end in one.
+fn append_line(buffer: &mut String, line: &str) {
+    if !buffer.is_empty() && !buffer.ends_with('\n') {
+        buffer.push('\n');
     }
-}
-
-/// Give a drain [`DRAIN_GRACE`] to finish, then take what it collected.
-///
-/// A read error or a panicked reader is appended to the bytes as a
-/// diagnostic — neither is dropped, and neither replaces the output.
-async fn finish_drain(
-    mut task: tokio::task::JoinHandle<Option<std::io::Error>>,
-    buffer: &Arc<Mutex<Vec<u8>>>,
-) -> Vec<u8> {
-    let note = match tokio::time::timeout(DRAIN_GRACE, &mut task).await {
-        Ok(Ok(None)) => None,
-        Ok(Ok(Some(e))) => Some(format!("spawn: failed to read child output: {e}")),
-        Ok(Err(e)) => Some(format!("spawn: output reader did not finish: {e}")),
-        // The grace elapsed: a surviving grandchild still holds the pipe's
-        // write end, so EOF will not arrive. Abort rather than detach — a
-        // detached reader would hold the pipe for the life of the process —
-        // and say the output may be short rather than call it complete.
-        Err(_) => {
-            task.abort();
-            Some("spawn: output may be incomplete: a surviving child still holds the pipe".to_string())
-        }
-    };
-    let mut bytes = std::mem::take(&mut *buffer.lock().await);
-    if let Some(note) = note {
-        append_line(&mut bytes, note.as_bytes());
-    }
-    bytes
-}
-
-/// Append a line to captured output, adding the separator only when the
-/// bytes already there do not end in one.
-fn append_line(buffer: &mut Vec<u8>, line: &[u8]) {
-    if !buffer.is_empty() && !buffer.ends_with(b"\n") {
-        buffer.push(b'\n');
-    }
-    buffer.extend_from_slice(line);
-    buffer.push(b'\n');
-}
-
-/// Build a result from a child's captured stdout/stderr: stdout keeps binary
-/// intact (text if valid UTF-8, else a Bytes result); stderr stays text.
-fn capture_to_result(code: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8>) -> ExecResult {
-    let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code.unwrap_or(-1) as i64);
-    result.err = String::from_utf8_lossy(&stderr).into_owned();
-    result
+    buffer.push_str(line);
+    buffer.push('\n');
 }
 
 /// Friendly, actionable error for the "nowhere to spawn" case: the shell's
