@@ -10,6 +10,20 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`Kernel::execute_background_with_options`** — run a whole program as a
+  job and get its `JobId`; a program that fails to parse or validate
+  registers no job. Stdout streams as the program runs; stderr reaches the
+  job stream after each top-level statement.
+- **`JobInfo.did_spill` / `JobInfo.original_code`** — a finished job now says
+  whether its exit code is its command's own. `failed:3` stays the status
+  string for a spilled job and a real exit 3; these two separate them, in
+  `jobs --json` as well.
+- **`kaish --plan` reports a `warnings` array** when the validator has
+  something to say about a program it will still run. The first entry is
+  W008, a literal operand a `[[ ]]` numeric comparison will refuse.
+
 ### Fixed
 
 - Usage errors across the builtins now exit 2 instead of 1: a missing operand,
@@ -19,6 +33,70 @@ breaking entries are marked **BREAKING**.
 - `read` and `glob` join the builtins that spend exit 1 on a result. `read`
   exits 1 at end of input, which is what ends a `while read` loop, and `glob`
   exits 1 when a pattern matched nothing; neither is a usage error.
+- `spawn --timeout` keeps what the child already wrote. A child that printed
+  a diagnostic and then hung reported 124 and nothing else; the partial
+  stdout and stderr now ride the 124, with the timeout line after them.
+- A child killed by a signal inside its `spawn --timeout` is no longer
+  reported as a timeout. It had returned 124 and a "timed out" line for a
+  segfault, because a signal death and an expiry read the same.
+- `patch` refuses a byte offset inside a multi-byte character instead of
+  aborting the kernel. `Insert { offset: 1 }` into a file starting with `é`
+  took the process down; it names the character the offset splits now.
+- `patch` refuses line 0 rather than editing line 1. `PatchOp`'s line
+  operations are 1-indexed and 0 was silently mapped onto the first line.
+- A wrapped command refuses `json_output()` on a verb with children. A node
+  never runs, so the declaration was accepted at `build()` and ignored
+  everywhere after, while the schema still published `typed_substitution`.
+- A gather row keeps the worker's own exit code when its stdout is binary.
+  The row was forced to a nonzero `code` the worker never returned; `ok:false`
+  and `err` carry the refusal, and the aggregate is still 123.
+- A fault inside `$(...)` names both assignments. `y=$(x=$((1/0)))` reported
+  "failed to evaluate assignment" twice with nothing to tell the two apart;
+  each frame names its target now.
+- A validation advisory survives a fault in the same program. A program that
+  warned and then faulted handed back an error with the warning missing.
+
+- An embedder tool's stdout and a tool's `--help` text now reach a background
+  job's stdout stream. `embedder_tool &` and `ls --help &` left
+  `/v/jobs/N/stdout` empty; the output was only in the job's result.
+- A streaming caller (`kaish -c`, `execute_with_options_streaming`) now
+  receives stderr drained during an `exit` statement and the watchdog's
+  timeout line. The timeout line follows any stderr the program wrote
+  instead of being dropped.
+- A cancel that fires before a program's first statement now stops it. An
+  embedder or job token cancelled that early let the program run to
+  completion.
+- A cancelled call exits 130 even when it ends a child by signal. A single
+  external command reported the child's 143 or 137 instead.
+- A runtime fault keeps the output that ran before it. `echo left &&
+  x=$((1/0))` shows `left`, and a function that faults exits 1 with what it
+  printed and the full cause instead of only the outermost message.
+- A spilled statement no longer masks a later statement's exit.
+  `original_code` belongs to the statement `code` reports, so an embedder
+  reading `original_code.unwrap_or(code)` sees `seq 1 5000; false` exit 1.
+  `did_spill` still stays true once anything spilled.
+- A background job's stdout stream (`/v/jobs/N/stdout`) now holds only the
+  job's own output, in order: builtin output is published when each builtin
+  returns, and output captured by `$(...)`, redirected with `>`, or read by
+  `scatter` no longer appears in it.
+- An embedder tool no longer runs with the kernel's context lock held. A
+  backend tool that called back into the kernel blocked forever; it runs on
+  the calling command's context now, the same as a builtin.
+- `timeout` now reaches an external command inside a function body, inside a
+  piped function body, and inside a `$(...)` in that body's arguments. The
+  timer's cancel token stopped at the function boundary and the command ran
+  to completion.
+- A `$(...)` in a here-string, a heredoc body, or a `< file` target now runs
+  under the cancel token and watchdog of the command being redirected.
+  `f() { cat <<< $(slow); }; timeout 1 f` ran past its deadline.
+- An embedder tool now sees the call's cancel token and watchdog, so a
+  request timeout stops it. It had been receiving the kernel's.
+- A command substitution no longer writes into the enclosing pipe, and keeps
+  its own stderr. `echo "got [$(cat f)]" | cat` printed only the file, and a
+  substitution's stderr in a middle stage was dropped.
+- A pipeline's last stage now returns its ignore config and output limit,
+  not only scope, cwd and aliases. `echo x | kaish-output-limit off` left the
+  limit on, while the same command run on its own turned it off.
 - `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
   unreadable file, or a missing pattern argument exits 2, so a caller cannot
   read a broken search as a negative answer. `diff` argument errors exit 2 to
@@ -42,9 +120,15 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
+  `Execution { error, output }`. `output` holds what ran before the fault; a
+  `KernelError::Execution(e)` pattern no longer compiles.
 - **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive a
   `ToolCtx` and never implement one, so this changes no supported use, but an
   out-of-tree implementation no longer compiles.
+- **BREAKING** (`kaish-kernel`): `CommandDispatcher::eval_expr` takes
+  `&mut ExecContext`. It evaluates a redirect operand on the calling
+  command's context now; the old `&ExecContext` was ignored.
 - A kernel builtin dispatched with a context that is not the kernel's now
   panics instead of returning exit 1 with an internal message. Sealing
   `ToolCtx` is what makes that branch unreachable: `ToolRegistry::get` and

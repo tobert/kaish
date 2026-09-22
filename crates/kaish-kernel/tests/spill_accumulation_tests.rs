@@ -19,7 +19,11 @@ use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::ExecResult;
 
 async fn run(script: &str) -> ExecResult {
-    let k = Kernel::new(KernelConfig::repl()).expect("kernel");
+    // `isolated()` is NoLocal, which forces in-memory truncation. `repl()` is
+    // Passthrough and spills to disk, so these tests wrote a ~600 KB file into
+    // the host spill directory on every run. Truncation sets `did_spill`
+    // either way, which is all these tests read.
+    let k = Kernel::new(KernelConfig::isolated()).expect("kernel");
     k.execute(script).await.expect("kernel execute")
 }
 
@@ -61,4 +65,115 @@ async fn a_block_that_did_not_spill_reports_false() {
     let r = run("kaish-output-limit set 2K; echo a; echo b").await;
     assert!(!r.did_spill, "nothing was truncated here");
     assert_eq!(r.code, 0);
+}
+
+// ---------------------------------------------------------------------------
+// `original_code` tracks the same statement `code` does — the last one.
+//
+// `accumulate_result` kept the FIRST `original_code` in a block, so a spill in
+// statement 1 left its code standing over every statement after it. An
+// embedder reading the documented "real exit of a capped result",
+// `original_code.unwrap_or(code)`, then settled `seq 1 5000; false` as
+// success: `code` was `false`'s 1, but `original_code` was still `seq`'s 0.
+//
+// `did_spill` is sticky because truncation is a fact about the OUTPUT that a
+// later statement cannot undo. `original_code` is not a fact about output — it
+// is what `code` would have been without the spill remap, so it belongs to
+// whichever statement `code` belongs to.
+// ---------------------------------------------------------------------------
+
+/// What an embedder computes as "the real exit of a capped result"
+/// (`docs/EMBEDDING.md`, exit code 3). The tests assert this rather than the
+/// field shape: it is the value a caller acts on.
+fn real_exit(r: &ExecResult) -> i64 {
+    r.original_code.unwrap_or(r.code)
+}
+
+/// A statement that spills and fails, so its own `original_code` is non-zero:
+/// `pipefail` reports the rightmost failing stage, and `seq`'s output spills.
+const FAILING_SPILL: &str = "set -o pipefail; false | seq 1 100000";
+
+/// The bug: a spill in statement 1 hid statement 2's failure.
+#[tokio::test]
+async fn a_spill_does_not_mask_a_later_failure() {
+    let r = run("kaish-output-limit set 2K; seq 1 100000; false").await;
+    assert!(r.did_spill, "statement 1 was truncated, and that stays reported");
+    assert_eq!(
+        real_exit(&r),
+        1,
+        "`false` exited 1; a spill earlier in the block must not report 0"
+    );
+}
+
+/// The other direction: the block still reports success when it ends in it.
+#[tokio::test]
+async fn a_spill_before_a_success_reports_success() {
+    let r = run("kaish-output-limit set 2K; seq 1 100000; echo after").await;
+    assert!(r.did_spill, "statement 1 was truncated");
+    assert_eq!(real_exit(&r), 0, "`echo` exited 0");
+}
+
+/// The control: a statement that spills AND fails reports its own failure.
+#[tokio::test]
+async fn a_failing_spill_alone_reports_its_failure() {
+    let r = run(&format!("kaish-output-limit set 2K; {FAILING_SPILL}")).await;
+    assert!(r.did_spill, "`seq`'s output was truncated");
+    assert_eq!(r.code, 3, "the spill remap owns `code`");
+    assert_eq!(
+        real_exit(&r),
+        1,
+        "and `original_code` carries the pipefail status the remap replaced"
+    );
+}
+
+/// …and a statement after it moves the reported exit, as `code` already does.
+#[tokio::test]
+async fn a_success_after_a_failing_spill_reports_success() {
+    let r = run(&format!("kaish-output-limit set 2K; {FAILING_SPILL}; true")).await;
+    assert!(r.did_spill, "the truncation still happened");
+    assert_eq!(
+        real_exit(&r),
+        0,
+        "the block's last statement succeeded; an earlier failure is not the block's status"
+    );
+}
+
+/// A block that never spilled leaves `original_code` unset, as documented.
+#[tokio::test]
+async fn no_spill_leaves_original_code_unset() {
+    let r = run("kaish-output-limit set 2K; echo a; false").await;
+    assert!(!r.did_spill);
+    assert_eq!(r.code, 1, "ordinary shell status");
+    assert_eq!(
+        r.original_code, None,
+        "`original_code` is present only alongside a spill"
+    );
+}
+
+/// `exit` takes the same path: the exit arm assigns `code` after the fold, so
+/// a spill before it had left `original_code` answering for a code that was
+/// replaced. `seq …; exit 5` reported 0.
+#[tokio::test]
+async fn a_spill_before_an_exit_reports_the_exit_code() {
+    let r = run("kaish-output-limit set 2K; seq 1 100000; exit 5").await;
+    assert!(r.did_spill, "statement 1 was truncated");
+    assert_eq!(real_exit(&r), 5, "`exit 5` set the status; the spill did not");
+}
+
+/// A `break` carries no code of its own, so a loop that spills and then breaks
+/// reports the loop's 0. `original_code` follows `code` here as everywhere
+/// else: the truncation stays reported, the pre-break failure does not become
+/// the loop's status. Pinned because the signal fold reaches
+/// `accumulate_result` with a control-flow placeholder rather than a
+/// statement.
+#[tokio::test]
+async fn a_loop_that_spills_then_breaks_reports_the_loop_status() {
+    let r = run(
+        "kaish-output-limit set 2K; set -o pipefail; \
+         for i in 1; do false | seq 1 100000; break; done",
+    )
+    .await;
+    assert!(r.did_spill, "the body truncated, and that stays reported");
+    assert_eq!(r.code, 0, "`break` leaves the loop at 0");
+    assert_eq!(real_exit(&r), 0, "`original_code` answers for that same 0");
 }

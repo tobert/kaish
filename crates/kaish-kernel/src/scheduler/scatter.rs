@@ -172,7 +172,10 @@ impl ScatterGatherRunner {
             };
             (text, data)
         } else {
+            // The stages before `scatter` produce its input, not job output.
+            let stream_output = std::mem::replace(&mut ctx.background_stream_output, false);
             let mut result = runner.run_sequential(pre_scatter, ctx, &*self.sequential_dispatcher).await;
+            ctx.background_stream_output = stream_output;
             // GH #250: `run_sequential` never applies the output-limit spill
             // check or the `did_spill` -> exit-3 remap
             // (`output_limit::apply_spill_contract`) — that seam only
@@ -233,6 +236,9 @@ impl ScatterGatherRunner {
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.
         if post_gather.is_empty() || gathered.code != 0 {
+            // gather's rows are built here rather than by a dispatched
+            // command, so nothing else publishes them to a job stream.
+            ctx.publish_job_stdout(&gathered).await;
             gathered
         } else {
             ctx.set_stdin_with_data(
@@ -246,7 +252,7 @@ impl ScatterGatherRunner {
     /// Run the parallel stage for all items.
     ///
     /// Each worker gets its own forked dispatcher via
-    /// [`CommandDispatcher::fork`]. The fork snapshots per-session state
+    /// [`CommandDispatcher::fork_attached`], so a cancel cascades into it. The fork snapshots per-session state
     /// (scope, cwd, aliases, user tools) so workers can run concurrently
     /// without racing. Forks are cheap (Scope is COW, plus a few Arc bumps),
     /// and they unlock the full dispatch chain inside workers — user tools,
@@ -280,19 +286,20 @@ impl ScatterGatherRunner {
 
             // Build the worker context FROM THE PARENT, not from scratch. A
             // from-scratch `ExecContext::with_backend_and_scope` starts
-            // `watchdog = None`; `dispatch_command` then syncs that `None` INTO
-            // the subkernel (kernel.rs `ec.watchdog = ctx.watchdog.clone()`),
-            // clobbering the fork's inherited watchdog — so inside a worker the
-            // script clock is gone and any `ctx.patient` hold suspends a
-            // *missing* timer, yielding false-positive request timeouts that
-            // kill the worker. `child_for_pipeline` clones exactly what a worker
+            // `watchdog = None`, and commands in the worker read the watchdog
+            // from this context — so the script clock would be gone and any
+            // `ctx.patient` hold would suspend a *missing* timer, yielding
+            // false-positive request timeouts that kill the worker.
+            // `child_for_pipeline` clones exactly what a worker
             // needs in one shot — watchdog, vfs_budget, aliases, ignore_config,
-            // output_limit, allow_external_commands, backend, cwd, scope,
+            // output_limit, allow_unwrapped_commands, backend, cwd, scope,
             // dispatcher — replacing the manual field-copy that was easy to let
             // drift (and that dropped the watchdog). `base_ctx` is a borrow (not
             // `'static`), so the child MUST be built here and MOVED into the
             // spawn — it cannot be constructed inside the closure.
             let mut worker_ctx = base_ctx.child_for_pipeline();
+            // A worker's stdout is gather's input, not job output.
+            worker_ctx.background_stream_output = false;
             // Per-worker TYPED binding — the same json→Value conversion the
             // for-loop uses for `$(cmd)` items (GH #73), so a record element
             // subscripts as `${ITEM[k]}`.
@@ -521,11 +528,12 @@ fn strip_one_trailing_newline(s: &str) -> &str {
 /// riding through the row as if it were the worker's real text output. Per
 /// "crash beats corrupt" we go loud at row granularity instead: `try_text_out`
 /// catches it, the row is forced `ok:false` with a clear `err` (never a
-/// lossily-decoded `out`), and the OTHER rows are unaffected — see
+/// lossily-decoded `out`) while `code` keeps the worker's own exit code, and
+/// the OTHER rows are unaffected — see
 /// `docs/binary-data.md` for the broader binary-data plan.
 fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
     let mut ok = r.result.ok() && !r.timed_out;
-    let mut code = if r.timed_out { 124 } else { r.result.code };
+    let code = if r.timed_out { 124 } else { r.result.code };
 
     let (out_text, err_text) = match r.result.try_text_out() {
         Ok(text) => (
@@ -533,10 +541,11 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
             strip_one_trailing_newline(&r.result.err).to_string(),
         ),
         Err(e) => {
+            // `ok:false` and `err` carry the refusal; the worker's own exit
+            // code stays as the worker reported it. Rewriting a 0 to a 1 here
+            // reported a number the worker never returned, which is the one
+            // field a caller reads to learn what the worker did.
             ok = false;
-            if code == 0 {
-                code = 1;
-            }
             (
                 String::new(),
                 format!(
@@ -578,6 +587,12 @@ fn result_row(i: usize, r: &ScatterResult) -> serde_json::Value {
 ///
 /// Exit codes (A′): `0` all workers ok · `123` any worker failed, partial or
 /// total (timeouts count) — partial-vs-total is distinguished in the rows.
+///
+/// `123` is gather's own aggregate and a worker may return it too, so `$?`
+/// alone cannot separate the two. The rows can: the aggregate means at least
+/// one row is `ok:false`, and a row's `code` is that worker's own. Changing
+/// the aggregate would be worse — `123` is the documented A′ code that
+/// callers already gate on.
 fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult {
     // A worker's binary stdout that can't decode as text is a failure for
     // gather's purposes too — see `result_row`'s hazard doc. Folding it into
@@ -1222,7 +1237,10 @@ mod tests {
         let row: serde_json::Value =
             serde_json::from_str(out.text_out().lines().next().unwrap()).unwrap();
         assert_eq!(row["ok"], false, "binary output must not be silently ok:true");
-        assert_ne!(row["code"], 0, "must carry a nonzero code");
+        // `code` is the worker's own. This worker exited 0, and `ok:false`
+        // plus `err` carry the refusal — rewriting the 0 to a 1 reported a
+        // number the worker never returned.
+        assert_eq!(row["code"], 0, "the worker's own exit code rides the row");
         assert!(row["out"].as_str().unwrap().is_empty(), "no lossy text in out");
         let err_text = row["err"].as_str().unwrap();
         assert!(err_text.contains("binary"), "{err_text}");
@@ -1276,7 +1294,7 @@ mod tests {
         );
 
         // Document the trap the fix closes: the old construction starts with a
-        // None watchdog, which dispatch_command then syncs into the subkernel.
+        // None watchdog, which the worker's commands would then read.
         let from_scratch =
             ExecContext::with_backend_and_scope(parent.backend.clone(), parent.scope.clone());
         assert!(

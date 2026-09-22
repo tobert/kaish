@@ -95,6 +95,14 @@ pub enum IssueCode {
     /// warning, never an error: the name binds either way, and the author is
     /// the only one who knows which name they meant.
     MixedScriptName,
+    /// A literal operand in a `[[ ]]` numeric comparison is not a number, so
+    /// the comparison faults at runtime with exit 2 — `[[ "abc" -eq 1 ]]`.
+    /// Both operands are in the source, so the fault is decidable before
+    /// anything runs. A warning, not an error: the runtime already refuses
+    /// it as a result rather than an `Err`, deliberately (GH #340's
+    /// statement-position decision), and an error here would turn that
+    /// result back into a rejection.
+    NonNumericTestOperand,
     /// `test` was given an XSI compound/grouping operator (`-a`, `-o`,
     /// `(`, `)`), which kaish does not implement.
     TestCompoundOperator,
@@ -105,6 +113,11 @@ pub enum IssueCode {
     /// argument, and a bad value keep `UnknownFlag`, `MissingRequiredArg`,
     /// and `InvalidArgType`.
     WrappedCallRejected,
+    /// `!` over a backgrounded pipeline (`! cmd &`). bash silently drops the
+    /// negation there (`! true & wait $!` reports 0, the un-negated status) —
+    /// kaish refuses rather than accept syntax whose effect it would have to
+    /// throw away. Negate inside the job instead, or drop the `!`.
+    NegatedBackgroundPipeline,
 }
 
 impl IssueCode {
@@ -112,8 +125,8 @@ impl IssueCode {
     ///
     /// Code numbers are stable identifiers, not contiguous. E010 and
     /// W003/W004/W005 remain retired, as does W006 (PosixTestCommand, retired
-    /// when `test` became a first-class builtin) — W007 is the next free
-    /// warning number, not a reuse of one of them. E020 covers the same
+    /// when `test` became a first-class builtin) — W007 and W008 were taken
+    /// in that order, not as a reuse of one of them. E020 covers the same
     /// builtin as retired W006 but is a different judgement: W006 warned that
     /// `[` was not kaish's, E020 rejects an operator `test` will refuse at
     /// runtime anyway. E006 (InvalidSedExpr), E007
@@ -142,8 +155,10 @@ impl IssueCode {
             IssueCode::UnreadableAssignmentTarget => "E018",
             IssueCode::InvisibleAssignmentTarget => "E019",
             IssueCode::MixedScriptName => "W007",
+            IssueCode::NonNumericTestOperand => "W008",
             IssueCode::TestCompoundOperator => "E020",
             IssueCode::WrappedCallRejected => "E021",
+            IssueCode::NegatedBackgroundPipeline => "E022",
         }
     }
 
@@ -161,6 +176,22 @@ impl IssueCode {
     /// nobody. Add a code to the `matches!` arm when the same is true of it.
     pub fn surfaces_to_agent(&self) -> bool {
         matches!(self, IssueCode::MixedScriptName)
+    }
+
+    /// Whether a warning carrying this code belongs in `kaish --plan`'s
+    /// `warnings` array.
+    ///
+    /// The bar is narrower than "is a warning": the statement will run and
+    /// will fail, and the validator can say so from the source alone. A
+    /// caller reading a plan acts on that.
+    ///
+    /// Most warnings do not qualify and must stay out. `UndefinedCommand`
+    /// fires on every external command, so publishing it would put
+    /// `command 'cargo' not found in builtin registry` in the plan of every
+    /// program that calls one — the same noise [`Self::surfaces_to_agent`]
+    /// exists to keep out of an agent's stderr.
+    pub fn surfaces_in_plan(&self) -> bool {
+        matches!(self, IssueCode::NonNumericTestOperand)
     }
 
     /// Default severity for this issue code.
@@ -182,7 +213,8 @@ impl IssueCode {
             | IssueCode::LvalueUndefinedRoot
             | IssueCode::DottedAssignmentTarget
             | IssueCode::UnreadableAssignmentTarget
-            | IssueCode::InvisibleAssignmentTarget => Severity::Error,
+            | IssueCode::InvisibleAssignmentTarget
+            | IssueCode::NegatedBackgroundPipeline => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment
@@ -193,7 +225,8 @@ impl IssueCode {
             | IssueCode::UndefinedCommand
             | IssueCode::UnknownFlag
             | IssueCode::PossiblyUndefinedVariable
-            | IssueCode::MixedScriptName => Severity::Warning,
+            | IssueCode::MixedScriptName
+            | IssueCode::NonNumericTestOperand => Severity::Warning,
         }
     }
 }

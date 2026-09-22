@@ -333,11 +333,9 @@ async fn test_failed_background_job_status() {
     kernel.execute("false &").await.unwrap();
 
     let status = wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
-    assert!(
-        status.starts_with("failed:") || status == "done:1",
-        "expected failed status, got: {}",
-        status
-    );
+    // job.rs status_string(): a non-ok, non-killed job is always "failed:{code}";
+    // "done:{n}" only occurs for n == 0 (the ok() branch), so "done:1" is dead.
+    assert_eq!(status, "failed:1", "expected failed:1, got: {}", status);
 }
 
 /// GH #212: `execute_background` must apply the same spill/exit-3 contract
@@ -364,6 +362,52 @@ async fn test_spilled_background_job_reports_failed_not_done() {
     );
 }
 
+/// A spilled job and a job that genuinely exited 3 must be tellable apart.
+///
+/// `failed:3` is deliberately the status string for both — that is the loud
+/// signal GH #212 installed and it stays. What was missing is the pair of
+/// facts behind it: `Job::to_info` copied only `result.code`, so `did_spill`
+/// and `original_code` never reached `JobInfo` and an embedder reading
+/// `jobs --json` had no way to ask whether the 3 was the command's own.
+///
+/// The contrast case is what makes this discriminating: both jobs report
+/// `failed:3` and `exit_code: 3`, and only the fields below separate them.
+#[tokio::test]
+async fn a_spilled_job_carries_the_spill_facts_a_real_exit_3_does_not() {
+    use kaish_kernel::scheduler::JobId;
+
+    let kernel = setup().await;
+    kernel.execute("set -o output-limit=64").await.unwrap();
+
+    // Job 1 spills: `seq` exits 0 and the remap makes it 3.
+    kernel.execute("seq 1 5000 &").await.unwrap();
+    assert_eq!(wait_for_job(&kernel, 1, Duration::from_secs(5)).await, "failed:3");
+
+    // Job 2 exits 3 on its own terms, under the same output limit.
+    kernel.execute("function three { return 3 }").await.unwrap();
+    kernel.execute("three &").await.unwrap();
+    assert_eq!(wait_for_job(&kernel, 2, Duration::from_secs(5)).await, "failed:3");
+
+    let spilled = kernel.jobs().get(JobId(1)).await.expect("job 1 is still tracked");
+    let genuine = kernel.jobs().get(JobId(2)).await.expect("job 2 is still tracked");
+
+    assert_eq!(spilled.exit_code, Some(3), "both report 3: {spilled:?}");
+    assert_eq!(genuine.exit_code, Some(3), "both report 3: {genuine:?}");
+
+    assert!(spilled.did_spill, "the spilled job must say so: {spilled:?}");
+    assert_eq!(
+        spilled.original_code,
+        Some(0),
+        "seq exited 0 before the remap replaced it: {spilled:?}"
+    );
+
+    assert!(!genuine.did_spill, "nothing was capped here: {genuine:?}");
+    assert_eq!(
+        genuine.original_code, None,
+        "no code was replaced, so there is no original to report: {genuine:?}"
+    );
+}
+
 // ============================================================================
 // Pipelines in Background
 // ============================================================================
@@ -381,12 +425,8 @@ async fn test_pipeline_in_background() {
 
     let result = kernel.execute("cat /tmp/pipeline_out.txt").await.unwrap();
     assert!(result.ok(), "cat failed: {}", result.err);
-    // wc -l should output "3"
-    assert!(
-        result.text_out().trim() == "3" || result.text_out().contains("3"),
-        "expected 3 lines, got: {}",
-        result.text_out()
-    );
+    // wc -l is the bare count + newline (see wc_lines_is_bare_number_with_newline).
+    assert_eq!(result.text_out(), "3\n", "expected 3 lines, got: {:?}", result.text_out());
 }
 
 // ============================================================================
@@ -552,6 +592,46 @@ async fn v_jobs_status_reports_killed() {
     let kernel = setup().await;
     let r = kernel.execute("sleep 30 & kill %1").await.expect("execute");
     assert_eq!(r.code, 0, "kill should succeed: {}", r.err);
+    let status = kernel.execute("cat /v/jobs/1/status").await.expect("execute");
+    assert_eq!(status.text_out().trim(), "killed:130", "err: {}", status.err);
+}
+
+/// kaibo review residual: the `spawn` builtin's cancel arm relied on the
+/// top-level cancel normalization (`Kernel::execute_with_options` rewriting
+/// any non-ok result to 130 once `ctx.cancel` is observed cancelled) rather
+/// than reporting 130 itself. `execute_background` (the `&` job path this
+/// test drives, same as `v_jobs_status_reports_killed` above) never runs
+/// that normalization — it sends the runner's result straight to
+/// `JobManager` — so a `spawn --command sleep --argv 60 &` job killed with
+/// `kill %1` reported the killed child's own absent-exit-code mapping
+/// (`capture_to_result`'s `-1` fallback) instead of the documented
+/// `killed:130` the `sleep` BUILTIN's identical job (above) already reports.
+/// `spawn` must match it.
+///
+/// Needs its own kernel, not the shared `setup()`: `spawn` is an external
+/// command and `KernelConfig::isolated()` (every other test in this file)
+/// refuses those with exit 127 — a real regression here would otherwise be
+/// masked by that refusal, not proven by it.
+#[cfg(all(unix, feature = "subprocess"))]
+#[tokio::test]
+async fn kill_terminates_spawn_background_job_with_130() {
+    let kernel = kaish_kernel::Kernel::new(
+        kaish_kernel::KernelConfig::isolated().with_allow_unwrapped_commands(true),
+    )
+    .expect("failed to create kernel")
+    .into_arc();
+    let start = std::time::Instant::now();
+    let r = kernel
+        .execute("spawn --command sleep --argv 60 & kill %1")
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "kill %1 of a spawn job should succeed: {}", r.err);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "kill must return promptly once the child is killed, took {:?}",
+        start.elapsed()
+    );
+
     let status = kernel.execute("cat /v/jobs/1/status").await.expect("execute");
     assert_eq!(status.text_out().trim(), "killed:130", "err: {}", status.err);
 }

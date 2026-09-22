@@ -83,10 +83,11 @@ async fn a_compound_can_be_a_later_stage(#[case] source: &str, #[case] expected:
 
 /// A compound stage buffers: its whole output is collected before the next
 /// stage sees a byte. bash streams, so `… | head -1` over a long loop exits
-/// early there and runs to completion here. Deliberate for now — streaming
-/// means plumbing a stage's writer into nested statement execution, which is
-/// the shared-slot machinery GH #369 is about. This row pins the *result*, not
-/// the timing, so it stays true if streaming lands later.
+/// early there and runs to completion here. Deliberate for now: the stage's
+/// writer travels on the threaded context and could be handed down, but each
+/// iteration would then write as it ran, so the loop would still run every
+/// iteration. This row pins the *result*, not the timing, so it stays true if
+/// streaming lands later.
 #[tokio::test]
 async fn a_buffered_compound_stage_still_produces_the_right_answer() {
     let kernel = kernel();

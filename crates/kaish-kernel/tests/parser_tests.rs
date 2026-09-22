@@ -370,6 +370,282 @@ fn parser_precedence_deeply_chained() {
     parse_and_snapshot("precedence_deeply_chained", "a || b || c && d && e");
 }
 
+// =============================================================================
+// STATEMENT-LEVEL ! (PIPELINE NEGATION)
+// =============================================================================
+//
+// `!` binds to the whole pipeline, below `&&`/`||` — bash's reading. See
+// docs/LANGUAGE.md, "Shell Options" for the errexit exemption this carries.
+
+#[test]
+fn parser_stmt_not_command() {
+    parse_and_snapshot("stmt_not_command", "! true");
+}
+
+#[test]
+fn parser_stmt_not_pipeline() {
+    // `!` negates the WHOLE pipeline's status, not just the first stage.
+    parse_and_snapshot("stmt_not_pipeline", "! a | b");
+}
+
+#[test]
+fn parser_stmt_not_and_chain() {
+    // `!` binds tighter than `&&`: `! a && b` is `(! a) && b`, not `!(a && b)`.
+    parse_and_snapshot("stmt_not_and_chain", "! a && b");
+}
+
+#[test]
+fn parser_stmt_or_chain_not() {
+    // Same precedence rule on the right of `||`.
+    parse_and_snapshot("stmt_or_chain_not", "a || ! b");
+}
+
+#[test]
+fn parser_stmt_not_double() {
+    // `! !` double-negates, matching bash's `! ! true`.
+    parse_and_snapshot("stmt_not_double", "! ! true");
+}
+
+#[test]
+fn parser_stmt_not_test_expr() {
+    // A `[[ ]]` is a compound command in bash's grammar too — `!` applies.
+    parse_and_snapshot("stmt_not_test_expr", "! [[ -f /nonexistent ]]");
+}
+
+#[test]
+fn parser_stmt_not_arith() {
+    parse_and_snapshot("stmt_not_arith", "! (( 0 ))");
+}
+
+#[test]
+fn parser_stmt_not_compound() {
+    // `!` also negates a compound statement's own exit status (bash allows
+    // `! for …; done`, `! if …; fi`).
+    parse_and_snapshot("stmt_not_compound", "! for x in 1 2; do\n    echo ${x}\ndone");
+}
+
+// `!` also wraps the signal statements — bash accepts `! exit 3` and
+// `! break`/`! continue`/`! return` syntactically (they fail at RUNTIME, not
+// parse time, if the position doesn't apply — same as a bare `break` outside
+// a loop). The interpreter passes their ControlFlow through `Stmt::Not`
+// untouched, so this is a parser-only change; see shell_compat_tests.rs for
+// the runtime-behavior rows.
+
+#[test]
+fn parser_stmt_not_exit() {
+    parse_and_snapshot("stmt_not_exit", "! exit 3");
+}
+
+#[test]
+fn parser_stmt_not_return() {
+    parse_and_snapshot("stmt_not_return", "! return 2");
+}
+
+#[test]
+fn parser_stmt_not_break() {
+    parse_and_snapshot("stmt_not_break", "! break");
+}
+
+#[test]
+fn parser_stmt_not_continue() {
+    parse_and_snapshot("stmt_not_continue", "! continue");
+}
+
+// =============================================================================
+// GLUED `!` IS REFUSED (statement, condition, and `[[ ]]` position)
+// =============================================================================
+//
+// bash's `!` is a reserved word needing a token boundary on both sides:
+// `!true` lexes as the single word `!true` (bash: `!true: command not
+// found`), never as `!` negating `true`. kaish's lexer emits a standalone
+// `Bang` token regardless of adjacency, so without a check `!true` and
+// `!!true` would silently parse as negation — a real divergence from bash
+// that reads as a working script until the exit code is wrong. `!` needs a
+// space everywhere it negates: the statement position, the condition
+// position (`if`/`while`), and inside `[[ ]]` (`TestExpr::Not`) — Amy's call
+// was to refuse a glued `!` in general, not just where it was first caught.
+
+#[rstest]
+#[case("!true")]
+#[case("!!true")]
+#[case("! !true")]
+#[case("!grep")]
+#[case("!break")]
+#[case("!continue")]
+#[case("!return")]
+#[case("!exit 3")]
+#[case("if !true; then echo yes; fi")]
+#[case("while !cmd; do :; done")]
+#[case("[[ !-f x ]]")]
+#[case("[[ !$x == y ]]")]
+fn glued_bang_is_refused(#[case] input: &str) {
+    expect_parse_error(input);
+}
+
+#[test]
+fn glued_bang_error_names_the_fix() {
+    let errors = parse("!true").expect_err("`!true` must be refused");
+    assert!(
+        errors[0].message.contains("! true"),
+        "the error must name the fix (a spaced `! true`): {errors:?}"
+    );
+}
+
+/// `! !true` is refused for the INNER glued pair, not the outer spaced one —
+/// the first `!` (properly spaced from the second `!`) must not be blamed.
+#[test]
+fn glued_bang_after_a_spaced_bang_blames_the_right_one() {
+    let errors = parse("! !true").expect_err("`! !true` must be refused");
+    assert_eq!(errors.len(), 1, "exactly one glue, not two: {errors:?}");
+    assert_eq!(
+        errors[0].span.start, 2,
+        "must blame the SECOND `!` (glued to `true`), not the first"
+    );
+}
+
+/// `!!true` is ONE mistake (a run of two glued `!`s glued to `true`), not
+/// two — only the first glued pair is reported. Fixing the first `!` and
+/// re-running surfaces any real remaining glue on its own.
+#[test]
+fn glued_bang_run_reports_only_the_first_pair() {
+    let errors = parse("!!true").expect_err("`!!true` must be refused");
+    assert_eq!(errors.len(), 1, "expected exactly one error for a glued run: {errors:?}");
+    assert!(
+        errors[0].message.contains("!!"),
+        "the first pair reported must be the `!!` glue itself: {errors:?}"
+    );
+}
+
+// Forms that must keep parsing exactly as before: a properly spaced `!`
+// (statement, condition, and `[[ ]]` position — including double negation),
+// `!=` (a distinct token, not `!` followed by `=`), arithmetic's own `!` (a
+// separate sub-lexer), `!` inside quotes, and an ordinary glued ARGUMENT
+// (`echo hi!`), which keeps the pre-existing glued-argument error, unrelated
+// to this one.
+
+#[rstest]
+#[case("! true")]
+#[case("! ! true")]
+#[case("if ! true; then echo yes; fi")]
+#[case("while ! cmd; do :; done")]
+#[case("[[ 1 != 2 ]]")]
+#[case("(( ! 0 ))")]
+#[case("[[ ! -f x ]]")]
+#[case("[[ ! ! -f x ]]")]
+#[case(r#"echo "!true""#)]
+#[case("echo '!true'")]
+fn unaffected_bang_forms_still_parse(#[case] input: &str) {
+    parse(input).unwrap_or_else(|e| panic!("{input:?} must still parse: {e:?}"));
+}
+
+#[test]
+fn ordinary_glued_argument_keeps_its_pre_existing_error() {
+    // `echo hi!` and `echo !x` were already refused by the PRE-EXISTING
+    // glued-ARGUMENT check (`reject_glued_args`) before this work — pin
+    // that the message is still that one, not the new glued-`!` message,
+    // proving the two checks are independent.
+    for input in ["echo hi!", "echo !x"] {
+        let errors = parse(input).expect_err("must still be refused (pre-existing behavior)");
+        assert!(
+            errors[0].message.contains("adjacent words with no space"),
+            "{input:?} must keep the pre-existing glued-argument message: {errors:?}"
+        );
+    }
+}
+
+// ── A line continuation must not evade the glued-`!` guard ─────────────────
+//
+// `tokenize` drops `Token::LineContinuation` from the stream it hands the
+// parser, but used to keep the original byte spans either side of it — so
+// `!\<newline>true` measured a 2-byte gap between `!` and `true` and read as
+// spaced, silently negating. bash removes a backslash-newline before it even
+// tokenizes, so `!\<newline>true` IS `!true`: one glued word. The lexer
+// reports each dropped continuation's span beside the tokens, and the
+// parser's adjacency checks treat a gap made only of continuations as no gap.
+
+#[test]
+fn glued_bang_across_a_line_continuation_is_refused() {
+    // "!" + "\" + "\n" + "true" — the continuation is flush against `!`,
+    // so removing it (as bash does) leaves `!true`, fully glued.
+    let errors = parse("!\\\ntrue").expect_err("a line continuation must not hide the glue");
+    assert!(
+        errors[0].message.contains("!true"),
+        "must report the same glued text as `!true`: {errors:?}"
+    );
+}
+
+/// Control: a REAL space before the continuation is still a real space —
+/// this must keep parsing, proving the fix above checks for the continuation
+/// specifically, not for any nonzero byte gap.
+#[test]
+fn a_real_space_before_a_line_continuation_still_negates() {
+    // "!" + " " + "\" + "\n" + "true"
+    parse("! \\\ntrue").expect("a real space before the continuation must still negate");
+}
+
+// ── A glued `!` inside `$(...)` must surface its own message ───────────────
+//
+// A purpose-built parse diagnosis raised while re-parsing a `$(...)` body
+// can lose its own message to chumsky's `choice`/alternative bookkeeping in
+// favor of a generic one — the same loss `validate_cmd_subst_bodies` exists
+// to undo for a bare, unquoted `$(...)`. A glued `!` inside a QUOTED
+// `"$(...)"` or a heredoc body took a different, still-lossy path: parsing
+// the body recursively and, on failure, discarding the real error for a
+// generic "syntax error in command substitution" wrapper. Fixed by naming
+// the real error's message inside that wrapper instead of discarding it.
+
+#[test]
+fn glued_bang_inside_a_bare_command_substitution_surfaces_its_message() {
+    // The bare, unquoted form already went through `validate_cmd_subst_bodies`,
+    // which re-parses with the real grammar and propagates its own error —
+    // a control proving the quoted/heredoc forms below were the exception,
+    // not the rule.
+    let errors = parse("echo $(!true)").expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("!true") && errors[0].message.contains("needs a space"),
+        "the bare form must surface the glued-`!` message, not a generic one: {errors:?}"
+    );
+}
+
+#[test]
+fn glued_bang_inside_a_quoted_command_substitution_surfaces_its_message() {
+    let errors = parse(r#"echo "$(!true)""#).expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("!true") && errors[0].message.contains("needs a space"),
+        "a quoted $(...) must surface the glued-`!` message, not a generic \
+         \"syntax error in command substitution\": {errors:?}"
+    );
+}
+
+/// A lexer error inside a quoted `$(...)` names itself, not a missing `)`.
+#[test]
+fn backtick_inside_a_quoted_command_substitution_surfaces_the_lexer_error() {
+    let errors = parse(r#"echo "$(echo `date`)""#).expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("backticks are not supported"),
+        "must name the backtick, not a missing `)`: {errors:?}"
+    );
+}
+
+/// Text after the closing `)` is string text, not shell code: an apostrophe
+/// or backtick there is literal and must not fail the substitution.
+#[rstest]
+#[case(r#"echo "$(echo hi) it's""#)]
+#[case(r#"echo "$(echo hi) `x`""#)]
+fn string_text_after_a_quoted_command_substitution_is_literal(#[case] source: &str) {
+    parse(source).expect("text after `)` is literal");
+}
+
+#[test]
+fn glued_bang_inside_a_heredoc_command_substitution_surfaces_its_message() {
+    let errors =
+        parse("cat <<EOF\n$(!true)\nEOF\n").expect_err("must be refused");
+    assert!(
+        errors[0].message.contains("!true") && errors[0].message.contains("needs a space"),
+        "a heredoc body's $(...) must surface the glued-`!` message: {errors:?}"
+    );
+}
+
 #[test]
 fn parser_if_command_with_args() {
     // Command with arguments as condition
@@ -1094,8 +1370,10 @@ fn one_stmt_sexpr(input: &str) -> String {
     "test a != b",
     r#"(cmd test (pos (string "a")) (pos (string "!=")) (pos (string "b")))"#
 )]
-// Leading-`!` negation sugar (kaish has no `! cmd` pipeline negation, so this
-// is the only negation path for the builtin).
+// Leading `!` as a `test` OPERAND, not kaish's own statement-level `!`
+// negation: `test`'s raw-argv binding takes it as a literal positional
+// string (POSIX's `test ! -f x` negation operand), distinct from
+// `! test -f x`, which negates the whole command's exit status via grammar.
 #[case(
     "test ! -f x",
     r#"(cmd test (pos (string "!")) (shortflag f) (pos (string "x")))"#

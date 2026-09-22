@@ -140,16 +140,20 @@ pub trait CommandDispatcher: Send + Sync {
         anyhow::bail!("this dispatcher cannot run a compound statement in a pipeline stage")
     }
 
-    /// Evaluate an expression through the full async chain.
+    /// Evaluate a redirect operand through the full async chain.
     ///
     /// Unlike the runner's sync `eval_simple_expr`, this can run command
     /// substitution (`$(...)`) because it has access to pipeline execution.
-    /// Used for redirect targets and heredoc bodies so `cat < $(cmd)`,
-    /// `echo x > $(cmd)`, and `$(...)` inside heredoc bodies work. The `ctx`
-    /// carries scope/cwd/backend for dispatchers that evaluate against it;
-    /// stateful dispatchers (Kernel) snapshot their own session state and
-    /// only let command output escape (side effects like `cd` do not).
-    async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value>;
+    /// `scheduler::pipeline::eval_redirect_target` is the caller, so this
+    /// covers every redirect operand: a target (`cat < $(cmd)`,
+    /// `echo x > $(cmd)`), a heredoc body, and a here-string word.
+    ///
+    /// `ctx` is the context of the command being redirected, and a `$(...)`
+    /// here runs on it: the operand is evaluated before that command runs,
+    /// but under its cancel token and watchdog, so `timeout 1 cat <<< $(slow)`
+    /// ends at the deadline. Session side effects still do not escape — the
+    /// Kernel restores scope and cwd around the substitution.
+    async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value>;
 
     /// Fork the dispatcher for concurrent execution (detached).
     ///
@@ -224,7 +228,7 @@ impl BackendDispatcher {
         args: &[Arg],
         ctx: &mut ExecContext,
     ) -> ExternalCommandOutcome {
-        if !ctx.allow_external_commands {
+        if !ctx.allow_unwrapped_commands {
             return ExternalCommandOutcome::Unavailable(ExternalCommandsUnavailable::ConfiguredOff);
         }
         match self.try_external_on_path(name, args, ctx).await {
@@ -526,8 +530,27 @@ impl BackendDispatcher {
             crate::scheduler::DEFAULT_STREAM_MAX_SIZE,
         ));
         let stdout_clone = stdout_stream.clone();
+
+        // Tee into the background job's stdout node, exactly as the production
+        // spawn site does (`spawn::spawn_process`). Without this a test driven
+        // through this dispatcher saw `/v/jobs/{id}/stdout` stay empty while
+        // the child wrote, so the routing the #446/#448/#449 work installed
+        // could not be observed here at all. Only the stage whose stdout IS
+        // the job's stdout tees: in `a | b`, `a`'s bytes are `b`'s stdin.
+        let job_streams = match (&ctx.job_manager, ctx.background_job, ctx.background_stream_output) {
+            (Some(jobs), Some(job_id), true) => jobs.streams(job_id).await,
+            _ => None,
+        };
+        let stdout_tee = job_streams.as_ref().and_then(|streams| {
+            matches!(
+                ctx.pipeline_position,
+                PipelinePosition::Only | PipelinePosition::Last
+            )
+            .then(|| streams.stdout.clone())
+        });
+
         let stdout_task = tokio::spawn(async move {
-            crate::scheduler::drain_to_stream(child_stdout, stdout_clone).await;
+            crate::scheduler::drain_to_stream_teed(child_stdout, stdout_clone, stdout_tee).await;
         });
 
         // Stderr streaming is intentionally left as-is (live to
@@ -686,7 +709,7 @@ impl CommandDispatcher for BackendDispatcher {
 
     /// Sync-only evaluation (no command substitution) — matches this
     /// test dispatcher's documented "no async argument evaluation" limit.
-    async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value> {
+    async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value> {
         crate::scheduler::pipeline::eval_simple_expr(expr, ctx)
             .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!("cannot evaluate expression in test dispatcher"))
@@ -805,6 +828,79 @@ mod external_process_tests {
             "try_external itself must not set did_spill — that's \
              Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
              matching production"
+        );
+    }
+
+    /// A job's stdout node fills while the child writes, through this
+    /// dispatcher too.
+    ///
+    /// The production spawn site tees the drain into the background job's
+    /// stdout stream; this twin drained into its own ring only. So no test
+    /// driven through this dispatcher could observe stream routing at all —
+    /// a hole directly under the streaming work in #446/#448/#449, which is
+    /// exactly the behavior a twin exists to let a test reach.
+    #[tokio::test]
+    async fn an_externals_stdout_tees_into_its_background_jobs_stream() {
+        use crate::scheduler::JobManager;
+
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let manager = Arc::new(JobManager::new());
+        // The channel end stays here: the job never completes during the
+        // test, which is the state a live `/v/jobs/N/stdout` read happens in.
+        let (_result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job_id = manager.register("sh -c 'echo teed-through'".to_string(), result_rx).await;
+
+        ctx.set_job_manager(manager.clone());
+        ctx.background_job = Some(job_id);
+        ctx.background_stream_output = true;
+        ctx.pipeline_position = PipelinePosition::Only;
+
+        let cmd = sh_cmd("echo teed-through");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(result.code, 0, "err: {}", result.err);
+
+        let streamed = manager.read_stdout(job_id).await.expect("the job still exists");
+        assert_eq!(
+            String::from_utf8_lossy(&streamed),
+            "teed-through\n",
+            "the child's stdout must reach /v/jobs/{job_id}/stdout, not only the result",
+        );
+    }
+
+    /// A stage that is not the job's stdout does not tee.
+    ///
+    /// In `a | b`, `a`'s bytes are `b`'s stdin, and teeing them would put the
+    /// pipeline's intermediate data into the job's node alongside its real
+    /// output. This is the control for the test above: without it, a tee that
+    /// ignored the pipeline position entirely would pass unnoticed.
+    #[tokio::test]
+    async fn a_non_final_stages_stdout_does_not_tee() {
+        use crate::scheduler::JobManager;
+
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let manager = Arc::new(JobManager::new());
+        let (_result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job_id = manager.register("sh -c 'echo upstream' | cat".to_string(), result_rx).await;
+
+        ctx.set_job_manager(manager.clone());
+        ctx.background_job = Some(job_id);
+        ctx.background_stream_output = true;
+        ctx.pipeline_position = PipelinePosition::First;
+
+        let cmd = sh_cmd("echo upstream");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(result.code, 0, "err: {}", result.err);
+        assert_eq!(
+            result.text_out(),
+            "upstream\n",
+            "the stage still returns its output for the runner to forward",
+        );
+
+        let streamed = manager.read_stdout(job_id).await.expect("the job still exists");
+        assert!(
+            streamed.is_empty(),
+            "an upstream stage's bytes are the next stage's stdin, not the job's output: {}",
+            String::from_utf8_lossy(&streamed),
         );
     }
 

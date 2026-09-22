@@ -612,6 +612,10 @@ tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
 cmd 2>&1 | tee log.txt          # capture both streams
 
+# Redirects apply left to right; `2>&1` copies where stdout points then.
+cmd > log.txt 2>&1              # both streams to log.txt
+cmd 2>&1 > log.txt              # stderr to the old stdout, stdout to log.txt
+
 # A redirect target is a SINGLE word — quote it when it interpolates.
 # Command substitution runs in the target (and in here-doc bodies).
 echo hi > "$dir/out.log"        # correct
@@ -696,9 +700,20 @@ bare parse failure.
 cmd1 && cmd2                    # run cmd2 only if cmd1 succeeds
 cmd1 || cmd2                    # run cmd2 only if cmd1 fails
 mkdir /tmp/work && cd /tmp/work && echo "ready"
+
+! true                          # negates a pipeline's exit status: 0 → 1
+! grep -q pattern file | wc -l  # binds to the WHOLE pipeline, below && / ||
+! cmd1 && cmd2                  # ! binds tighter than &&: (! cmd1) && cmd2
+!true                           # error — kaish needs a space: write `! true`
+f() { ! cmd; }; f &             # negate inside the job, then background the call
+! cmd &                         # error — kaish refuses; bash silently drops the negation here
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.
+
+> **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
+> its flipped status — see "Shell Options" → "`!` and `set -e`" below for the
+> assertion hazard this creates.
 
 ## Test Expressions
 
@@ -1179,6 +1194,26 @@ rather than only its last stage. `cat missing | wc -l` exits 0 without it and
 replaces it — capture it first if you need it twice, which is bash's behavior
 too.
 
+### `!` and `set -e`
+
+`!` negates a pipeline's exit status — 0 becomes 1, nonzero becomes 0 — and
+the negated statement never trips `set -e`, whatever that flipped status is:
+
+```sh
+set -e
+! true                            # flips to exit 1 — does not abort the script
+echo reached                      # still runs
+```
+
+This follows bash exactly, and it is a hazard for a common idiom: `!` used as
+an assertion does not stop a `set -e` script — the negated statement is
+exempt from errexit whatever its flipped status is. `! grep -q secret f`
+exits 1 when `secret` IS in `f` (the case a script wants to catch) and 0
+when it is absent, but `set -e` never sees either code, so a script relying
+on it to abort never does. Write the check the other way instead —
+`grep -q secret f && exit 1` — so the failure `set -e` needs to see is the
+one it actually gets.
+
 `set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
 **1** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
 `trash`) — an unknown name is never silently ignored, because a caller that
@@ -1525,9 +1560,12 @@ done
 - **Row schema**: `i`, `item` (typed), `ok`, `code`, `out` (stdout, trailing
   newline stripped), `err` (stderr, always present) on every row; `data` (the
   worker's structured output) and `timed_out:true` when present. Timeout →
-  `code` 124.
+  `code` 124. Read `ok`, not `code`: `code` is the worker's own, and a worker
+  whose stdout is binary is `ok:false` with `code` 0.
 - **Exit codes**: `0` all workers ok · `123` any worker failed (partial or
-  total — the rows carry which) · `2` usage.
+  total — the rows carry which) · `2` usage. A worker can exit `123` itself;
+  `$?` cannot tell that apart from the aggregate, so read the rows —
+  gather's `123` means at least one row has `ok:false`.
 - **Ingress**: a JSON array fans out typed, element-by-element (`1` and `"1"`
   stay distinct); plain text is one string item per line (blank lines skipped,
   whitespace within a line never split). A single non-array object errors

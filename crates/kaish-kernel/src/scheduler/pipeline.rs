@@ -74,148 +74,199 @@ fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat
     }
 }
 
-/// Apply redirects to an execution result.
-///
-/// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
-/// Post-execution redirects (stdout/stderr to file, merge) applied here.
-/// Redirects are processed left-to-right per POSIX.
-pub(crate) async fn apply_redirects(
-    mut result: ExecResult,
-    redirects: &[Redirect],
-    ctx: &ExecContext,
-    dispatcher: &dyn CommandDispatcher,
-) -> ExecResult {
-    // Defer materialization of OutputData → result.out to individual redirect
-    // handlers. File redirects (Overwrite/Append) can stream OutputData directly
-    // to disk via write_canonical(), avoiding OOM on large structured output.
-    // Merge redirects and the fallthrough path materialize on demand.
-    for redir in redirects {
-        match redir.kind {
-            RedirectKind::MergeStderr => {
-                // 2>&1 - append stderr to stdout
-                // Ensure output is materialized for merge
-                result.materialize();
-                if !result.err.is_empty() {
-                    let err = std::mem::take(&mut result.err);
-                    result.push_out(&err);
-                }
-            }
-            RedirectKind::MergeStdout => {
-                // 1>&2 or >&2 - append stdout to stderr (a text stream).
-                // Binary stdout can't be folded into text stderr without
-                // corruption — fail loud instead.
-                if result.is_bytes() {
-                    return ExecResult::failure(
-                        1,
-                        "redirect: cannot merge binary stdout into stderr (1>&2) — \
-                         redirect it to a file or pipe through base64/xxd",
-                    );
-                }
-                result.materialize();
-                if !result.text_out().is_empty() {
-                    let out = result.text_out().into_owned();
-                    result.err.push_str(&out);
-                }
-                // `1>&2` is still a stdout redirect: stdout went to stderr, so
-                // drop out/output AND the .data sideband (same as a file
-                // redirect), or a structured result leaks past `x=$(cmd >&2)`
-                // and `cmd >&2 | consumer`. Unconditional so a .data-only,
-                // empty-.out result is cleared too.
-                result.clear_stdout();
-            }
-            RedirectKind::StdoutOverwrite => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                // A binary result writes its raw bytes (no lossy decode).
-                if let Some(bytes) = result.out_bytes() {
-                    if let Err(e) = redirect_write(ctx, &path, bytes).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Some(output) = result.take_output_for_stream() {
-                    // Stream OutputData directly to file if available
-                    let mut buf = Vec::new();
-                    if let Err(e) = output.write_canonical(&mut buf, None) {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    if let Err(e) = redirect_write(ctx, &path, &buf).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                // stdout went to the file: drop out/output AND the .data sideband.
-                result.clear_stdout();
-            }
-            RedirectKind::StdoutAppend => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                // A binary result appends its raw bytes (no lossy decode).
-                if let Some(bytes) = result.out_bytes() {
-                    if let Err(e) = redirect_append(ctx, &path, bytes).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Some(output) = result.take_output_for_stream() {
-                    // Stream OutputData directly if available
-                    let mut buf = Vec::new();
-                    if let Err(e) = output.write_canonical(&mut buf, None) {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    if let Err(e) = redirect_append(ctx, &path, &buf).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                } else if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                // stdout went to the file: drop out/output AND the .data sideband.
-                result.clear_stdout();
+/// A command that faults becomes its failed result: the output it produced
+/// before the fault, then the full cause chain, exit 1.
+pub(crate) fn fault_result(error: anyhow::Error) -> ExecResult {
+    let mut result = error
+        .downcast_ref::<crate::error::FaultWithOutput>()
+        .map(|carrier| carrier.output.clone())
+        .unwrap_or_default();
+    result.code = 1;
+    if !result.err.is_empty() && !result.err.ends_with('\n') {
+        result.err.push('\n');
+    }
+    result.err.push_str(&ExecResult::terminate_diagnostic(format!("{error:#}")));
+    result
+}
+
+/// A stderr redirect moves `err` away from the job's stream, which is only
+/// right if none of it was published: the redirect turned publishing off
+/// before the stage ran (`redirects_stderr`).
+fn assert_stderr_unpublished(result: &ExecResult) {
+    assert_eq!(
+        result.stderr_published_len, 0,
+        "stderr reached the job's stream before its redirect moved it"
+    );
+}
+
+/// Whether a stage's redirects send its stdout away from its pipeline
+/// position: to a file (`>`, `>>`, `&>`) or to stderr (`>&2`).
+fn redirects_stdout(stage: &PipelineStage) -> bool {
+    redirect_sinks(stage.redirects()).stdout != Sink::Stdout
+}
+
+/// Whether a stage's redirects send its stderr away from being the job's
+/// stderr: to a file (`2>`, `&>`) or into stdout (`2>&1`). `>&2` alone
+/// adds content INTO stderr, so the stage's own stderr still belongs on the
+/// job's stream (`stdout_sent_to_stderr_reaches_the_stderr_stream`).
+fn redirects_stderr(stage: &PipelineStage) -> bool {
+    redirect_sinks(stage.redirects()).stderr != Sink::Stderr
+}
+
+/// Whether a stage's stderr ends in its own stdout (`2>&1` while fd 1 is
+/// still stdout) — the one case where a stage's stdout gains bytes only
+/// once the WHOLE stage has finished and `apply_redirects` has run, after any
+/// live leaf publish already sent the pre-merge stdout.
+fn merges_stderr_into_stdout(stage: &PipelineStage) -> bool {
+    redirect_sinks(stage.redirects()).stderr == Sink::Stdout
+}
+
+/// Where a file descriptor points while redirects are applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sink {
+    /// The command's own stdout: the pipe, the capture, or the terminal.
+    Stdout,
+    /// The command's own stderr.
+    Stderr,
+    /// The file opened by the redirect at this index in `RedirectSinks::files`.
+    File(usize),
+}
+
+/// Where fd 1 and fd 2 point once every redirect has applied, and the file
+/// redirects in the order they open.
+struct RedirectSinks<'a> {
+    stdout: Sink,
+    stderr: Sink,
+    files: Vec<&'a Redirect>,
+}
+
+/// Resolve redirects left to right, as bash does: `2>&1` copies wherever
+/// fd 1 points at that moment. `> f 2>&1` sends both streams to `f`;
+/// `2>&1 > f` sends stderr to the old stdout and stdout to `f`.
+fn redirect_sinks(redirects: &[Redirect]) -> RedirectSinks<'_> {
+    let mut sinks = RedirectSinks { stdout: Sink::Stdout, stderr: Sink::Stderr, files: Vec::new() };
+    for redirect in redirects {
+        let file = Sink::File(sinks.files.len());
+        match redirect.kind {
+            RedirectKind::MergeStderr => sinks.stderr = sinks.stdout,
+            RedirectKind::MergeStdout => sinks.stdout = sinks.stderr,
+            RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend => {
+                sinks.files.push(redirect);
+                sinks.stdout = file;
             }
             RedirectKind::Stderr => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                if let Err(e) = redirect_write(ctx, &path, result.err.as_bytes()).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                result.err.clear();
+                sinks.files.push(redirect);
+                sinks.stderr = file;
             }
             RedirectKind::Both => {
-                let path = match eval_redirect_target(&redir.target, ctx, dispatcher).await {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
-                };
-                // Build the combined bytes: raw binary stdout (no lossy decode),
-                // or structured output streamed straight to a byte buffer via
-                // `take_output_for_stream`/`write_canonical` — same lazy path
-                // `>`/`>>` use above — instead of forcing it through one
-                // `String` first (`text_out()`'s canonical-string fallback).
-                // Falls back to the text form only when neither applies.
-                // Followed by stderr.
-                let mut combined: Vec<u8> = if let Some(b) = result.out_bytes() {
-                    b.to_vec()
-                } else if let Some(output) = result.take_output_for_stream() {
-                    let mut buf = Vec::new();
-                    if let Err(e) = output.write_canonical(&mut buf, None) {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    buf
-                } else {
-                    result.text_out().into_owned().into_bytes()
-                };
-                combined.extend_from_slice(result.err.as_bytes());
-                if let Err(e) = redirect_write(ctx, &path, &combined).await {
-                    return ExecResult::failure(1, format!("redirect: {e}"));
-                }
-                // both streams went to the file: drop stdout (incl. .data) + stderr.
-                result.clear_stdout();
-                result.err.clear();
+                sinks.files.push(redirect);
+                sinks.stdout = file;
+                sinks.stderr = file;
             }
             // Pre-execution redirects - already handled before command execution
             RedirectKind::Stdin | RedirectKind::HereDoc(_) | RedirectKind::HereString => {}
+        }
+    }
+    sinks
+}
+
+/// A file a redirect opened, and the bytes that end up there.
+struct RedirectFile {
+    path: String,
+    append: bool,
+    data: Vec<u8>,
+}
+
+/// Apply redirects to an execution result.
+///
+/// Pre-execution redirects (Stdin, HereDoc) should be handled before calling.
+/// Post-execution redirects (stdout/stderr to file, merge) applied here, to
+/// the fds `redirect_sinks` resolves. The output moves only after every
+/// target is evaluated, in order.
+pub(crate) async fn apply_redirects(
+    mut result: ExecResult,
+    redirects: &[Redirect],
+    ctx: &mut ExecContext,
+    dispatcher: &dyn CommandDispatcher,
+) -> ExecResult {
+    let sinks = redirect_sinks(redirects);
+    let (stdout_sink, stderr_sink) = (sinks.stdout, sinks.stderr);
+    let mut files: Vec<RedirectFile> = Vec::with_capacity(sinks.files.len());
+    for redirect in sinks.files {
+        let path = match eval_redirect_target(&redirect.target, ctx, dispatcher).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+        };
+        files.push(RedirectFile { path, append: redirect.kind == RedirectKind::StdoutAppend, data: Vec::new() });
+    }
+
+    // stdout goes first, then stderr, wherever both land together.
+    if stdout_sink != Sink::Stdout {
+        if stdout_sink == Sink::Stderr && result.is_bytes() {
+            // Binary stdout can't be folded into text stderr without
+            // corruption — fail loud instead.
+            return ExecResult::failure(
+                1,
+                "redirect: cannot merge binary stdout into stderr (1>&2) — \
+                 redirect it to a file or pipe through base64/xxd",
+            );
+        }
+        // A binary result moves its raw bytes; structured output serializes
+        // straight to bytes (`take_output_for_stream`), as a pipe does.
+        let stdout: Vec<u8> = if let Some(bytes) = result.out_bytes() {
+            bytes.to_vec()
+        } else if let Some(output) = result.take_output_for_stream() {
+            let mut buf = Vec::new();
+            if let Err(e) = output.write_canonical(&mut buf, None) {
+                return ExecResult::failure(1, format!("redirect: {e}"));
+            }
+            buf
+        } else {
+            result.text_out().into_owned().into_bytes()
+        };
+        // stdout went elsewhere: drop out/output AND the .data sideband, or a
+        // structured result leaks past `x=$(cmd > f)` and `cmd >&2 | consumer`.
+        result.clear_stdout();
+        let stderr = if stderr_sink == Sink::Stderr {
+            String::new()
+        } else {
+            assert_stderr_unpublished(&result);
+            std::mem::take(&mut result.err)
+        };
+        match stdout_sink {
+            // `1>&2` over a text result: the bytes are valid UTF-8.
+            Sink::Stderr => result.err.push_str(&String::from_utf8_lossy(&stdout)),
+            Sink::File(index) => files[index].data.extend_from_slice(&stdout),
+            Sink::Stdout => unreachable!("handled by the enclosing branch"),
+        }
+        match stderr_sink {
+            Sink::Stdout => result.push_out(&stderr),
+            Sink::File(index) => files[index].data.extend_from_slice(stderr.as_bytes()),
+            Sink::Stderr => {}
+        }
+    } else if stderr_sink != Sink::Stderr && !result.err.is_empty() {
+        assert_stderr_unpublished(&result);
+        let stderr = std::mem::take(&mut result.err);
+        match stderr_sink {
+            Sink::Stdout => {
+                result.materialize();
+                result.push_out(&stderr);
+            }
+            Sink::File(index) => files[index].data.extend_from_slice(stderr.as_bytes()),
+            Sink::Stderr => {}
+        }
+    }
+
+    // Every opened file is written, empty or not: `> f` creates or truncates
+    // `f` even when nothing ends up there.
+    for file in &files {
+        let written = if file.append {
+            redirect_append(ctx, &file.path, &file.data).await
+        } else {
+            redirect_write(ctx, &file.path, &file.data).await
+        };
+        if let Err(e) = written {
+            return ExecResult::failure(1, format!("redirect: {e}"));
         }
     }
     // No trailing materialize. Every reader of a result goes through
@@ -224,8 +275,7 @@ pub(crate) async fn apply_redirects(
     // tree in here bought nothing and cost the structured form. Keeping it
     // means an embedder can render an `ls` listing itself, and the pipe's own
     // `take_output_for_stream()` fast path (which requires `.out` empty) can
-    // actually fire. Redirects that replace the text materialize themselves,
-    // above.
+    // actually fire.
     result
 }
 
@@ -242,7 +292,7 @@ pub(crate) async fn apply_redirects(
 /// no longer depends on how the kernel was constructed.
 async fn eval_redirect_target(
     expr: &Expr,
-    ctx: &ExecContext,
+    ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> Result<String, String> {
     // A numeral whose source text does not round-trip through its own typed
@@ -256,7 +306,7 @@ async fn eval_redirect_target(
     let value = dispatcher
         .eval_expr(expr, ctx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     // Decision D: a bare collection can't be a redirect target either — same
     // process-boundary guard as external argv (see `structured_boundary_error`).
     if let Some(msg) = crate::interpreter::structured_boundary_error("a redirect target", &value) {
@@ -458,7 +508,7 @@ impl PipelineRunner {
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            let result = self.run_single(&stages[0], ctx, None, dispatcher).await;
+            let result = self.run_single(&stages[0], ctx, dispatcher).await;
             // A lone command is a pipeline of one, and bash reports it:
             // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
             // multi-stage case would leave the previous pipeline's codes
@@ -512,37 +562,25 @@ impl PipelineRunner {
         let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(1, format!("scatter: {e}")),
-                    format,
-                )
+                return finalize_scatter_gather_error(ExecResult::failure(1, format!("scatter: {e}")), format);
             }
         };
         let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()).await {
             Ok(args) => args,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(1, format!("gather: {e}")),
-                    format,
-                )
+                return finalize_scatter_gather_error(ExecResult::failure(1, format!("gather: {e}")), format);
             }
         };
         let scatter_opts = match parse_scatter_options(&scatter_args) {
             Ok(opts) => opts,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(2, format!("scatter: {e}")),
-                    format,
-                )
+                return finalize_scatter_gather_error(ExecResult::failure(2, format!("scatter: {e}")), format);
             }
         };
         let gather_opts = match parse_gather_options(&gather_args) {
             Ok(opts) => opts,
             Err(e) => {
-                return finalize_scatter_gather_error(
-                    ExecResult::failure(2, format!("gather: {e}")),
-                    format,
-                )
+                return finalize_scatter_gather_error(ExecResult::failure(2, format!("gather: {e}")), format);
             }
         };
 
@@ -566,38 +604,77 @@ impl PipelineRunner {
             .await
     }
 
-    /// Run a single command with optional stdin.
+    /// Run a single command.
     ///
     /// The dispatcher handles arg parsing, schema lookup, output format, and execution.
     /// The runner handles stdin setup (redirects + pipeline) and output redirects.
+    ///
+    /// Stdin arrives on `ctx` — from a redirect set up here, or from the
+    /// session. A pipeline's stages go through `run_pipeline` instead, which
+    /// wires each stage's `pipe_stdin` directly.
     async fn run_single(
         &self,
         stage: &PipelineStage,
         ctx: &mut ExecContext,
-        stdin: Option<Vec<u8>>,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
-        // Set up stdin from redirects (< file, <<heredoc)
-        if let Err(e) = setup_stdin_redirects_for(stage, ctx, dispatcher).await {
-            return ExecResult::failure(1, e);
-        }
-
-        // Set stdin from pipeline (overrides redirect stdin)
-        if let Some(input) = stdin {
-            ctx.set_stdin(input);
-        }
-
         // Set pipeline position for stdio inheritance decisions
         ctx.pipeline_position = PipelinePosition::Only;
 
-        // Execute via dispatcher (full resolution chain)
-        let result = match dispatch_stage(stage, ctx, dispatcher).await {
-            Ok(result) => result,
-            Err(e) => ExecResult::failure(1, e.to_string()),
+        // Set up stdin from redirects (< file, <<heredoc). A failure here
+        // skips dispatch but still runs the stage's own stdout/stderr
+        // redirects and the leaf publish below, the same as a dispatch
+        // failure does — a `cmd < missing 2>file &` sends "no such file" to
+        // the file, not to the job's stream.
+        let mut result = match setup_stdin_redirects_for(stage, ctx, dispatcher).await {
+            Ok(()) => {
+                // A redirected stdout goes to its target, not to a job's stream.
+                let stream_output = ctx.background_stream_output;
+                if redirects_stdout(stage) {
+                    ctx.background_stream_output = false;
+                }
+                // A redirected/merged stderr goes to its target too, not to
+                // the job's stderr stream — this must be decided before
+                // dispatch, or an external command (or a nested dispatch
+                // inside a function/compound) tees its stderr live to the
+                // wrong stream before the redirect ever runs.
+                let stream_stderr = ctx.background_stream_stderr;
+                if redirects_stderr(stage) {
+                    ctx.background_stream_stderr = false;
+                }
+
+                // Execute via dispatcher (full resolution chain)
+                let result = match dispatch_stage(stage, ctx, dispatcher).await {
+                    Ok(result) => result,
+                    Err(e) => fault_result(e),
+                };
+                ctx.background_stream_output = stream_output;
+                ctx.background_stream_stderr = stream_stderr;
+                result
+            }
+            Err(e) => ExecResult::failure(1, e),
         };
 
+        // `2>&1` moves this stage's stderr into its stdout, but only once
+        // `apply_redirects` runs below — capture what stdout held before
+        // that, so only the newly merged bytes get published (whatever was
+        // there already reached the stream via the leaf's own live publish).
+        // Stdout that went elsewhere was never published live, so none of
+        // what ends up in stdout is prior.
+        let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(stage).then(|| match result.out_bytes() {
+            _ if redirects_stdout(stage) => Vec::new(),
+            Some(bytes) => bytes.to_vec(),
+            None => result.text_out().into_owned().into_bytes(),
+        });
+
         // Apply post-execution redirects
-        apply_redirects(result, stage.redirects(), ctx, dispatcher).await
+        result = apply_redirects(result, stage.redirects(), ctx, dispatcher).await;
+
+        if let Some(prior_out) = prior_out {
+            ctx.publish_job_stdout_suffix(&prior_out, &result).await;
+        }
+
+        result
     }
 
     /// Run a multi-command pipeline concurrently.
@@ -614,8 +691,9 @@ impl PipelineRunner {
     /// stage's pipe writer here rather than handing it to the statement, so
     /// the loop runs to completion and its whole output is written to the pipe
     /// at once — `for … done | head -1` therefore runs every iteration where
-    /// bash would stop early. Streaming needs a writer threaded through nested
-    /// statement execution; see GH #369.
+    /// bash would stop early. The writer now travels on the threaded context
+    /// (GH #369), so this is a remaining behavior gap rather than a missing
+    /// mechanism.
     async fn run_pipeline(
         &self,
         stages: &[PipelineStage],
@@ -645,6 +723,22 @@ impl PipelineRunner {
             data_receivers.push(Some(rx));
         }
 
+        // Detached handles, deliberately — a `JoinSet` would be wrong here.
+        //
+        // GH #190 asked for `JoinSet` so a dropped set aborts what it owns.
+        // The drop path is reachable: the REPL races `execute` against SIGINT
+        // and drops the loser, and any embedder wrapping `execute` in a
+        // `timeout` does the same. On that path aborting is the WORSE
+        // cleanup. A detached stage stays alive long enough for the cancel
+        // that follows to reach `wait_or_kill`, which SIGTERMs the child's
+        // process GROUP, waits the grace, then SIGKILLs the group. An abort
+        // drops the `Child` instead and falls back to `kill_on_drop`, a bare
+        // SIGKILL of the direct child pid — so a stage's grandchildren
+        // survive a Ctrl-C that used to kill them.
+        //
+        // The leak the issue worried about is bounded: every stage is joined
+        // below, and the `fork_attached` cancellation cascade owns the
+        // teardown on the one path that skips the join.
         let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
         // Set when stage 0 receives the session's stdin rather than a redirect's.
         // Only then may its remainder be returned at the join.
@@ -726,11 +820,6 @@ impl PipelineRunner {
             // so each concurrent stage's spans stay in the same trace.
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
                 tokio::spawn(crate::telemetry::bind_current_context(async move {
-                // A stdin-redirect setup failure short-circuits this stage.
-                if let Err(e) = stdin_setup {
-                    return (ExecResult::failure(1, e), stage_ctx);
-                }
-
                 // Hand the structured-data sideband receiver to the stage; do
                 // NOT pre-read it. A consuming builtin resolves it via
                 // `ctx.resolve_stdin()`, which drains the pipe first (so a
@@ -740,17 +829,54 @@ impl PipelineRunner {
                 // dropped structured data (`seq 1 3 | jq .` → text → parse error).
                 stage_ctx.stdin_data_rx = data_receiver;
 
-                // Execute the stage
-                let mut result = match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
-                    Ok(result) => result,
-                    Err(e) => ExecResult::failure(1, e.to_string()),
+                // A stdin-redirect setup failure skips dispatch, but the
+                // stage's own stdout/stderr redirects and its leaf publish
+                // still run below — the same treatment `run_single` gives it.
+                let mut result = match stdin_setup {
+                    Ok(()) => {
+                        // A redirected stdout goes to its target, not to a job's stream.
+                        if redirects_stdout(&stage) {
+                            stage_ctx.background_stream_output = false;
+                        }
+                        // A redirected/merged stderr goes to its target too —
+                        // decided before dispatch, or a nested live publish
+                        // (external tee, a function body's own commands)
+                        // reaches the wrong stream before the redirect runs.
+                        if redirects_stderr(&stage) {
+                            stage_ctx.background_stream_stderr = false;
+                        }
+                        match dispatch_stage(&stage, &mut stage_ctx, &*task_dispatcher).await {
+                            Ok(result) => result,
+                            Err(e) => fault_result(e),
+                        }
+                    }
+                    Err(e) => ExecResult::failure(1, e),
                 };
+
+                // `2>&1` moves this stage's stderr into its stdout only once
+                // `apply_redirects` runs below — capture what stdout held
+                // before that so only the newly merged bytes get published.
+                // Stdout that went elsewhere was never published live, so none of
+                // what ends up in stdout is prior.
+                let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(&stage).then(|| match result.out_bytes() {
+                    _ if redirects_stdout(&stage) => Vec::new(),
+                    Some(bytes) => bytes.to_vec(),
+                    None => result.text_out().into_owned().into_bytes(),
+                });
 
                 // Apply post-execution redirects. Use the stage's own
                 // (forked) dispatcher — the borrowed `dispatcher` can't cross
                 // the spawn boundary, and `stage_ctx.dispatcher` is `None` on a
                 // bare kernel, which is exactly the GH #90 gap.
-                result = apply_redirects(result, stage.redirects(), &stage_ctx, &*task_dispatcher).await;
+                result = apply_redirects(result, stage.redirects(), &mut stage_ctx, &*task_dispatcher).await;
+
+                if let Some(prior_out) = prior_out {
+                    stage_ctx.publish_job_stdout_suffix(&prior_out, &result).await;
+                }
+                // Every stage publishes its own stderr live, regardless of
+                // pipeline position — bash never pipes stderr between
+                // stages, unlike stdout.
+                stage_ctx.publish_job_stderr(&mut result).await;
 
                 // Flush buffered stderr to the kernel's stderr stream.
                 // This delivers error output from intermediate pipeline stages
@@ -759,8 +885,9 @@ impl PipelineRunner {
                 // stderr goes through the pipe as expected.
                 if !result.err.is_empty() {
                     if let Some(ref stderr) = stage_ctx.stderr {
-                        stderr.write_str(&result.err);
+                        stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
                         result.err.clear();
+                        result.stderr_published_len = 0;
                     }
                 }
 
@@ -847,11 +974,14 @@ impl PipelineRunner {
                     }
                     if i == last_idx {
                         last_result = result;
-                        // Sync last stage's scope and cwd changes back
+                        // The last stage returns every session change, the
+                        // same as a statement run on its own.
                         ctx.scope = stage_ctx.scope;
                         ctx.cwd = stage_ctx.cwd;
                         ctx.prev_cwd = stage_ctx.prev_cwd;
                         ctx.aliases = stage_ctx.aliases;
+                        ctx.ignore_config = stage_ctx.ignore_config;
+                        ctx.output_limit = stage_ctx.output_limit;
                     }
                 }
                 Err(e) => {
@@ -2810,8 +2940,8 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout contentstderr content");
         assert!(result.err.is_empty());
@@ -2827,8 +2957,8 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout only");
         assert!(result.err.is_empty());
@@ -2848,8 +2978,8 @@ mod tests {
             target: Expr::Literal(Value::Null),
         }];
 
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         assert_eq!(&*result.text_out(), "stdout\nstderr\n");
         assert!(result.err.is_empty());
@@ -2935,8 +3065,8 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/out.txt".to_string())),
         }];
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
 
         // Both streams went to the file: stdout (incl. the sideband) and
         // stderr are both dropped from the in-memory result.
@@ -2968,8 +3098,8 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/big.txt".to_string())),
         }];
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
         assert!(result.ok());
 
         let written = ctx.backend.read(Path::new("/big.txt"), None).await.expect("file written");
@@ -2989,8 +3119,8 @@ mod tests {
             kind: RedirectKind::Both,
             target: Expr::Literal(Value::String("/bin.out".to_string())),
         }];
-        let ctx = make_minimal_ctx();
-        let result = apply_redirects(result, &redirects, &ctx, &test_dispatcher()).await;
+        let mut ctx = make_minimal_ctx();
+        let result = apply_redirects(result, &redirects, &mut ctx, &test_dispatcher()).await;
         assert!(result.ok());
 
         let written = ctx.backend.read(Path::new("/bin.out"), None).await.expect("file written");

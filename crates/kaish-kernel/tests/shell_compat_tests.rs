@@ -1224,8 +1224,180 @@ shell_compat! {
     eq: "a",
 }
 
+// =============================================================================
+// Statement-level `!` (pipeline negation), and errexit rows around it —
+// every row below is bash-verified (`KAISH_BASH_COMPAT=1`) with no
+// divergence found: `!` flips the whole pipeline's exit code, and the
+// negated statement is exempt from `set -e` whatever its (flipped) result.
+// See docs/LANGUAGE.md, "Shell Options" for the errexit hazard this creates.
+// =============================================================================
+
+shell_compat! {
+    name: bang_negates_true,
+    script: "! true; echo $?",
+    eq: "1",
+}
+
+shell_compat! {
+    name: bang_negates_false,
+    script: "! false; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: bang_negates_the_whole_pipeline,
+    // `!` binds to `true | false` as ONE unit — the pipeline's own status
+    // (bash: without pipefail, the LAST stage's code, here false's 1) is
+    // what flips, not the first stage's.
+    script: "! true | false; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: errexit_does_not_fire_on_a_negated_true,
+    // `echo $?` proves `!` actually flipped `true`'s 0 to 1 — without it this
+    // row would pass equally well if `!` were a no-op, since `true; echo
+    // reached` under `set -e` also prints "reached".
+    script: "set -e; ! true; echo $?; echo reached",
+    eq: "1\nreached",
+}
+
+shell_compat! {
+    name: errexit_does_not_fire_on_a_negated_false,
+    // The exempt case that actually exercises the suppression: `false`'s
+    // own nonzero code would trip `set -e` on its own — `!` must suppress
+    // that BEFORE it gets a chance to negate the code, not after.
+    script: "set -e; ! false; echo reached",
+    eq: "reached",
+}
+
+// ---- set -e and &&/|| lists: only the LAST command in the list trips it ---
+// (pre-existing kaish behavior — bash-verified here as a control, since it
+// is the same suppression mechanism `!` now reuses.)
+
+shell_compat! {
+    name: errexit_does_not_fire_when_or_recovers,
+    script: "set -e; false || true; echo reached",
+    eq: "reached",
+}
+
+shell_compat! {
+    name: errexit_does_not_fire_when_and_short_circuits,
+    // `false` is not "the command following the final &&" — `true` never
+    // ran, so nothing that DID run failed as the list's last command.
+    script: "set -e; false && true; echo reached",
+    eq: "reached",
+}
+
+shell_compat! {
+    name: errexit_fires_when_and_chain_fails_last,
+    // `false` here IS the command following the final `&&`, and it fails —
+    // this is the case the two rows above are the control for.
+    script: "set -e; true && false; echo reached",
+    exit: 1,
+    absent: "reached",
+}
+
+// ---- set -e and conditions: `if`/`while` never trip it --------------------
+
+shell_compat! {
+    name: errexit_does_not_fire_inside_an_if_condition,
+    script: "set -e; if false; then echo unreachable; fi; echo reached",
+    eq: "reached",
+}
+
+shell_compat! {
+    name: errexit_does_not_fire_inside_a_while_condition,
+    script: "set -e; while false; do echo unreachable; done; echo reached",
+    eq: "reached",
+}
+
+// ---- set -e inside a function body -----------------------------------------
+
+shell_compat! {
+    name: errexit_fires_on_a_failing_command_inside_a_function,
+    script: "set -e; f() { false; echo unreached_in_f; }; f; echo reached",
+    exit: 1,
+    absent: "reached",
+    absent: "unreached_in_f",
+}
+
+// ---- set -e and a failing pipeline stage that is not the last one ---------
+
+shell_compat! {
+    name: errexit_ignores_a_failing_non_last_pipeline_stage,
+    // Without pipefail, the pipeline's status is the LAST stage's (true's
+    // 0) — `false`'s failure in the middle never surfaces.
+    script: "set -e; false | true; echo reached",
+    eq: "reached",
+}
+
+shell_compat! {
+    name: errexit_with_pipefail_sees_a_failing_non_last_pipeline_stage,
+    script: "set -e; set -o pipefail; false | true; echo reached",
+    exit: 1,
+    absent: "reached",
+}
+
+// ---- set -e and a failing $(...) inside an assignment ---------------------
+
+shell_compat! {
+    name: errexit_fires_on_a_failing_command_substitution_in_an_assignment,
+    script: "set -e; x=$(false); echo reached",
+    exit: 1,
+    absent: "reached",
+}
+
+// ---- `!` also wraps the signal statements (exit/return) ------------------
+// bash accepts `! exit N` and `! return N` syntactically — the signal itself
+// leaves before `!` gets anything to flip, so the exit/return code is
+// untouched, not negated.
+
+shell_compat! {
+    name: bang_exit_leaves_the_code_untouched,
+    // `!` does not flip an `exit` code — the script leaves with exit 3, and
+    // nothing after `! exit 3` ever runs.
+    script: "! exit 3; echo after",
+    exit: 3,
+    absent: "after",
+}
+
+shell_compat! {
+    name: bang_return_leaves_the_code_untouched,
+    script: "f() { ! return 2; }; f; echo \"rc=$?\"",
+    eq: "rc=2",
+}
+
 shell_compat! {
     name: quoted_leading_hash_is_literal,
     script: "echo '#3'",
     eq: "#3",
+}
+
+// ---- redirects apply left to right, with dup semantics -----------------
+// `2>&1` copies wherever stdout points at that moment. `> f 2>&1` sends both
+// to f; `2>&1 > f` sends stderr to the old stdout and stdout to f.
+
+shell_compat! {
+    name: redirect_stdout_then_merge_sends_both_to_the_file,
+    script: "ls /kaish-compat-nonexistent > /tmp/kaish-compat-redir-a 2>&1; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-a)\"",
+    eq: "lines:1",
+}
+
+shell_compat! {
+    name: merge_then_redirect_stdout_sends_stderr_to_the_old_stdout,
+    script: "ls /kaish-compat-nonexistent 2>&1 > /tmp/kaish-compat-redir-b | wc -l; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-b)\"",
+    eq: "1\nlines:0",
+}
+
+shell_compat! {
+    name: both_redirect_sends_both_to_the_file,
+    script: "ls /kaish-compat-nonexistent &> /tmp/kaish-compat-redir-c; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-c)\"",
+    eq: "lines:1",
+}
+
+shell_compat! {
+    name: stderr_to_file_then_stdout_to_stderr_sends_both_to_the_file,
+    script: "echo kaish-compat-out 2> /tmp/kaish-compat-redir-d 1>&2; echo \"file:$(cat /tmp/kaish-compat-redir-d)\"",
+    eq: "file:kaish-compat-out",
 }

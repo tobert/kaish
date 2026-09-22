@@ -35,21 +35,35 @@ pub struct JobStreams {
     ///   command running for this job — but only from the stage whose stdout
     ///   *is* the job's stdout (`Only` or `Last` in the pipeline), so
     ///   `a | b` streams `b` and not `a`'s bytes on their way into `b`.
-    /// * **At completion**, from the job's captured `ExecResult`, and only
-    ///   when nothing was streamed live. That covers a builtin-only job
-    ///   (`echo hi &`): a builtin returns its output as a value when it
-    ///   finishes, so there is no byte stream to tee.
+    /// * **When a builtin returns**, from its result after `--json` is
+    ///   applied, under the same `Only`/`Last` rule. A builtin that
+    ///   re-dispatched (`timeout`) publishes only if the command it ran wrote
+    ///   nothing.
+    ///
+    /// Output with another destination is never published: a `$(...)`
+    /// capture, a stdout redirect, a scatter worker's stdout.
     ///
     /// Whichever fed it, the stream is closed once the job's result is in
     /// ([`JobManager::finalize_streams`]), so a reader can tell "no more
     /// coming" from "nothing yet".
     pub stdout: Arc<BoundedStream>,
-    /// The job's stderr. Same two feeds as [`Self::stdout`], except the live
-    /// one takes **every** stage's stderr, not just the last — stderr is not
-    /// piped between stages. The consequence, stated rather than papered
-    /// over: in a job mixing builtins and externals, once any external has
-    /// written stderr the completion write is skipped, so a builtin stage's
-    /// stderr stays in the job's `ExecResult` and does not reach this stream.
+    /// The job's stderr. Fed live, and never twice for the same bytes:
+    ///
+    /// * **Per chunk**, by the drain task behind an external command running
+    ///   for this job — from every stage, not only `Only`/`Last`, since bash
+    ///   never pipes stderr between stages.
+    /// * **When each statement ends**, including one nested in a loop, `if`,
+    ///   or function body (`Kernel::execute_stmt_flow`), and when each
+    ///   pipeline stage ends. A statement's stderr is final by then: its
+    ///   redirects have applied. `ExecResult::stderr_published_len` records
+    ///   how much of `err` the stream holds, so only the rest is written.
+    ///
+    /// Output with another destination is never published: a `2>file`/`&>file`
+    /// redirect, or `2>&1`, whose bytes land on [`Self::stdout`] instead.
+    ///
+    /// A whole-program job (`Kernel::execute_background_with_options`) writes
+    /// each top-level statement's stderr itself when the statement finishes,
+    /// instead of this per-statement publish.
     pub stderr: Arc<BoundedStream>,
 }
 
@@ -383,16 +397,12 @@ impl Job {
                     return false;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    // The sender dropped without sending a result — the
-                    // spawned task's future panicked and unwound before
-                    // `tx.send(result)` ran (GH #247). `execute_background`
-                    // uses this oneshot-channel path exclusively for every
-                    // `&` job, so this is the ONLY place a background-job
-                    // panic surfaces; a wording indistinguishable from an
-                    // ordinary `exit 1` ("job channel closed", previously)
-                    // hid a kernel bug behind what read as a normal command
-                    // failure, and the case went to `tracing::error!` for
-                    // the first time here — it was not logged at all before.
+                    // The sender dropped without sending a result (GH #247).
+                    // The kernel's job tasks send one even when they panic
+                    // (`send_job_result`), so this is a sender dropped some
+                    // other way. A wording indistinguishable from an
+                    // ordinary `exit 1` would hide a kernel bug behind what
+                    // reads as a normal command failure.
                     tracing::error!(
                         job_id = %self.id,
                         command = %self.command,
@@ -470,6 +480,13 @@ impl Job {
     /// the call sites can't drift on which fields they remember to set.
     fn to_info(&self, status: JobStatus) -> JobInfo {
         let exit_code = self.result.as_ref().map(|r| r.code);
+        // A spilled job's code was remapped to 3, so `exit_code` alone cannot
+        // be told apart from a command that genuinely exited 3. Carry the two
+        // facts that make it legible.
+        let (did_spill, original_code) = match &self.result {
+            Some(r) => (r.did_spill, r.original_code),
+            None => (false, None),
+        };
         JobInfo::new(self.id, self.command.clone(), status)
             .with_output_file(self.output_file.clone())
             .with_pid(self.pid)
@@ -477,6 +494,7 @@ impl Job {
             .with_started_at(self.started_at)
             .with_finished_at(self.finished_at)
             .with_pgids(self.pgids_combined())
+            .with_spill(did_spill, original_code)
     }
 }
 
@@ -705,35 +723,27 @@ impl JobManager {
         Some(stream.read().await)
     }
 
-    /// Close out a finished job's streams: write the captured result into a
-    /// stream that received nothing live, then close both.
+    /// Close a finished job's streams.
     ///
-    /// The conditional is the no-double-write rule. A stream with live bytes
-    /// in it already holds exactly what the child emitted; writing
-    /// `result.text_out()` on top would repeat all of it. A stream with no
-    /// live bytes belongs to a job with nothing to tee — a builtin returns
-    /// its output as a value, not as a pipe — and would otherwise read empty
-    /// forever.
+    /// Neither stream is written here. Every producer of a job's stdout or
+    /// stderr publishes as it runs: an external per chunk; a builtin, an
+    /// embedder tool, `--help`, or an AST dump when it returns; gather's
+    /// rows; every other statement kind from `Kernel::execute_stmt_flow`.
+    /// Writing the captured result on top would repeat it — see
+    /// [`JobStreams::stdout`] and [`JobStreams::stderr`] for exactly which
+    /// bytes reach each stream and when.
+    ///
+    /// `_result` is accepted for symmetry with callers that already have it
+    /// in hand, and because a future producer this function does not yet
+    /// know about may need it; nothing here reads it today.
     ///
     /// Called by the background task that owns the job, before it hands the
     /// result over, so a reader that sees a terminal `status` also sees a
     /// closed, complete stream.
-    pub async fn finalize_streams(&self, id: JobId, result: &ExecResult) {
+    pub async fn finalize_streams(&self, id: JobId, _result: &ExecResult) {
         let Some(streams) = self.streams(id).await else {
             return;
         };
-
-        if streams.stdout.stats().await.total_written == 0 {
-            // Raw bytes when the payload is binary; `text_out` would decode it
-            // lossily and corrupt what a caller reads back out of the node.
-            match result.out_bytes() {
-                Some(bytes) => streams.stdout.write(bytes).await,
-                None => streams.stdout.write(result.text_out().as_bytes()).await,
-            }
-        }
-        if streams.stderr.stats().await.total_written == 0 {
-            streams.stderr.write(result.err.as_bytes()).await;
-        }
 
         streams.stdout.close().await;
         streams.stderr.close().await;

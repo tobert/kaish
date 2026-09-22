@@ -50,3 +50,66 @@ async fn spawn_timeout_kills_child_process_does_not_leak() {
         "child process kept running past the timeout — leaked"
     );
 }
+
+/// A timeout keeps what the child already wrote.
+///
+/// `wait_with_output()` owns the buffers it fills, so dropping that future on
+/// the timeout dropped the bytes with it: a child that printed a diagnostic
+/// and then hung reported 124 and nothing else, and the one line that said
+/// why it hung was gone.
+#[tokio::test]
+async fn spawn_timeout_keeps_the_childs_partial_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // `sh` runs `sleep 5` as its own child, which survives a kill aimed at
+    // `sh` and keeps the pipe's write end open. Waiting for EOF would make
+    // this "300ms" call return in five seconds, so the elapsed-time assertion
+    // below is as much the point as the output one.
+    let script = r#"spawn --command sh --argv '["-c", "echo partial-out; echo partial-err >&2; sleep 5"]' --timeout 300"#;
+    let started = std::time::Instant::now();
+    let result = kernel.execute(script).await.expect("kernel execute");
+    let elapsed = started.elapsed();
+
+    assert_eq!(result.code, 124, "expected timeout exit code: {:?}", result.err);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "a 300ms timeout must return promptly, not when a surviving grandchild exits: {elapsed:?}"
+    );
+    assert!(
+        result.text_out().contains("partial-out"),
+        "stdout written before the timeout must survive it: {:?}",
+        result.text_out()
+    );
+    assert!(
+        result.err.contains("partial-err"),
+        "stderr written before the timeout must survive it: {:?}",
+        result.err
+    );
+    assert!(
+        result.err.contains("timed out after 300ms"),
+        "the timeout diagnostic rides alongside the child's stderr: {:?}",
+        result.err
+    );
+}
+
+/// A child killed by a signal is not a timeout.
+///
+/// `ExitStatus::code()` is `None` both when the timer fires and when the
+/// child dies by signal. Reading that `None` as expiry reported 124 and a
+/// fabricated "timed out after 10000ms" line for a child that died in 10ms.
+#[tokio::test]
+async fn a_signal_death_inside_the_timeout_is_not_reported_as_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let script = r#"spawn --command sh --argv '["-c", "kill -9 $$"]' --timeout 10000"#;
+    let result = kernel.execute(script).await.expect("kernel execute");
+
+    assert_ne!(result.code, 124, "the child died by signal, well inside the timeout");
+    assert!(
+        !result.err.contains("timed out"),
+        "no timeout diagnostic belongs on a signal death: {:?}",
+        result.err
+    );
+}

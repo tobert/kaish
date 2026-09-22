@@ -89,6 +89,17 @@ async fn a_substitution_does_not_leak_its_cd() {
     assert_eq!(got, format!("/tmp|{here}"), "the cd is scoped, and PWD tracks");
 }
 
+/// The same rule for a substitution in a redirect operand. It runs on the
+/// redirected command's context rather than a throwaway one, so the scoping
+/// has to come from the save-and-restore around the substitution, not from
+/// the context being discarded afterward.
+#[tokio::test]
+async fn a_substitution_in_a_redirect_operand_does_not_leak_its_cd() {
+    let here = out("pwd").await;
+    let got = out("cat <<< $(cd /tmp; pwd); pwd").await;
+    assert_eq!(got, format!("/tmp\n{here}"), "the cd is scoped to the operand");
+}
+
 /// `reset()` puts the session back at `/`, and `$PWD` must say so. It sets
 /// `ctx.cwd` directly rather than going through `set_cwd`, so it needs its own
 /// write — and `initial_vars` can carry an inherited `PWD` that would

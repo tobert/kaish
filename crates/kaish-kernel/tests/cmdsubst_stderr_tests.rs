@@ -214,3 +214,44 @@ async fn multi_statement_substitution_keeps_value_and_stderr() {
         r.err
     );
 }
+
+/// A substitution inside a function body that is itself a pipeline stage.
+///
+/// Coverage for the shape, NOT a guard for the sender: checked against a build
+/// where `emit_cmdsubst_stderr` reads the shared slot, and this case passes
+/// there too. A function body buffers — its stderr comes back in the result
+/// and is joined by the statement drain, so it never depends on which sender
+/// the substitution wrote to. `a_substitution_in_a_middle_stage_keeps_stderr`
+/// is the row that actually fails on the slot read.
+#[tokio::test]
+async fn a_substitution_inside_a_function_stage_keeps_stderr() {
+    let k = setup().await;
+    let r = k
+        .execute("f() { echo \"[$(cat /nope)]\"; }; f | cat")
+        .await
+        .expect("execute");
+    assert_eq!(
+        r.err.matches("/nope").count(),
+        1,
+        "expected the substitution's stderr exactly once, got err: {:?}",
+        r.err
+    );
+}
+
+/// A non-last stage, where the enclosing command's own output goes to the pipe
+/// rather than the caller. The stderr channel is shared by design and must
+/// still reach the caller from there.
+#[tokio::test]
+async fn a_substitution_in_a_middle_stage_keeps_stderr() {
+    let k = setup().await;
+    let r = k
+        .execute("echo \"[$(cat /nope)]\" | cat | cat")
+        .await
+        .expect("execute");
+    assert_eq!(
+        r.err.matches("/nope").count(),
+        1,
+        "expected the substitution's stderr exactly once, got err: {:?}",
+        r.err
+    );
+}

@@ -104,12 +104,21 @@ impl Tool for PlanTool {
         // before anything it names can happen.
         match crate::plan_program(&source) {
             Ok(statements) => {
-                let doc = serde_json::json!({
+                let mut doc = serde_json::json!({
                     "statements": statements,
                     "kaish_version": crate::KAISH_VERSION,
                     "kaish_git_hash": crate::KAISH_GIT_HASH,
                     "kaish_build_date": crate::KAISH_BUILD_DATE,
                 });
+                // The same `warnings` array the CLI emits. The two are
+                // documented as one projection, so a key on one and not the
+                // other is a divergence, not a difference in scope.
+                let warnings = plan_warnings(&source);
+                if !warnings.is_empty()
+                    && let Some(object) = doc.as_object_mut()
+                {
+                    object.insert("warnings".into(), serde_json::Value::Array(warnings));
+                }
                 let text = render_plan_text(&statements);
                 ExecResult::success_with_data(
                     text,
@@ -161,4 +170,33 @@ fn render_plan_text(statements: &[crate::ast::plan::PlannedStatement]) -> String
         }
     }
     out
+}
+
+/// Statements that will run and fail, as plan JSON objects.
+///
+/// Filtered by `IssueCode::surfaces_in_plan`, not by severity — most
+/// warnings are advisory and would be noise in a plan. Mirrors
+/// `plan_validation_issues` in the REPL binary; the two emit one projection.
+fn plan_warnings(source: &str) -> Vec<serde_json::Value> {
+    let Ok(issues) = crate::validator::validate_program(source) else {
+        return Vec::new();
+    };
+    issues
+        .iter()
+        .filter(|issue| issue.severity != crate::validator::Severity::Error)
+        .filter(|issue| issue.code.surfaces_in_plan())
+        .map(|issue| {
+            let mut object = serde_json::Map::new();
+            object.insert("code".into(), issue.code.code().into());
+            object.insert("message".into(), issue.message.clone().into());
+            if let Some(span) = &issue.span {
+                object.insert("start".into(), span.start.into());
+                object.insert("end".into(), span.end.into());
+            }
+            if let Some(suggestion) = &issue.suggestion {
+                object.insert("suggestion".into(), suggestion.clone().into());
+            }
+            serde_json::Value::Object(object)
+        })
+        .collect()
 }

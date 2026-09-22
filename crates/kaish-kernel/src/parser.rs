@@ -14,9 +14,58 @@ use crate::lexer::{self, HereDocData, Token};
 use chumsky::error::RichReason;
 use chumsky::input::{MappedInput, Stream, ValueInput};
 use chumsky::prelude::*;
+use std::cell::RefCell;
 
 /// Span type used throughout the parser.
 pub type Span = SimpleSpan;
+
+thread_local! {
+    /// Line continuations dropped from the current [`parse`] call's tokens,
+    /// as `(start, end)` source offsets. `CACHED_PARSER` is built once per
+    /// thread, so per-call data reaches its closures through here.
+    static CONTINUATION_GAPS: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Installs one [`parse`] call's continuation gaps and restores the previous
+/// set on drop, so a nested `parse` (a quoted `$(...)` body) or a panic
+/// cannot leave the outer call reading the wrong gaps.
+struct ContinuationGapsGuard {
+    saved: Vec<(usize, usize)>,
+}
+
+impl ContinuationGapsGuard {
+    fn install(gaps: Vec<(usize, usize)>) -> Self {
+        let saved = CONTINUATION_GAPS.with(|c| std::mem::replace(&mut *c.borrow_mut(), gaps));
+        Self { saved }
+    }
+}
+
+impl Drop for ContinuationGapsGuard {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.saved);
+        CONTINUATION_GAPS.with(|c| *c.borrow_mut() = saved);
+    }
+}
+
+/// True when two spans touch, or the bytes between them are only dropped
+/// line continuations. bash removes a backslash-newline before it splits
+/// words, so `W\<newline>N` is one word; every adjacency check uses this.
+fn gap_is_only_continuations(prev_end: usize, next_start: usize) -> bool {
+    if prev_end >= next_start {
+        return prev_end == next_start;
+    }
+    CONTINUATION_GAPS.with(|gaps| {
+        let gaps = gaps.borrow();
+        let mut pos = prev_end;
+        while pos < next_start {
+            let Some(gap) = gaps.iter().find(|gap| gap.0 == pos) else {
+                return false;
+            };
+            pos = gap.1;
+        }
+        pos == next_start
+    })
+}
 
 /// The token stream a cached parser reads.
 ///
@@ -68,15 +117,17 @@ thread_local! {
 /// - Special variables: `${?}` → LastExitCode, `${$}` → CurrentPid
 /// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}` → VarRef
 /// - Default values: `${VAR:-default}` → VarWithDefault (with nested expansion support)
-fn parse_var_expr(raw: &str) -> Expr {
+///
+/// A default word that fails to parse (`${x:-$(echo hi}`) is an error.
+fn parse_var_expr(raw: &str) -> Result<Expr, String> {
     // Special case: ${?} is the last exit code (same as $?)
     if raw == "${?}" {
-        return Expr::LastExitCode;
+        return Ok(Expr::LastExitCode);
     }
 
     // Special case: ${$} is the current PID (same as $$)
     if raw == "${$}" {
-        return Expr::CurrentPid;
+        return Ok(Expr::CurrentPid);
     }
 
     // Check for default value syntax: ${VAR:-default}
@@ -87,22 +138,12 @@ fn parse_var_expr(raw: &str) -> Expr {
         // Extract default value (between :- and }) and recursively parse it,
         // after stripping shell quoting from the word (quotes are syntax).
         let default_str = &raw[colon_idx + 2..raw.len() - 1];
-        // TODO: this discards a real error. `parse_interpolated_string` now
-        // reports an unterminated `$(`, but this path returns `Expr` and has
-        // nowhere to put a failure, so `echo ${x:-$(echo hi}` still exits 0
-        // with the body kept as literal text — the same silent shape the
-        // quoted path just stopped doing. Closing it needs the check on the
-        // token stream, where `validate_interpolated_strings` already lives;
-        // it only inspects `Token::String` today and would have to read a
-        // `VarRef`'s default word too.
-        let default_word = unquote_default_word(default_str);
-        let default = parse_interpolated_string(&default_word)
-            .unwrap_or_else(|_| vec![StringPart::Literal(default_word.clone())]);
-        return Expr::VarWithDefault { path, default };
+        let default = parse_interpolated_string(&unquote_default_word(default_str))?;
+        return Ok(Expr::VarWithDefault { path, default });
     }
 
     // Regular variable path
-    Expr::VarRef(parse_varpath(raw))
+    Ok(Expr::VarRef(parse_varpath(raw)))
 }
 
 /// Detect bash's `${VAR:offset:length}` substring form and explain the kaish
@@ -662,24 +703,35 @@ fn parse_interpolated_string_spanned(
                 // string scanner mis-reads `stamp = "$(date +%s)"` as
                 // unterminated. The escape models genuinely differ, which is
                 // why this sibling exists at all.
-                let inserted = if let Ok(program) = parse(&cmd_content) {
-                    // The full statement block runs as the substitution body
-                    // (pipelines, `&&`/`||`, `;`/newline sequences, comments).
-                    let stmts = strip_empty_stmts(program.statements);
-                    if stmts.is_empty() {
-                        false
-                    } else {
-                        parts.push(SpannedPart {
-                            part: StringPart::CommandSubst(stmts),
-                            offset: base_offset + part_start,
-                            len: pos - part_start,
-                        });
-                        true
+                let inserted = match parse(&cmd_content) {
+                    Ok(program) => {
+                        // The full statement block runs as the substitution
+                        // body (pipelines, `&&`/`||`, `;`/newline sequences,
+                        // comments).
+                        let stmts = strip_empty_stmts(program.statements);
+                        if stmts.is_empty() {
+                            false
+                        } else {
+                            parts.push(SpannedPart {
+                                part: StringPart::CommandSubst(stmts),
+                                offset: base_offset + part_start,
+                                len: pos - part_start,
+                            });
+                            true
+                        }
                     }
-                } else {
-                    return Err(format!(
-                        "syntax error in command substitution: $({cmd_content})"
-                    ));
+                    // Name the REAL problem, not a generic wrapper — a
+                    // glued `!` (or any other purpose-built diagnosis) inside
+                    // a quoted `$(...)` used to lose its own message here,
+                    // the same class of loss `validate_cmd_subst_bodies`
+                    // exists to undo for the unquoted form.
+                    Err(errs) => {
+                        let detail =
+                            errs.first().map(|e| e.message.as_str()).unwrap_or("syntax error");
+                        return Err(format!(
+                            "syntax error in command substitution: $({cmd_content}): {detail}"
+                        ));
+                    }
                 };
                 if inserted {
                     // Successfully pushed a CommandSubst; the next literal
@@ -912,22 +964,10 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                 // `(`/`)` sitting inside a quoted argument of the
                 // substitution itself (`$(echo "(")`).
                 let remainder: String = chars.clone().collect();
-                let close = lexer::tokenize(&remainder).ok().and_then(|toks| {
-                    let toks: Vec<(Token, Span)> = toks
-                        .into_iter()
-                        .map(|sp| (sp.token, (sp.span.start..sp.span.end).into()))
-                        .collect();
-                    find_cmd_subst_close(&toks).map(|idx| toks[idx].1)
-                });
-                // No close — or a remainder that does not even tokenize —
-                // means the substitution ran past the closing quote. Report
-                // it before `parse` sees the body: the body can be a valid
-                // program on its own (`echo hi`), so falling back to it runs
-                // a substitution nobody closed, and the plan then renders a
-                // `)` the writer never typed.
-                let Some(rparen_span) = close else {
-                    return Err("unterminated command substitution: missing `)`".to_string());
-                };
+                // A missing close is reported before `parse` sees the body:
+                // the body can be a valid program on its own (`echo hi`), so
+                // falling back to it runs a substitution nobody closed.
+                let rparen_span = quoted_cmd_subst_close(&remainder)?;
                 let (cmd_content, consume_bytes) =
                     (remainder[..rparen_span.start].to_string(), rparen_span.end);
                 let mut consumed = 0usize;
@@ -953,12 +993,17 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                             parts.push(StringPart::CommandSubst(stmts));
                         }
                     }
-                    Err(_) => {
+                    Err(errs) => {
                         // A syntax error inside the substitution is loud, exactly
                         // like the unquoted `$(...)` form — never silently demoted
-                        // to literal text.
+                        // to literal text. Name the REAL problem, not a generic
+                        // wrapper — a glued `!` (or any other purpose-built
+                        // diagnosis) inside a quoted `$(...)` used to lose its
+                        // own message here.
+                        let detail =
+                            errs.first().map(|e| e.message.as_str()).unwrap_or("syntax error");
                         return Err(format!(
-                            "syntax error in command substitution: $({cmd_content})"
+                            "syntax error in command substitution: $({cmd_content}): {detail}"
                         ));
                     }
                 }
@@ -1154,10 +1199,40 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Find the `)` that closes a quoted `$(`, given the text after the `$(`.
+///
+/// Text after that `)` is string text, not shell code, so a lexer error
+/// there (`"$(echo hi) it's"`) does not count. A lexer error before any
+/// close is the body's own error and is reported as the lexer states it.
+fn quoted_cmd_subst_close(remainder: &str) -> Result<Span, String> {
+    fn close_in(source: &str) -> Result<Option<Span>, Vec<lexer::Spanned<lexer::LexerError>>> {
+        let tokens: Vec<(Token, Span)> = lexer::tokenize(source)?
+            .into_iter()
+            .map(|spanned| (spanned.token, (spanned.span.start..spanned.span.end).into()))
+            .collect();
+        Ok(find_cmd_subst_close(&tokens).map(|index| tokens[index].1))
+    }
+    let missing = || "unterminated command substitution: missing `)`".to_string();
+    let errors = match close_in(remainder) {
+        Ok(close) => return close.ok_or_else(missing),
+        Err(errors) => errors,
+    };
+    let first = errors
+        .iter()
+        .min_by_key(|error| error.span.start)
+        .unwrap_or_else(|| unreachable!("tokenize failed without an error"));
+    if let Some(before_error) = remainder.get(..first.span.start)
+        && let Ok(Some(close)) = close_in(before_error)
+    {
+        return Ok(close);
+    }
+    Err(format!("lexer error: {}", first.token))
+}
+
 /// Parse kaish source code into a Program AST.
 pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // Tokenize with logos
-    let tokens = lexer::tokenize(source).map_err(|errs| {
+    let (tokens, gaps) = lexer::tokenize_with_continuation_gaps(source).map_err(|errs| {
         errs.into_iter()
             .map(|e| ParseError {
                 span: (e.span.start..e.span.end).into(),
@@ -1171,6 +1246,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
         .into_iter()
         .map(|spanned| (spanned.token, (spanned.span.start..spanned.span.end).into()))
         .collect();
+    let gaps: Vec<(usize, usize)> = gaps.into_iter().map(|s| (s.start, s.end)).collect();
 
     // bash's `${VAR:offset:length}` is checked on the token stream, before the
     // grammar runs, for the reason documented on `command_parser`: a `try_map`
@@ -1241,6 +1317,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // End-of-input span
     let end_span: Span = (source.len()..source.len()).into();
 
+    let _gaps = ContinuationGapsGuard::install(gaps);
     parse_tokens(tokens, end_span, (0..0).into())
 }
 
@@ -1558,15 +1635,21 @@ where
         ))
         .boxed();
 
-        // Base statement (without chaining)
-        let base_statement = choice((
-            just(Token::Newline).to(Stmt::Empty),
-            set_command,
-            env_scoped,
-            assignment_parser().map(Stmt::Assignment),
-            // Shell-style functions (use $1, $2 positional params)
-            posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
-            bash_function_parser(stmt.clone()).map(Stmt::ToolDef),   // function name { }
+        // `!` negates a pipeline (spec: bash's reading) — the statement-level
+        // sibling of the `!` `condition_parser` already accepts inside `if`/
+        // `while`. It applies to test/arith/pipeline alike: a `[[ ]]` or
+        // `(( ))` is a compound command in bash's grammar too, eligible for
+        // `!` same as any other pipeline stage (`! [[ -f x ]]`, `! (( 0 ))`
+        // both parse in bash). `break`/`continue`/`return`/`exit` are
+        // included too — bash accepts `! exit 3` syntactically (it fails at
+        // runtime only if the signal position doesn't apply, same as a bare
+        // `break` outside a loop) — and the interpreter passes their
+        // ControlFlow through `Stmt::Not` untouched, so wrapping them here
+        // costs nothing new on the execution side. Repeated so `! ! x`
+        // parses, matching `condition_parser`'s `!` and bash's own `! !`;
+        // `bang_prefixed` refuses a glued `!x` the same way `condition_parser`
+        // does (bash reads that as a command literally named `!x`).
+        let negatable = choice((
             break_stmt,
             continue_stmt,
             return_stmt,
@@ -1579,6 +1662,19 @@ where
                 command_stage_parser(),
             )))
             .map(pipeline_into_stmt),
+        ));
+        let negatable = bang_prefixed(negatable, Stmt::Not, crate::ast::plan::render_stmt);
+
+        // Base statement (without chaining)
+        let base_statement = choice((
+            just(Token::Newline).to(Stmt::Empty),
+            set_command,
+            env_scoped,
+            assignment_parser().map(Stmt::Assignment),
+            // Shell-style functions (use $1, $2 positional params)
+            posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
+            bash_function_parser(stmt.clone()).map(Stmt::ToolDef),   // function name { }
+            negatable,
         ))
         .boxed();
 
@@ -1887,7 +1983,9 @@ where
                     let mut index = 0;
                     while index + 1 < items.len() {
                         let start = index;
-                        while index + 1 < items.len() && items[index].1.end == items[index + 1].1.start {
+                        while index + 1 < items.len()
+                            && gap_is_only_continuations(items[index].1.end, items[index + 1].1.start)
+                        {
                             index += 1;
                         }
                         if index > start {
@@ -2159,12 +2257,13 @@ where
         // command alternative and the glued-word diagnosis that names the fix.
         .then(just(Token::Eq).map_with(|_, extra| -> Span { extra.span() }).or_not().rewind())
         .filter(|((_, is_identifier, name_span), equals)| {
-            !(*is_identifier && equals.is_some_and(|span| name_span.end == span.start))
+            !(*is_identifier
+                && equals.is_some_and(|span| gap_is_only_continuations(name_span.end, span.start)))
         })
         .map(|((name, _, name_span), _)| (name, name_span))
         .then(args_list_parser().map_with(|args, extra| -> (Vec<Arg>, Span) { (args, extra.span()) }))
         .validate(|((name, name_span), (args, args_span)), _, emitter| {
-            if !args.is_empty() && name_span.end == args_span.start {
+            if !args.is_empty() && gap_is_only_continuations(name_span.end, args_span.start) {
                 emitter.emit(Rich::custom(
                     args_span,
                     "command name and first argument need a space between them",
@@ -2245,6 +2344,7 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
             stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)
         }
         Stmt::EnvScoped { body, .. } => stmt_has_ambiguous_stdin(body),
+        Stmt::Not(body) => stmt_has_ambiguous_stdin(body),
         Stmt::Assignment(_)
         | Stmt::Break(_)
         | Stmt::Continue(_)
@@ -2297,7 +2397,10 @@ fn reject_glued_args<'src>(
     for pair in args.windows(2) {
         let (prev, prev_span) = &pair[0];
         let (next, next_span) = &pair[1];
-        if is_glue_candidate(prev) && is_glue_candidate(next) && prev_span.end == next_span.start {
+        if is_glue_candidate(prev)
+            && is_glue_candidate(next)
+            && gap_is_only_continuations(prev_span.end, next_span.start)
+        {
             return Err(Rich::custom(*next_span, GLUED_ARGS_MESSAGE));
         }
     }
@@ -2471,7 +2574,9 @@ where
     .try_map(
         |(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)),
          span| {
-            if key_span.end != eq_span.start || eq_span.end != value_span.start {
+            if !gap_is_only_continuations(key_span.end, eq_span.start)
+                || !gap_is_only_continuations(eq_span.end, value_span.start)
+            {
                 Err(Rich::custom(
                     span,
                     "a flag and its value must not have spaces around '=' \
@@ -2498,7 +2603,9 @@ where
     .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
     .try_map(|(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)), span| {
         // Check that key ends where = starts and = ends where value starts
-        if key_span.end != eq_span.start || eq_span.end != value_span.start {
+        if !gap_is_only_continuations(key_span.end, eq_span.start)
+            || !gap_is_only_continuations(eq_span.end, value_span.start)
+        {
             Err(Rich::custom(
                 span,
                 "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
@@ -2624,7 +2731,7 @@ where
         .map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) })
         .then(target.clone().map_with(|_, e| e.span()).rewind().or_not())
         .try_map(|((expr, span), glued), _| match glued {
-            Some(next_span) if next_span.start == span.end => Err(Rich::custom(
+            Some(next_span) if gap_is_only_continuations(span.end, next_span.start) => Err(Rich::custom(
                 next_span,
                 "adjacent words with no space between them are not joined into the redirect \
                  target (kaish does no token pasting); quote the whole target, e.g. \
@@ -2867,16 +2974,18 @@ where
     //
     // Precedence: ! (highest) > && > ||
 
-    // Unary NOT binds tighter than `&&`/`||`, so it must recurse at the
-    // unary level — `! A || B` is `(!A) || B`, NOT `!(A || B)`. The inner
-    // `recursive` lets `!` chain (`! ! expr`) while bottoming out at a
-    // primary test, so the bang never swallows a following `&&`/`||` operand.
-    let unary = recursive(|unary| {
-        let not_expr = just(Token::Bang)
-            .ignore_then(unary)
-            .map(|expr| TestExpr::Not { expr: Box::new(expr) });
-        choice((not_expr, primary_test.clone()))
-    });
+    // Unary NOT binds tighter than `&&`/`||`, so it applies at the unary
+    // level — `! A || B` is `(!A) || B`, NOT `!(A || B)`. `bang_prefixed`
+    // folds `! ! ! expr` on its own (its internal `just(Token::Bang)
+    // .repeated()` needs no external recursion to chain), and refuses a
+    // glued `!` (`[[ !-f x ]]`, `[[ !$x == y ]]`) the same way the
+    // statement-level `!` and `condition_parser`'s `!` do — Amy's call was
+    // to refuse a glued `!` everywhere, not just where it was first caught.
+    let unary = bang_prefixed(
+        primary_test.clone(),
+        |inner| TestExpr::Not { expr: inner },
+        crate::ast::plan::render_test,
+    );
 
     // AND level: unary && unary && ...
     let and_expr = unary.clone().foldl(
@@ -2904,6 +3013,72 @@ where
         .then_ignore(just(Token::RBracket).then(just(Token::RBracket)))
         .labelled("test expression")
         .boxed()
+}
+
+/// Parse zero or more `!` immediately before `base`, requiring whitespace
+/// between each `!` and whatever follows it — another `!`, or `base` itself.
+///
+/// bash's `!` is a reserved word: it needs a token boundary on both sides,
+/// so `!true` lexes as the single word `!true` (bash: `!true: command not
+/// found`), never as `!` negating `true`. kaish's lexer emits a standalone
+/// `Bang` token regardless of adjacency, so without this guard `!true` and
+/// `!!true` silently parsed as negation. This refuses those glued forms,
+/// checking `Span` adjacency the same way [`command_parser`]'s "command name
+/// and first argument need a space between them" check does; the emitted
+/// message names the glued text itself (`render`'s job), so `!grep -q x f`
+/// reports itself, not a generic example.
+///
+/// `wrap` builds the negated node at each level: `Expr::Not` for a
+/// condition, `Stmt::Not` for a statement. `render` renders that level's
+/// node back to text (`render_expr`/`render_stmt`), for the glued-text
+/// message. Shared by [`condition_parser`] (`if`/`while`) and the
+/// statement-level `!` in `statement_parser`, so both read the identical
+/// rule.
+fn bang_prefixed<'tokens, I, T, W, R>(
+    base: impl Parser<'tokens, I, T, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+    wrap: W,
+    render: R,
+) -> impl Parser<'tokens, I, T, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    T: 'tokens,
+    W: Fn(Box<T>) -> T + Clone + 'tokens,
+    R: Fn(&T) -> String + Clone + 'tokens,
+{
+    just(Token::Bang)
+        .map_with(|_, extra| extra.span())
+        .repeated()
+        .collect::<Vec<Span>>()
+        .then(base.map_with(|b, extra| (b, extra.span())))
+        .validate(move |(bangs, (body, body_span)), _, emitter| {
+            for (i, bang_span) in bangs.iter().enumerate() {
+                let next_is_bang = i + 1 < bangs.len();
+                let next_start = if next_is_bang { bangs[i + 1].start } else { body_span.start };
+                if gap_is_only_continuations(bang_span.end, next_start) {
+                    // The rest of the glued word: another `!` when this bang
+                    // is glued to a following bang, or the negated node's
+                    // own rendered text when it's glued straight to what it
+                    // negates.
+                    let rest = if next_is_bang { "!".to_string() } else { render(&body) };
+                    emitter.emit(Rich::custom(
+                        *bang_span,
+                        format!(
+                            "`!{rest}`: `!` needs a space before what it negates; write `! {rest}`"
+                        ),
+                    ));
+                    // Report only the FIRST glued pair — `!!true` is one
+                    // mistake to fix, not two: once the earliest `!` in the
+                    // glued run is spaced out, the rest of the run parses
+                    // fresh and any real remaining glue reports on its own.
+                    break;
+                }
+            }
+            let mut result = body;
+            for _ in 0..bangs.len() {
+                result = wrap(Box::new(result));
+            }
+            result
+        })
 }
 
 /// Condition parser: supports [[ ]] test expressions and commands with && / || chaining.
@@ -2940,10 +3115,9 @@ where
 
     // `!` negates the command that follows it, BEFORE `&&`/`||` fold below —
     // bash reads `! true && true` as `(! true) && true`. Repeated so `! ! x`
-    // parses, which bash also accepts.
-    let base = just(Token::Bang)
-        .repeated()
-        .foldr(base, |_, inner| Expr::Not(Box::new(inner)));
+    // parses, which bash also accepts; `bang_prefixed` refuses a glued `!x`
+    // (bash reads that as a command literally named `!x`).
+    let base = bang_prefixed(base, Expr::Not, crate::ast::plan::render_expr);
 
     // && has higher precedence than ||
     // First chain with && (higher precedence)
@@ -3300,21 +3474,11 @@ where
             {
                 return Err(Rich::custom(span, msg));
             }
-            // `${x:-WORD}`'s default word expands like a double-quoted string,
-            // and `parse_var_expr` returns an `Expr` with nowhere to put a
-            // failure — so a malformed `$(` inside the word was kept as
-            // literal text and the whole statement ran. Checked here, at the
-            // grammar, rather than on the token stream: a nested default word
-            // (`$(echo ${x:-$(echo hi})`) is a `VarRef` at whatever depth it
-            // occurs, so this one rule reaches every nesting.
-            if let Some(colon) = find_default_separator(&raw)
-                && raw.len() > colon + 3
-                && let Err(msg) =
-                    parse_interpolated_string(&unquote_default_word(&raw[colon + 2..raw.len() - 1]))
-            {
-                return Err(Rich::custom(span, msg));
-            }
-            Ok(parse_var_expr(&raw))
+            // `${x:-WORD}`'s default word expands like a double-quoted
+            // string. Checked at the grammar, not the token stream, so a
+            // nested default word (`$(echo ${x:-$(echo hi})`) is reached at
+            // every depth.
+            parse_var_expr(&raw).map_err(|msg| Rich::custom(span, msg))
         }),
         select! { Token::SimpleVarRef(name) => Expr::VarRef(VarPath::simple(name)) },
     ))
@@ -3741,9 +3905,9 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
 
         if is_assign_key_token(tok)
             && let Some((Token::Eq, eq_span)) = tokens.get(i + 1)
-            && eq_span.start == span.end
+            && gap_is_only_continuations(span.end, eq_span.start)
             && let Some((value_span, next_i)) = word_unit(tokens, i + 2)
-            && eq_span.end == value_span.start
+            && gap_is_only_continuations(eq_span.end, value_span.start)
         {
             units.push((span.start..value_span.end).into());
             i = next_i;
@@ -3760,8 +3924,9 @@ fn glue_candidate_units(tokens: &[(Token, Span)]) -> Vec<Span> {
         // break in it: a name that cannot start an assignment (`./bin=1`)
         // reaches argv as word/`=`/word and must be reported as one word.
         if matches!(tok, Token::Eq)
-            && units.last().is_some_and(|last: &Span| last.end == span.start)
-            && word_unit(tokens, i + 1).is_some_and(|(next, _)| next.start == span.end)
+            && units.last().is_some_and(|last: &Span| gap_is_only_continuations(last.end, span.start))
+            && word_unit(tokens, i + 1)
+                .is_some_and(|(next, _)| gap_is_only_continuations(span.end, next.start))
         {
             units.push(*span);
             i += 1;
@@ -3869,15 +4034,19 @@ fn validate_glued_args(
 ) -> Result<(), Vec<ParseError>> {
     let units = glue_candidate_units(tokens);
     for i in 0..units.len().saturating_sub(1) {
-        if units[i].end != units[i + 1].start {
+        if !gap_is_only_continuations(units[i].end, units[i + 1].start) {
             continue;
         }
         let mut start_idx = i;
-        while start_idx > 0 && units[start_idx - 1].end == units[start_idx].start {
+        while start_idx > 0
+            && gap_is_only_continuations(units[start_idx - 1].end, units[start_idx].start)
+        {
             start_idx -= 1;
         }
         let mut end_idx = i + 1;
-        while end_idx + 1 < units.len() && units[end_idx].end == units[end_idx + 1].start {
+        while end_idx + 1 < units.len()
+            && gap_is_only_continuations(units[end_idx].end, units[end_idx + 1].start)
+        {
             end_idx += 1;
         }
         // The scan walks the whole token stream, so it also finds adjacency

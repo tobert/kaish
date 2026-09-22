@@ -57,9 +57,17 @@ code is something agents can branch on:
 | 0 | Success | — |
 | 1 | Failure | Read `err` |
 | 2 | Usage error, or a refusal that names what to do instead (e.g. `kaish-trash empty` without `--confirm`) | Read `err` |
-| 3 | Output truncated by the output limit | `original_code` holds the real exit code. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
+| 3 | Output truncated by the output limit | `original_code` holds the real exit code of the statement `code` reports. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
+
+A program's `code` is its last statement's, as in `sh`, and `original_code`
+follows it. `seq 1 5000; false` exits **1** with `did_spill: true` — the
+truncation is still reported, and the status is `false`'s. Read the real exit
+as `original_code.unwrap_or(code)`, and read "was anything lost" from
+`did_spill`, which stays true once any top-level statement spilled. A spill
+inside `$(...)`, a function body, or an `if`/`while` condition does not reach
+it — that output is truncated without the program-level flag being set.
 
 **Assert on the code and the kind, never on the wording.** The exit code is
 contract, and so is the `std::io::ErrorKind` a VFS refusal carries — a write
@@ -144,11 +152,14 @@ rather than parsing `Display` text:
   `None` when the issue isn't about a command at all (`break` outside a
   loop); narrow by it once `code` alone isn't specific enough, rather than
   parsing `message` to recover a name this field already gives you.
-- **`KernelError::Execution(anyhow::Error)`** — a statement began running and
-  faulted: a builtin, the evaluator, an IO fault, or anything else the
-  interpreter propagated. The original error chain is intact — `{:?}` and
-  `.source()` still walk it — even though `Display` (`{}`) shows only the
-  outermost message, matching `anyhow`'s usual behavior.
+- **`KernelError::Execution { error, output }`** — a statement began running
+  and faulted: a builtin, the evaluator, an IO fault, or anything else the
+  interpreter propagated. `error` is the original chain — `{:?}` and
+  `.source()` walk it, and `{:#}` prints it — while `Display` (`{}`) shows
+  only the outermost message, matching `anyhow`. `output` is what ran before
+  the fault, stdout and stderr: for `echo left && x=$((1/0))` it holds
+  `left`. It is empty when the fault came first. A streaming caller has
+  already received the same output through `on_output`.
 
 `is_rejected()` (and its complement, `is_execution_failure()`) answer the
 coarse question without a match statement. `KernelError` is
@@ -268,7 +279,7 @@ Consequences for embedders:
 
 - **External commands need `subprocess`.** Without it, PATH lookup and
   `exec`/`spawn` don't exist. With it, gate at runtime via
-  `allow_external_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
+  `allow_unwrapped_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
   Git is an ordinary external command (`git status`, `git log`): it runs via
   `subprocess` against your system `git`, with no in-tree builtin or backend.
   The old `kaish-tools-git` crate (git builtin + `GitVfs`, removed in 0.9.0) is
@@ -906,14 +917,16 @@ its own parser.
 
 ### Wrapped commands: an external program as a tool
 
-`allow_external_commands` is a single switch. Off, nothing spawns. On, every
-program on `$PATH` spawns, with any arguments, and the validator sees each call
-as an opaque word list. A **wrapped command** is the setting between: an
+`allow_unwrapped_commands` is a single switch. It allows any program that is
+not a wrapped command: PATH lookup for a word that is not a builtin, `exec`,
+`spawn`, and `env CMD`. Off, only a wrapped command spawns. On, any program on
+`$PATH` also spawns, with any arguments, and the validator sees each call as
+an opaque word list. A **wrapped command** is the setting between: an
 allowlist with a grammar. The embedder declares one program, the verbs it
 allows, and the flags each verb accepts; the kernel validates a call against
 that declaration, renders the child's argv itself, and runs the program with
 `execve(2)` — never through `sh -c`. It runs while
-`allow_external_commands = false`, so a kernel can name every program it is
+`allow_unwrapped_commands = false`, so a kernel can name every program it is
 able to run.
 
 The kernel holds the mechanism that makes the policy correct: the parse, the
@@ -1001,14 +1014,17 @@ Semantics:
 ## Sandboxing and External Commands
 
 Builtins go through the VFS and respect its mounts; **external commands,
-`exec`, and `spawn` access the real filesystem directly** (they're OS
-processes). Two gates:
+`exec`, `spawn`, and `env CMD` access the real filesystem directly** (they're
+OS processes). Two gates:
 
 - Compile-time: build without the `subprocess` feature — the capability
   doesn't exist.
-- Runtime: `allow_external_commands = false` in `KernelConfig` — PATH
-  lookups return "command not found" and `exec`/`spawn` error.
-  `KernelConfig::isolated()` sets this by default.
+- Runtime: `allow_unwrapped_commands = false` in `KernelConfig` — PATH
+  lookup, `exec`, `spawn`, and `env CMD` are refused before anything runs,
+  all four with "external commands are disabled on this shell" and exit 127.
+  None of these fall back to "command not found" — that message stays
+  reserved for a name that genuinely isn't resolvable. `KernelConfig::isolated()` sets this by
+  default.
 
 ### Preflighting a script for external commands
 
@@ -1215,8 +1231,33 @@ source text, so it touches no filesystem and needs no capability feature.
 
 The output is always a JSON object, so a caller parses one shape whatever
 happened: `{"statements": [...]}` and exit **0**, or `{"errors": [...]}` and
-exit **2** — the same usage code a builtin returns for bad argv. Both shapes
-also carry `kaish_version` (bare semver, e.g. `"0.17.0"`), `kaish_git_hash`
+exit **2** — the same usage code a builtin returns for bad argv.
+
+A plan that exits 0 can still hold a statement the runtime refuses:
+`[[ "abc" -eq 1 ]]` plans cleanly and faults with exit 2 the moment it runs.
+Those carry a `warnings` array, present only when there is something in it,
+so a caller that reads `statements` alone is unchanged:
+
+```console
+$ kaish --plan '[[ "abc" -eq 1 ]]'
+{"statements":[…],"warnings":[{"code":"W008","message":"this comparison
+cannot succeed: type error: expected numeric operand, got non-numeric string
+\"abc\"","suggestion":"compare with `==` for text, or give the operand a
+numeric value"}],"kaish_version":"0.18.0",…}
+```
+
+The plan exits **0** for that program, because the program runs. `warnings`
+never means "unrunnable" — `errors` does, and only `errors` does. Every
+issue object in either array carries a `code`; route on it rather than on
+message text. `start`/`end` appear only when the issue refers to a position
+in the source.
+
+The `warnings` array holds only what the runtime will refuse, never the
+validator's advisory warnings. `UndefinedCommand` fires on every external
+command a program calls, and publishing it here would put a line in the plan
+of every program that runs `cargo`.
+
+Both shapes also carry `kaish_version` (bare semver, e.g. `"0.17.0"`), `kaish_git_hash`
 (short hash, or `"unknown"` when kaish was built with no `.git` present — a
 crates.io tarball build, for instance), and `kaish_build_date`
 (`YYYY-MM-DD`) at the top level, so a caller windowing measurements by
@@ -1441,6 +1482,30 @@ last kernel built wins for both. A hermetic kernel (`NoLocal`, or any
 that manager. Share a manager between kernels configured alike, or accept
 the last writer.
 
+### Whole-program asynchronous execution
+
+`Kernel::execute_background_with_options(source, options)` starts one complete
+kaish program as a job and returns its `JobId`. The source is parsed and
+validated on the job's fork first; a rejected program returns
+`KernelError::Parse` or `KernelError::Validation` and registers no job. It uses
+the kernel's `JobManager`, so an embedder that builds a kernel per request
+supplies a shared manager with `KernelConfig::with_job_manager` first.
+
+```rust
+let id = kernel
+    .execute_background_with_options("echo first; long_task; echo last", ExecuteOptions::new())
+    .await?;
+let result = kernel.jobs().wait(id).await.expect("job remains tracked");
+```
+
+The job runs in a fork with the same options, tools, variables, and cwd as
+foreground execution. `JobManager::cancel` and the options' cancel token both
+stop it with exit 130. Stdout reaches the job's stream as it is produced, the
+same as a `cmd &` job; stderr reaches the stream when each top-level statement
+finishes. A runtime error (exit 1), a timeout (exit 124), or a cancellation
+(exit 130) ends stderr with one diagnostic line, in both the result and the
+stream.
+
 ### JobFs for Background Job Observability
 
 The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background
@@ -1467,23 +1532,32 @@ cat /v/jobs/1/stdout        # Whatever the build has printed so far
 
 `stdout` and `stderr` are live for an **external** command run by the job:
 its drain task tees each 8 KiB chunk into the node as the child emits it.
-GH #240 had removed both nodes because they filled only once, at completion,
-while four docs promised a live stream — they are back on the terms the docs
-always claimed.
+A builtin, a function call, or any other statement publishes its stdout and
+stderr when it returns, so a job mixing both reads in order. GH #240 had
+removed both nodes because they filled only once, at completion, while four
+docs promised a live stream — they are back on the terms the docs always
+claimed.
 
 Three limits, stated because an embedder polling these needs to predict them:
 
 - **A builtin is not a live producer.** A kaish builtin returns its whole
-  output as a value when it finishes, so `echo hi &` fills the node in one
-  write at completion — and so does `cargo build 2>&1 | tee build.log &`,
+  output as a value when it finishes, so `echo hi &` writes the node once,
+  when `echo` returns — and so does `cargo build 2>&1 | tee build.log &`,
   because kaish's `tee` is a builtin. Drop the `| tee`: the job's own stream
   *is* the log.
-- **Only the last stage of a pipeline reaches `stdout`.** An upstream stage's
-  output is the next stage's stdin, not the job's stdout. `stderr` takes every
-  stage's, since stderr is not piped. One consequence: in a job mixing
-  builtins and externals, once any external has written stderr the
-  completion write is skipped, so a builtin stage's stderr stays in the job's
-  `ExecResult` and does not reach the node.
+- **Only the job's own stdout reaches `stdout`.** An upstream stage's output
+  is the next stage's stdin, `$(...)` output is a value, a redirected stdout
+  goes to its target, and a scatter worker's stdout is gather's input; none
+  of it is published. `stderr` publishes from every stage, not only the
+  last — bash never pipes stderr between stages, so `a | b` streams both
+  `a`'s and `b`'s stderr, in the order each command produced it. An
+  external tees it live, chunk by chunk; a builtin, a function call, or any
+  other statement publishes once its own redirects apply. `2>file`,
+  `&>file`, and `2>&1` keep a stage's stderr out of the node (`2>&1`'s bytes
+  land in `stdout` instead); `>&2` still reaches `stderr`, since only the
+  destination of the command's own stdout changed. A whole-program job
+  writes each top-level statement's stderr when the statement finishes,
+  instead of this per-stage publish.
 - **Each node is a 10 MB ring** that evicts its oldest bytes. A job that
   outruns it loses its head, not its tail; redirect to a file
   (`cmd > /tmp/out.log &`) when the whole output matters.
@@ -1536,7 +1610,12 @@ work on `wasm32-unknown-unknown` too), and `pgids: Vec<u32>` — the real OS
 process groups a background job spawned. `pgids` is the surface to use for
 "what is this job actually doing"; `pid` is set only for a Ctrl-Z-stopped
 foreground job (a TTY concept an embedder never sees) and is otherwise
-`None`. For a finished job's `ExecResult` without blocking, use the
+`None`. Two fields say whether a finished job's exit code is its command's
+own: `did_spill: bool` is true when the output was capped and the code was
+remapped to 3, and `original_code: Option<i64>` carries the code that was
+replaced. Without them a spilled job and a job that genuinely exited 3 are
+the same report. Both are omitted from the JSON when unset. For a finished
+job's `ExecResult` without blocking, use the
 non-blocking `JobManager::try_result(id) -> Option<ExecResult>` instead of
 `wait`, which parks until the job completes.
 

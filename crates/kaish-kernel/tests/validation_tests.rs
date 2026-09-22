@@ -327,21 +327,18 @@ async fn validation_passes_for_valid_seq() {
 #[tokio::test]
 async fn validation_accepts_glob_pattern_ls_star() {
     let kernel = make_kernel().await;
-    // `ls *.txt` now parses and expands at runtime.
-    // In an empty temp dir, it returns "no matches" error at runtime (not parse error).
-    let result = kernel.execute("ls *.txt").await;
-
-    // Parse succeeds, runtime may fail with "no matches"
-    match result {
-        Ok(exec) => {
-            // If there happen to be .txt files, it succeeds
-            assert!(exec.code == 0 || exec.code == 1);
-        }
-        Err(e) => {
-            let err = e.to_string();
-            assert!(err.contains("no matches"), "expected no-matches error: {}", err);
-        }
-    }
+    // `ls *.txt` parses and expands at runtime. In a directory with no match
+    // the command fails with exit 1 (docs/LANGUAGE.md, "Glob Expansion"),
+    // and `execute` returns `Ok`, not `Err`.
+    // Made through the kernel, so it exists with or without the localfs backend.
+    let dir = format!("/tmp/kaish-glob-empty-{}", std::process::id());
+    let cd = kernel.execute(&format!("mkdir -p {dir} && cd {dir}")).await.expect("cd");
+    assert!(cd.ok(), "cd into the empty directory must succeed: {cd:?}");
+    let exec = kernel.execute("ls *.txt").await.expect("execute");
+    let cleanup = kernel.execute(&format!("cd / && rm -r {dir}")).await.expect("cleanup");
+    assert!(cleanup.ok(), "remove the empty directory: {cleanup:?}");
+    assert_eq!(exec.code, 1, "{exec:?}");
+    assert!(exec.err.contains("no matches"), "{exec:?}");
 }
 
 #[tokio::test]
@@ -833,4 +830,140 @@ async fn generic_undefined_command_warning_stays_trace_only() {
         "the generic undefined-command validation warning must not surface, got err: {:?}",
         result.err
     );
+}
+
+// ── W008: a literal operand a numeric `[[ ]]` op will refuse ───────────
+
+/// The validator's rule and the runtime's are one function, so whatever the
+/// runtime refuses is reported here — including the leading-zero and
+/// out-of-range spellings, not just a plainly non-numeric word.
+#[test]
+fn a_literal_operand_a_numeric_comparison_refuses_is_reported() {
+    for source in [
+        r#"[[ "abc" -eq 1 ]]"#,
+        "[[ 010 -eq 10 ]]",
+        "[[ inf -gt 1 ]]",
+        r#"[[ 1 -lt "nope" ]]"#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+        assert_eq!(
+            reported[0].severity,
+            kaish_kernel::validator::Severity::Warning,
+            "{source}: a warning, never an error — the runtime refuses it as a result",
+        );
+    }
+}
+
+/// Nothing computed, and nothing outside a numeric op.
+#[test]
+fn w008_stays_quiet_where_the_value_is_not_in_the_source() {
+    for source in [
+        r#"x=abc; [[ "$x" -eq 1 ]]"#,
+        r#"[[ $(echo abc) -eq 1 ]]"#,
+        r#"[[ "abc" == "abc" ]]"#,
+        r#"[[ "abc" < "b" ]]"#,
+        "[[ 1 -eq 1 ]]",
+        r#"[[ "1.5" -gt 1 ]]"#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand),
+            "{source} must not warn: {issues:?}",
+        );
+    }
+}
+
+/// The same comparison written through the `test` builtin — `[[ ]]` and
+/// `test` share one set of numeric operators (docs/LANGUAGE.md, "Three
+/// spellings"), so a literal, non-numeric operand must be caught the same
+/// way through either spelling.
+#[test]
+fn a_literal_operand_a_numeric_comparison_refuses_is_reported_through_test() {
+    for source in [
+        r#"test "abc" -eq 1"#,
+        "test 010 -eq 10",
+        "test inf -gt 1",
+        r#"test 1 -lt "nope""#,
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+        assert_eq!(
+            reported[0].severity,
+            kaish_kernel::validator::Severity::Warning,
+            "{source}: a warning, never an error — the runtime refuses it as a result",
+        );
+    }
+}
+
+/// Same quiet cases as `[[ ]]`, through `test`: nothing computed, and
+/// nothing outside a numeric op.
+#[test]
+fn w008_stays_quiet_through_test_where_the_value_is_not_in_the_source() {
+    for source in [
+        r#"x=abc; test "$x" -eq 1"#,
+        r#"test $(echo abc) -eq 1"#,
+        r#"test "abc" == "abc""#,
+        "test 1 -eq 1",
+        r#"test "1.5" -gt 1"#,
+        "test $x -eq 1",
+        "test $x -eq $y",
+    ] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand),
+            "{source} must not warn: {issues:?}",
+        );
+    }
+}
+
+// ── `test`'s validate() judges each operand independently (kaibo review) ──
+//
+// The first version bailed out (`return Vec::new()`) whenever ANY word in
+// the expression was the `<dynamic>` placeholder (an unevaluated `$x` or
+// `$(cmd)`) — a blanket suppression the `[[ ]]` walker's per-operand
+// judgment (`walker.rs`'s `check_numeric_literal_operand`) never had.
+
+/// `test abc -eq $y`: the literal `abc` is still in the source and still
+/// cannot succeed against `-eq`, regardless of what `$y` resolves to —
+/// `[[ abc -eq $y ]]` already warns here, and `test` must agree.
+#[test]
+fn w008_still_fires_through_test_when_the_other_operand_is_dynamic() {
+    for source in ["test abc -eq $y", "test $y -eq abc"] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+    }
+}
+
+/// `test $x -a $y`: the compound operator `-a` is a literal word in the
+/// source — the validator classifies it regardless of what `$x`/`$y`
+/// resolve to — so E020 must still fire, not be swallowed by the two
+/// dynamic operands sitting on either side of it.
+#[test]
+fn e020_still_fires_through_test_when_the_operands_are_dynamic() {
+    for source in ["test $x -a $y", "test $x -o $y"] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::TestCompoundOperator),
+            "{source}: expected E020, got {issues:?}"
+        );
+    }
 }

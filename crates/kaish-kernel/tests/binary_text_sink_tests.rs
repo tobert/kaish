@@ -64,7 +64,7 @@ async fn assert_loud_binary(script: &str) {
         Err(e) => {
             // The alternate `{:#}` form walks the full `anyhow` cause chain —
             // some paths (e.g. `Stmt::Assignment`) wrap the real cause behind
-            // a generic `.context("failed to evaluate assignment")`, so a
+            // a `.context("failed to evaluate assignment to x")`, so a
             // bare `{}` would only show that wrapper and miss the actual
             // binary-data message underneath.
             let msg = format!("{:#}", e);

@@ -23,6 +23,10 @@ record), `ok`, `code`, `out` (worker stdout, trailing newline stripped), `err`
 output, typed) and `timed_out:true` only when present. A timed-out worker
 reports `code` 124.
 
+Read `ok`, not `code`. `code` is the worker's own exit code, and a worker
+whose stdout is binary is `ok:false` with `code` 0 — the refusal is in `ok`
+and `err`.
+
 `ITEM` is **typed**: from a JSON array (jq/`values`/seq/split/glob/find), each
 worker binds the real element — `${ITEM[id]}` subscripts a record, numbers stay
 numbers, `1` ≠ `"1"`. From plain text, one string item per line (blank lines
@@ -60,6 +64,10 @@ cat results.jsonl | fromjsonl | scatter | retry ${ITEM[item][host]} | gather  # 
 `0` every worker succeeded · `123` any worker failed (partial or total —
 distinguish via the rows) · `2` usage error. A pipeline's status is its last
 command's, so check gather's code directly or gate with `if`/`&&`.
+
+A worker can exit `123` itself, and `$?` cannot tell that apart from gather's
+aggregate. The rows can: gather's `123` means at least one row has
+`ok:false`, and each row's `code` is that worker's own.
 
 ## Parameters
 

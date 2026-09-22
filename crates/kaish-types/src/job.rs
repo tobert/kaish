@@ -117,11 +117,25 @@ pub struct JobInfo {
     /// applies to an embedder-created job.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pgids: Vec<u32>,
+    /// True when the job's output was capped and data was lost — spilled to a
+    /// file, truncated in memory, or evicted from the capture ring. The exit
+    /// code is remapped to 3 in every one of those cases, so without this
+    /// field a spilled job and a job that genuinely exited 3 report the same
+    /// `failed:3` and an embedder cannot tell them apart. See
+    /// [`crate::ExecResult::did_spill`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub did_spill: bool,
+    /// The exit code the job's command returned before the spill remap
+    /// replaced it. `Some` only when [`Self::did_spill`] is true and the code
+    /// was changed. See [`crate::ExecResult::original_code`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_code: Option<i64>,
 }
 
 impl JobInfo {
     /// Create a `JobInfo` with the required fields; `output_file`/`pid`/
-    /// `exit_code`/`finished_at` default to `None`, `pgids` to empty,
+    /// `exit_code`/`finished_at`/`original_code` default to `None`,
+    /// `did_spill` to false, `pgids` to empty,
     /// and `started_at` to now (callers that track a job's real start time —
     /// i.e. `JobManager` — override it via [`Self::with_started_at`]). Chain
     /// the `with_*` setters to fill in the rest.
@@ -139,6 +153,8 @@ impl JobInfo {
             started_at: clock::system_now(),
             finished_at: None,
             pgids: Vec::new(),
+            did_spill: false,
+            original_code: None,
         }
     }
 
@@ -177,6 +193,16 @@ impl JobInfo {
         self.pgids = pgids;
         self
     }
+
+    /// Set the spill facts together (see [`Self::did_spill`] and
+    /// [`Self::original_code`]). One setter because they answer one question —
+    /// "was this exit code the command's own?" — and a caller that set only
+    /// the flag would leave that question half-answered.
+    pub fn with_spill(mut self, did_spill: bool, original_code: Option<i64>) -> Self {
+        self.did_spill = did_spill;
+        self.original_code = original_code;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +221,8 @@ mod tests {
         assert!(info.exit_code.is_none());
         assert!(info.finished_at.is_none());
         assert!(info.pgids.is_empty());
+        assert!(!info.did_spill);
+        assert!(info.original_code.is_none());
         // started_at defaults to "now" — bounded sanity check, not exact.
         assert!(
             info.started_at >= before,
@@ -216,13 +244,16 @@ mod tests {
             .with_exit_code(Some(0))
             .with_started_at(started)
             .with_finished_at(Some(finished))
-            .with_pgids(vec![4242, 4243]);
+            .with_pgids(vec![4242, 4243])
+            .with_spill(true, Some(0));
         assert_eq!(info.output_file, Some(PathBuf::from("job-output.txt")));
         assert_eq!(info.pid, Some(1234));
         assert_eq!(info.exit_code, Some(0));
         assert_eq!(info.started_at, started);
         assert_eq!(info.finished_at, Some(finished));
         assert_eq!(info.pgids, vec![4242, 4243]);
+        assert!(info.did_spill);
+        assert_eq!(info.original_code, Some(0));
     }
 
     // ── serde: JobId ──
@@ -269,7 +300,9 @@ mod tests {
     #[test]
     fn job_info_omits_unset_optional_fields_from_the_wire() {
         // A plain running job (the common case) must not carry dead weight:
-        // no output_file/pid/exit_code/finished_at, no pgids array.
+        // no output_file/pid/exit_code/finished_at, no pgids array, and
+        // neither spill field — a reader that has not been updated for them
+        // still sees exactly the document it saw before.
         let info = JobInfo::new(JobId(4), "sleep 5", JobStatus::Running);
         let json = serde_json::to_value(&info).unwrap();
         let obj = json.as_object().unwrap();
@@ -278,6 +311,8 @@ mod tests {
         assert!(!obj.contains_key("exit_code"), "{json}");
         assert!(!obj.contains_key("finished_at"), "{json}");
         assert!(!obj.contains_key("pgids"), "{json}");
+        assert!(!obj.contains_key("did_spill"), "{json}");
+        assert!(!obj.contains_key("original_code"), "{json}");
         // Required fields always present.
         assert!(obj.contains_key("started_at"), "{json}");
         assert!(obj.contains_key("status"), "{json}");

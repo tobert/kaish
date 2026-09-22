@@ -215,19 +215,44 @@ pub struct ExecContext {
     /// job for `kill -<sig> %N` and tees its output into the job's streams.
     /// `None` for foreground execution.
     pub background_job: Option<crate::scheduler::JobId>,
+    /// Whether this command's stdout is its background job's stdout, so its
+    /// output is published to the job's stream: an external per chunk, a
+    /// builtin when it returns. False inside `$(...)`, under a stdout
+    /// redirect, and in a scatter worker.
+    pub background_stream_output: bool,
+    /// Whether this dispatch's stderr is its background job's stderr, so it
+    /// is published to the job's stream: an external per chunk, everything
+    /// else when its statement or pipeline stage ends
+    /// (`ExecContext::publish_job_stderr`).
+    /// Unlike `background_stream_output`, stderr is not gated on pipeline
+    /// position — bash never pipes stderr between stages, so every stage
+    /// streams its own. False under a redirect that sends stderr elsewhere
+    /// (`2>file`, `&>file`, `2>&1`) and for a whole-program job, which
+    /// publishes each statement's stderr itself when the statement finishes.
+    pub background_stream_stderr: bool,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
     pub ignore_config: IgnoreConfig,
     /// Output size limit configuration for agent safety.
     pub output_limit: OutputLimitConfig,
-    /// Whether external command execution is allowed.
+    /// Whether an unwrapped command may run: PATH lookup for a word that is
+    /// not a builtin, the `exec` and `spawn` builtins, and `env CMD` (which
+    /// spawns CMD the same way, so it answers to the same gate). A wrapped
+    /// command's program is pinned at registration and never reaches this
+    /// check, so the name is true by construction: it gates any program
+    /// that is *not* a wrapped command.
     ///
-    /// When `false`, external commands (PATH lookup, `exec`, `spawn`) are blocked.
-    /// Only kaish builtins and backend-registered tools (MCP) are available.
-    /// A blocked attempt reports [`ExternalCommandsUnavailable::ConfiguredOff`],
-    /// not "command not found".
-    pub allow_external_commands: bool,
+    /// When `false`, those four sites are blocked; a blocked attempt reports
+    /// [`ExternalCommandsUnavailable::ConfiguredOff`], not "command not
+    /// found". Everything else a kernel can run — builtins, backend-registered
+    /// tools (MCP), user-defined `tool`s, wrapped commands, `.kai` scripts —
+    /// is unaffected.
+    ///
+    /// `true` for a stand-alone `ExecContext` built outside a kernel (every
+    /// constructor below sets it); the kernel always overwrites it from
+    /// `KernelConfig::allow_unwrapped_commands` at construction.
+    pub allow_unwrapped_commands: bool,
     /// Trash backend for safe file deletion.
     ///
     /// Always present when the kernel creates the context (even if `set -o trash`
@@ -417,6 +442,96 @@ fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
 }
 
 impl ExecContext {
+    /// Publish `result`'s stdout to this context's background job, when that
+    /// stdout is the job's stdout. For output no builtin or external command
+    /// produced: gather's rows and an embedder tool's result.
+    pub(crate) async fn publish_job_stdout(&self, result: &ExecResult) {
+        let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
+            self.background_job,
+            self.background_stream_output,
+            self.pipeline_position,
+            self.job_manager.as_ref(),
+        ) else {
+            return;
+        };
+        let Some(streams) = jobs.streams(job_id).await else {
+            return;
+        };
+        match result.out_bytes() {
+            Some(bytes) => streams.stdout.write(bytes).await,
+            None => streams.stdout.write(result.text_out().as_bytes()).await,
+        }
+    }
+
+    /// Whether stderr produced in this context belongs on its background
+    /// job's stderr stream: a `cmd &` job, and no redirect has sent stderr
+    /// elsewhere. Every stage streams its own stderr regardless of pipeline
+    /// position — bash never pipes stderr between stages, unlike stdout.
+    pub(crate) fn publishes_job_stderr(&self) -> bool {
+        self.background_job.is_some() && self.background_stream_stderr && self.job_manager.is_some()
+    }
+
+    /// Publish the part of `result.err` the job's stream does not hold yet,
+    /// `err[stderr_published_len..]`, and mark all of `err` published. A
+    /// no-op outside a publishing context, so it is safe to call at every
+    /// point stderr may need to reach the stream.
+    pub(crate) async fn publish_job_stderr(&self, result: &mut ExecResult) {
+        let published = result.stderr_published_len;
+        assert!(
+            published <= result.err.len() && result.err.is_char_boundary(published),
+            "stderr published length {published} does not fit err of {} bytes",
+            result.err.len()
+        );
+        if published == result.err.len() || !self.publishes_job_stderr() {
+            return;
+        }
+        self.write_job_stderr(&result.err.as_bytes()[published..]).await;
+        result.stderr_published_len = result.err.len();
+    }
+
+    /// Write `bytes` to the job's stderr stream when this context publishes.
+    pub(crate) async fn write_job_stderr(&self, bytes: &[u8]) {
+        if bytes.is_empty() || !self.publishes_job_stderr() {
+            return;
+        }
+        let (Some(job_id), Some(jobs)) = (self.background_job, self.job_manager.as_ref()) else {
+            return;
+        };
+        // A job removed from the manager has no reader left.
+        if let Some(streams) = jobs.streams(job_id).await {
+            streams.stderr.write(bytes).await;
+        }
+    }
+
+    /// Publish the stdout bytes a stage's own redirects introduced after
+    /// dispatch — the one case `publish_job_stdout` cannot see. `2>&1`
+    /// merges a stage's stderr into its stdout only once the stage has
+    /// finished and `apply_redirects` has run, by which point a builtin's or
+    /// external's own leaf publish already sent whatever stdout existed
+    /// BEFORE the merge. `prior` is that pre-redirect stdout; only the bytes
+    /// beyond it are new and need publishing.
+    pub(crate) async fn publish_job_stdout_suffix(&self, prior: &[u8], result: &ExecResult) {
+        let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
+            self.background_job,
+            self.background_stream_output,
+            self.pipeline_position,
+            self.job_manager.as_ref(),
+        ) else {
+            return;
+        };
+        let current: Vec<u8> = match result.out_bytes() {
+            Some(bytes) => bytes.to_vec(),
+            None => result.text_out().into_owned().into_bytes(),
+        };
+        if current.len() <= prior.len() || !current.starts_with(prior) {
+            return;
+        }
+        let Some(streams) = jobs.streams(job_id).await else {
+            return;
+        };
+        streams.stdout.write(&current[prior.len()..]).await;
+    }
+
     /// Create a new execution context with a VFS (uses LocalBackend without tools).
     ///
     /// This constructor is for backward compatibility and tests that don't need tool dispatch.
@@ -441,10 +556,12 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -482,10 +599,12 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -520,10 +639,12 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -558,10 +679,12 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -599,10 +722,12 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -637,10 +762,12 @@ impl ExecContext {
             kill_children_on_parent_death: false,
             kill_grace: DEFAULT_KILL_GRACE,
             background_job: None,
+            background_stream_output: false,
+            background_stream_stderr: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
-            allow_external_commands: true,
+            allow_unwrapped_commands: true,
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -933,10 +1060,12 @@ impl ExecContext {
             kill_children_on_parent_death: self.kill_children_on_parent_death,
             kill_grace: self.kill_grace,
             background_job: self.background_job,
+            background_stream_output: self.background_stream_output,
+            background_stream_stderr: self.background_stream_stderr,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
-            allow_external_commands: self.allow_external_commands,
+            allow_unwrapped_commands: self.allow_unwrapped_commands,
             trash_backend: self.trash_backend.clone(),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: self.terminal_state.clone(),

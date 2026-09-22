@@ -273,18 +273,62 @@ async fn kernel_cancel_kills_running_external() {
         .await
         .expect("execute");
 
-    // Cancel returns control with the kernel's "interrupted" path; exit code
-    // is 130 (SIGINT-style) on the cancellation checkpoint.
-    assert!(
-        result.code == 130 || result.code == 143,
-        "expected 130 or 143, got {}",
-        result.code,
-    );
+    // A cancelled call reports 130 whether a checkpoint or the killed child
+    // ended it; the child's own 128+SIGTERM (143) is not the call's status.
+    assert_eq!(result.code, 130, "cancellation must report 130: {result:?}");
 
     let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
     assert!(
         wait_for_dead(pid, Duration::from_secs(2)).await,
         "Kernel::cancel did not kill external pid {}",
+        pid,
+    );
+}
+
+/// The `spawn` builtin's child now has its own process group (a sibling
+/// review fix), which meant a `Kernel::cancel()` no longer reached it at
+/// all: `spawn` never raced its wait against `ctx.cancel`, so a Ctrl-C or an
+/// embedder cancellation left `spawn --command sleep 300` running to
+/// completion regardless. This pins the fix on the grandchild case
+/// specifically — `spawn`'s direct child backgrounds a `sleep`, so only a
+/// process-group kill (not `Child::start_kill()`) reaches it.
+#[tokio::test]
+async fn kernel_cancel_kills_spawn_and_its_backgrounded_grandchild() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("grandchild.pid");
+
+    let kernel = kernel_for_test();
+    let kernel_clone = kernel.clone();
+    let pid_file_clone = pid_file.clone();
+
+    // Cancel once the grandchild is actually running (its pid is recorded),
+    // not after a fixed sleep — same reasoning as the test above.
+    tokio::spawn(async move {
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
+        kernel_clone.cancel();
+    });
+
+    let start = Instant::now();
+    let script = format!(
+        r#"spawn --command sh --argv '["-c", "sleep 60 & echo $! > {} ; wait"]'"#,
+        pid_file.display()
+    );
+    let result = kernel.execute(&script).await.expect("execute");
+    let elapsed = start.elapsed();
+
+    // Before the fix, this call blocked for the full 60s `sleep` (or the
+    // grandchild's copy of the stdout pipe kept the drains from ever seeing
+    // EOF) — a bounded wait here is itself part of what the fix proves.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "spawn must return promptly once cancelled, took {elapsed:?}: {result:?}"
+    );
+    assert_eq!(result.code, 130, "cancellation must report 130: {result:?}");
+
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(2)).await,
+        "Kernel::cancel did not kill spawn's grandchild pid {}",
         pid,
     );
 }
@@ -310,6 +354,170 @@ async fn timeout_builtin_kills_inner_external() {
     assert!(
         wait_for_dead(pid, Duration::from_secs(3)).await,
         "timeout builtin left pid {} alive",
+        pid,
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 5b. timeout reaches an external inside a function body
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `timeout` swaps a child cancel token onto its ctx and re-dispatches `f`. The
+/// function body re-enters `execute_pipeline`, which snapshots the kernel's own
+/// token, so the timer's cancel may never reach the external the body runs.
+#[tokio::test]
+async fn timeout_builtin_kills_external_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ bash {}; }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` did not return within 10s: the timer's cancel never reached the external in f's body");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left pid {} alive inside the function body",
+        pid,
+    );
+}
+
+#[tokio::test]
+async fn timeout_builtin_kills_piped_external_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ bash {} | cat; }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with a piped external in f did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the piped stage's pid {} alive inside the function body",
+        pid,
+    );
+}
+
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_argument_substitution_inside_function_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ echo $(bash {}); }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in an argument did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the substitution's pid {} alive inside the function body",
+        pid,
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 5c. timeout reaches an external in a redirect operand's substitution
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A here-string, a heredoc body, and a `< file` target all resolve through
+/// one call site, `eval_redirect_target`. It reaches the kernel through
+/// `CommandDispatcher::eval_expr`, so a `$(…)` in any of the three must run
+/// under the cancel token of the command being redirected.
+///
+/// The redirect goes inside the function body, not on `timeout` itself:
+/// `timeout 1 cat <<< $(slow)` expands the operand before `timeout` starts
+/// its timer, which is bash's order too, so no timer could cover it. Here
+/// `timeout` is already running when `cat`'s operand is evaluated.
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_a_here_string_substitution() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program = format!("f() {{ cat <<< $(bash {}); }}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in a here-string did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the here-string substitution's pid {} alive",
+        pid,
+    );
+}
+
+/// The heredoc arm of the same call site. A heredoc body that holds a `$(…)`
+/// is evaluated as an expression rather than taken as literal text, so it
+/// reaches `eval_redirect_target` the same way the here-string does.
+#[tokio::test]
+async fn timeout_builtin_kills_external_in_a_heredoc_substitution() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let program =
+        format!("f() {{ cat <<EOF\n$(bash {})\nEOF\n}}; timeout 1 f", script.display());
+    let outcome = tokio::time::timeout(Duration::from_secs(10), kernel.execute(&program)).await;
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    let Ok(result) = outcome else {
+        // Reap the child before failing, or the test leaves `sleep 60` behind.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        panic!("`timeout 1 f` with `$(external)` in a heredoc body did not return within 10s");
+    };
+    let result = result.expect("execute");
+
+    assert_eq!(result.code, 124, "expected 124, got code={} err={}", result.code, result.err);
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(3)).await,
+        "timeout left the heredoc substitution's pid {} alive",
         pid,
     );
 }
@@ -404,15 +612,10 @@ async fn grace_escalation_sigkills_term_trapping_child() {
     let (pid, kill_requested) = ready;
     let elapsed = kill_requested.elapsed();
 
-    // 137 is 128 + SIGKILL(9): the child's own wait status, reported straight
-    // through. This is the sharpest evidence the test has — 143 (128 + SIGTERM)
-    // would mean plain SIGTERM did the job and no escalation ever happened.
-    assert_eq!(
-        result.code, 137,
-        "expected 137 (128 + SIGKILL) — the TERM-ignoring child should have been \
-         escalated to SIGKILL; 143 would mean SIGTERM killed it and the escalation \
-         never ran",
-    );
+    // A cancelled call reports 130 whatever signal ended the child, as a
+    // timeout reports 124. The escalation is proven below: the child ignores
+    // SIGTERM, so dying at all means SIGKILL, and not before the grace.
+    assert_eq!(result.code, 130, "a cancelled call must report 130: {result:?}");
 
     assert!(
         wait_for_dead(pid, Duration::from_secs(3)).await,
@@ -751,4 +954,64 @@ async fn timeout_does_not_fire_when_command_finishes_first() {
         .expect("execute");
     assert!(result.ok(), "expected ok, got {}", result.code);
     assert_eq!(result.text_out().trim(), "done");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 17. `! <cancelled command>` must never report success
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A cancelled child reports its kill as a Normal ExecResult (130, or a killed
+// child's own 128+signal) — the same shape as an ordinary nonzero exit — not
+// as an Err. `Stmt::Not` flips a Normal result's code, and `execute()`'s
+// top-level cancellation remap (kernel.rs, `run_under_watchdog`'s caller)
+// only overwrites the code to 130 when the FINAL result is not ok. Flipping
+// a cancelled 130 to 0 first would make that remap skip — read as "nothing to
+// fix" — and the whole call would report success for a run that was killed,
+// not completed. `Stmt::Not` must check the cancel tokens directly and skip
+// the flip when they fired.
+
+#[tokio::test]
+async fn kernel_cancel_of_a_negated_external_reports_130_not_success() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let kernel_clone = kernel.clone();
+    let pid_file_clone = pid_file.clone();
+
+    tokio::spawn(async move {
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
+        kernel_clone.cancel();
+    });
+
+    let result = kernel
+        .execute(&format!("! bash {}", script.display()))
+        .await
+        .expect("execute");
+
+    // The headline assertion: a cancelled `!` must report 130, never the 0 a
+    // naive flip of a killed child's nonzero code would produce.
+    assert_eq!(
+        result.code, 130,
+        "a cancelled `!` must report 130, not a flipped-to-success code: {result:?}"
+    );
+    assert!(!result.ok(), "a cancellation must never read as success: {result:?}");
+
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(2)).await,
+        "Kernel::cancel did not kill the external pid {} under `!`",
+        pid,
+    );
+}
+
+/// Control: an UNcancelled `!` still flips normally, so the test above is
+/// proof of the cancellation guard specifically, not of `!` refusing to flip
+/// at all.
+#[tokio::test]
+async fn uncancelled_negated_external_still_flips() {
+    let kernel = kernel_for_test();
+    let result = kernel.execute("! true").await.expect("execute");
+    assert_eq!(result.code, 1, "an uncancelled `!` must still flip: {result:?}");
 }

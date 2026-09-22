@@ -72,7 +72,7 @@ async fn arithmetic_division_by_zero_is_matchable_as_failed_while_running() {
     assert!(err.is_execution_failure(), "a runtime fault must be classified as an execution failure: {err:?}");
     assert!(!err.is_rejected());
 
-    let KernelError::Execution(inner) = err else {
+    let KernelError::Execution { error: inner, .. } = err else {
         panic!("division by zero must be KernelError::Execution");
     };
     // `Display` shows only the outermost `.context(...)` — unchanged from
@@ -80,7 +80,7 @@ async fn arithmetic_division_by_zero_is_matchable_as_failed_while_running() {
     // untouched. The original fault is still there, one level down: the
     // debug chain (`{:?}`) and `source()` both still reach it, so nothing
     // was actually lost — only `Display`'s single line is terse.
-    assert_eq!(inner.to_string(), "failed to evaluate assignment");
+    assert_eq!(inner.to_string(), "failed to evaluate assignment to x");
     let chain = format!("{inner:?}");
     assert!(chain.contains("divides by zero"), "the chain must still carry the original fault: {chain}");
 }
@@ -158,7 +158,7 @@ async fn execution_display_is_pinned() {
     let err = kernel.execute("x=$((1/0))").await.expect_err("must fault at runtime");
     // Identical to what `.to_string()` on the pre-existing `anyhow::Error`
     // produced: `Display` shows the outermost `.context(...)` only.
-    assert_eq!(err.to_string(), "failed to evaluate assignment");
+    assert_eq!(err.to_string(), "failed to evaluate assignment to x");
 }
 
 /// The `{:#}` form specifically, because that is the one that broke.
@@ -321,4 +321,187 @@ async fn validation_issue_command_is_pinned_at_every_populated_site(
         expected_command,
         "`{script}` ({code:?}) command mismatch: {issues:?}"
     );
+}
+
+// ── A fault inside `$(...)` names both assignments ─────────────────────
+//
+// `y=$(echo inner; x=$((1/0)))` runs the assignment arm twice: once for the
+// inner `x`, once for the outer `y`. Both wrapped the fault in the same
+// unnamed context, so `{:#}` read "failed to evaluate assignment: failed to
+// evaluate assignment: arithmetic error…" — two identical frames, neither
+// saying which assignment it belonged to.
+//
+// The fix names the target rather than walking the chain to suppress the
+// outer frame: both frames are true, and a reader who can tell them apart
+// learns where the fault came from and where it landed.
+
+#[tokio::test]
+async fn a_nested_assignment_fault_names_both_targets() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("y=$(echo inner; x=$((1/0)))")
+        .await
+        .expect_err("the inner arithmetic fault must propagate");
+
+    assert_eq!(
+        err.to_string(),
+        "failed to evaluate assignment to y",
+        "Display shows the outermost frame, which is the assignment that failed"
+    );
+
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("failed to evaluate assignment to y"),
+        "the outer assignment must be named: {chain}"
+    );
+    assert!(
+        chain.contains("failed to evaluate assignment to x"),
+        "the inner assignment must be named too, not repeated verbatim: {chain}"
+    );
+    assert!(
+        chain.contains("divides by zero"),
+        "the original fault must still be reachable: {chain}"
+    );
+}
+
+// ── `! cmd &` — refused, deliberately diverging from bash ──────────────────
+//
+// bash silently drops the negation for a backgrounded pipeline: the exit
+// code `!` would flip is never read before the job scatters into the
+// background, so `! true & wait $!` reports 0, the un-negated status — the
+// `!` had no effect at all. kaish refuses this syntax instead of accepting
+// it and throwing the negation away; there is no plain `shell_compat!` row
+// for it (the macro's kaish side expects a successful `execute()`, and this
+// case is a rejection, not a result).
+
+#[tokio::test]
+async fn negated_background_pipeline_is_rejected() {
+    let kernel = make_kernel();
+    let err = kernel.execute("! true &").await.expect_err("`! true &` must be rejected");
+
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("`! true &` must be KernelError::Validation, not {err:?}");
+    };
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline),
+        "expected NegatedBackgroundPipeline (E022): {issues:?}"
+    );
+}
+
+/// The fix names the REAL negated pipeline, not a `cmd` placeholder, and
+/// records the pipeline's first command via `.with_command`, matching the
+/// convention `ScatterWithoutGather`'s sibling check already uses.
+#[tokio::test]
+async fn negated_background_pipeline_message_names_the_real_body() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("! grep -q x f &")
+        .await
+        .expect_err("`! grep -q x f &` must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("must be KernelError::Validation, not {err:?}");
+    };
+    let issue = issues
+        .iter()
+        .find(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline)
+        .unwrap_or_else(|| panic!("expected NegatedBackgroundPipeline (E022): {issues:?}"));
+    assert_eq!(
+        issue.message,
+        "`! grep -q x f &`: `!` cannot negate a background pipeline; negate inside the job — \
+         `f() { ! grep -q x f; }; f &` — or drop the `!`",
+        "the fix must name the real pipeline, not a `cmd` placeholder"
+    );
+    assert_eq!(
+        issue.command.as_deref(),
+        Some("grep"),
+        "must record the pipeline's first command, like ScatterWithoutGather does"
+    );
+}
+
+/// Nesting doesn't dodge the check: the OUTERMOST `!` still wraps a
+/// backgrounded pipeline.
+#[tokio::test]
+async fn double_negated_background_pipeline_is_also_rejected() {
+    let kernel = make_kernel();
+    let err = kernel.execute("! ! true &").await.expect_err("`! ! true &` must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("`! ! true &` must be KernelError::Validation, not {err:?}");
+    };
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline),
+        "expected NegatedBackgroundPipeline (E022): {issues:?}"
+    );
+}
+
+/// The refusal names a working fix — negate INSIDE the job, then background
+/// the call — so this pins that the named form is not itself refused.
+#[tokio::test]
+async fn the_suggested_negate_inside_the_job_fix_is_not_itself_rejected() {
+    let kernel = make_kernel();
+    let result = kernel
+        .execute("f() { ! false; }; f &")
+        .await
+        .expect("negating inside the job, then backgrounding the call, must not be rejected");
+    assert_eq!(result.code, 0, "starting the background job reports 0: {result:?}");
+}
+
+/// An un-negated background pipeline is unaffected — the check is specific
+/// to `!` over `&`, not to backgrounding in general.
+#[tokio::test]
+async fn a_plain_background_pipeline_is_not_rejected() {
+    let kernel = make_kernel();
+    let result = kernel.execute("true &").await.expect("a plain `cmd &` must not be rejected");
+    assert_eq!(result.code, 0, "{result:?}");
+}
+
+// ── An env-scoped assignment (`A=$(...) cmd`) names its target too ─────
+//
+// `Stmt::EnvScoped` — the inline `NAME=value ... command` prefix — evaluates
+// its assignment expressions with no `with_context` at all, unlike
+// `Stmt::Assignment`'s plain `A=$(...)` form above. A failing value left no
+// name in the error: `{:#}` on `A=$((1/0)) echo hi` showed only "arithmetic
+// error: divides by zero", not which of possibly several env-prefix names
+// the failing value belonged to.
+
+#[tokio::test]
+async fn an_env_scoped_assignment_fault_names_its_target() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("A=$((1/0)) echo hi")
+        .await
+        .expect_err("the env-prefix arithmetic fault must propagate");
+
+    assert_eq!(
+        err.to_string(),
+        "failed to evaluate assignment to A",
+        "Display shows the outermost frame, matching Stmt::Assignment's wording"
+    );
+
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("failed to evaluate assignment to A"),
+        "the env-prefix target must be named: {chain}"
+    );
+    assert!(
+        chain.contains("divides by zero"),
+        "the original fault must still be reachable: {chain}"
+    );
+}
+
+/// Two names in the same env prefix (`A=1 B=$((1/0)) cmd`) — only the one
+/// whose value actually failed is named; evaluation is left-to-right and
+/// stops at the first failure (matching the loop's `break` in kernel.rs).
+#[tokio::test]
+async fn an_env_scoped_assignment_fault_names_the_failing_target_not_an_earlier_one() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("A=1 B=$((1/0)) echo hi")
+        .await
+        .expect_err("the second env-prefix assignment's fault must propagate");
+
+    assert_eq!(err.to_string(), "failed to evaluate assignment to B");
 }

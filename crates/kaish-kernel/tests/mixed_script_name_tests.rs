@@ -195,3 +195,66 @@ async fn env_also_judges_a_command_argument_that_looks_like_an_assignment() {
         "a quoted argument after the command is not judged: {quiet:?}"
     );
 }
+
+/// The advisory reaches the streaming callback **and** the returned
+/// aggregate, and `execute_with_options_streaming` hands a caller both.
+///
+/// `execute_streaming_inner`'s comment used to claim the streaming and
+/// non-streaming paths were "disjoint, so this prints the advisory exactly
+/// once on each". They are not: this entry point is streaming and returns the
+/// aggregate. An embedder that prints its callback's stderr and then the
+/// result's sees W007 twice. The duplicate is deliberate — neither caller may
+/// lose the advisory — and this test is what keeps the comment honest.
+#[tokio::test]
+async fn warning_reaches_both_the_stream_and_the_aggregate() {
+    use kaish_kernel::ExecuteOptions;
+
+    let k = kernel();
+    let name = cyrillic_path();
+
+    let mut streamed_err = String::new();
+    let mut on_output = |r: &kaish_kernel::interpreter::ExecResult| {
+        streamed_err.push_str(&r.err);
+    };
+    let result = k
+        .execute_with_options_streaming(&format!("{name}=/bin"), ExecuteOptions::new(), &mut on_output)
+        .await
+        .expect("a mixed-script name is a warning, not a failure");
+
+    assert!(
+        streamed_err.contains("W007"),
+        "the streaming callback must receive the advisory: {streamed_err:?}"
+    );
+    assert!(
+        result.err.contains("W007"),
+        "the returned aggregate carries it too: {:?}",
+        result.err
+    );
+}
+
+/// A program that warns and then faults keeps the warning in the error it
+/// hands back.
+///
+/// The three `Ok` returns in `execute_streaming_inner` prepend the advisory
+/// to the aggregate; the fault return did not, so a non-streaming caller lost
+/// it exactly when the program also went wrong.
+#[tokio::test]
+async fn a_warning_survives_a_fault_in_the_same_program() {
+    use kaish_kernel::KernelError;
+
+    let k = kernel();
+    let name = cyrillic_path();
+    let err = k
+        .execute(&format!("{name}=/bin\nx=$((1/0))"))
+        .await
+        .expect_err("the arithmetic fault must propagate");
+
+    let KernelError::Execution { output, .. } = err else {
+        panic!("expected an execution fault");
+    };
+    assert!(
+        output.err.contains("W007"),
+        "the advisory must survive the fault: {:?}",
+        output.err
+    );
+}

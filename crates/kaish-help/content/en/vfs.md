@@ -45,11 +45,17 @@ jobs --cleanup             # remove completed jobs
 ```
 
 `stdout` and `stderr` fill as an external command emits. A builtin does not
-stream: it returns its whole output when it finishes, so `echo hi &` fills
-the node in one write at the end — and so does `cargo build | tee log &`,
-because `tee` is a builtin. Drop the `| tee`; the job's stream is the log.
-Only the last stage of a pipeline reaches `stdout` (an earlier stage's output
-is the next stage's stdin); `stderr` takes every stage's.
+stream: it writes its whole output when it returns, so `echo hi &` fills the
+node in one write — and so does `cargo build | tee log &`, because `tee` is a
+builtin. Drop the `| tee`; the job's stream is the log.
+Only the job's own output reaches `stdout`. An earlier pipeline stage's
+output, `$(...)` output, a redirected stdout, and a scatter worker's output do
+not. `stderr` fills from every pipeline stage, not just the last — bash never
+pipes stderr between stages. An external command fills it live, chunk by
+chunk; a builtin, a function call, or any other statement fills it once its
+own redirects apply. `2>file`, `&>file`, and `2>&1` keep a stage's stderr out
+of the node; `>&2` still reaches `stderr`. A `$(...)` in a command's arguments
+runs before its redirects, so its stderr reaches `stderr` either way.
 
 Each node holds at most 10MB and evicts its oldest bytes past that. Redirect
 to a file (`cargo build > /tmp/build.log 2>&1 &`) when the whole output
@@ -87,14 +93,14 @@ passthrough (REPL) mode `/dev` is the real host `/dev` instead.
 
 ## Sandbox Limitations
 
-**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, and `spawn` access the real filesystem directly.
+**External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, `spawn`, and `env CMD` access the real filesystem directly.
 
-To block external command execution, set `allow_external_commands=false` in `KernelConfig`:
+To block external command execution, set `allow_unwrapped_commands=false` in `KernelConfig`:
 
 ```rust
-KernelConfig::agent().with_allow_external_commands(false)
+KernelConfig::agent().with_allow_unwrapped_commands(false)
 ```
 
-When disabled, PATH lookups return "command not found" and the `exec`/`spawn` builtins return errors. `KernelConfig::isolated()` sets this to `false` by default.
+When disabled, PATH lookup, `exec`, `spawn`, and `env CMD` are all refused with "external commands are disabled on this shell" and exit 127 — never "command not found", which stays reserved for a name that genuinely isn't resolvable. `KernelConfig::isolated()` sets this to `false` by default.
 
 Prefer builtins over external commands — kaish's in-process builtins (grep, sed, jq, etc.) respect VFS boundaries.
