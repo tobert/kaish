@@ -523,14 +523,11 @@ async fn timeout_wrapped_fault_matches_foreground(#[case] setup: &str) {
     assert_job_matches_foreground(setup, "timeout 5 f &").await;
 }
 
-/// KNOWN BUG, pinned: a substitution's stderr is drained after the command's
-/// own stderr, so `result.err` lists `a` before `b` while the job stream has
-/// them in the order they ran (`b` first, as bash prints). When this passes,
-/// remove the `ignore` and this note.
+/// A substitution in the arguments runs first, so its stderr comes first in
+/// `result.err`, as it does on the job stream and in bash.
 #[rstest::rstest]
 #[case::negated("f() { ! cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\"; }")]
 #[case::chain("f() { cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\" && true; }")]
-#[ignore = "known bug: drained substitution stderr is appended after the command's own stderr"]
 #[tokio::test]
 async fn substitution_stderr_ahead_of_a_negated_or_chained_command_matches_foreground(#[case] setup: &str) {
     assert_job_matches_foreground(setup, "f &").await;
