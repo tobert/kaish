@@ -1401,3 +1401,93 @@ shell_compat! {
     script: "echo kaish-compat-out 2> /tmp/kaish-compat-redir-d 1>&2; echo \"file:$(cat /tmp/kaish-compat-redir-d)\"",
     eq: "file:kaish-compat-out",
 }
+
+// ---- redirect targets open before the command runs ---------------------
+// Each target is evaluated and opened left to right before the command
+// starts: `>` truncates at open, `>>` opens for append. A target that fails
+// to open means the command does not run; its error goes through the
+// redirects already opened to its left. `$d` keeps the kaish and bash sides
+// of a row off each other's files: the two run concurrently.
+
+shell_compat! {
+    name: redirect_to_a_missing_directory_does_not_run_the_command,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; rm -f \"$d-t\"; touch \"$d-t\" > /kaish-compat-nodir/a; echo \"rc=$?\"; if [[ -e \"$d-t\" ]]; then echo ran; else echo skipped; fi",
+    eq: "rc=1\nskipped",
+}
+
+shell_compat! {
+    name: redirect_does_not_create_the_parent_directory,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; rm -r \"$d-p\" 2> /dev/null; echo x > \"$d-p/sub/a\"; if [[ -d \"$d-p\" ]]; then echo made; else echo absent; fi",
+    eq: "absent",
+}
+
+shell_compat! {
+    name: nested_writer_to_the_same_target_keeps_its_bytes,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; f() { echo a > \"$d-o\"; }; f > \"$d-o\"; cat \"$d-o\"",
+    eq: "a",
+}
+
+shell_compat! {
+    name: outer_writer_with_data_overwrites_the_nested_writer,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; f() { echo a > \"$d-o2\"; echo b; }; f > \"$d-o2\"; cat \"$d-o2\"",
+    eq: "b",
+}
+
+shell_compat! {
+    name: nested_append_writers_keep_both_lines,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; rm -f \"$d-ap\"; f() { echo a >> \"$d-ap\"; echo b; }; f >> \"$d-ap\"; cat \"$d-ap\"",
+    eq: "a\nb",
+}
+
+shell_compat! {
+    name: a_later_failing_target_still_truncates_an_earlier_one,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; echo old > \"$d-g\"; echo x > \"$d-g\" > /kaish-compat-nodir/a; echo \"size:$(wc -c < \"$d-g\")\"",
+    eq: "size:0",
+}
+
+shell_compat! {
+    name: an_empty_stderr_target_does_not_clobber_stdout_on_the_same_file,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; echo hi > \"$d-t3\" 2> \"$d-t3\"; cat \"$d-t3\"",
+    eq: "hi",
+}
+
+shell_compat! {
+    name: cat_of_its_own_output_target_empties_it,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; echo data > \"$d-s\"; cat \"$d-s\" > \"$d-s\"; echo \"size:$(wc -c < \"$d-s\")\"",
+    eq: "size:0",
+}
+
+// An open error goes wherever stderr points at that moment.
+
+shell_compat! {
+    name: open_error_after_merge_goes_to_stdout,
+    script: "cat 2>&1 < /kaish-compat-missing | wc -l",
+    eq: "1",
+}
+
+shell_compat! {
+    name: open_error_before_merge_stays_on_stderr,
+    script: "cat < /kaish-compat-missing 2>&1 | wc -l",
+    eq: "0",
+}
+
+shell_compat! {
+    name: output_open_error_before_merge_stays_on_stderr,
+    script: "echo x > /kaish-compat-nodir/a 2>&1 | wc -l",
+    eq: "0",
+}
+
+shell_compat! {
+    name: output_open_error_after_merge_goes_to_stdout,
+    script: "echo x 2>&1 > /kaish-compat-nodir/a | wc -l",
+    eq: "1",
+}
+
+// bash empties the file: `>` truncates it before `sort` reads it. kaish
+// refuses the command instead and leaves the file alone.
+shell_compat! {
+    name: same_file_as_input_and_output_is_refused,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; printf 'b\\na\\n' > \"$d-sp\"; sort < \"$d-sp\" > \"$d-sp\"; echo \"rc=$?\"; cat \"$d-sp\"",
+    kaish_eq: "rc=1\nb\na",
+    bash_eq: "rc=0",
+}
