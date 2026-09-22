@@ -486,3 +486,29 @@ async fn faulting_condition_command_prints_its_diagnostic_once(#[case] body: &st
     }
     assert_job_matches_foreground(&setup, "f &").await;
 }
+
+/// A negated statement drains the stderr channel itself before flipping its
+/// code; a `|` pipe's non-last stage reaches the job stream only through it.
+#[tokio::test]
+async fn negated_pipeline_nested_in_a_compound_matches_foreground() {
+    assert_job_matches_foreground(
+        "",
+        "if true; then ! cat /kaish-corpus-negated-missing | wc -l; fi &",
+    )
+    .await;
+}
+
+/// A fault under `!` becomes the block's error. Its message is published when
+/// that error is rendered, not also when the negated body returned.
+#[rstest::rstest]
+#[case::test_expression("f() { ! [[ 1 -eq abc ]]; }")]
+#[case::published_body("f() { ! if true; then cat /kaish-corpus-negated-body; [[ 1 -eq abc ]]; fi; }")]
+#[tokio::test]
+async fn negated_fault_matches_foreground(#[case] setup: &str) {
+    assert_job_matches_foreground(setup, "f &").await;
+}
+
+#[tokio::test]
+async fn negated_builtin_error_matches_foreground() {
+    assert_job_matches_foreground("", "if true; then ! cat /kaish-corpus-negated-builtin; fi &").await;
+}

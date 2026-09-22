@@ -3567,7 +3567,8 @@ impl Kernel {
                 }
                 match body_flow {
                     ControlFlow::Normal(mut result) => {
-                        self.drain_stderr_into(&mut result).await;
+                        ctx.publish_job_stderr(&mut result).await;
+                        self.drain_stderr_into(&mut result, ctx).await;
                         // A fault is "could not decide", not a boolean to
                         // flip — coercing it into a decided 0/1 would let a
                         // wrong conclusion stand in for a comparison that
@@ -3575,7 +3576,9 @@ impl Kernel {
                         // names `!` as one of the boolean consumers a fault
                         // must abort rather than answer).
                         if result.fault {
-                            let message = std::mem::take(&mut result.err);
+                            // Only the unpublished tail is the message; the
+                            // published part stays prior output, shown once.
+                            let message = result.err.split_off(result.stderr_published_len);
                             return Err(with_prior_output(
                                 result,
                                 anyhow::anyhow!("{}", message.trim_end()),
@@ -3617,10 +3620,10 @@ impl Kernel {
                             ControlFlow::Break { result, .. }
                             | ControlFlow::Continue { result, .. }
                             | ControlFlow::Exit { result, .. } => {
-                                self.drain_stderr_into(result).await;
+                                self.drain_stderr_into(result, ctx).await;
                             }
                             ControlFlow::Return { value } => {
-                                self.drain_stderr_into(value).await;
+                                self.drain_stderr_into(value, ctx).await;
                             }
                             ControlFlow::Normal(_) => unreachable!("matched above"),
                         }
