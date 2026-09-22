@@ -59,7 +59,7 @@ impl Tool for Sleep {
             Some(Value::Float(f)) => *f,
             Some(Value::String(s)) => match parse_duration(s) {
                 Ok(d) => d,
-                Err(e) => return ExecResult::failure(1, format!("sleep: {}", e)),
+                Err(e) => return ExecResult::failure(2, format!("sleep: {}", e)),
             },
             _ => return ExecResult::failure(2, "sleep: missing seconds argument"),
         };

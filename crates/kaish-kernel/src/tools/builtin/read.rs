@@ -111,7 +111,7 @@ impl Tool for Read {
         // parser's own name scan never sees.
         for name in &var_names {
             if let Err(bad) = crate::name::validate(name) {
-                return ExecResult::failure(1, format!("read: `{name}': {bad}"));
+                return ExecResult::failure(2, format!("read: `{name}': {bad}"));
             }
         }
 

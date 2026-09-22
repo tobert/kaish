@@ -71,7 +71,7 @@ impl Tool for KaishOutputLimit {
                         ctx.output_limit.set_limit(Some(bytes));
                         show_config(ctx)
                     }
-                    Err(e) => ExecResult::failure(1, format!("kaish-output-limit set: {}", e)),
+                    Err(e) => ExecResult::failure(2, format!("kaish-output-limit set: {}", e)),
                 }
             }
             Some("on") => {
@@ -94,7 +94,7 @@ impl Tool for KaishOutputLimit {
                         ctx.output_limit.set_head_bytes(bytes);
                         show_config(ctx)
                     }
-                    Err(e) => ExecResult::failure(1, format!("kaish-output-limit head: {}", e)),
+                    Err(e) => ExecResult::failure(2, format!("kaish-output-limit head: {}", e)),
                 }
             }
             Some("tail") => {
@@ -107,7 +107,7 @@ impl Tool for KaishOutputLimit {
                         ctx.output_limit.set_tail_bytes(bytes);
                         show_config(ctx)
                     }
-                    Err(e) => ExecResult::failure(1, format!("kaish-output-limit tail: {}", e)),
+                    Err(e) => ExecResult::failure(2, format!("kaish-output-limit tail: {}", e)),
                 }
             }
             Some(other) => ExecResult::failure(2, format!(

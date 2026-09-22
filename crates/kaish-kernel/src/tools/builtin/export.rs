@@ -116,7 +116,7 @@ impl Tool for Export {
         // This is the common case when the shell parses `export VAR="value"`
         for (name, value) in &args.named {
             if let Err(why) = check_name(name) {
-                return ExecResult::failure(1, why);
+                return ExecResult::failure(2, why);
             }
             ctx.scope.set_exported_global(name, value.clone());
         }
@@ -134,14 +134,14 @@ impl Tool for Export {
                 let value = &arg_str[eq_pos + 1..];
 
                 if let Err(why) = check_name(name) {
-                    return ExecResult::failure(1, why);
+                    return ExecResult::failure(2, why);
                 }
 
                 ctx.scope.set_exported_global(name, Value::String(value.to_string()));
             } else {
                 // Just mark for export
                 if let Err(why) = check_name(arg_str) {
-                    return ExecResult::failure(1, why);
+                    return ExecResult::failure(2, why);
                 }
                 ctx.scope.export(arg_str);
             }

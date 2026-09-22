@@ -44,6 +44,7 @@ async fn code_of(script: &str) -> i64 {
 #[case("readlink")]
 #[case("realpath")]
 #[case("dirname")]
+#[case("basename")]
 #[case("tee")]
 #[case("printf")]
 #[case("unset")]
@@ -54,16 +55,38 @@ async fn code_of(script: &str) -> i64 {
 #[case("cp a.txt")]
 #[case("mv a.txt")]
 #[case("ln a.txt")]
+#[case("awk")]
+// `sed -i` with no file operand — editing a stream in place is meaningless.
+#[case("sed -i 's/a/b/'")]
 // A flag value the builtin cannot use.
 #[case("find . -type x")]
 #[case("find . -maxdepth nope")]
 #[case("checksum --algorithm bogus a.txt")]
 #[case("seq --increment 0 1 5")]
 #[case("cut a.txt")]
+#[case("sleep abc")]
+#[case("kaish-output-limit set bogus")]
+// A name that cannot be bound cannot be read/unset/exported either.
+#[case("read a-b")]
+#[case("unset a-b")]
+#[case("export a-b")]
+// A malformed inner program is argv, same as a rejected kaish-validate input.
+#[case("kaish-ast '{'")]
 // An unknown subcommand.
 #[case("kaish-trash bogus")]
 #[case("kaish-ignore bogus")]
 #[case("kaish-output-limit bogus")]
+// `set -o`/`set +o` on a name kaish doesn't implement.
+#[case("set -o bogus")]
+// Text the caller typed inline is argv, whether it's JSON or JSONL.
+#[case("fromjson '{not json}'")]
+#[case("fromjsonl 'not json'")]
+// `--argjson NAME VALUE` with a VALUE that isn't JSON is an unusable flag
+// value, and a *computed* filter that fails to compile is the same class of
+// mistake a computed `grep` pattern is — a literal filter never reaches
+// here; the validator refuses it first.
+#[case("jq -n --argjson x 'not-json' '.'")]
+#[case("x='.['; echo null | jq \"$x\"")]
 #[tokio::test]
 async fn a_usage_error_exits_2(#[case] script: &str) {
     assert_eq!(
@@ -85,12 +108,34 @@ async fn a_usage_error_exits_2(#[case] script: &str) {
 // loop terminator and must survive the sweep.
 #[case::read_at_eof("read x", 1)]
 #[case::success("cat a.txt", 0)]
+// Data read from stdin or a file is the world, even though a file *path* is
+// itself an argument — the same text malformed as a positional above is 2.
+#[case::fromjson_stdin_content("echo '{not json}' | fromjson", 1)]
+#[case::fromjsonl_stdin_content("printf 'not json' | fromjsonl", 1)]
+// base64 -d never takes its data as a positional literal — a file or stdin,
+// always the world.
+#[case::base64_decode_content("echo 'not-base64!!!' | base64 -d", 1)]
 #[tokio::test]
 async fn a_result_or_an_operational_failure_keeps_its_code(
     #[case] script: &str,
     #[case] expected: i64,
 ) {
     assert_eq!(code_of(script).await, expected, "`{script}`");
+}
+
+/// `jq`'s `--path` file operand names *where* to read, not what's in it —
+/// invalid JSON in the file is the same result (1) as invalid JSON on
+/// stdin, not a usage error, even though the path is an argument.
+#[tokio::test]
+async fn jq_file_operand_invalid_json_keeps_its_code() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("bad.json"), "{not json}").expect("fixture");
+    let kernel = common::kernel_at(dir.path());
+    let result = kernel
+        .execute("jq . bad.json")
+        .await
+        .expect("script was not rejected");
+    assert_eq!(result.code, 1, "err: {}", result.err);
 }
 
 #[tokio::test]

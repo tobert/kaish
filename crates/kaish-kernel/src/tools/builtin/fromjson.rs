@@ -82,31 +82,43 @@ impl Tool for FromJson {
         parsed.global.apply(ctx);
 
         // Input text: an explicit positional argument wins; otherwise stdin.
-        let input = match args.positional.first() {
-            Some(Value::String(s)) => s.clone(),
+        // The two sides answer to different codes below: text the caller
+        // typed inline (a positional) is argv, so a bad document there is
+        // theirs to fix (2); text read from stdin is data from the world,
+        // so a bad document there is a result (1) — the same split kaish
+        // draws between a computed and a literal `grep` pattern.
+        let (input, from_stdin) = match args.positional.first() {
+            Some(Value::String(s)) => (s.clone(), false),
             Some(Value::Bytes(b)) => match std::str::from_utf8(b) {
-                Ok(s) => s.to_string(),
+                Ok(s) => (s.to_string(), false),
                 Err(_) => {
                     return ExecResult::failure(1, "fromjson: input is binary, not text")
                 }
             },
             // An already-structured value: re-serialize its JSON text so
             // `fromjson` is idempotent on values that are already typed.
-            Some(other) => kaish_types::value_to_json(other).to_string(),
+            Some(other) => (kaish_types::value_to_json(other).to_string(), false),
             None => match ctx.read_stdin_to_text().await {
-                Ok(Some(s)) => s,
+                Ok(Some(s)) => (s, true),
                 Ok(None) => {
                     return ExecResult::failure(
                         2,
                         "fromjson: no input (pass a JSON string or pipe stdin)",
                     )
                 }
-                Err(e) => return ExecResult::failure(2, format!("fromjson: {e}")),
+                // stdin carried bytes that are not valid UTF-8: the data
+                // itself is at fault, not the invocation.
+                Err(e) => return ExecResult::failure(1, format!("fromjson: {e}")),
             },
         };
 
+        let bad_input_code = if from_stdin { 1 } else { 2 };
+
         if input.trim().is_empty() {
-            return ExecResult::failure(2, "fromjson: empty input (expected one JSON document)");
+            return ExecResult::failure(
+                bad_input_code,
+                "fromjson: empty input (expected one JSON document)",
+            );
         }
 
         // One document, one value: serde_json::from_str rejects trailing garbage
@@ -114,7 +126,9 @@ impl Tool for FromJson {
         // column C" — a loud, positioned error, never a silent null.
         let json: serde_json::Value = match serde_json::from_str(&input) {
             Ok(j) => j,
-            Err(e) => return ExecResult::failure(2, format!("fromjson: invalid JSON: {e}")),
+            Err(e) => {
+                return ExecResult::failure(bad_input_code, format!("fromjson: invalid JSON: {e}"))
+            }
         };
 
         // Envelope-free: an envelope-shaped object stays a record, never Bytes.

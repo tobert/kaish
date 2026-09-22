@@ -371,6 +371,10 @@ impl Ls {
         // Stat each match and build DirEntry list for sorting/formatting
         let mut entries: Vec<(String, DirEntry)> = Vec::new();
         let mut error_text = String::new();
+        // Worst, not a flat 1: every failure here happens to be operational
+        // today, but tracking the max keeps this arm honest with the -R
+        // arm's aggregation the moment one of them isn't.
+        let mut code = 0i64;
         for name in &names {
             let abs = ctx.resolve_path(name);
             // lstat: an operand that is a link renders as the link.
@@ -379,6 +383,7 @@ impl Ls {
                 Err(e) => {
                     if report_missing {
                         error_text.push_str(&format!("ls: cannot access '{}': {}\n", name, e));
+                        code = code.max(1);
                     }
                     // else: file disappeared between walk and stat; skip it
                 }
@@ -450,7 +455,7 @@ impl Ls {
         // even though the readable operands still list successfully.
         if !error_text.is_empty() {
             result.err.push_str(&error_text);
-            result.code = 1;
+            result.code = code;
         }
         result
     }

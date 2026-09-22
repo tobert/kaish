@@ -211,7 +211,7 @@ impl Tool for Sed {
             };
             if files.is_empty() {
                 return ExecResult::failure(
-                    1,
+                    2,
                     "sed: -i requires file operands (cannot edit a stream in place)",
                 );
             }
