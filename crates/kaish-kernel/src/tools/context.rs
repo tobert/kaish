@@ -1385,9 +1385,9 @@ impl ExecContext {
 /// Trusted in-tree builtins recover the concrete `ExecContext` (job control,
 /// pipes, dispatcher) through
 /// [`ToolCtx::as_any_mut`](kaish_tool_api::ToolCtx::as_any_mut).
-#[async_trait]
 impl kaish_tool_api::sealed::Sealed for ExecContext {}
 
+#[async_trait]
 impl kaish_tool_api::ToolCtx for ExecContext {
     fn backend(&self) -> &Arc<dyn KernelBackend> {
         &self.backend
@@ -1419,6 +1419,17 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         match &self.watchdog {
             Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
             None => kaish_tool_api::PatientGuard::inert(),
+        }
+    }
+
+    async fn checkpoint(&mut self) -> Result<(), kaish_tool_api::Interrupted> {
+        // Yields only when this task's cooperative budget is spent, so the
+        // watchdog's timer gets a turn without a yield on every call.
+        tokio::task::consume_budget().await;
+        if self.cancel.is_cancelled() {
+            Err(kaish_tool_api::Interrupted)
+        } else {
+            Ok(())
         }
     }
 
