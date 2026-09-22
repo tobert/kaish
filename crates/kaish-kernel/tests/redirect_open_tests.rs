@@ -76,9 +76,9 @@ async fn unwritable_target_is_refused_before_the_command_runs() {
     let dir = tempfile::tempdir().unwrap();
     let kernel = kernel_at(dir.path());
 
-    let r = kernel.execute("touch ran.txt > /v/jobs/x").await.expect("execute");
+    let r = kernel.execute("touch ran.txt > /v/bin/x").await.expect("execute");
     assert_eq!(r.code, 1, "{r:?}");
-    assert!(r.err.starts_with("redirect: /v/jobs/x: "), "{r:?}");
+    assert_eq!(r.err.trim_end(), "redirect: /v/bin/x: read-only filesystem");
     assert!(!dir.path().join("ran.txt").exists(), "the command must not run");
 }
 
@@ -88,9 +88,13 @@ async fn dev_null_opens_for_write_and_append() {
     let dir = tempfile::tempdir().unwrap();
     let kernel = kernel_at(dir.path());
 
-    let r = kernel.execute("echo x > /dev/null; echo y >> /dev/null; echo z 2> /dev/null; echo ok").await.expect("execute");
+    let r = kernel
+        .execute("echo x > /dev/null; echo y >> /dev/null; ls /kaish-redirect-missing 2> /dev/null; echo ok")
+        .await
+        .expect("execute");
     assert_eq!(r.code, 0, "{r:?}");
-    assert_eq!(r.text_out().trim(), "z\nok");
+    assert_eq!(r.text_out().trim(), "ok");
+    assert_eq!(r.err, "", "ls's error must go to /dev/null: {r:?}");
 }
 
 /// A background job whose target fails to open does not run its command.
@@ -150,7 +154,8 @@ async fn same_file_through_substitution_is_refused() {
     assert_eq!(r.code, 1, "{r:?}");
     assert_eq!(
         r.err.trim_end(),
-        "redirect: ./P is both input and output; write to a temp file, then mv it over ./P",
+        "redirect: ./P is both input and output (> empties it before it is read); \
+         write to a temp file, then mv it over ./P",
     );
     assert_eq!(std::fs::read_to_string(dir.path().join("P")).unwrap(), "b\na\n", "P must be untouched");
 }
@@ -187,7 +192,8 @@ async fn literal_same_file_is_a_validation_error() {
     assert_eq!(issue.code.code(), "E023");
     assert_eq!(
         issue.message,
-        "redirect: ./P is both input and output; write to a temp file, then mv it over ./P",
+        "redirect: ./P is both input and output (>> feeds the command its own output); \
+         write to a temp file, then append that to ./P",
     );
     assert_eq!(std::fs::read_to_string(dir.path().join("P")).unwrap(), "b\na\n");
 }
@@ -202,4 +208,119 @@ async fn different_input_and_output_files_run() {
     let r = kernel.execute("sort < P > Q; cat Q").await.expect("execute");
     assert_eq!(r.code, 0, "{r:?}");
     assert_eq!(r.text_out().trim(), "a\nb");
+}
+
+/// Appending to the file being read feeds the command its own output:
+/// `cat < P >> P` would grow P without end.
+#[tokio::test]
+async fn reading_a_file_while_appending_to_it_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("P"), "a\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel.execute("cat < $(echo P) >> $(echo P)").await.expect("execute");
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_eq!(
+        r.err.trim_end(),
+        "redirect: P is both input and output (>> feeds the command its own output); \
+         write to a temp file, then append that to P",
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join("P")).unwrap(), "a\n", "P must be untouched");
+}
+
+/// A missing input is its own error, not a same-file hazard, and the
+/// output after it is never opened.
+#[tokio::test]
+async fn missing_input_named_as_output_reports_the_missing_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel.execute("sort < $(echo nofile) > $(echo nofile)").await.expect("execute");
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_eq!(r.err.trim_end(), "redirect: nofile: no such file or directory");
+    assert!(!dir.path().join("nofile").exists(), "the output after a failed input must not open");
+}
+
+/// A dangling symlink into a missing directory names that directory, never
+/// one that exists.
+#[tokio::test]
+async fn dangling_symlink_names_the_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("nodir/x", dir.path().join("L")).unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel.execute("echo a > L").await.expect("execute");
+    assert_eq!(r.code, 1, "{r:?}");
+    assert_eq!(
+        r.err.trim_end(),
+        "redirect: L: no such file or directory; create the directory first: mkdir -p nodir",
+    );
+    assert!(!dir.path().join("nodir").exists());
+}
+
+/// scatter's own redirects never reach it inside a scatter ... gather
+/// pipeline, so they are refused by name rather than dropped.
+#[tokio::test]
+async fn scatter_redirect_is_refused_in_a_scatter_gather_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("list.txt"), "1\n2\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute(r#"scatter < list.txt | touch "w$ITEM" | gather"#)
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 2, "{r:?}");
+    assert_eq!(
+        r.err.trim_end(),
+        "scatter: takes no redirects in a scatter ... gather pipeline; \
+         pipe its input in: cat list.txt | scatter | ...",
+    );
+    assert!(!dir.path().join("w1").exists(), "no worker may run");
+}
+
+/// A read-only mount refuses the target by kind, and the command does not
+/// run.
+#[tokio::test]
+async fn read_only_mount_target_is_refused() {
+    use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
+    use kaish_kernel::{Kernel, KernelBackend, KernelConfig, LocalBackend};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/", MemoryFs::new());
+    vfs.mount("/ro", LocalFs::read_only(dir.path().to_path_buf()));
+    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {}).expect("kernel");
+
+    let r = kernel.execute("touch /ran.txt > /ro/out.txt; echo rc=$?; ls /").await.expect("execute");
+    assert_eq!(r.err.trim_end(), "redirect: /ro/out.txt: read-only filesystem");
+    assert!(r.text_out().starts_with("rc=1"), "{r:?}");
+    assert!(!r.text_out().contains("ran.txt"), "the command must not run: {r:?}");
+    assert!(!dir.path().join("out.txt").exists(), "host must be untouched");
+}
+
+/// Under an overlay, the truncation and the write both land in the upper
+/// layer; the host file keeps its content.
+#[cfg(feature = "overlay")]
+#[tokio::test]
+async fn overlay_target_writes_land_in_the_upper_layer() {
+    use kaish_kernel::{Kernel, KernelConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("out.txt"), "host\n").unwrap();
+    let config = KernelConfig::agent_with_root(dir.path().to_path_buf())
+        .with_overlay(true)
+        .with_trash(false)
+        .with_allow_unwrapped_commands(false);
+    let kernel = Kernel::new(config).expect("overlay kernel");
+
+    let r = kernel
+        .execute("echo new > out.txt; cat out.txt; echo x > nodir/a.txt; echo rc=$?")
+        .await
+        .expect("execute");
+    assert_eq!(r.text_out().trim(), "new\nrc=1", "{r:?}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "host\n");
+    assert!(!dir.path().join("nodir").exists());
 }

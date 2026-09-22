@@ -1483,6 +1483,13 @@ shell_compat! {
     eq: "1",
 }
 
+// A missing input fails first; the output to its right never opens.
+shell_compat! {
+    name: missing_input_named_as_output_fails_on_the_input,
+    script: "d=\"/tmp/kaish-compat-open-${BASH_VERSINFO:-kaish}\"; rm -f \"$d-nf\"; sort < \"$d-nf\" > \"$d-nf\"; echo \"rc=$?\"; if [[ -e \"$d-nf\" ]]; then echo made; else echo absent; fi",
+    eq: "rc=1\nabsent",
+}
+
 // bash empties the file: `>` truncates it before `sort` reads it. kaish
 // refuses the command instead and leaves the file alone.
 shell_compat! {
