@@ -164,16 +164,19 @@ mod tests {
         args.flags.insert("f".to_string());
 
         let result = Readlink.execute(args, &mut ctx).await;
-        // VfsRouter::canonicalize folds `.`/`..` lexically (`lexical_absolute`)
-        // before routing to a mount, so "/some/../path/./file" reaches MemoryFs
-        // as "path/file", not "some/../path/./file" — "some" never gets an
-        // lstat. "path" is the missing INTERMEDIATE component there, which
-        // errors regardless of readlink -f's allow-missing-FINAL semantics.
+        // Two independent lexical folds sit between this operand and
+        // MemoryFs: ExecContext::resolve_path (context.rs `normalize_path`)
+        // folds `.`/`..` before the path reaches the backend, and
+        // VfsRouter::canonicalize (`lexical_absolute`) folds again before
+        // routing to a mount. Either one alone turns
+        // "/some/../path/./file" into "path/file", so "some" never gets an
+        // lstat; only breaking BOTH makes "some" reach MemoryFs. "path" is
+        // the missing INTERMEDIATE component there, which errors regardless
+        // of readlink -f's allow-missing-FINAL semantics.
         // The error's leading "readlink: <operand>: " always echoes the raw,
         // unfolded operand (so it names "some" no matter what); the part
-        // AFTER that echo is what proves the fold happened, and it must name
-        // the post-fold "path", not "some". If the lexical fold ever broke,
-        // MemoryFs would instead report the missing component as "some".
+        // AFTER that echo is what proves a fold happened, and it must name
+        // the post-fold "path", not "some".
         assert!(!result.ok(), "expected failure, got {}", result.text_out());
         assert!(
             result.err.trim_end().ends_with("path"),
