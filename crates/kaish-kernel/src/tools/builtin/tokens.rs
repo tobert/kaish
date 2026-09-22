@@ -101,6 +101,16 @@ impl Tool for Tokens {
             }
         };
 
+        // `encode_with_special_tokens` below is one opaque call into the
+        // tiktoken-rs dependency with no yield point of its own; walk the
+        // input first so a script timeout has somewhere to stop a large
+        // input before that starts.
+        for _ in text.chars() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("tokens");
+            }
+        }
+
         // Tokenize
         let token_ids = bpe.encode_with_special_tokens(&text);
         let count = token_ids.len();
@@ -113,6 +123,9 @@ impl Tool for Tokens {
         if verbose {
             let mut lines = format!("count: {}\nids: [", count);
             for (i, id) in token_ids.iter().enumerate() {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("tokens");
+                }
                 if i > 0 { lines.push_str(", "); }
                 lines.push_str(&id.to_string());
             }
@@ -120,11 +133,13 @@ impl Tool for Tokens {
             return ExecResult::with_output(OutputData::text(lines));
         }
 
-        let nodes: Vec<OutputNode> = token_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| OutputNode::new(i.to_string()).with_cells(vec![id.to_string()]))
-            .collect();
+        let mut nodes: Vec<OutputNode> = Vec::with_capacity(token_ids.len());
+        for (i, id) in token_ids.iter().enumerate() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("tokens");
+            }
+            nodes.push(OutputNode::new(i.to_string()).with_cells(vec![id.to_string()]));
+        }
         let table = OutputData::table(
             vec!["INDEX".to_string(), "ID".to_string()],
             nodes,

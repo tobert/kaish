@@ -121,6 +121,9 @@ impl Tool for FromJsonl {
         let mut offset = 0usize;
         let mut line_no = 0usize;
         for raw_line in input.split_inclusive('\n') {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("fromjsonl");
+            }
             line_no += 1;
             let start = offset;
             offset += raw_line.len();

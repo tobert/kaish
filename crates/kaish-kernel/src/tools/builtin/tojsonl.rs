@@ -127,6 +127,9 @@ impl Tool for ToJsonl {
 
         let mut out = String::new();
         for element in elements {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("tojsonl");
+            }
             match serde_json::to_string(element) {
                 Ok(line) => {
                     out.push_str(&line);
