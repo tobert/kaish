@@ -15,16 +15,12 @@
 //! thread past that timeout too, so its failure arrives when the builtin
 //! finishes: about a minute for the `seq` cases in a debug build.
 //!
-//! `request_timeout_stops_a_busy_builtin` (and the two standalone cases after
-//! it) extend the second hazard past `seq`: every builtin with a loop whose
-//! length depends on input size checkpoints (`ToolCtx::checkpoint` in
-//! kaish-tool-api), so `request_timeout` stops it mid-scan instead of running
-//! it to completion. Confirmed with a negative control — with the kernel's
-//! `checkpoint` body replaced by `Ok(())`, every case in this batch plus the
-//! two pre-existing busy-builtin/busy-pipeline cases above failed (returned
-//! before the deadline, or ran past it) — except `cat` and `cmp`, which are
-//! checkpointed but not represented here; see the comment above their
-//! omission below.
+//! `request_timeout_stops_a_busy_builtin` and `request_timeout_stops_a_busy_diff`
+//! extend the second hazard past `seq`: a builtin with a loop whose length
+//! depends on input size calls `ToolCtx::checkpoint` (kaish-tool-api) once per
+//! pass, so `request_timeout` stops it mid-scan. With the kernel's `checkpoint`
+//! made inert, every one of those cases fails, as do the two `seq` timeout
+//! cases above. `cat` and `cmp` have no case; the comment above `diff` says why.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -124,7 +120,7 @@ async fn request_timeout_stops_a_busy_builtin_without_a_pipe() {
 const HANG_DEADLINE: Duration = Duration::from_millis(50);
 
 /// Run `script` against `kernel` under `HANG_DEADLINE`, wrapped in the
-/// module's outer `HANG` timeout so a regression fails in seconds.
+/// module's outer `HANG` timeout so a regression fails instead of hanging.
 async fn run_with_deadline(kernel: &Kernel, script: &str) -> (ExecResult, Duration) {
     let started = Instant::now();
     let result = tokio::time::timeout(
@@ -179,16 +175,12 @@ async fn request_timeout_stops_a_busy_builtin(#[case] script: &str) {
     );
 }
 
-// `cat` and `cmp` are checkpointed too (`cat`'s terminal single-file path now
-// goes through `read_file_chunked` instead of one unchunked `backend.read`;
-// `cmp`'s lockstep loop checkpoints per chunk pair), but neither has a case
-// here: both reached code 124 under `HANG_DEADLINE` even with the kernel's
-// `checkpoint` made inert (the negative control this module's tests are
-// meant to fail under), so this suite can't show either one relying on the
-// checkpoint specifically — something else already stops them at this input
-// size. The fixes still bound worst-case latency (a `LocalFs` chunk read is
-// genuine I/O, unlike `MemoryFs`'s in-memory copy); this suite just can't
-// prove it for these two.
+// `cat` and `cmp` have no case here. `cat` checkpoints only its piped paths:
+// its single-file path keeps the unranged `backend.read`, because a chunked
+// read never ends on an endless device like `/dev/zero`, and the unranged read
+// is what refuses one. `cmp` checkpoints per chunk pair, but it reached 124
+// here even with the checkpoint made inert, so a case could not fail for the
+// reason this file tests.
 
 /// `diff` needs two files different enough that every line disagrees — two
 /// identical files return before the diff computation even starts (the
