@@ -3567,7 +3567,6 @@ impl Kernel {
                 }
                 match body_flow {
                     ControlFlow::Normal(mut result) => {
-                        ctx.publish_job_stderr(&mut result).await;
                         self.drain_stderr_into(&mut result, ctx).await;
                         // A fault is "could not decide", not a boolean to
                         // flip — coercing it into a decided 0/1 would let a
