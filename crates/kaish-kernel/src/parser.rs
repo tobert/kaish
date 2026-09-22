@@ -55,6 +55,39 @@ impl Drop for ContinuationGapsGuard {
     }
 }
 
+thread_local! {
+    /// The full source text of the current [`parse`] call, installed
+    /// alongside [`CONTINUATION_GAPS`] by the same entry point. Read only by
+    /// `validate_glued_args`'s own success branch, to slice the exact
+    /// refused word for its error message — unlike `CONTINUATION_GAPS`,
+    /// nothing here is load-bearing for parse correctness. A missing or
+    /// stale value just means a message stays at [`GLUED_ARGS_MESSAGE`]'s
+    /// generic examples instead of naming the word, never a wrong parse.
+    static PARSE_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Installs one [`parse`] call's source text and restores the previous one
+/// on drop — the same nesting discipline as [`ContinuationGapsGuard`], for
+/// the same reason: a nested `parse` (a quoted `$(...)` body) runs against
+/// its own, smaller source, then the outer call's source is current again.
+struct SourceTextGuard {
+    saved: Option<String>,
+}
+
+impl SourceTextGuard {
+    fn install(source: &str) -> Self {
+        let saved = PARSE_SOURCE.with(|c| c.borrow_mut().replace(source.to_string()));
+        Self { saved }
+    }
+}
+
+impl Drop for SourceTextGuard {
+    fn drop(&mut self) {
+        let saved = self.saved.take();
+        PARSE_SOURCE.with(|c| *c.borrow_mut() = saved);
+    }
+}
+
 /// True when two spans touch, or the bytes between them are only dropped
 /// line continuations. bash removes a backslash-newline before it splits
 /// words, so `W\<newline>N` is one word; every adjacency check uses this.
@@ -1335,8 +1368,8 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     let end_span: Span = (source.len()..source.len()).into();
 
     let _gaps = ContinuationGapsGuard::install(gaps);
+    let _src = SourceTextGuard::install(source);
     parse_tokens(tokens, end_span, (0..0).into())
-        .map_err(|errors| name_the_glued_word(source, errors))
 }
 
 /// Parse an already-tokenized slice into a `Program`, running the same
@@ -2443,41 +2476,59 @@ const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are 
      one argument (kaish does no token pasting); quote the whole word, e.g. \
      \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
 
-/// Replace [`GLUED_ARGS_MESSAGE`]'s generic example with the actual refused
-/// word, when neither side of the paste is a variable or command
-/// substitution — a bare-punctuation paste (`echo ===`) has no `/tmp/`,
-/// no `$(echo x).txt`, and no `$dir` to relate to, so the shipped examples
-/// were pointing at a shape that never occurred.
+/// The message for a glued-argv run at `span` — [`GLUED_ARGS_MESSAGE`]'s
+/// generic examples, or the actual refused word when it is plain enough to
+/// show literally.
 ///
-/// Runs once, here at the top of [`parse`], after every internal rescan
-/// (`validate_glued_args`, `is_glued_args_error`) has already settled on the
-/// final span: `error.span` is the exact word chumsky is naming, so slicing
-/// `source` at that span is always the right word, never a guess. `$` is the
-/// only way a variable (`$VAR`, `${VAR}`) or a command substitution (`$(…)`)
-/// spells itself, so its absence is what licenses the swap.
-fn name_the_glued_word(source: &str, errors: Vec<ParseError>) -> Vec<ParseError> {
-    errors
-        .into_iter()
-        .map(|error| {
-            if error.message != GLUED_ARGS_MESSAGE {
-                return error;
-            }
-            let Some(word) = source.get(error.span.start..error.span.end) else {
-                return error;
-            };
-            if word.contains('$') {
-                return error;
-            }
-            ParseError {
-                message: format!(
-                    "adjacent words with no space between them are not joined into \
-                     one argument (kaish does no token pasting); quote the whole \
-                     word, e.g. {word:?}"
-                ),
-                span: error.span,
-            }
-        })
-        .collect()
+/// Called ONLY from [`validate_glued_args`]'s own success branch, where the
+/// caller guarantees `span` is the full, corrected run: a bare-punctuation
+/// paste (`echo ===`) has no `/tmp/`, no `$(echo x).txt`, and no `$dir` to
+/// relate to, so the shipped examples were pointing at a shape that never
+/// occurred, and naming the actual word fixes that. `reject_glued_args`'s own
+/// raw span, and the "no run found" fallback that leaves the grammar's span
+/// standing (documented on `validate_glued_args`, and on `is_word_token` for
+/// the nine-keyword gap), are never a full, verified run — a wrong word FROM
+/// EITHER of those (unrelated to the real paste) would be actively
+/// misleading, so this function must never be reached for them.
+fn glued_args_message(span: Span) -> String {
+    let word = PARSE_SOURCE.with(|source| {
+        source.borrow().as_ref().and_then(|s| s.get(span.start..span.end)).map(str::to_string)
+    });
+    match word {
+        Some(word) if is_plain_glued_word(&word) => format!(
+            "adjacent words with no space between them are not joined into \
+             one argument (kaish does no token pasting); quote the whole \
+             word, e.g. {word:?}"
+        ),
+        _ => GLUED_ARGS_MESSAGE.to_string(),
+    }
+}
+
+/// True when `word` is safe to name verbatim in the fix-it example.
+///
+/// No `$`: a variable (`$VAR`, `${VAR}`) or a command substitution (`$(…)`)
+/// already has its own example in [`GLUED_ARGS_MESSAGE`]. No quote or
+/// backslash character: `"foo"bar`'s SOURCE text carries its own quote
+/// marks, so showing it verbatim inside another pair of quotes reads like
+/// the VALUE still has quotes in it — `{word:?}` is Rust's Debug quoting,
+/// not shell quoting, and does not fix this. No control or whitespace
+/// character: a run with no space between the words has no business
+/// containing either, and a literal backslash-newline (`echo a\<newline>b`
+/// glued) is neither the refused source text nor bash's joined `ab`.
+///
+/// The explicit checks above are re-verified against `{word:?}` itself as a
+/// second, independent guard: some Unicode format characters (bidi
+/// overrides, zero-width joiners) are neither `is_control()` nor
+/// `is_whitespace()`, but Rust's Debug escaper still refuses to print them
+/// bare, and its judgment wins over the hand-picked exclusion list above.
+fn is_plain_glued_word(word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let plain_chars = word
+        .chars()
+        .all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '$' | '"' | '\'' | '\\'));
+    plain_chars && format!("{word:?}") == format!("\"{word}\"")
 }
 
 /// True when `e` is `reject_glued_args`'s own rejection and nothing else —
@@ -4125,7 +4176,7 @@ fn validate_glued_args(
         let span: Span = (units[start_idx].start..units[end_idx].end).into();
         return Err(vec![ParseError {
             span,
-            message: GLUED_ARGS_MESSAGE.to_string(),
+            message: glued_args_message(span),
         }]);
     }
     // No run at or after the grammar's position: say nothing and let its own
