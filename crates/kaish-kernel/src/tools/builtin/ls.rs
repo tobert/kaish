@@ -167,7 +167,10 @@ impl Tool for Ls {
                         errors.push(one.err.trim_end().to_string());
                     }
                     if one.code != 0 {
-                        code = one.code;
+                        // Worst, not last: `list_one` only fails operationally
+                        // today, but last-wins would drop a usage 2 behind a
+                        // later operand's 1 the moment one is added.
+                        code = code.max(one.code);
                     }
                     let chunk = one.text_out();
                     if !chunk.trim().is_empty() {
