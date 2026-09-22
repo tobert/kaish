@@ -528,7 +528,11 @@ async fn timeout_wrapped_fault_matches_foreground(#[case] setup: &str) {
 #[rstest::rstest]
 #[case::negated("f() { ! cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\"; }")]
 #[case::chain("f() { cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\" && true; }")]
+#[case::and_right("f() { true && cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\"; }")]
+#[case::or_right("f() { false || cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\"; }")]
+#[case::case_body("f() { case x in x) cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\";; esac; }")]
+#[case::if_body("f() { if true; then cat /kaish-corpus-order-a \"$(cat /kaish-corpus-order-b)\"; fi; }")]
 #[tokio::test]
-async fn substitution_stderr_ahead_of_a_negated_or_chained_command_matches_foreground(#[case] setup: &str) {
+async fn substitution_stderr_ahead_of_its_command_matches_foreground(#[case] setup: &str) {
     assert_job_matches_foreground(setup, "f &").await;
 }

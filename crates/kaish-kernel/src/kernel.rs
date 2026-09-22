@@ -3201,8 +3201,9 @@ impl Kernel {
                             };
                             match flow {
                                 ControlFlow::Normal(r) => {
-                                    accumulate_result(&mut result, &r);
+                                    // Drain before accumulating, as `if` does.
                                     self.drain_stderr_into(&mut result, ctx).await;
+                                    accumulate_result(&mut result, &r);
                                 }
                                 mut other => {
                                     self.drain_stderr_into(&mut result, ctx).await;
@@ -3318,6 +3319,11 @@ impl Kernel {
                             };
                             match right_flow {
                                 ControlFlow::Normal(mut right_result) => {
+                                    // execute_stmt_flow already published this
+                                    // operand's stderr. An unpublished chunk here
+                                    // would reach the stream after it; today only a
+                                    // stderr redirect leaves one, and that redirect
+                                    // also takes the operand's own stderr.
                                     self.drain_stderr_ahead(&mut right_result, ctx).await;
                                     self.update_last_result(&right_result).await;
                                     let mut combined = left_result;
@@ -3406,6 +3412,11 @@ impl Kernel {
                             };
                             match right_flow {
                                 ControlFlow::Normal(mut right_result) => {
+                                    // execute_stmt_flow already published this
+                                    // operand's stderr. An unpublished chunk here
+                                    // would reach the stream after it; today only a
+                                    // stderr redirect leaves one, and that redirect
+                                    // also takes the operand's own stderr.
                                     self.drain_stderr_ahead(&mut right_result, ctx).await;
                                     self.update_last_result(&right_result).await;
                                     let mut combined = left_result;
