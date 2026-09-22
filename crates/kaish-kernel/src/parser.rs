@@ -23,26 +23,34 @@ thread_local! {
     /// Line continuations dropped from the current [`parse`] call's tokens,
     /// as `(start, end)` source offsets. `CACHED_PARSER` is built once per
     /// thread, so per-call data reaches its closures through here.
-    static CONTINUATION_GAPS: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    ///
+    /// `None` means no [`parse`] call has installed its gaps on this thread —
+    /// a source with genuinely no continuations still installs `Some(vec![])`.
+    /// Every caller of [`gap_is_only_continuations`] runs inside
+    /// [`ContinuationGapsGuard`]'s scope (see `parse_tokens`'s doc comment),
+    /// so `None` here is a bug, not a quiet default: answering from an empty
+    /// list would tell a backslash-continued word (`W\<newline>N`) it has a
+    /// real gap and let it split into two args with no error at all.
+    static CONTINUATION_GAPS: RefCell<Option<Vec<(usize, usize)>>> = const { RefCell::new(None) };
 }
 
 /// Installs one [`parse`] call's continuation gaps and restores the previous
 /// set on drop, so a nested `parse` (a quoted `$(...)` body) or a panic
 /// cannot leave the outer call reading the wrong gaps.
 struct ContinuationGapsGuard {
-    saved: Vec<(usize, usize)>,
+    saved: Option<Vec<(usize, usize)>>,
 }
 
 impl ContinuationGapsGuard {
     fn install(gaps: Vec<(usize, usize)>) -> Self {
-        let saved = CONTINUATION_GAPS.with(|c| std::mem::replace(&mut *c.borrow_mut(), gaps));
+        let saved = CONTINUATION_GAPS.with(|c| c.borrow_mut().replace(gaps));
         Self { saved }
     }
 }
 
 impl Drop for ContinuationGapsGuard {
     fn drop(&mut self) {
-        let saved = std::mem::take(&mut self.saved);
+        let saved = self.saved.take();
         CONTINUATION_GAPS.with(|c| *c.borrow_mut() = saved);
     }
 }
@@ -50,12 +58,23 @@ impl Drop for ContinuationGapsGuard {
 /// True when two spans touch, or the bytes between them are only dropped
 /// line continuations. bash removes a backslash-newline before it splits
 /// words, so `W\<newline>N` is one word; every adjacency check uses this.
+///
+/// Panics if no [`ContinuationGapsGuard`] is installed on this thread — see
+/// [`CONTINUATION_GAPS`]'s doc comment. Every real call path installs one
+/// first; a miss here is an internal bug, and it must stop the parse rather
+/// than silently answer as if the word had no continuation.
 fn gap_is_only_continuations(prev_end: usize, next_start: usize) -> bool {
     if prev_end >= next_start {
         return prev_end == next_start;
     }
     CONTINUATION_GAPS.with(|gaps| {
-        let gaps = gaps.borrow();
+        let borrowed = gaps.borrow();
+        let Some(gaps) = borrowed.as_ref() else {
+            unreachable!(
+                "gap_is_only_continuations ran without parse's ContinuationGapsGuard \
+                 installed on this thread"
+            );
+        };
         let mut pos = prev_end;
         while pos < next_start {
             let Some(gap) = gaps.iter().find(|gap| gap.0 == pos) else {
@@ -1332,6 +1351,17 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
 /// `stdin_anchor` is where the ambiguous-multiple-stdin-redirect diagnostic
 /// (which carries no AST span of its own) points: the source start for the
 /// top level, or the `$(...)` span for a nested body.
+///
+/// Precondition: a [`ContinuationGapsGuard`] for this token stream must
+/// already be installed on this thread — [`parse`] installs one before its
+/// own top-level call and before recursing into a `$(...)` body, and every
+/// recursive call into this function (`validate_cmd_subst_bodies`,
+/// `cmd_subst_parser`) runs from inside that same call tree. There is no
+/// gaps parameter here because the grammar this function drives is built
+/// once per thread (see `CACHED_PARSER`) and reused across calls; a fresh
+/// per-call parameter would have to thread through every combinator instead
+/// of the one thread-local read at the point of use. [`gap_is_only_continuations`]
+/// panics rather than guess if this precondition is ever violated.
 fn parse_tokens(
     tokens: Vec<(Token, Span)>,
     end_span: Span,
@@ -5942,6 +5972,22 @@ mod tests {
             }
             other => panic!("expected env-scoped, got {other:?}"),
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ContinuationGapsGuard precondition
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// `gap_is_only_continuations` must panic, not silently answer "no
+    /// continuation here", when read outside `parse`'s guard — see
+    /// `CONTINUATION_GAPS`'s doc comment for why an empty-list default would
+    /// be a silent argv-splat bug rather than a merely missing diagnostic.
+    #[test]
+    #[should_panic(expected = "ContinuationGapsGuard")]
+    fn gap_is_only_continuations_panics_without_installed_guard() {
+        // libtest gives every test its own thread, so `CONTINUATION_GAPS` is
+        // at its `None` default here — no `parse` call has run on it yet.
+        gap_is_only_continuations(0, 1);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
