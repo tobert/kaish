@@ -418,10 +418,11 @@ impl Filesystem for LocalFs {
                 None => false,
             };
             if !parent_exists || !allow_missing_final {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("No such file or directory: {}", path.display()),
-                ));
+                // The path alone — "No such file or directory" restated
+                // `ErrorKind::NotFound`'s own meaning, and
+                // `BackendError::NotFound`'s Display adds "not found:" once
+                // when this crosses that boundary.
+                return Err(io::Error::new(io::ErrorKind::NotFound, path.display().to_string()));
             }
         }
 

@@ -3,11 +3,15 @@
 //! Used for `/v` and testing. All data is ephemeral.
 //!
 //! `io::Error` messages below carry the path (and, where two paths are in
-//! play, which one) but never restate the `ErrorKind`'s own phrase —
-//! `impl From<io::Error> for BackendError` (kaish-types) adds that phrase
-//! once when the error crosses into a `BackendError`; baking it into the
-//! message here doubled it (`ls` against `MemoryFs` read "not found: not
-//! found: /path").
+//! play, which one) but never restate the phrase a `BackendError` variant's
+//! own `#[error(...)]` `Display` supplies for that `ErrorKind` — baking it
+//! into the message here doubled it (`ls` against `MemoryFs` read "not
+//! found: not found: /path"). The rule only binds a kind `BackendError`
+//! actually phrases (`NotFound`, `IsADirectory`, `NotADirectory`,
+//! `AlreadyExists`, `PermissionDenied`); `DirectoryNotEmpty` has no variant
+//! of its own — it falls to `BackendError::Io`, whose `#[error("io error:
+//! {0}")]` says nothing about emptiness — so its message keeps "directory
+//! not empty" as the only description a reader gets.
 
 use crate::budget::ByteBudget;
 use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
