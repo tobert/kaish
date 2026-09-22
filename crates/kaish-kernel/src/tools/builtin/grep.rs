@@ -624,8 +624,12 @@ impl Tool for Grep {
                 .await;
 
             // I/O error reading the file.
-            if let Err(e) = scan_result {
-                return ExecResult::failure(2, format!("grep: {}: {}", path, e));
+            let scan_result = match scan_result {
+                Ok(outcome) => outcome,
+                Err(e) => return ExecResult::failure(2, format!("grep: {}: {}", path, e)),
+            };
+            if scan_result == crate::tools::ScanOutcome::Interrupted {
+                return kaish_tool_api::Interrupted.result("grep");
             }
 
             // Flush the remaining carry.  `saw_invalid_utf8` is set if any
@@ -744,7 +748,7 @@ impl Grep {
     #[allow(clippy::too_many_arguments)]
     async fn stream_grep(
         &self,
-        _ctx: &mut ExecContext,
+        ctx: &mut ExecContext,
         pipe_in: crate::scheduler::PipeReader,
         mut pipe_out: crate::scheduler::PipeWriter,
         regex: &regex::Regex,
@@ -761,9 +765,18 @@ impl Grep {
         // is the downstream stage closing the pipe (`grep x | head -1`), which
         // is ordinary and keeps the match-based code.
         let mut read_error: Option<std::io::Error> = None;
+        let mut interrupted = false;
 
         let mut line_buf = String::new();
         loop {
+            // `read_line` genuinely awaits, but it does not itself check for a
+            // cancel: an upstream stage that keeps producing lines faster than
+            // this one is interrupted would otherwise keep this loop running
+            // past the script timeout.
+            if ctx.checkpoint().await.is_err() {
+                interrupted = true;
+                break;
+            }
             line_buf.clear();
             match reader.read_line(&mut line_buf).await {
                 Ok(0) => break,
@@ -803,6 +816,9 @@ impl Grep {
         drop(reader);
         let _ = pipe_out.shutdown().await;
 
+        if interrupted {
+            return kaish_tool_api::Interrupted.result("grep");
+        }
         if let Some(e) = read_error {
             return ExecResult::failure(2, format!("grep: {e}"));
         }
@@ -860,6 +876,9 @@ impl Grep {
         };
 
         for file_path in files {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("grep");
+            }
             // Create relative filename for display
             let stripped = file_path.strip_prefix(root).unwrap_or(file_path);
             let display_name = match display_prefix {
@@ -2387,7 +2406,7 @@ mod tests {
 
         let mut vfs = VfsRouter::new();
         vfs.mount("/", rec);
-        let ctx = ExecContext::new(Arc::new(vfs));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
 
         // Use read_file_chunked directly with a small chunk to force multiple reads.
         let regex = regex::Regex::new("line").unwrap();

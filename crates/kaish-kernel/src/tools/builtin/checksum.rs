@@ -8,7 +8,8 @@ use digest::Digest;
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::get_path_string;
-use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ScanOutcome, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use kaish_tool_api::Interrupted;
 
 /// Checksum tool: compute or verify file hashes.
 pub struct Checksum;
@@ -163,7 +164,7 @@ impl Tool for Checksum {
                 })
                 .await
             {
-                Ok(()) => {
+                Ok(ScanOutcome::Complete) => {
                     let hash = hasher.finalize_hex();
                     let line = format!("{}  {}", hash, path);
                     // First header (HASH) binds to node.name; FILE/ALGO are
@@ -176,6 +177,7 @@ impl Tool for Checksum {
                     );
                     text_lines.push(line);
                 }
+                Ok(ScanOutcome::Interrupted) => return Interrupted.result("checksum"),
                 Err(e) => {
                     return ExecResult::failure(1, format!("checksum: {}: {}", path, e));
                 }
@@ -245,7 +247,7 @@ impl Checksum {
                 })
                 .await
             {
-                Ok(()) => {
+                Ok(ScanOutcome::Complete) => {
                     let actual_hash = hasher.finalize_hex();
                     if actual_hash == expected_hash {
                         output.push_str(&format!("{}: OK\n", filename));
@@ -254,6 +256,7 @@ impl Checksum {
                         failures += 1;
                     }
                 }
+                Ok(ScanOutcome::Interrupted) => return Interrupted.result("checksum"),
                 Err(e) => {
                     output.push_str(&format!("{}: FAILED ({})\n", filename, e));
                     failures += 1;

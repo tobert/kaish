@@ -81,6 +81,14 @@ impl Tool for Cat {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = [0u8; 8192];
                     loop {
+                        // `read`/`write_all` genuinely await, but neither checks
+                        // for a cancel: an upstream stage producing data faster
+                        // than this one is interrupted would keep this loop
+                        // running past the script timeout otherwise.
+                        if ctx.checkpoint().await.is_err() {
+                            let _ = pipe_out.shutdown().await;
+                            return kaish_tool_api::Interrupted.result("cat");
+                        }
                         match pipe_in.read(&mut buf).await {
                             Ok(0) => break,
                             Ok(n) => {
@@ -168,7 +176,17 @@ impl Tool for Cat {
                 .await;
             }
             // Terminal stage (pipe_stdout is None): must materialise the whole
-            // file to return it as an ExecResult. Streaming saves nothing here.
+            // file to return it as an ExecResult. Streaming saves nothing
+            // here, and it is not checkpointed like the piped path above:
+            // `read_file_chunked`'s bounded `read_range` calls succeed
+            // forever on an endless device (`/dev/zero`, `/dev/urandom`),
+            // since a bounded range is exactly what those devices *do*
+            // answer — only the unranged whole-file `read` this path uses
+            // is gated to fail loudly instead of streaming forever (see
+            // `DevFs` in kaish-vfs). A real backend's read is genuine I/O
+            // that already yields; an in-memory one is fast enough at any
+            // size this checkpoint could plausibly help with that the
+            // watchdog would never get a useful head start anyway.
             return match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => ExecResult::success_text_or_bytes(data),
                 Err(e) => ExecResult::failure(1, format!("cat: {}: {}", paths[0], e)),
@@ -254,8 +272,12 @@ impl Tool for Cat {
 /// Early exit: if `write_all` returns `Err` (the downstream reader was dropped,
 /// e.g. `cat big | head -1`), the loop breaks immediately and returns success —
 /// the downstream command already has what it needed.
+///
+/// Checkpoints once per chunk: a `MemoryFs`/`OverlayFs` read never truly
+/// awaits, so without this a script timeout could not stop a large in-memory
+/// file from streaming to completion.
 async fn stream_file_to_pipe(
-    ctx: &ExecContext,
+    ctx: &mut ExecContext,
     path: &Path,
     display_path: &str,
     mut pipe_out: PipeWriter,
@@ -264,6 +286,10 @@ async fn stream_file_to_pipe(
     use tokio::io::AsyncWriteExt;
     let mut offset = 0u64;
     loop {
+        if ctx.checkpoint().await.is_err() {
+            let _ = pipe_out.shutdown().await;
+            return kaish_tool_api::Interrupted.result("cat");
+        }
         let chunk = match ctx
             .backend
             .read(path, Some(ReadRange::bytes(offset, chunk_size)))
@@ -562,7 +588,7 @@ mod tests {
     async fn cat_streams_file_in_bounded_chunks() {
         // Build a file large enough to need multiple 256-byte reads.
         let payload: Vec<u8> = (0u8..=255u8).cycle().take(1000).collect();
-        let (ctx, ranges) = make_recording_ctx("big.bin", &payload).await;
+        let (mut ctx, ranges) = make_recording_ctx("big.bin", &payload).await;
 
         // Set up a pipe pair and call the helper directly with chunk_size=256.
         let (pipe_out, mut pipe_in) = crate::scheduler::pipe_stream(4096);
@@ -581,7 +607,7 @@ mod tests {
             collected
         });
 
-        let result = stream_file_to_pipe(&ctx, Path::new("/big.bin"), "/big.bin", pipe_out, 256).await;
+        let result = stream_file_to_pipe(&mut ctx, Path::new("/big.bin"), "/big.bin", pipe_out, 256).await;
         assert!(result.ok(), "stream_file_to_pipe failed: {}", result.err);
 
         let collected = drain.await.expect("drain task panicked");
@@ -611,7 +637,7 @@ mod tests {
     async fn cat_streams_binary_file_intact() {
         // Bytes that are not valid UTF-8.
         let payload: Vec<u8> = vec![0x00, 0xff, 0xfe, 0x80, 0x81, 0x82, 0x41, 0x00, 0xff];
-        let (ctx, _ranges) = make_recording_ctx("binary.bin", &payload).await;
+        let (mut ctx, _ranges) = make_recording_ctx("binary.bin", &payload).await;
 
         let (pipe_out, mut pipe_in) = crate::scheduler::pipe_stream(4096);
 
@@ -630,7 +656,7 @@ mod tests {
 
         // Use a small chunk size to exercise the loop even on a small file.
         let result =
-            stream_file_to_pipe(&ctx, Path::new("/binary.bin"), "/binary.bin", pipe_out, 4).await;
+            stream_file_to_pipe(&mut ctx, Path::new("/binary.bin"), "/binary.bin", pipe_out, 4).await;
         assert!(result.ok(), "stream_file_to_pipe failed: {}", result.err);
 
         let collected = drain.await.expect("drain task panicked");
@@ -650,13 +676,13 @@ mod tests {
     #[tokio::test]
     async fn cat_streaming_early_exit_on_broken_pipe() {
         let payload: Vec<u8> = vec![b'x'; 1000];
-        let (ctx, ranges) = make_recording_ctx("big.bin", &payload).await;
+        let (mut ctx, ranges) = make_recording_ctx("big.bin", &payload).await;
 
         let (pipe_out, pipe_reader) = crate::scheduler::pipe_stream(4096);
         // Drop the reader immediately — the first write_all will fail.
         drop(pipe_reader);
 
-        let result = stream_file_to_pipe(&ctx, Path::new("/big.bin"), "/big.bin", pipe_out, 256).await;
+        let result = stream_file_to_pipe(&mut ctx, Path::new("/big.bin"), "/big.bin", pipe_out, 256).await;
         // Early exit must still return success (not an error).
         assert!(result.ok(), "early-exit path should return success, got: {}", result.err);
 

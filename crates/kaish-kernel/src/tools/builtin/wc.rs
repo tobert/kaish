@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ScanOutcome, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use kaish_tool_api::Interrupted;
 
 /// Wc tool: count lines, words, characters, and bytes.
 pub struct Wc;
@@ -128,7 +129,7 @@ impl Tool for Wc {
                 })
                 .await
             {
-                Ok(()) => {
+                Ok(ScanOutcome::Complete) => {
                     let (lc, wc, cc, bc, invalid_utf8) = counter.finish();
 
                     if invalid_utf8 && needs_text {
@@ -146,6 +147,7 @@ impl Tool for Wc {
                     rows.push((path.clone(), cells.clone()));
                     nodes.push(OutputNode::new(path.as_str()).with_cells(cells));
                 }
+                Ok(ScanOutcome::Interrupted) => return Interrupted.result("wc"),
                 Err(e) => {
                     error_messages.push(format!("wc: {}: {}", path, e));
                     had_error = true;
@@ -731,7 +733,7 @@ mod tests {
 
         let mut vfs = VfsRouter::new();
         vfs.mount("/", rec);
-        let ctx = ExecContext::new(Arc::new(vfs));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
 
         let mut counter = WcCounter::default();
         ctx.read_file_chunked(Path::new("/big.txt"), 256, |c| {
