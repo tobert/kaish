@@ -11,7 +11,9 @@
 //!   the work finishes on its own.
 //!
 //! Every case runs under an outer `tokio::time::timeout`, so a regression fails
-//! in seconds instead of hanging the test binary.
+//! instead of hanging the test binary. A builtin that never yields holds the
+//! thread past that timeout too, so its failure arrives when the builtin
+//! finishes: about a minute for the `seq` cases in a debug build.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
