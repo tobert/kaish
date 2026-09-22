@@ -284,7 +284,20 @@ impl Tool for Spawn {
                 }
             }
             None => match ctx.backend.resolve_real_path(&ctx.cwd) {
-                Some(p) => p,
+                Some(p) if p.is_dir() => p,
+                // A resolved-but-missing shell cwd (e.g. a directory `cd`ed
+                // into and then deleted out from under the shell) is the
+                // same class as an explicit `--cwd` naming a missing
+                // directory just above — the message must name the cwd,
+                // not raise a raw ENOENT that blames the command
+                // ("spawn: /bin/true: No such file or directory") for a
+                // problem that is the cwd's, not the command's.
+                Some(p) => {
+                    return ExecResult::failure(
+                        1,
+                        format!("spawn: cwd '{}' does not exist or is not a directory", p.display()),
+                    )
+                }
                 None => return virtual_cwd_error(&command_name, &ctx.cwd),
             },
         };
@@ -1018,6 +1031,38 @@ mod tests {
         assert!(!result.ok(), "a missing cwd directory must refuse: {result:?}");
         assert!(
             result.err.contains("kaish-spawn-cwd-does-not-exist-xyz"),
+            "error must name the cwd that doesn't exist: {result:?}"
+        );
+        assert!(
+            !result.err.contains("/bin/true:"),
+            "error must not blame the command for the cwd's own problem: {result:?}"
+        );
+    }
+
+    /// kaibo round-4 finding: the DEFAULT-cwd branch (no `--cwd` given) was
+    /// missing the `is_dir()` check the explicit `--cwd` branch just above
+    /// has — a shell cwd that resolves to a real filesystem location but
+    /// doesn't exist there any more (e.g. `cd`ed into, then deleted out
+    /// from under the shell) fell straight through to `spawn_process`,
+    /// which failed on the chdir and reported a raw ENOENT blaming the
+    /// COMMAND, the same misleading shape the explicit-`--cwd` fix already
+    /// closed for the other branch.
+    #[tokio::test]
+    async fn test_spawn_default_cwd_missing_directory_names_the_cwd_not_the_command() {
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        ctx.cwd = PathBuf::from("/tmp/kaish-spawn-default-cwd-does-not-exist-xyz");
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a missing default cwd directory must refuse: {result:?}");
+        assert!(
+            result.err.contains("kaish-spawn-default-cwd-does-not-exist-xyz"),
             "error must name the cwd that doesn't exist: {result:?}"
         );
         assert!(
