@@ -497,3 +497,28 @@ async fn exit_sets_the_status_while_the_value_survives() {
     }
     failures.assert_none();
 }
+
+/// Text printed inside the block that raised the signal is output after the
+/// value, so it replaces the value.
+#[tokio::test]
+async fn text_folded_into_a_signal_replaces_the_value() {
+    let bodies = [
+        "fromjson '[1,2]'; if true; then echo hi; exit 0; fi",
+        "fromjson '[1,2]'; while true; do echo hi; exit 0; done",
+    ];
+    let text = Some(Value::String("[1,2]hi".to_string()));
+    let mut failures = Failures::default();
+    for body in bodies {
+        let direct = bound(&kernel().await, body).await;
+        failures.check(direct == text, format!("$({body}): bound {direct:?}"));
+        let top = kernel().await.execute(body).await.unwrap();
+        failures.check(top.data.is_none(), format!("top level `{body}`: data={:?}", top.data));
+        for wrapper in WRAPPERS {
+            let k = kernel().await;
+            let run = define(&k, wrapper, body).await;
+            let value = bound(&k, &run).await;
+            failures.check(value == text, format!("{wrapper} `{body}`: bound {value:?}"));
+        }
+    }
+    failures.assert_none();
+}

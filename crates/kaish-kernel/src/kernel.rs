@@ -2678,7 +2678,7 @@ impl Kernel {
                     // `exit` ran inside — arrives on the signal. Emit it like
                     // any other statement's, then let `code` decide the status.
                     on_output(&carried);
-                    accumulate_result(&mut result, &carried);
+                    accumulate_signal_result(&mut result, &carried);
                     result.code = code;
                     prepend_stderr(&root_ctx, &surfaced_warnings, &mut result).await;
                     return Ok(result);
@@ -2689,7 +2689,7 @@ impl Kernel {
                     // A top-level `return` stops the script, like `exit` —
                     // it must not discard prior statements' accumulated
                     // output nor let execution continue past it.
-                    accumulate_result(&mut result, &value);
+                    accumulate_signal_result(&mut result, &value);
                     prepend_stderr(&root_ctx, &surfaced_warnings, &mut result).await;
                     return Ok(result);
                 }
@@ -5342,15 +5342,16 @@ impl Kernel {
                     self.drain_stderr_onto(err, published_len, ctx, false).await;
 
                     match flow {
-                        ControlFlow::Normal(r)
-                        | ControlFlow::Break { result: r, .. }
-                        | ControlFlow::Continue { result: r, .. } => accumulated.add(r),
+                        ControlFlow::Normal(r) => accumulated.add(r),
+                        ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                            accumulated.add_signal(r)
+                        }
                         ControlFlow::Return { value } => {
-                            accumulated.add(value);
+                            accumulated.add_signal(value);
                             break;
                         }
                         ControlFlow::Exit { code, result: r } => {
-                            accumulated.add(r);
+                            accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
                             break;
                         }
@@ -5479,15 +5480,16 @@ impl Kernel {
             self.drain_stderr_onto(err, published_len, ctx, false).await;
 
             match flow {
-                ControlFlow::Normal(r)
-                | ControlFlow::Break { result: r, .. }
-                | ControlFlow::Continue { result: r, .. } => accumulated.add(r),
+                ControlFlow::Normal(r) => accumulated.add(r),
+                ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                    accumulated.add_signal(r)
+                }
                 ControlFlow::Return { value } => {
-                    accumulated.add(value);
+                    accumulated.add_signal(value);
                     break;
                 }
                 ControlFlow::Exit { code, result: r } => {
-                    accumulated.add(r);
+                    accumulated.add_signal(r);
                     accumulated.set_exit_code(code);
                     break;
                 }
@@ -5882,11 +5884,11 @@ impl Kernel {
                             ));
                         }
                         ControlFlow::Return { value } => {
-                            accumulated.add(value);
+                            accumulated.add_signal(value);
                             return Ok(accumulated.finish());
                         }
                         ControlFlow::Exit { code, result: r } => {
-                            accumulated.add(r);
+                            accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
                             return Ok(accumulated.finish());
                         }
@@ -6030,15 +6032,16 @@ impl Kernel {
                         let (err, published_len) = accumulated.stderr_mut();
                         self.drain_stderr_onto(err, published_len, ctx, false).await;
                         match flow {
-                            ControlFlow::Normal(r)
-                            | ControlFlow::Break { result: r, .. }
-                            | ControlFlow::Continue { result: r, .. } => accumulated.add(r),
+                            ControlFlow::Normal(r) => accumulated.add(r),
+                            ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                                accumulated.add_signal(r)
+                            }
                             ControlFlow::Return { value } => {
-                                accumulated.add(value);
+                                accumulated.add_signal(value);
                                 break;
                             }
                             ControlFlow::Exit { code, result: r } => {
-                                accumulated.add(r);
+                                accumulated.add_signal(r);
                                 accumulated.set_exit_code(code);
                                 break;
                             }
@@ -7838,6 +7841,19 @@ impl StatementAccumulator {
         self.status.data_is_value = self.status.data.is_some();
     }
 
+    /// Add the result a `break`/`continue`/`exit`/`return` carries. The value
+    /// before the signal survives unless the signal's result replaces it; see
+    /// `accumulate_signal_result`.
+    fn add_signal(&mut self, signal: ExecResult) {
+        let kept = self.status.data.take();
+        let valueless = is_valueless(&signal);
+        self.add(signal);
+        if valueless {
+            self.status.data = kept;
+            self.status.data_is_value = self.status.data.is_some();
+        }
+    }
+
     /// `exit N` sets the sequence's code after the exiting statement is added.
     fn set_exit_code(&mut self, code: i64) {
         self.status.code = code;
@@ -8054,7 +8070,7 @@ fn fold_block_output_into_flow(block_output: ExecResult, flow: &mut ControlFlow)
         ControlFlow::Normal(_) => return,
     };
     let mut merged = block_output;
-    accumulate_result(&mut merged, carried);
+    accumulate_signal_result(&mut merged, carried);
     *carried = merged;
 }
 
@@ -8063,18 +8079,37 @@ fn fold_block_output_into_flow(block_output: ExecResult, flow: &mut ControlFlow)
 /// into that loop's result.
 fn accumulate_flow_output(accumulated: &mut ExecResult, flow: &ControlFlow) {
     if let ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } = flow {
-        // `break`/`continue` carry no value of their own, and a signal that
-        // produced nothing must not erase what the body already produced —
-        // leaving a loop early stops it, it does not unmake its output. Same
-        // reasoning as `fold_block_output_into_flow`'s, one step further:
-        // `$(while true; do fromjson '[5]'; break; done)` bound text because
-        // the empty `break` result overwrote the body's value.
-        let carried = (accumulated.data.take(), accumulated.data_is_value);
-        accumulate_result(accumulated, result);
-        if result.data.is_none() {
-            (accumulated.data, accumulated.data_is_value) = carried;
-        }
+        accumulate_signal_result(accumulated, result);
     }
+}
+
+/// `accumulate_result` for the result a `break`/`continue`/`exit`/`return`
+/// carries: the value before the signal survives unless the signal's result
+/// replaces it.
+///
+/// A signal carries no value of its own, so leaving early must not erase what
+/// already ran: `$(while true; do fromjson '[5]'; break; done)` and
+/// `$(fromjson '[5]'; exit 0)` bind the list.
+fn accumulate_signal_result(accumulated: &mut ExecResult, signal: &ExecResult) {
+    let kept = (accumulated.data.take(), accumulated.data_is_value);
+    accumulate_result(accumulated, signal);
+    if is_valueless(signal) {
+        (accumulated.data, accumulated.data_is_value) = kept;
+    }
+}
+
+/// True when a signal's result holds no data and printed no stdout.
+///
+/// Output folded into a signal from its block counts: text printed after a
+/// value replaces it. A result that printed nothing adds nothing to the text,
+/// so the earlier value still describes the output. `set -e` stopping on a
+/// silent `false` keeps the value for the same reason.
+fn is_valueless(signal: &ExecResult) -> bool {
+    signal.data.is_none()
+        && match signal.out_bytes() {
+            Some(bytes) => bytes.is_empty(),
+            None => signal.text_out().is_empty(),
+        }
 }
 
 /// Check if a value is truthy.
