@@ -44,9 +44,9 @@ struct SpawnArgs {
     #[arg(long = "argv")]
     argv: Option<String>,
 
-    /// Environment variables added to the child, as a JSON object string.
-    /// Applied on top of kaish's exported variables, or alone with
-    /// `--clear-env`.
+    /// Environment variables added to the child, as a record or a JSON
+    /// object string. Applied on top of kaish's exported variables, or
+    /// alone with `--clear-env`.
     #[arg(long = "env")]
     env: Option<String>,
 
@@ -157,11 +157,16 @@ impl Tool for Spawn {
             None => Vec::new(),
         };
 
-        // Get env (optional)
-        let env_vars = args
-            .get_named("env")
-            .map(extract_string_object)
-            .unwrap_or_default();
+        // Get env (optional). A shape that isn't a record, a JSON-object
+        // string, or a string that parses as one goes loud rather than
+        // silently running with no env vars at all.
+        let env_vars = match args.get_named("env") {
+            Some(v) => match extract_string_object(v) {
+                Ok(vars) => vars,
+                Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
+            },
+            None => Vec::new(),
+        };
 
         // Get cwd (optional). A binary value goes loud rather than silently
         // being treated as "no cwd override".
@@ -443,13 +448,17 @@ fn value_to_string(value: &Value) -> String {
 /// Supports:
 /// - JSON array (Value::Json): use elements directly
 /// - JSON array string: parse and extract string items
-/// - Plain string: one-element array (no implicit splitting)
+/// - Any other scalar (string, int, float, bool, null): one-element array
+///   (no implicit splitting) — `spawn --command sleep --argv 60` types `60`
+///   as `Value::Int`, and it must reach the child as one argument, "60".
 ///
 /// Decision D: a nested-collection element (a list/record *inside* the argv
-/// list), or a record used as the whole argv, is a loud error — never a silent
-/// JSON stringify or a silently-dropped element. The top-level list itself is
-/// legitimate (spawn's argv is a list of strings). Reuses the shared
-/// `structured_boundary_error` so the message matches every other boundary.
+/// list), a record used as the whole argv, or binary anywhere in it, is a
+/// loud error — never a silent JSON stringify, a silently-dropped element,
+/// or a `[binary: N bytes]` placeholder substituted in as if it were the
+/// real argument text. The top-level list itself is legitimate (spawn's
+/// argv is a list of strings). Reuses the shared `structured_boundary_error`
+/// so the collection-boundary message matches every other boundary.
 fn extract_string_array(value: &Value) -> Result<Vec<String>, String> {
     match value {
         Value::Json(serde_json::Value::Array(arr)) => {
@@ -484,26 +493,50 @@ fn extract_string_array(value: &Value) -> Result<Vec<String>, String> {
             // Plain string is one argument — no implicit whitespace splitting
             Ok(vec![s.clone()])
         }
-        _ => Ok(vec![]),
+        // Binary crosses the process boundary the same way it does at every
+        // other Decision-D guard in this file — loud, never the local
+        // `value_to_string`'s `[binary: N bytes]` placeholder substituted in
+        // as if it were the real argument text.
+        Value::Bytes(_) => Err(format!(
+            "argv must be a JSON array or a string, got {}",
+            value_to_string(value)
+        )),
+        // Any other bare scalar (Int, Float, Bool, Null) is legitimately one
+        // argument, the same as a bare string — `spawn --command sleep
+        // --argv 60` types `60` as `Value::Int` (kaish's typed argv
+        // barewords), and it must still reach the child as the text "60".
+        other => Ok(vec![value_to_string(other)]),
     }
 }
 
 /// Extract a string→string mapping from a Value.
 ///
 /// Supports:
-/// - String: parse as JSON object
-fn extract_string_object(value: &Value) -> Vec<(String, String)> {
+/// - A record (`Value::Json` object): the natural, obvious spelling for
+///   key-value data — used directly, same field extraction as the
+///   string-parsed case below.
+/// - String: parsed as a JSON object.
+///
+/// A shape that is none of these — a scalar, an array, or a string that
+/// doesn't parse as a JSON object — is a loud error rather than a silent
+/// "no env vars at all".
+fn extract_string_object(value: &Value) -> Result<Vec<(String, String)>, String> {
     match value {
-        Value::String(s) => {
-            if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s) {
-                return obj
-                    .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect();
-            }
-            vec![]
-        }
-        _ => vec![],
+        Value::Json(serde_json::Value::Object(obj)) => Ok(obj
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()),
+        Value::String(s) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s) {
+            Ok(obj) => Ok(obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()),
+            Err(e) => Err(format!("env must be a JSON object, got a string that doesn't parse as one: {e}")),
+        },
+        other => Err(format!(
+            "env must be a JSON object (a record) or a JSON-object string, got {}",
+            crate::interpreter::value_to_string(other)
+        )),
     }
 }
 
@@ -913,5 +946,85 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().contains("quick"));
+    }
+
+    /// kaibo round-3 finding: a non-string scalar `--argv` (e.g. a bare
+    /// `Value::Int` — `spawn --command sleep --argv 60` types `60` this way,
+    /// kaish's typed argv barewords) hit `extract_string_array`'s catch-all
+    /// `_ => Ok(vec![])` and silently became NO argv at all — `sleep` ran
+    /// with no arguments instead of sleeping 60 seconds, an existing,
+    /// intentional usage this fix must not break. A bare scalar is now one
+    /// argument, the same as a bare string already was.
+    #[tokio::test]
+    async fn test_spawn_argv_bare_int_is_one_argument_not_dropped() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named.insert("argv".to_string(), Value::Int(60));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "60");
+    }
+
+    /// The one `--argv` shape that does stay a loud error: binary crossing
+    /// the process boundary, matching every other Decision-D guard in this
+    /// file (a `[binary: N bytes]` placeholder substituted in as the actual
+    /// argument text would be worse than dropping it).
+    #[tokio::test]
+    async fn test_spawn_argv_binary_scalar_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named
+            .insert("argv".to_string(), Value::Bytes(vec![0xff, 0x00]));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "binary argv must refuse, not become a placeholder string: {result:?}");
+        assert!(result.err.contains("argv"), "should name the flag: {}", result.err);
+    }
+
+    /// kaibo round-3 finding: `--env` given a kaish record (`Value::Json`
+    /// object) — the natural, obvious spelling for key-value data — hit
+    /// `extract_string_object`'s catch-all `_ => vec![]` and silently ran
+    /// with no env vars at all. A record is now accepted directly, the same
+    /// shape a JSON-object string already parses into.
+    #[tokio::test]
+    async fn test_spawn_env_record_is_accepted() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert(
+            "env".to_string(),
+            Value::Json(serde_json::json!({"FOO": "bar"})),
+        );
+        args.flags.insert("clear-env".to_string());
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(
+            result.text_out().contains("FOO=bar"),
+            "a record --env must reach the child: {}",
+            result.text_out()
+        );
+    }
+
+    /// kaibo round-3 finding: an `--env` that is neither a record nor a
+    /// JSON-object string (nor a string that fails to parse as one) hit the
+    /// same silent `vec![]` catch-all.
+    #[tokio::test]
+    async fn test_spawn_env_non_object_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert("env".to_string(), Value::Int(5));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a non-object env must refuse, not silently run with no env vars: {result:?}");
+        assert!(result.err.contains("env"), "should name the flag: {}", result.err);
     }
 }

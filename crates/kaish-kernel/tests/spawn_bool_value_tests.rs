@@ -21,7 +21,17 @@ async fn spawn_command_true_is_not_swallowed() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
 
-    let result = kernel.execute("spawn --command true").await.expect("execute");
+    // `common::kernel_at` seeds no PATH (the kernel never reads the OS env
+    // on its own) — `spawn`'s own `--command` resolution has none of its
+    // own OS-PATH fallback either, so `true` needs PATH exported here, the
+    // same way other test kernels seed it via `initial_vars`. Exporting it
+    // at runtime instead of touching the shared helper keeps this fix local
+    // to the one test file that actually spawns an external command.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let result = kernel
+        .execute(&format!("export PATH=\"{path}\"; spawn --command true"))
+        .await
+        .expect("execute");
     assert!(
         !result.err.contains("a value is required"),
         "the literal command should reach spawn: {:?}",
@@ -38,8 +48,9 @@ async fn spawn_command_quoted_true_still_works() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
 
+    let path = std::env::var("PATH").unwrap_or_default();
     let result = kernel
-        .execute("spawn --command 'true'")
+        .execute(&format!("export PATH=\"{path}\"; spawn --command 'true'"))
         .await
         .expect("execute");
     assert_ne!(result.code, 2, "quoted form regressed: {:?}", result.err);
