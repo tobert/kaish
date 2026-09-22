@@ -164,12 +164,24 @@ mod tests {
         args.flags.insert("f".to_string());
 
         let result = Readlink.execute(args, &mut ctx).await;
-        // /some/../path/./file normalizes to /path/file; MemoryFs will report
-        // "not found" for /path/file, which readlink -f allows as missing final component.
-        // The parent /path must also not exist — let's test that the path normalizes at
-        // least through the dot-dot without crashing.
-        // (The actual test for symlink traversal is in the integration tests.)
-        let _ = result; // just confirm it doesn't panic
+        // VfsRouter::canonicalize folds `.`/`..` lexically (`lexical_absolute`)
+        // before routing to a mount, so "/some/../path/./file" reaches MemoryFs
+        // as "path/file", not "some/../path/./file" — "some" never gets an
+        // lstat. "path" is the missing INTERMEDIATE component there, which
+        // errors regardless of readlink -f's allow-missing-FINAL semantics.
+        // The error's leading "readlink: <operand>: " always echoes the raw,
+        // unfolded operand (so it names "some" no matter what); the part
+        // AFTER that echo is what proves the fold happened, and it must name
+        // the post-fold "path", not "some". If the lexical fold ever broke,
+        // MemoryFs would instead report the missing component as "some".
+        assert!(!result.ok(), "expected failure, got {}", result.text_out());
+        assert!(
+            result.err.trim_end().ends_with("path"),
+            "expected the underlying not-found error to name the missing \
+             intermediate component \"path\" (proving \"/some/..\" folded away \
+             before MemoryFs ever saw \"some\"): {}",
+            result.err
+        );
     }
 
     #[tokio::test]
