@@ -616,6 +616,12 @@ cmd 2>&1 | tee log.txt          # capture both streams
 cmd > log.txt 2>&1              # both streams to log.txt
 cmd 2>&1 > log.txt              # stderr to the old stdout, stdout to log.txt
 
+# Targets open left to right BEFORE the command runs.
+mkdir -p out; cmd > out/log.txt # correct — a redirect never creates a directory
+cmd > missing-dir/log.txt       # exit 1 — cmd does not run
+sort < f > f.tmp; mv f.tmp f    # correct — rewrite a file through a temp file
+sort < f > f                    # error — f is both input and output
+
 # A redirect target is a SINGLE word — quote it when it interpolates.
 # Command substitution runs in the target (and in here-doc bodies).
 echo hi > "$dir/out.log"        # correct
@@ -635,6 +641,22 @@ jq -r '.name' <<< "$RESULT"     # canonical JSON field extraction
 cat <<< "hello $NAME"           # interpolation works like double quotes
 cat <<< 'raw $VAR'              # single quotes stay literal
 ```
+
+> **Targets open before the command runs.** Each target is evaluated and
+> opened left to right first, as in bash: `>`, `2>`, and `&>` truncate the
+> file, and `>>` opens it for append, creating it if missing. If a target
+> cannot open, the command does not run and exits 1; the error goes where
+> stderr points at that moment (`cmd 2>&1 > /missing/f` sends it to
+> stdout). A missing parent directory is an error, never created — run
+> `mkdir -p` first. `cat f > f` empties `f`, as in bash, because `>`
+> truncates before `cat` reads.
+>
+> **One file as input and output is refused.** `sort < f > f` exits 1
+> with `redirect: f is both input and output; write to a temp file, then mv
+> it over f`, and `f` keeps its content. bash would empty `f`. Paths are
+> compared after symlinks and `.`/`..` resolve. When both targets are
+> literals, the validator reports it as E023 before anything runs, so
+> `kaish --plan` shows it.
 
 > **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
 > combining two of them on the same command is a parse error (rather than
