@@ -1455,7 +1455,12 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         // Yields only when this task's cooperative budget is spent, so the
         // watchdog's timer gets a turn without a yield on every call.
         tokio::task::consume_budget().await;
-        if self.cancel.is_cancelled() {
+        // `self.cancel` is fired by a request timeout or `Kernel::cancel()`;
+        // the dispatcher poll is an embedder's own out-of-band check
+        // (`ExecuteOptions::interrupt`) for a host that can't cancel a token
+        // from another thread. Either one stops a checkpointing builtin.
+        let dispatcher_cancelled = self.dispatcher.as_ref().is_some_and(|d| d.is_cancelled());
+        if self.cancel.is_cancelled() || dispatcher_cancelled {
             Err(kaish_tool_api::Interrupted)
         } else {
             Ok(())

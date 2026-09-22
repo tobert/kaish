@@ -1454,7 +1454,19 @@ impl Kernel {
             parent.child_token()
         };
         let background_job = self.exec_ctx.read().await.background_job;
-        self.fork_inner(child_token, background_job).await
+        let fork = self.fork_inner(child_token, background_job).await;
+        // Foreground concurrency must see the parent's interrupt check too —
+        // `fork_inner` always starts a fork's `interrupt` at `None`, leaving
+        // a pipeline stage's loop or builtin checkpoint unstoppable by it. A
+        // detached fork (`Self::fork`, background jobs) stays `None`: a
+        // background job must survive a foreground call's interrupt.
+        #[allow(clippy::expect_used)]
+        let check = self.interrupt.lock().expect("interrupt poisoned").clone();
+        #[allow(clippy::expect_used)]
+        {
+            *fork.interrupt.lock().expect("interrupt poisoned") = check;
+        }
+        fork
     }
 
     /// Fork for a background job, stamping the job id so external commands
@@ -7844,6 +7856,16 @@ impl CommandDispatcher for Kernel {
     /// $(slow)` would run past its deadline.
     async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value> {
         self.eval_expr_async(expr, ctx).await
+    }
+
+    /// Poll the embedder's `ExecuteOptions::interrupt`, via the inherent
+    /// `Kernel::is_cancelled` (UFCS, as `fork` below — avoids recursing into
+    /// the trait method being defined here). That inherent method already
+    /// polls the check and fires the cancel token on it, so a builtin
+    /// checkpointing through `ctx.dispatcher` gets the same interrupt
+    /// awareness kaish's own interpreter loops have had all along.
+    fn is_cancelled(&self) -> bool {
+        Kernel::is_cancelled(self)
     }
 
     /// Produce a forked dispatcher with independent mutable state (detached).
