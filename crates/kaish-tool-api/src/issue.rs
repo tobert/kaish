@@ -113,6 +113,11 @@ pub enum IssueCode {
     /// argument, and a bad value keep `UnknownFlag`, `MissingRequiredArg`,
     /// and `InvalidArgType`.
     WrappedCallRejected,
+    /// `!` over a backgrounded pipeline (`! cmd &`). bash silently drops the
+    /// negation there (`! true & wait $!` reports 0, the un-negated status) —
+    /// kaish refuses rather than accept syntax whose effect it would have to
+    /// throw away. Negate inside the job instead, or drop the `!`.
+    NegatedBackgroundPipeline,
 }
 
 impl IssueCode {
@@ -153,6 +158,7 @@ impl IssueCode {
             IssueCode::NonNumericTestOperand => "W008",
             IssueCode::TestCompoundOperator => "E020",
             IssueCode::WrappedCallRejected => "E021",
+            IssueCode::NegatedBackgroundPipeline => "E022",
         }
     }
 
@@ -207,7 +213,8 @@ impl IssueCode {
             | IssueCode::LvalueUndefinedRoot
             | IssueCode::DottedAssignmentTarget
             | IssueCode::UnreadableAssignmentTarget
-            | IssueCode::InvisibleAssignmentTarget => Severity::Error,
+            | IssueCode::InvisibleAssignmentTarget
+            | IssueCode::NegatedBackgroundPipeline => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

@@ -121,6 +121,36 @@ impl<'a> Validator<'a> {
                 }
                 self.validate_stmt(body);
             }
+            Stmt::Not(body) => {
+                // `! cmd &` — bash silently drops the negation for a
+                // backgrounded pipeline; see `docs/LANGUAGE.md`, "Statement
+                // Chaining" for why. The emitted message stays clinical: the
+                // statement, the rule, the fix.
+                if let Stmt::Pipeline(p) = body.as_ref()
+                    && p.background
+                {
+                    let rendered = crate::ast::plan::render_stmt(stmt);
+                    // The fix names the REAL negated pipeline, not a `cmd`
+                    // placeholder — `render_stmt(body)` renders it with the
+                    // trailing ` &` `render_pipeline` always adds for a
+                    // backgrounded pipeline; strip that back off since the
+                    // fix supplies its own `&` after wrapping the job.
+                    let body_rendered = crate::ast::plan::render_stmt(body);
+                    let inner = body_rendered.strip_suffix(" &").unwrap_or(&body_rendered);
+                    let mut issue = ValidationIssue::error(
+                        IssueCode::NegatedBackgroundPipeline,
+                        format!(
+                            "`{rendered}`: `!` cannot negate a background pipeline; negate \
+                             inside the job — `f() {{ ! {inner}; }}; f &` — or drop the `!`"
+                        ),
+                    );
+                    if let Some(cmd) = p.stages.first().and_then(|s| s.as_command()) {
+                        issue = issue.with_command(cmd.name.clone());
+                    }
+                    self.issues.push(issue);
+                }
+                self.validate_stmt(body);
+            }
             Stmt::Empty => {}
         }
     }

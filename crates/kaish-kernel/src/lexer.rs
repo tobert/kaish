@@ -2454,6 +2454,8 @@ fn rewrite_body_arithmetic(
 fn resolve_markers(
     tokens: Vec<Spanned<Token>>,
     scan: &ScanOutput,
+    keep_comments: bool,
+    continuation_spans: &mut Vec<Span>,
 ) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
     let markers: Vec<&Replacement> = scan
         .replacements
@@ -2567,6 +2569,8 @@ fn resolve_markers(
                             &scan.text[cursor..m.new_start],
                             cursor,
                             &mut result,
+                            keep_comments,
+                            continuation_spans,
                         )?;
                     }
                     match m.kind {
@@ -2589,7 +2593,13 @@ fn resolve_markers(
                     cursor = m.new_start + m.new_len;
                 }
                 if cursor < span.end {
-                    relex_fragment(&scan.text[cursor..span.end], cursor, &mut result)?;
+                    relex_fragment(
+                        &scan.text[cursor..span.end],
+                        cursor,
+                        &mut result,
+                        keep_comments,
+                        continuation_spans,
+                    )?;
                 }
             }
         }
@@ -2605,6 +2615,8 @@ fn relex_fragment(
     fragment: &str,
     base: usize,
     result: &mut Vec<Spanned<Token>>,
+    keep_comments: bool,
+    continuation_spans: &mut Vec<Span>,
 ) -> Result<(), Vec<Spanned<LexerError>>> {
     // A fragment of a split word is mid-word by construction: the word token
     // it came from cannot begin with `#`, so a fragment that does is always
@@ -2624,6 +2636,13 @@ fn relex_fragment(
     for (tok, span) in Token::lexer(fragment).spanned() {
         let span = base + span.start..base + span.end;
         match tok {
+            // Same drop-and-record rule as `tokenize_impl`: a fragment
+            // after a marker (`$((1+2))\<newline>abc`) can hold a continuation.
+            Ok(t) if !keep_comments && matches!(t, Token::Comment | Token::LineContinuation) => {
+                if matches!(t, Token::LineContinuation) {
+                    continuation_spans.push(span);
+                }
+            }
             Ok(t) => result.push(Spanned::new(t, span)),
             Err(e) => errors.push(Spanned::new(e, span)),
         }
@@ -3659,7 +3678,7 @@ fn flush_glob_run(
 /// verbatim-slice text. All spans — including `HereDoc` tokens and
 /// everything after them — are exact original-source byte ranges.
 pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
-    tokenize_impl(source, false)
+    tokenize_impl(source, false).map(|(tokens, _gaps)| tokens)
 }
 
 /// Tokenize, preserving `Comment` and `LineContinuation` tokens.
@@ -3668,13 +3687,26 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
 /// second pipeline with no preprocessing or merges). Useful for
 /// pretty-printing and formatting tools.
 pub fn tokenize_with_comments(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
-    tokenize_impl(source, true)
+    tokenize_impl(source, true).map(|(tokens, _gaps)| tokens)
+}
+
+/// Tokens, and the source spans of the line continuations dropped from them.
+type TokensAndContinuations = (Vec<Spanned<Token>>, Vec<Span>);
+
+/// [`tokenize`], plus the source span of every dropped line continuation,
+/// sorted by start. Token spans never cover a continuation, so a caller
+/// that must read `W\<newline>N` as adjacent (as bash does) checks the gap
+/// between two spans against this list.
+pub(crate) fn tokenize_with_continuation_gaps(
+    source: &str,
+) -> Result<TokensAndContinuations, Vec<Spanned<LexerError>>> {
+    tokenize_impl(source, false)
 }
 
 fn tokenize_impl(
     source: &str,
     keep_comments: bool,
-) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
+) -> Result<TokensAndContinuations, Vec<Spanned<LexerError>>> {
     let scan_output = scan(source).map_err(|e| vec![e])?;
 
     // map_position's early `break` depends on the table being ordered by
@@ -3688,7 +3720,11 @@ fn tokenize_impl(
         "replacement table must be ordered by new_start"
     );
 
-    let mut tokens = Vec::new();
+    let mut tokens: Vec<Spanned<Token>> = Vec::new();
+    // Dropped continuations, recorded beside the tokens. Spans are also
+    // source-text coordinates for fusion and numerals, so a span must never
+    // grow to cover a continuation.
+    let mut continuation_spans: Vec<Span> = Vec::new();
     let mut errors = Vec::new();
     for (result, span) in Token::lexer(&scan_output.text).spanned() {
         // A token that scans for its own terminator (`"`, `${`) reads to
@@ -3708,6 +3744,9 @@ fn tokenize_impl(
                 if !keep_comments
                     && matches!(token, Token::Comment | Token::LineContinuation)
                 {
+                    if matches!(token, Token::LineContinuation) {
+                        continuation_spans.push(span);
+                    }
                     continue;
                 }
                 // Rewritten-buffer spans here; mapped to original
@@ -3723,11 +3762,12 @@ fn tokenize_impl(
         return Err(errors);
     }
 
-    let resolved = resolve_markers(tokens, &scan_output).map_err(|errs| {
-        errs.into_iter()
-            .map(|e| Spanned::new(e.token, map_span(&e.span, &scan_output.replacements)))
-            .collect::<Vec<_>>()
-    })?;
+    let resolved = resolve_markers(tokens, &scan_output, keep_comments, &mut continuation_spans)
+        .map_err(|errs| {
+            errs.into_iter()
+                .map(|e| Spanned::new(e.token, map_span(&e.span, &scan_output.replacements)))
+                .collect::<Vec<_>>()
+        })?;
 
     let mapped: Vec<Spanned<Token>> = resolved
         .into_iter()
@@ -3737,12 +3777,22 @@ fn tokenize_impl(
         })
         .collect();
 
-    Ok(preserve_numeric_source_text(
-        merge_glob_adjacent(
-            merge_colon_adjacent(merge_flag_metachar_adjacent(split_tilde_assignments(mapped, source)), source),
+    let mut mapped_gaps: Vec<Span> = continuation_spans
+        .iter()
+        .map(|s| map_span(s, &scan_output.replacements))
+        .collect();
+    // `resolve_markers` appends fragment continuations after the top-level ones.
+    mapped_gaps.sort_by_key(|s| s.start);
+
+    Ok((
+        preserve_numeric_source_text(
+            merge_glob_adjacent(
+                merge_colon_adjacent(merge_flag_metachar_adjacent(split_tilde_assignments(mapped, source)), source),
+                source,
+            ),
             source,
         ),
-        source,
+        mapped_gaps,
     ))
 }
 

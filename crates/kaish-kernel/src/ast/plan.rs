@@ -460,6 +460,7 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
             collect_stmt(left, background, out);
             collect_stmt(right, background, out);
         }
+        Stmt::Not(body) => collect_stmt(body, background, out),
         Stmt::EnvScoped { assignments, body } => {
             for a in assignments {
                 out.bind_path(&a.path);
@@ -629,6 +630,7 @@ pub(crate) fn render_stmt(stmt: &Stmt) -> String {
             let prefix: Vec<String> = assignments.iter().map(render_assignment).collect();
             format!("{} {}", prefix.join(" "), render_stmt(body))
         }
+        Stmt::Not(body) => format!("! {}", render_stmt(body)),
         Stmt::Empty => String::new(),
     }
 }
@@ -952,7 +954,7 @@ fn render_part(part: &StringPart) -> String {
     }
 }
 
-fn render_test(test: &TestExpr) -> String {
+pub(crate) fn render_test(test: &TestExpr) -> String {
     match test {
         TestExpr::FileTest { op, path } => format!("{} {}", op, render_expr(path)),
         TestExpr::StringTest { op, value } => format!("{} {}", op, render_expr(value)),

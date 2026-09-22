@@ -364,6 +364,100 @@ async fn a_nested_assignment_fault_names_both_targets() {
     );
 }
 
+// ── `! cmd &` — refused, deliberately diverging from bash ──────────────────
+//
+// bash silently drops the negation for a backgrounded pipeline: the exit
+// code `!` would flip is never read before the job scatters into the
+// background, so `! true & wait $!` reports 0, the un-negated status — the
+// `!` had no effect at all. kaish refuses this syntax instead of accepting
+// it and throwing the negation away; there is no plain `shell_compat!` row
+// for it (the macro's kaish side expects a successful `execute()`, and this
+// case is a rejection, not a result).
+
+#[tokio::test]
+async fn negated_background_pipeline_is_rejected() {
+    let kernel = make_kernel();
+    let err = kernel.execute("! true &").await.expect_err("`! true &` must be rejected");
+
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("`! true &` must be KernelError::Validation, not {err:?}");
+    };
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline),
+        "expected NegatedBackgroundPipeline (E022): {issues:?}"
+    );
+}
+
+/// The fix names the REAL negated pipeline, not a `cmd` placeholder, and
+/// records the pipeline's first command via `.with_command`, matching the
+/// convention `ScatterWithoutGather`'s sibling check already uses.
+#[tokio::test]
+async fn negated_background_pipeline_message_names_the_real_body() {
+    let kernel = make_kernel();
+    let err = kernel
+        .execute("! grep -q x f &")
+        .await
+        .expect_err("`! grep -q x f &` must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("must be KernelError::Validation, not {err:?}");
+    };
+    let issue = issues
+        .iter()
+        .find(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline)
+        .unwrap_or_else(|| panic!("expected NegatedBackgroundPipeline (E022): {issues:?}"));
+    assert_eq!(
+        issue.message,
+        "`! grep -q x f &`: `!` cannot negate a background pipeline; negate inside the job — \
+         `f() { ! grep -q x f; }; f &` — or drop the `!`",
+        "the fix must name the real pipeline, not a `cmd` placeholder"
+    );
+    assert_eq!(
+        issue.command.as_deref(),
+        Some("grep"),
+        "must record the pipeline's first command, like ScatterWithoutGather does"
+    );
+}
+
+/// Nesting doesn't dodge the check: the OUTERMOST `!` still wraps a
+/// backgrounded pipeline.
+#[tokio::test]
+async fn double_negated_background_pipeline_is_also_rejected() {
+    let kernel = make_kernel();
+    let err = kernel.execute("! ! true &").await.expect_err("`! ! true &` must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("`! ! true &` must be KernelError::Validation, not {err:?}");
+    };
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.code == kaish_kernel::validator::IssueCode::NegatedBackgroundPipeline),
+        "expected NegatedBackgroundPipeline (E022): {issues:?}"
+    );
+}
+
+/// The refusal names a working fix — negate INSIDE the job, then background
+/// the call — so this pins that the named form is not itself refused.
+#[tokio::test]
+async fn the_suggested_negate_inside_the_job_fix_is_not_itself_rejected() {
+    let kernel = make_kernel();
+    let result = kernel
+        .execute("f() { ! false; }; f &")
+        .await
+        .expect("negating inside the job, then backgrounding the call, must not be rejected");
+    assert_eq!(result.code, 0, "starting the background job reports 0: {result:?}");
+}
+
+/// An un-negated background pipeline is unaffected — the check is specific
+/// to `!` over `&`, not to backgrounding in general.
+#[tokio::test]
+async fn a_plain_background_pipeline_is_not_rejected() {
+    let kernel = make_kernel();
+    let result = kernel.execute("true &").await.expect("a plain `cmd &` must not be rejected");
+    assert_eq!(result.code, 0, "{result:?}");
+}
+
 // ── An env-scoped assignment (`A=$(...) cmd`) names its target too ─────
 //
 // `Stmt::EnvScoped` — the inline `NAME=value ... command` prefix — evaluates

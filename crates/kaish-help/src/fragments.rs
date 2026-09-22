@@ -544,10 +544,19 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
 
 if ! cmd; then …; fi      # `!` negates a condition
 while ! cmd; do …; done   # and is how kaish spells `until`
+
+! true                    # `!` also negates a pipeline as its own statement
+! a | b                   # binds to the WHOLE pipeline, not just `a`
+!true                     # error — kaish needs a space: write `! true`
+f() { ! cmd; }; f &       # negate inside the job, then background the call
+! cmd &                   # error — kaish refuses; bash silently drops the negation here
 ```
 
-`!` binds to the command that follows, not to the whole chain: `! a && b` is
-`(! a) && b`, so `if ! true && true` takes the `else` branch."#,
+`!` binds to the command (or pipeline) that follows, not to the whole chain:
+`! a && b` is `(! a) && b`, so `if ! true && true` takes the `else` branch,
+and `! true && echo x` never prints `x`. A negated statement never trips
+`set -e` — see the Shell Options section for the assertion hazard this
+creates (`! grep -q secret f` does not stop a `set -e` script)."#,
     ),
     syntax_section(
         "test-expressions",
@@ -739,6 +748,19 @@ each stage either way: after `false | true`, `${PIPESTATUS[0]}` is `1` and
 `${PIPESTATUS[1]}` is `0`. `PIPESTATUS` is a list, so `${#PIPESTATUS}` counts
 the stages and `$(values $PIPESTATUS)` iterates them. Reading it runs a
 command, and that command replaces it — capture it before asking twice.
+
+```sh
+set -e
+! true                     # flips to exit 1 — does not abort the script
+echo reached               # still runs
+```
+
+`!` negates a pipeline's exit status, and the negated statement never trips
+`set -e`, whatever that flipped status is. This is a hazard for a common
+idiom: `! grep -q secret f` used as an assertion does not stop a `set -e`
+script — it exits 1 when `secret` IS in `f` and 0 when it is absent, but
+`set -e` never sees either code. Write the check the other way instead —
+`grep -q secret f && exit 1`.
 
 Env var: `KAISH_TRASH=1` enables trash at startup.
 

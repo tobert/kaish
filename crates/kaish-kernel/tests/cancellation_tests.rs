@@ -955,3 +955,63 @@ async fn timeout_does_not_fire_when_command_finishes_first() {
     assert!(result.ok(), "expected ok, got {}", result.code);
     assert_eq!(result.text_out().trim(), "done");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// 17. `! <cancelled command>` must never report success
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A cancelled child reports its kill as a Normal ExecResult (130, or a killed
+// child's own 128+signal) — the same shape as an ordinary nonzero exit — not
+// as an Err. `Stmt::Not` flips a Normal result's code, and `execute()`'s
+// top-level cancellation remap (kernel.rs, `run_under_watchdog`'s caller)
+// only overwrites the code to 130 when the FINAL result is not ok. Flipping
+// a cancelled 130 to 0 first would make that remap skip — read as "nothing to
+// fix" — and the whole call would report success for a run that was killed,
+// not completed. `Stmt::Not` must check the cancel tokens directly and skip
+// the flip when they fired.
+
+#[tokio::test]
+async fn kernel_cancel_of_a_negated_external_reports_130_not_success() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("pid");
+    let script = pid_writer(tmp.path(), &pid_file, "sleep 60");
+
+    let kernel = kernel_for_test();
+    let kernel_clone = kernel.clone();
+    let pid_file_clone = pid_file.clone();
+
+    tokio::spawn(async move {
+        let _ = wait_for_pid(&pid_file_clone, Duration::from_secs(2)).await;
+        kernel_clone.cancel();
+    });
+
+    let result = kernel
+        .execute(&format!("! bash {}", script.display()))
+        .await
+        .expect("execute");
+
+    // The headline assertion: a cancelled `!` must report 130, never the 0 a
+    // naive flip of a killed child's nonzero code would produce.
+    assert_eq!(
+        result.code, 130,
+        "a cancelled `!` must report 130, not a flipped-to-success code: {result:?}"
+    );
+    assert!(!result.ok(), "a cancellation must never read as success: {result:?}");
+
+    let pid = wait_for_pid(&pid_file, Duration::from_secs(2)).await.expect("pid_file");
+    assert!(
+        wait_for_dead(pid, Duration::from_secs(2)).await,
+        "Kernel::cancel did not kill the external pid {} under `!`",
+        pid,
+    );
+}
+
+/// Control: an UNcancelled `!` still flips normally, so the test above is
+/// proof of the cancellation guard specifically, not of `!` refusing to flip
+/// at all.
+#[tokio::test]
+async fn uncancelled_negated_external_still_flips() {
+    let kernel = kernel_for_test();
+    let result = kernel.execute("! true").await.expect("execute");
+    assert_eq!(result.code, 1, "an uncancelled `!` must still flip: {result:?}");
+}

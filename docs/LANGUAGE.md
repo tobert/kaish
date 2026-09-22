@@ -700,9 +700,20 @@ bare parse failure.
 cmd1 && cmd2                    # run cmd2 only if cmd1 succeeds
 cmd1 || cmd2                    # run cmd2 only if cmd1 fails
 mkdir /tmp/work && cd /tmp/work && echo "ready"
+
+! true                          # negates a pipeline's exit status: 0 → 1
+! grep -q pattern file | wc -l  # binds to the WHOLE pipeline, below && / ||
+! cmd1 && cmd2                  # ! binds tighter than &&: (! cmd1) && cmd2
+!true                           # error — kaish needs a space: write `! true`
+f() { ! cmd; }; f &             # negate inside the job, then background the call
+! cmd &                         # error — kaish refuses; bash silently drops the negation here
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.
+
+> **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
+> its flipped status — see "Shell Options" → "`!` and `set -e`" below for the
+> assertion hazard this creates.
 
 ## Test Expressions
 
@@ -1182,6 +1193,26 @@ rather than only its last stage. `cat missing | wc -l` exits 0 without it and
 `${#PIPESTATUS}` is `2`. Reading `PIPESTATUS` runs a command, and that command
 replaces it — capture it first if you need it twice, which is bash's behavior
 too.
+
+### `!` and `set -e`
+
+`!` negates a pipeline's exit status — 0 becomes 1, nonzero becomes 0 — and
+the negated statement never trips `set -e`, whatever that flipped status is:
+
+```sh
+set -e
+! true                            # flips to exit 1 — does not abort the script
+echo reached                      # still runs
+```
+
+This follows bash exactly, and it is a hazard for a common idiom: `!` used as
+an assertion does not stop a `set -e` script — the negated statement is
+exempt from errexit whatever its flipped status is. `! grep -q secret f`
+exits 1 when `secret` IS in `f` (the case a script wants to catch) and 0
+when it is absent, but `set -e` never sees either code, so a script relying
+on it to abort never does. Write the check the other way instead —
+`grep -q secret f && exit 1` — so the failure `set -e` needs to see is the
+one it actually gets.
 
 `set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
 **1** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
