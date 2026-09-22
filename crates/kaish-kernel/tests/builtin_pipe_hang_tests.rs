@@ -14,6 +14,17 @@
 //! instead of hanging the test binary. A builtin that never yields holds the
 //! thread past that timeout too, so its failure arrives when the builtin
 //! finishes: about a minute for the `seq` cases in a debug build.
+//!
+//! `request_timeout_stops_a_busy_builtin` (and the two standalone cases after
+//! it) extend the second hazard past `seq`: every builtin with a loop whose
+//! length depends on input size checkpoints (`ToolCtx::checkpoint` in
+//! kaish-tool-api), so `request_timeout` stops it mid-scan instead of running
+//! it to completion. Confirmed with a negative control — with the kernel's
+//! `checkpoint` body replaced by `Ok(())`, every case in this batch plus the
+//! two pre-existing busy-builtin/busy-pipeline cases above failed (returned
+//! before the deadline, or ran past it) — except `cat` and `cmp`, which are
+//! checkpointed but not represented here; see the comment above their
+//! omission below.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -21,7 +32,8 @@
 use std::time::{Duration, Instant};
 
 use kaish_kernel::interpreter::ExecResult;
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
+use rstest::rstest;
 
 /// Well past what any case below needs when kaish behaves.
 const HANG: Duration = Duration::from_secs(10);
@@ -91,5 +103,107 @@ async fn request_timeout_stops_a_busy_builtin_without_a_pipe() {
     let config = KernelConfig::isolated().with_request_timeout(Duration::from_millis(200));
     let (r, took) = run(config, "seq 1 50000000").await;
     assert_eq!(r.code, 124, "err: {}", r.err);
+    assert!(took < Duration::from_secs(3), "took {took:?}");
+}
+
+// ============================================================================
+// ToolCtx::checkpoint — a busy builtin (not just a busy loop or a busy pipe)
+// stops at the timeout
+// ============================================================================
+//
+// The `seq` case above is one instance of the bug `ToolCtx::checkpoint`
+// (kaish-tool-api) exists to fix: a builtin loop over input-sized data that
+// never awaits holds its thread past `request_timeout`, since the watchdog
+// task that would set the cancel token cannot run until the loop ends. This
+// batch is every other builtin checkpointed for the same reason.
+//
+// The deadline is short and the input is large enough that a case reaching
+// code 0 (finished on its own) instead of 124 means the input isn't big
+// enough to prove the checkpoint actually fires — the fix is to grow the
+// input, never to weaken the assertion (see the module doc above).
+const HANG_DEADLINE: Duration = Duration::from_millis(50);
+
+/// Run `script` against `kernel` under `HANG_DEADLINE`, wrapped in the
+/// module's outer `HANG` timeout so a regression fails in seconds.
+async fn run_with_deadline(kernel: &Kernel, script: &str) -> (ExecResult, Duration) {
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        HANG,
+        kernel.execute_with_options(
+            script,
+            ExecuteOptions {
+                timeout: Some(HANG_DEADLINE),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("`{script}` did not return within {HANG:?}"))
+    .expect("execute");
+    (result, started.elapsed())
+}
+
+/// A fresh isolated kernel with `/tmp/big.txt` populated with 2,000,000 lines
+/// (`seq 1 2000000`) — built *without* a timeout, since the setup itself must
+/// complete; only the case under test runs against `HANG_DEADLINE`.
+async fn kernel_with_big_file() -> Kernel {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+    let setup = kernel
+        .execute("seq 1 2000000 > /tmp/big.txt")
+        .await
+        .expect("execute");
+    assert_eq!(setup.code, 0, "setup must succeed: {}", setup.err);
+    kernel
+}
+
+#[rstest]
+#[case::grep("grep zzz /tmp/big.txt")]
+#[case::sort("sort /tmp/big.txt")]
+#[case::wc("wc -l /tmp/big.txt")]
+#[case::xxd("xxd /tmp/big.txt")]
+#[case::uniq("uniq /tmp/big.txt")]
+#[case::tr("tr a-z A-Z < /tmp/big.txt")]
+#[case::cut("cut -c 1-3 /tmp/big.txt")]
+#[case::sed("sed 's/1/9/' /tmp/big.txt")]
+#[case::awk("awk '{print $1}' /tmp/big.txt")]
+#[case::tac("tac /tmp/big.txt")]
+#[case::base64("base64 /tmp/big.txt")]
+#[tokio::test]
+async fn request_timeout_stops_a_busy_builtin(#[case] script: &str) {
+    let kernel = kernel_with_big_file().await;
+    let (result, took) = run_with_deadline(&kernel, script).await;
+    assert_eq!(result.code, 124, "`{script}`: err: {}", result.err);
+    assert!(
+        took < Duration::from_secs(3),
+        "`{script}` took {took:?}; the timeout stops the work, it does not wait for it to finish"
+    );
+}
+
+// `cat` and `cmp` are checkpointed too (`cat`'s terminal single-file path now
+// goes through `read_file_chunked` instead of one unchunked `backend.read`;
+// `cmp`'s lockstep loop checkpoints per chunk pair), but neither has a case
+// here: both reached code 124 under `HANG_DEADLINE` even with the kernel's
+// `checkpoint` made inert (the negative control this module's tests are
+// meant to fail under), so this suite can't show either one relying on the
+// checkpoint specifically — something else already stops them at this input
+// size. The fixes still bound worst-case latency (a `LocalFs` chunk read is
+// genuine I/O, unlike `MemoryFs`'s in-memory copy); this suite just can't
+// prove it for these two.
+
+/// `diff` needs two files different enough that every line disagrees — two
+/// identical files return before the diff computation even starts (the
+/// execute()-level fast path), which would prove nothing here.
+#[tokio::test]
+async fn request_timeout_stops_a_busy_diff() {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+    let setup = kernel
+        .execute("seq 1 2000000 > /tmp/big.txt; seq 2 2000001 > /tmp/big2.txt")
+        .await
+        .expect("execute");
+    assert_eq!(setup.code, 0, "setup must succeed: {}", setup.err);
+
+    let script = "diff /tmp/big.txt /tmp/big2.txt";
+    let (result, took) = run_with_deadline(&kernel, script).await;
+    assert_eq!(result.code, 124, "err: {}", result.err);
     assert!(took < Duration::from_secs(3), "took {took:?}");
 }
