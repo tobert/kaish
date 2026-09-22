@@ -148,9 +148,55 @@ impl Tool for Exec {
             let mut cmd = std::process::Command::new(&command);
             cmd.args(&argv);
 
+            // `Command::exec()` resets SIGPIPE to its default disposition
+            // right before the exec syscall — correct for the child a real
+            // `fork`+`exec` would produce, but `exec()` doesn't fork: this
+            // reset runs directly on the CURRENT process, and only returns
+            // (leaving the reset in place) when exec fails. Rust's runtime
+            // sets SIGPIPE to `SIG_IGN` at startup precisely so a write to
+            // a closed pipe returns `EPIPE` instead of killing the process;
+            // a failed `exec /nonexistent` would otherwise leave this
+            // process — the REPL, or an embedder's host process calling
+            // through the kernel — with SIGPIPE defaulted for the rest of
+            // its life. The next write to a closed pipe then kills it
+            // instead of erroring.
+            //
+            // SAFETY: `SigDfl` is a well-defined, safe signal disposition
+            // (no custom handler code runs). `nix::sigaction` always both
+            // sets AND returns the PRIOR disposition — there is no
+            // "query-only" variant in its safe API — so the value set here
+            // is a deliberate throwaway: `exec()` is about to force SIGPIPE
+            // to default anyway on its way to the exec syscall, so setting
+            // it to `SigDfl` ourselves first changes nothing observable,
+            // and `old_sigpipe` is what we actually came here for.
+            #[allow(unsafe_code)]
+            let old_sigpipe = unsafe {
+                nix::sys::signal::sigaction(
+                    nix::sys::signal::Signal::SIGPIPE,
+                    &nix::sys::signal::SigAction::new(
+                        nix::sys::signal::SigHandler::SigDfl,
+                        nix::sys::signal::SaFlags::empty(),
+                        nix::sys::signal::SigSet::empty(),
+                    ),
+                )
+            };
+
             // exec() replaces the process — on success it never returns
             let err = cmd.exec();
-            // If we get here, exec failed
+
+            // If we get here, exec failed: restore whatever SIGPIPE
+            // disposition this process actually had before, rather than
+            // leaving it defaulted.
+            //
+            // SAFETY: restoring a disposition this same process already
+            // held is always safe — no new handler code, no fd or
+            // allocator assumptions (we are back in normal process
+            // context, not inside a fork/pre_exec window).
+            #[allow(unsafe_code)]
+            if let Ok(old) = old_sigpipe {
+                let _ = unsafe { nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGPIPE, &old) };
+            }
+
             ExecResult::failure(126, format!("exec: {}: {}", command, err))
         }
 
@@ -222,5 +268,57 @@ mod tests {
         assert!(!result.ok());
         // exec of nonexistent absolute path fails with 126 (exec error)
         assert_eq!(result.code, 126);
+    }
+
+    /// kaibo round-5 finding: `Command::exec()` resets SIGPIPE to its
+    /// default disposition right before the exec syscall, and — because
+    /// `exec()` doesn't fork — that reset runs on the CURRENT process, not
+    /// a disposable child. On success the process image is replaced anyway
+    /// (moot), but on FAILURE (this test's `/nonexistent/...` path) the
+    /// reset was never undone: this test process (and, in production, a
+    /// REPL or an embedder's host process) was left with SIGPIPE defaulted
+    /// for the rest of its life, so the next write to a closed pipe kills
+    /// it instead of returning EPIPE — exactly the crash that took down the
+    /// whole `cargo test --lib` run once `exec`'s own tests (which exercise
+    /// this failure path) ran before any test writing to a broken pipe.
+    ///
+    /// The query is a round-trip: setting SIGPIPE to `SigIgn` and reading
+    /// back the PRIOR disposition nix's `sigaction` returns, since nix's
+    /// safe API has no "query only" form. This is non-destructive for the
+    /// property under test — Rust's own runtime sets SIGPIPE to `SigIgn` at
+    /// startup, so restoring it to `SigIgn` here is a no-op if the fix
+    /// worked, and leaves the test process in the same healthy state either
+    /// way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_exec_failure_does_not_leave_sigpipe_defaulted() {
+        use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/nonexistent/kaish-exec-sigpipe-probe".into()));
+
+        let result = Exec.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "exec of a nonexistent command must fail: {result:?}");
+
+        // SAFETY: SigIgn is a well-defined, safe signal disposition (no
+        // custom handler code runs); this is a read via round-trip, not a
+        // handler installation.
+        #[allow(unsafe_code)]
+        let prior = unsafe {
+            sigaction(
+                Signal::SIGPIPE,
+                &SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty()),
+            )
+        }
+        .expect("sigaction query");
+
+        assert_eq!(
+            prior.handler(),
+            SigHandler::SigIgn,
+            "a failed exec() must not leave SIGPIPE defaulted on this process: {:?}",
+            prior.handler()
+        );
     }
 }
