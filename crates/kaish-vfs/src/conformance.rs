@@ -774,11 +774,12 @@ pub async fn canonicalize_allows_a_missing_final_component_only(
 /// `stat`'s; `stat_on_a_link_loop_errors_instead_of_hanging` above only pins
 /// the `stat` side. `canonicalize` runs its own hop-by-hop loop through
 /// `lstat`/`read_link` (the `Filesystem` default) or a host-path walk with
-/// its own counter (`LocalFs`), so a loop must refuse there too — and every
-/// implementation of the cap uses the same "too many levels of symbolic
-/// links" wording and `io::ErrorKind::Other`, so this pins both instead of
-/// just checking `is_err`.
-pub async fn canonicalize_of_a_symlink_loop_errors_with_the_cap_named(
+/// its own counter (`LocalFs`), so a loop must refuse there too. The trait
+/// doc only promises "an error, never a silent stop" — not a specific
+/// `io::ErrorKind` or message, which each implementation of the cap is free
+/// to word its own way — so this checks exactly that contract, the same as
+/// `stat_on_a_link_loop_errors_instead_of_hanging` does for `stat`.
+pub async fn canonicalize_of_a_symlink_loop_errors_instead_of_hanging(
     fs: &dyn Filesystem,
 ) -> Result<(), String> {
     fs.symlink(Path::new("b"), Path::new("a"))
@@ -798,20 +799,7 @@ pub async fn canonicalize_of_a_symlink_loop_errors_with_the_cap_named(
             "expected canonicalize(a) to error on a symlink loop, got Ok({})",
             resolved.display()
         )),
-        Ok(Err(error)) => {
-            if error.kind() != std::io::ErrorKind::Other {
-                return Err(format!(
-                    "expected ErrorKind::Other (the cap's own io::Error::other), got {:?}: {error}",
-                    error.kind()
-                ));
-            }
-            if !error.to_string().contains("too many levels of symbolic links") {
-                return Err(format!(
-                    "expected \"too many levels of symbolic links\" in the error, got: {error}"
-                ));
-            }
-            Ok(())
-        }
+        Ok(Err(_)) => Ok(()),
         Err(_) => Err("canonicalize(a) hung on a symlink loop instead of erroring".to_string()),
     }
 }
@@ -871,7 +859,7 @@ pub const CASES: &[(&str, Case)] = &[
     case!(rename_refuses_the_root),
     case!(canonicalize_of_an_escaping_symlink_stays_in_bounds),
     case!(canonicalize_allows_a_missing_final_component_only),
-    case!(canonicalize_of_a_symlink_loop_errors_with_the_cap_named),
+    case!(canonicalize_of_a_symlink_loop_errors_instead_of_hanging),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.
