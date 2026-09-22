@@ -2302,7 +2302,7 @@ fn pipeline_into_stmt(p: Pipeline) -> Stmt {
 
 /// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
 /// command would silently depend on redirect ordering at execution time
-/// (`setup_stdin_redirects` is last-wins), so `parse()` rejects it loudly.
+/// (`open_redirects` is last-wins), so `parse()` rejects it loudly.
 fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
     cmd.redirects
         .iter()

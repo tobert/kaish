@@ -25,7 +25,7 @@ use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolRegistry};
 
-use super::pipeline::{apply_redirects, PipelineRunner};
+use super::pipeline::{apply_redirects, is_input, open_redirects, PipelineRunner};
 
 /// Options for scatter operation.
 #[derive(Debug, Clone)]
@@ -158,6 +158,20 @@ impl ScatterGatherRunner {
     ) -> ExecResult {
         let runner = PipelineRunner::new(self.tools.clone());
 
+        // gather reads its workers' results; a `<` would have nothing to feed.
+        if gather_redirects.iter().any(|redirect| is_input(&redirect.kind)) {
+            return ExecResult::failure(
+                1,
+                "gather: reads its workers' results, not stdin; remove the <, <<, or <<< redirect",
+            );
+        }
+        // gather's own targets open before anything in the pipeline runs, so a
+        // target that cannot open runs no worker.
+        let gather_opened = match open_redirects(gather_redirects, ctx, &*self.sequential_dispatcher).await {
+            Ok(opened) => opened,
+            Err(failure) => return failure.into_result(gather_redirects, ctx).await,
+        };
+
         // Run pre-scatter commands to get input.
         // Uses run_sequential to avoid async recursion (scatter → run → scatter).
         let (text, data) = if pre_scatter.is_empty() {
@@ -231,7 +245,7 @@ impl ScatterGatherRunner {
         // when gather was the pipeline's last command, so a trailing
         // `gather > file | jq` silently skipped the file and let the
         // unredirected rows flow to `jq` instead.
-        let gathered = apply_redirects(gathered, gather_redirects, ctx, &*self.sequential_dispatcher).await;
+        let gathered = apply_redirects(gathered, gather_redirects, &gather_opened, ctx).await;
 
         // Run post-gather commands if any. A failed gather short-circuits —
         // feeding partial/failed output onward would propagate corruption.

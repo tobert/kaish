@@ -118,6 +118,11 @@ pub enum IssueCode {
     /// kaish refuses rather than accept syntax whose effect it would have to
     /// throw away. Negate inside the job instead, or drop the `!`.
     NegatedBackgroundPipeline,
+    /// One file is both a command's `<` input and one of its output targets
+    /// (`sort < f > f`). Opening the output truncates the file before the
+    /// command reads it, so kaish refuses the command. The runtime compares
+    /// resolved paths; this check sees only two literal spellings of one path.
+    RedirectInputIsOutput,
 }
 
 impl IssueCode {
@@ -159,6 +164,7 @@ impl IssueCode {
             IssueCode::TestCompoundOperator => "E020",
             IssueCode::WrappedCallRejected => "E021",
             IssueCode::NegatedBackgroundPipeline => "E022",
+            IssueCode::RedirectInputIsOutput => "E023",
         }
     }
 
@@ -214,7 +220,8 @@ impl IssueCode {
             | IssueCode::DottedAssignmentTarget
             | IssueCode::UnreadableAssignmentTarget
             | IssueCode::InvisibleAssignmentTarget
-            | IssueCode::NegatedBackgroundPipeline => Severity::Error,
+            | IssueCode::NegatedBackgroundPipeline
+            | IssueCode::RedirectInputIsOutput => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

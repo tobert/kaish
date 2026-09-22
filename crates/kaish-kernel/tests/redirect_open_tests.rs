@@ -12,6 +12,8 @@
 mod common;
 
 use common::kernel_at;
+use kaish_kernel::validator::IssueCode;
+use kaish_kernel::KernelError;
 
 /// A function body's streaming writer must not bypass the function's own
 /// stdout redirect into the enclosing pipe.
@@ -165,6 +167,29 @@ async fn same_file_through_a_symlink_is_refused() {
     assert_eq!(r.code, 1, "{r:?}");
     assert!(r.err.contains("L is both input and output"), "{r:?}");
     assert_eq!(std::fs::read_to_string(dir.path().join("P")).unwrap(), "b\na\n", "P must be untouched");
+}
+
+/// Literal targets are caught by the validator, so `--plan` reports them.
+#[tokio::test]
+async fn literal_same_file_is_a_validation_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("P"), "b\na\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let err = kernel.execute("sort < P >> ./P").await.expect_err("must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("must be KernelError::Validation, not {err:?}");
+    };
+    let issue = issues
+        .iter()
+        .find(|i| i.code == IssueCode::RedirectInputIsOutput)
+        .unwrap_or_else(|| panic!("expected RedirectInputIsOutput: {issues:?}"));
+    assert_eq!(issue.code.code(), "E023");
+    assert_eq!(
+        issue.message,
+        "redirect: ./P is both input and output; write to a temp file, then mv it over ./P",
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join("P")).unwrap(), "b\na\n");
 }
 
 /// Different files on `<` and `>` are fine.
