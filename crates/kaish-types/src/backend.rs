@@ -66,15 +66,35 @@ impl From<std::io::Error> for BackendError {
     fn from(err: std::io::Error) -> Self {
         use std::io::ErrorKind;
         match err.kind() {
-            ErrorKind::NotFound => BackendError::NotFound(err.to_string()),
-            ErrorKind::AlreadyExists => BackendError::AlreadyExists(err.to_string()),
-            ErrorKind::PermissionDenied => BackendError::PermissionDenied(err.to_string()),
-            ErrorKind::IsADirectory => BackendError::IsDirectory(err.to_string()),
-            ErrorKind::NotADirectory => BackendError::NotDirectory(err.to_string()),
+            ErrorKind::NotFound => BackendError::NotFound(strip_variant_phrase(&err, "not found: ")),
+            ErrorKind::AlreadyExists => {
+                BackendError::AlreadyExists(strip_variant_phrase(&err, "already exists: "))
+            }
+            ErrorKind::PermissionDenied => {
+                BackendError::PermissionDenied(strip_variant_phrase(&err, "permission denied: "))
+            }
+            ErrorKind::IsADirectory => {
+                BackendError::IsDirectory(strip_variant_phrase(&err, "is a directory: "))
+            }
+            ErrorKind::NotADirectory => {
+                BackendError::NotDirectory(strip_variant_phrase(&err, "not a directory: "))
+            }
             ErrorKind::ReadOnlyFilesystem => BackendError::ReadOnly,
             _ => BackendError::Io(err.to_string()),
         }
     }
+}
+
+/// Strip a leading phrase this variant's `#[error(...)]` `Display` adds back,
+/// so a filesystem that already spells its `io::Error` message the same way
+/// (`MemoryFs`, `OverlayFs`: `"not found: {path}"`) does not double it —
+/// `ls /nope` against one of those backends read "not found: not found:
+/// /nope" before this. A backend with no such convention (`LocalFs`, which
+/// carries the OS's own errno text, e.g. "No such file or directory") has
+/// nothing matching the prefix and passes through unchanged.
+fn strip_variant_phrase(err: &std::io::Error, phrase: &str) -> String {
+    let msg = err.to_string();
+    msg.strip_prefix(phrase).map(str::to_string).unwrap_or(msg)
 }
 
 /// Error when CAS (compare-and-set) check fails during patching.
@@ -508,4 +528,40 @@ mod tests {
         assert_eq!(result.original_code, Some(2));
     }
 
+    /// `MemoryFs`/`OverlayFs` spell their `io::Error` messages the same way
+    /// `BackendError`'s own `#[error(...)]` text does (`"not found: {path}"`,
+    /// `"is a directory: {path}"`, `"not a directory: {path}"`); the
+    /// conversion must not double that phrase. Reproduces `ls /nope` against
+    /// one of those backends, which read "not found: not found: /nope"
+    /// before `strip_variant_phrase`.
+    #[test]
+    fn from_io_error_does_not_double_a_self_described_phrase() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found: /nope");
+        let backend_err: BackendError = err.into();
+        assert_eq!(backend_err.to_string(), "not found: /nope");
+
+        let err = std::io::Error::new(std::io::ErrorKind::IsADirectory, "is a directory: /d");
+        let backend_err: BackendError = err.into();
+        assert_eq!(backend_err.to_string(), "is a directory: /d");
+
+        let err = std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory: /f/x");
+        let backend_err: BackendError = err.into();
+        assert_eq!(backend_err.to_string(), "not a directory: /f/x");
+    }
+
+    /// `LocalFs` carries the OS's own errno text, which never happens to
+    /// start with the variant's phrase — the conversion must still add it,
+    /// unchanged from before `strip_variant_phrase`.
+    #[test]
+    fn from_io_error_still_adds_the_phrase_to_a_bare_os_message() {
+        let err = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        );
+        let backend_err: BackendError = err.into();
+        assert_eq!(
+            backend_err.to_string(),
+            "not found: No such file or directory (os error 2)"
+        );
+    }
 }

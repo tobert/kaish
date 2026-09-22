@@ -865,6 +865,17 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(!result.ok());
+        // `MemoryFs` phrases its own `io::Error` as "not found: <path>",
+        // matching `BackendError::NotFound`'s `#[error(...)]` text; the
+        // conversion used to double it into "not found: not found:
+        // /nonexistent". One occurrence only.
+        assert_eq!(
+            result.err.matches("not found").count(),
+            1,
+            "doubled phrase: {}",
+            result.err
+        );
+        assert!(result.err.contains("not found: nonexistent"), "{}", result.err);
     }
 
     async fn make_ctx_with_hidden() -> ExecContext {

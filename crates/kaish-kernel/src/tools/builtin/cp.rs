@@ -216,16 +216,32 @@ impl LinkMode {
 
 /// Prefix a backend error with the path it happened to, keeping its variant;
 /// `From<io::Error>` drops the path.
+///
+/// Prefixes the variant's own payload, not `err`'s `Display` — `Display`
+/// already carries the variant's phrase (`"not found: {0}"`), so building
+/// `msg` from it and feeding `msg` back into the same variant doubled that
+/// phrase (`cp /nope x` read "not found: /nope: not found: nope").
 fn name_error(path: &Path, err: BackendError) -> BackendError {
-    let msg = format!("{}: {}", path.display(), err);
     match err {
-        BackendError::NotFound(_) => BackendError::NotFound(msg),
-        BackendError::AlreadyExists(_) => BackendError::AlreadyExists(msg),
-        BackendError::PermissionDenied(_) => BackendError::PermissionDenied(msg),
-        BackendError::IsDirectory(_) => BackendError::IsDirectory(msg),
-        BackendError::NotDirectory(_) => BackendError::NotDirectory(msg),
-        BackendError::Io(_) => BackendError::Io(msg),
-        BackendError::InvalidOperation(_) => BackendError::InvalidOperation(msg),
+        BackendError::NotFound(inner) => {
+            BackendError::NotFound(format!("{}: {}", path.display(), inner))
+        }
+        BackendError::AlreadyExists(inner) => {
+            BackendError::AlreadyExists(format!("{}: {}", path.display(), inner))
+        }
+        BackendError::PermissionDenied(inner) => {
+            BackendError::PermissionDenied(format!("{}: {}", path.display(), inner))
+        }
+        BackendError::IsDirectory(inner) => {
+            BackendError::IsDirectory(format!("{}: {}", path.display(), inner))
+        }
+        BackendError::NotDirectory(inner) => {
+            BackendError::NotDirectory(format!("{}: {}", path.display(), inner))
+        }
+        BackendError::Io(inner) => BackendError::Io(format!("{}: {}", path.display(), inner)),
+        BackendError::InvalidOperation(inner) => {
+            BackendError::InvalidOperation(format!("{}: {}", path.display(), inner))
+        }
         // No payload to carry the path in, or context already present.
         other => other,
     }
@@ -642,6 +658,17 @@ mod tests {
 
         let result = Cp.execute(args, &mut ctx).await;
         assert!(!result.ok());
+        // `name_error` re-wraps the backend error with the path, calling its
+        // `Display` a second time; on top of `MemoryFs`'s self-described
+        // "not found: <path>" message this doubled the phrase (see the
+        // `strip_variant_phrase` fix in kaish-types/src/backend.rs). One
+        // occurrence only.
+        assert_eq!(
+            result.err.matches("not found").count(),
+            1,
+            "doubled phrase: {}",
+            result.err
+        );
     }
 
     #[tokio::test]
