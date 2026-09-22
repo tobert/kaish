@@ -17,12 +17,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(target_os = "linux", feature = "subprocess"))]
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use kaish_kernel::ast::Value;
 use kaish_kernel::{Kernel, KernelConfig};
 
+/// The kernel is hermetic — it never reads the OS env — so the `sh -c
+/// "sleep ..."` scripts below need PATH exported to find `sleep` themselves,
+/// the same way `external_command_tests.rs::repl_kernel` seeds it.
 fn kernel_at(dir: &Path) -> Kernel {
-    let config = KernelConfig::repl().with_cwd(dir.to_path_buf());
+    let mut vars = HashMap::new();
+    vars.insert("PATH".to_string(), Value::String(std::env::var("PATH").unwrap_or_default()));
+    let config = KernelConfig::repl().with_cwd(dir.to_path_buf()).with_initial_vars(vars);
     Kernel::new(config).expect("kernel")
 }
 

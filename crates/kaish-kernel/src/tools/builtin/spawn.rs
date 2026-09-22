@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::spawn::{OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy};
+use crate::spawn::{hermetic_env, OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy};
 use crate::tools::builtin::get_path_string;
 use crate::tools::{exec_context,
     external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable,
@@ -44,7 +44,9 @@ struct SpawnArgs {
     #[arg(long = "argv")]
     argv: Option<String>,
 
-    /// Environment variables as JSON object string.
+    /// Environment variables added to the child, as a JSON object string.
+    /// Applied on top of kaish's exported variables, or alone with
+    /// `--clear-env`.
     #[arg(long = "env")]
     env: Option<String>,
 
@@ -58,7 +60,8 @@ struct SpawnArgs {
     #[arg(long = "timeout")]
     timeout: Option<String>,
 
-    /// Start with empty environment.
+    /// Start the child with no environment, instead of kaish's exported
+    /// variables. `--env` entries still apply on top.
     #[arg(long = "clear-env", visible_alias = "clear_env")]
     clear_env: bool,
 
@@ -216,13 +219,20 @@ impl Tool for Spawn {
             },
         };
 
-        // Env: hermetic (`--clear-env`) starts empty; otherwise inherit this
-        // process's own environment, same as leaving `Command::env_clear()`
-        // uncalled did before. `--env` entries are applied after either
-        // base, so they win on a name collision — `spawn_process` always
-        // clears first and takes exactly what it is given, so the ambient
-        // vars have to be listed explicitly here now.
-        let mut env: Vec<(String, String)> = if clear_env { Vec::new() } else { std::env::vars().collect() };
+        // Env: hermetic, matching `try_execute_external_on_path` — the
+        // kernel never reads the OS env, so the child sees only what kaish
+        // has exported (`hermetic_env`, fed by `KernelConfig::initial_vars`
+        // and `export`), never this process's own ambient environment.
+        // `--clear-env` drops even that, starting empty. `--env` entries
+        // apply last either way, so they win on a name collision.
+        let mut env: Vec<(String, String)> = if clear_env {
+            Vec::new()
+        } else {
+            match hermetic_env(&ctx.scope) {
+                Ok(env) => env,
+                Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
+            }
+        };
         env.extend(env_vars);
 
         // Handle stdin — forward raw bytes so binary survives into the child.
@@ -512,6 +522,36 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().contains("MY_TEST_VAR=test_value"));
+    }
+
+    /// Unit-level pin on the exact code path `hermetic_env(&ctx.scope)`
+    /// takes: a plain (non-exported) scope var never reaches the child, an
+    /// exported one does. The integration-level proof, through a real
+    /// `Kernel` and `printenv`, lives in
+    /// `external_command_tests.rs::spawn_child_does_not_see_an_unexported_os_var`
+    /// and `spawn_child_sees_exported_and_initial_vars`.
+    #[tokio::test]
+    async fn test_spawn_env_is_hermetic_not_ambient() {
+        let mut ctx = make_ctx();
+        ctx.scope.set_global("NOT_EXPORTED", Value::String("leaked".into()));
+        ctx.scope.set_exported("IS_EXPORTED", Value::String("visible".into()));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(
+            !result.text_out().contains("NOT_EXPORTED"),
+            "a non-exported scope var must not reach the child: {}",
+            result.text_out()
+        );
+        assert!(
+            result.text_out().contains("IS_EXPORTED=visible"),
+            "an exported scope var must reach the child: {}",
+            result.text_out()
+        );
     }
 
     #[tokio::test]

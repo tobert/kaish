@@ -540,6 +540,108 @@ async fn env_prefix_reaches_subprocess_then_does_not_leak() {
     );
 }
 
+// ============================================================================
+// `spawn` env hermeticity — same contract as the external-command path above,
+// pinned separately because `spawn` builds its own child environment rather
+// than going through `try_execute_external`.
+// ============================================================================
+
+#[tokio::test]
+async fn spawn_child_does_not_see_an_unexported_os_var() {
+    // Same shape as `external_command_is_hermetic_by_default`: cargo always
+    // sets PATH for the test process, but a kernel with no `initial_vars`
+    // never exports it, so a spawned child must not see it either. `spawn`'s
+    // own `--command` resolution has a separate OS-PATH fallback for finding
+    // the binary to run (unlike the external-command path) — that fallback
+    // is what lets `printenv` resolve at all here; it is not what this test
+    // is about. This test is about what the CHILD's environment contains.
+    assert!(
+        std::env::var_os("PATH").is_some(),
+        "test precondition: cargo should set PATH"
+    );
+    let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // no initial_vars
+    let result = kernel
+        .execute("spawn --command printenv --argv PATH")
+        .await
+        .unwrap();
+    assert!(
+        !result.ok(),
+        "printenv PATH must fail inside the spawned child: {result:?}"
+    );
+    assert!(
+        result.text_out().trim().is_empty(),
+        "no PATH in the child's env, got stdout={:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn spawn_child_sees_exported_and_initial_vars() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("MY_INITIAL".to_string(), Value::String("from_initial".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
+
+    let initial = kernel
+        .execute("spawn --command printenv --argv MY_INITIAL")
+        .await
+        .unwrap();
+    assert!(initial.ok(), "initial_vars must reach the spawned child: {initial:?}");
+    assert_eq!(initial.text_out().trim(), "from_initial");
+
+    let exported = kernel
+        .execute("export MY_EXPORTED=from_export; spawn --command printenv --argv MY_EXPORTED")
+        .await
+        .unwrap();
+    assert!(exported.ok(), "an exported var must reach the spawned child: {exported:?}");
+    assert_eq!(exported.text_out().trim(), "from_export");
+}
+
+#[tokio::test]
+async fn spawn_env_flag_overrides_an_exported_var() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("MY_VAR".to_string(), Value::String("exported_value".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
+
+    let result = kernel
+        .execute(r#"spawn --command printenv --argv MY_VAR --env '{"MY_VAR":"overridden"}'"#)
+        .await
+        .unwrap();
+    assert!(result.ok(), "spawn --env should succeed: {result:?}");
+    assert_eq!(result.text_out().trim(), "overridden");
+}
+
+#[tokio::test]
+async fn spawn_clear_env_starts_empty_then_applies_env() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("MY_VAR".to_string(), Value::String("exported_value".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
+
+    // `--clear-env` drops even the kernel's own exported vars.
+    let cleared = kernel
+        .execute("spawn --command printenv --argv MY_VAR --clear-env")
+        .await
+        .unwrap();
+    assert!(!cleared.ok(), "--clear-env must drop exported vars too: {cleared:?}");
+    assert!(cleared.text_out().trim().is_empty());
+
+    // `--env` still applies on top of the cleared environment.
+    let with_env = kernel
+        .execute(r#"spawn --command printenv --argv ONLY --clear-env --env '{"ONLY":"present"}'"#)
+        .await
+        .unwrap();
+    assert!(with_env.ok(), "--env on top of --clear-env should succeed: {with_env:?}");
+    assert_eq!(with_env.text_out().trim(), "present");
+}
+
 // Linux-gated + absolute path so the external spawn is unconditionally taken.
 // The Decision-D export guard fires at spawn time, so it needs a real binary —
 // a nonexistent path errors on resolution before the guard is reached.
