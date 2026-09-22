@@ -645,6 +645,55 @@ mod tests {
         );
     }
 
+    /// Round-4 kaibo finding: the streaming-stdin task (round 3) treated
+    /// every write and read error alike, so a broken upstream pipe read as
+    /// silent EOF — the same class of bug the fix distinguishes now (see
+    /// `crate::spawn::copy_stdin_to_child` and its own `stdin_copy_tests`
+    /// for the read-error side, which needs a synthetic reader since the
+    /// real `pipe_stream()` reader cannot itself produce a read error).
+    /// This is the integration-level half: a continuous producer (`yes`,
+    /// simulated here since `pipe_stream()`'s writer never stalls) keeps
+    /// writing well past the point `head -n1` reads one line, closes its
+    /// own stdin, and exits — the resulting `BrokenPipe` on our next write
+    /// is EXPECTED and must stay quiet, not show up as a spurious
+    /// diagnostic in the command's own stderr.
+    #[tokio::test]
+    async fn test_spawn_child_closing_stdin_early_is_quiet() {
+        use crate::scheduler::pipe_stream;
+        use tokio::io::AsyncWriteExt;
+
+        let mut ctx = make_ctx();
+        let (mut writer, reader) = pipe_stream(8192);
+        ctx.pipe_stdin = Some(reader);
+
+        tokio::spawn(async move {
+            loop {
+                if writer.write_all(b"y\n").await.is_err() {
+                    break; // reader (spawn's stdin-copy task) went away
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/head".into()));
+        args.named
+            .insert("argv".to_string(), Value::String(r#"["-n1"]"#.into()));
+
+        let result = tokio::time::timeout(Duration::from_secs(5), Spawn.execute(args, &mut ctx))
+            .await
+            .expect("spawn must not hang when the child closes stdin early on a live producer");
+
+        assert!(result.ok(), "head failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "y");
+        assert!(
+            result.err.is_empty(),
+            "a child closing its own stdin early (BrokenPipe) is expected and must stay quiet: {}",
+            result.err
+        );
+    }
+
     #[tokio::test]
     async fn test_spawn_with_env() {
         let mut ctx = make_ctx();
