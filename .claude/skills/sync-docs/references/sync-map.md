@@ -63,7 +63,7 @@ in kaish. Check for:
 Prose about design principles. Key claims to verify:
 - "in-process, zero-fork" — still true?
 - "80/20" principle — still the approach?
-- "ERE everywhere" — still consistent?
+- "GNU grep regex" (`grep` reads GNU BRE; `sed`/`awk` read ERE) — still consistent?
 
 ### Language Features Table (under `## Language Features`)
 

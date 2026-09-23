@@ -402,22 +402,19 @@ and adds `--exclude`, `--ftype`, and depth control.
 ## Regex (grep, sed, awk)
 
 ```sh
-# ERE (egrep-style) everywhere: a|b  (…)  x+ y? z{2,5}  [a-z]  ^…$
-grep 'error|warn' log.txt           # alternation — one call, many terms
-sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # (…) capture; \1 \2 in the REPLACEMENT
-awk '/^(GET|POST) /' access.log     # same engine in all three
-
-# GNU BRE spellings are accepted too — \| \(…\) \{n,m\} \+ \? rewrite to ERE:
-grep 'error\|warn' log.txt          # ≡ error|warn
-sed 's/\(a\)\(b\)/\2\1/'            # ≡ s/(a)(b)/\2\1/
-
-# A literal | + ? ( ) { }: bracket class, or strict-ERE mode
-grep '[|]' f                        # literal pipe (works in all three)
-grep -E 'a\|b' f                    # -E / -r (grep, sed): backslashed meta = literal
+# grep reads GNU BRE, as GNU grep does: bare ( ) { } | + ? are literal
+grep -n 'fn consult(' src/lib.rs    # a literal paren
+grep 'error\|warn' log.txt          # \| alternation; \(…\) group; \{2,5\} interval; \+ \?
+grep -E 'error|warn' log.txt        # -E: ERE, bare a|b (…) x+ y? z{2,5}
 grep -F 'a|b' f                     # -F: fixed string, nothing is a metachar
+grep '[0-9]\+\.\w\b' f              # \w \s \b \< \> work; \d is a literal d, as in GNU
 
-grep '\d+\.\w\b' f                  # \d \w \s \b \. work; \< \> too
-sed 's/(a)\1/x/'                    # ERROR — no backreference IN a pattern
+# sed and awk read ERE, and also accept the GNU BRE spellings \| \(…\) \{n,m\}
+sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # (…) capture; \1 \2 in the REPLACEMENT
+sed 's/\(a\)\(b\)/\2\1/'            # ≡ s/(a)(b)/\2\1/
+awk '/^(GET|POST) /' access.log     # ERE alternation
+sed 's/[|]/,/g' f                   # a literal | in sed or awk: bracket class
+sed 's/(a)\1/x/'                    # ERROR — no backreference in a pattern; grep refuses \1 too
 ```
 
 ## Shell Options
