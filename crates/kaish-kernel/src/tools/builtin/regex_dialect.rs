@@ -15,6 +15,13 @@
 //!   silently matched nothing (issue #60). The casualty is narrow: a backslash
 //!   before one of these metas is always the operator, never a literal; match
 //!   the character itself with a bracket class (`[+]`, `[|]`, `[{]`).
+//! - [`rewrite_posix_classes`] is `grep -E`'s pass: only `[...]` interiors
+//!   change, using the same [`posix_class_pattern`] table `gnu_bre_to_regex`
+//!   uses, since strict ERE otherwise passes straight through.
+//!
+//! Both bracket-expression translators route `[:alpha:]` and its eleven
+//! siblings through [`posix_class_pattern`], the regex engine's own
+//! `[:alpha:]` being ASCII-only where GNU grep in a UTF-8 locale is not.
 
 /// The GNU BRE backslash-metacharacters kaish rewrites to their bare ERE form.
 /// `\|`→alternation, `\+`/`\?`→quantifiers, `\(`/`\)`→group, `\{`/`\}`→interval.
@@ -96,6 +103,51 @@ const POSIX_CLASSES: &[&str] = &[
     "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct",
     "space", "upper", "xdigit",
 ];
+
+/// The regex engine's Unicode-aware equivalent for a GNU POSIX bracket
+/// class, self-contained (already wrapped in its own `[...]`) so it can sit
+/// next to any other item in the caller's bracket expression. `None` for a
+/// name GNU does not recognize.
+///
+/// Matched against `/usr/bin/grep` (GNU grep 3.12, `LC_ALL=C.UTF-8`), not the
+/// regex engine's own `[:alpha:]` support, which is ASCII-only —
+/// `[[:alpha:]]` must match `日本語テキスト`, not just `héllo wörld`.
+/// `tests/grep_gnu_bre_tests.rs` records the corpus this was checked against.
+///
+/// Two real GNU/glibc quirks ride along, confirmed against 57 Unicode code
+/// points spanning every general category before landing on this table:
+///
+/// - `alpha`/`alnum` also match a non-ASCII decimal digit (Arabic-Indic `٣`,
+///   fullwidth `３`) — glibc classifies every Unicode `Nd` character but the
+///   ASCII range as alphabetic. `digit` stays ASCII-only regardless.
+/// - `space`/`blank` exclude three Unicode "no-break" spaces (U+00A0 NBSP,
+///   U+2007 FIGURE SPACE, U+202F NARROW NO-BREAK SPACE), which glibc
+///   classifies `[:punct:]` instead, even though Unicode's White_Space
+///   property includes them.
+///
+/// Not chased: glibc additionally classifies U+2028 LINE SEPARATOR as
+/// `[:cntrl:]` (Unicode calls it `Zl`, not `Cc`), and `-i` on `[:upper:]` or
+/// `[:lower:]` becomes `[:alpha:]` in glibc — neither is in the corpus this
+/// gap was found from, and the second would need the case-fold flag threaded
+/// into this translation, which the sed/awk branch stacked on this one
+/// depends on staying out of `gnu_bre_to_regex`'s signature.
+fn posix_class_pattern(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "alpha" => r"[\p{Alphabetic}[\p{Nd}--0-9]]",
+        "alnum" => r"[\p{Alphabetic}\p{Nd}]",
+        "upper" => r"[\p{Uppercase}]",
+        "lower" => r"[\p{Lowercase}]",
+        "digit" => r"[0-9]",
+        "space" => r"[\p{White_Space}--[\u{00A0}\u{2007}\u{202F}]]",
+        "blank" => r"[\t\p{Zs}--[\u{00A0}\u{2007}\u{202F}]]",
+        "cntrl" => r"[\p{Cc}]",
+        "print" => r"[\P{Cc}]",
+        "graph" => r"[\P{Cc}--[\p{White_Space}--[\u{00A0}\u{2007}\u{202F}]]]",
+        "punct" => r"[\P{Cc}--[\p{Alphabetic}\p{Nd}[\p{White_Space}--[\u{00A0}\u{2007}\u{202F}]]]]",
+        "xdigit" => r"[0-9A-Fa-f]",
+        _ => return None,
+    })
+}
 
 /// Translate a GNU BRE (`grep` without `-E`/`-F`) into the regex engine's
 /// syntax, following GNU grep:
@@ -414,13 +466,13 @@ impl BreTranslator {
         let body: String = self.chars[body_start..end].iter().collect();
         self.index = end + 2;
         if delimiter == ':' {
-            if !POSIX_CLASSES.contains(&body.as_str()) {
-                return Err(Self::refuse(format!(
+            return match posix_class_pattern(&body) {
+                Some(pattern) => Ok(BracketItem::Class(pattern.to_string())),
+                None => Err(Self::refuse(format!(
                     "invalid character class `[:{body}:]` — use one of {}",
                     POSIX_CLASSES.join(", ")
-                )));
-            }
-            return Ok(BracketItem::Class(format!("[:{body}:]")));
+                ))),
+            };
         }
         let mut body_chars = body.chars();
         match (body_chars.next(), body_chars.next()) {
@@ -430,6 +482,47 @@ impl BreTranslator {
             ))),
         }
     }
+}
+
+/// Rewrite POSIX bracket classes for strict ERE (`grep -E`): only `[...]`
+/// interiors change, using [`posix_class_pattern`], the same translation
+/// [`gnu_bre_to_regex`] applies in default mode — the regex engine's own
+/// `[:alpha:]` is ASCII-only in both dialects. Every other ERE construct
+/// (`(...)`, `a|b`, `x{2,5}`, a backslashed literal) passes through
+/// untouched.
+///
+/// A bracket expression the translator cannot make sense of (an unmatched
+/// `[`, an unrecognized class name) is left exactly as written, so the
+/// engine's own error stands for it; this function never fails.
+pub(crate) fn rewrite_posix_classes(pattern: &str) -> String {
+    let mut translator = BreTranslator::new(pattern);
+    let mut out = String::with_capacity(pattern.len());
+    while let Some(c) = translator.peek(0) {
+        if c == '\\' {
+            out.push(c);
+            translator.index += 1;
+            if let Some(next) = translator.peek(0) {
+                out.push(next);
+                translator.index += 1;
+            }
+            continue;
+        }
+        if c == '[' {
+            let saved = translator.index;
+            translator.index += 1;
+            match translator.bracket() {
+                Ok(text) => out.push_str(&text),
+                Err(_) => {
+                    translator.index = saved + 1;
+                    out.push(c);
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        translator.index += 1;
+    }
+    out
 }
 
 /// Write `c` as a literal inside an engine character class.
@@ -632,7 +725,7 @@ mod tests {
     // Every bracket character is literal, backslash included.
     #[case(r"[\d]", r"[\\d]")]
     #[case("[]a]", r"[\]a]")]
-    #[case("[[:digit:]x-z]", "[[:digit:]x-z]")]
+    #[case("[[:digit:]x-z]", "[[0-9]x-z]")]
     #[case("[a-]", r"[a\-]")]
     // GNU word and buffer escapes.
     #[case(r"\<a\>", r"\b{start}a\b{end}")]
@@ -671,6 +764,83 @@ mod tests {
     fn refuses_what_gnu_grep_refuses(#[case] input: &str) {
         let message = gnu_bre_to_regex(input).expect_err("GNU grep exits 2 on this");
         assert!(message.contains("-E"), "names the ERE override: {message}");
+    }
+
+    #[rstest]
+    // `[:alpha:]` matches a Unicode letter and, per the glibc quirk this
+    // mirrors, a non-ASCII decimal digit — but not an ASCII one.
+    #[case('\u{00E9}', "alpha", true)] // é
+    #[case('\u{65E5}', "alpha", true)] // 日
+    #[case('\u{0663}', "alpha", true)] // Arabic-Indic ٣ — the glibc quirk
+    #[case('0', "alpha", false)]
+    #[case('0', "digit", true)]
+    #[case('\u{0663}', "digit", false)] // [:digit:] stays ASCII-only
+    #[case('\u{00A0}', "space", false)] // NBSP is [:punct:], not [:space:]
+    #[case('\u{00A0}', "blank", false)]
+    #[case('\u{00A0}', "punct", true)]
+    #[case('\u{3000}', "space", true)] // ideographic space IS [:space:]
+    #[case('\u{3000}', "blank", true)]
+    #[case('\u{0301}', "punct", true)] // combining acute accent
+    #[case('\u{00C9}', "upper", true)] // É
+    #[case('\u{00E9}', "lower", true)] // é
+    fn posix_class_pattern_matches_gnu_grep(
+        #[case] c: char,
+        #[case] class: &str,
+        #[case] expect_match: bool,
+    ) {
+        let pattern = posix_class_pattern(class).expect("a recognized class");
+        let re = regex::Regex::new(pattern).expect("every class formula compiles");
+        assert_eq!(
+            re.is_match(&c.to_string()),
+            expect_match,
+            "{c:?} against [:{class}:] ({pattern})",
+        );
+    }
+
+    #[rstest]
+    // Union with an explicit range and negation still work once a class
+    // expands to a Unicode formula.
+    #[case("[[:alpha:]0-9_]", 'a', true)]
+    #[case("[[:alpha:]0-9_]", '_', true)]
+    #[case("[[:alpha:]0-9_]", '\u{65E5}', true)]
+    #[case("[^[:alpha:]]", 'a', false)]
+    #[case("[^[:alpha:]]", '!', true)]
+    fn posix_class_composes_with_ranges_and_negation(
+        #[case] pattern: &str,
+        #[case] c: char,
+        #[case] expect_match: bool,
+    ) {
+        let translation = gnu_bre_to_regex(pattern).expect("valid GNU BRE");
+        let re = regex::Regex::new(&translation.pattern).expect("translation compiles");
+        assert_eq!(re.is_match(&c.to_string()), expect_match, "{c:?} against {pattern:?}");
+    }
+
+    #[rstest]
+    // `-E` gets the same Unicode-aware classes, everything else untouched.
+    #[case("[[:alpha:]]", '\u{65E5}', true)]
+    #[case("(foo|bar)", 'x', false)] // ERE syntax passes straight through
+    fn rewrite_posix_classes_fixes_extended_mode(
+        #[case] pattern: &str,
+        #[case] c: char,
+        #[case] expect_class_translated: bool,
+    ) {
+        let rewritten = rewrite_posix_classes(pattern);
+        if expect_class_translated {
+            assert_ne!(rewritten, pattern, "class should have translated: {pattern:?}");
+            let re = regex::Regex::new(&rewritten).expect("translation compiles");
+            assert!(re.is_match(&c.to_string()), "{c:?} against {rewritten:?}");
+        } else {
+            assert_eq!(rewritten, pattern, "non-class ERE syntax must pass through untouched");
+        }
+    }
+
+    #[rstest]
+    // A malformed or unrecognized class is left exactly as written, so the
+    // engine's own error names it.
+    #[case("[[:bogus:]]")]
+    #[case("[unclosed")]
+    fn rewrite_posix_classes_leaves_malformed_brackets_alone(#[case] pattern: &str) {
+        assert_eq!(rewrite_posix_classes(pattern), pattern);
     }
 
     #[rstest]

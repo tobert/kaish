@@ -16,7 +16,7 @@ use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint};
+use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, rewrite_posix_classes};
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
@@ -149,8 +149,9 @@ struct GrepArgs {
 
 /// The pattern the regex engine compiles for grep's three modes, and the GNU
 /// warnings to print for it. `-F` escapes every character; `-E` is strict
-/// ERE, passed through; the default is GNU BRE, translated. The error is the
-/// whole refusal text.
+/// ERE, with only its `[...]` classes rewritten (the regex engine's own
+/// `[:alpha:]` is ASCII-only); the default is GNU BRE, translated in full.
+/// The error is the whole refusal text.
 fn engine_pattern(
     pattern: &str,
     fixed: bool,
@@ -160,7 +161,7 @@ fn engine_pattern(
         return Ok((regex::escape(pattern), Vec::new()));
     }
     if extended {
-        return Ok((pattern.to_string(), Vec::new()));
+        return Ok((rewrite_posix_classes(pattern), Vec::new()));
     }
     gnu_bre_to_regex(pattern)
         .map(|translation| (translation.pattern, translation.warnings))
