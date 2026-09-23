@@ -3201,8 +3201,9 @@ impl Kernel {
                             };
                             match flow {
                                 ControlFlow::Normal(r) => {
-                                    accumulate_result(&mut result, &r);
+                                    // Drain before accumulating, as `if` does.
                                     self.drain_stderr_into(&mut result, ctx).await;
+                                    accumulate_result(&mut result, &r);
                                 }
                                 mut other => {
                                     self.drain_stderr_into(&mut result, ctx).await;
@@ -3304,8 +3305,8 @@ impl Kernel {
                         }
                         // Not a fault: this is output now, published before
                         // the right operand runs.
+                        self.drain_stderr_ahead(&mut left_result, ctx).await;
                         ctx.publish_job_stderr(&mut left_result).await;
-                        self.drain_stderr_into(&mut left_result, ctx).await;
                         self.update_last_result(&left_result).await;
                         // Pending is not failure (spec §I.5) — see the
                         // `OrChain` twin. The stash check matters here for a
@@ -3318,7 +3319,12 @@ impl Kernel {
                             };
                             match right_flow {
                                 ControlFlow::Normal(mut right_result) => {
-                                    self.drain_stderr_into(&mut right_result, ctx).await;
+                                    // execute_stmt_flow already published this
+                                    // operand's stderr. An unpublished chunk here
+                                    // would reach the stream after it; today only a
+                                    // stderr redirect leaves one, and that redirect
+                                    // also takes the operand's own stderr.
+                                    self.drain_stderr_ahead(&mut right_result, ctx).await;
                                     self.update_last_result(&right_result).await;
                                     let mut combined = left_result;
                                     accumulate_result(&mut combined, &right_result);
@@ -3384,8 +3390,8 @@ impl Kernel {
                         }
                         // Not a fault: this is output now, published before
                         // the right operand runs.
+                        self.drain_stderr_ahead(&mut left_result, ctx).await;
                         ctx.publish_job_stderr(&mut left_result).await;
-                        self.drain_stderr_into(&mut left_result, ctx).await;
                         self.update_last_result(&left_result).await;
                         // Pending is not failure (spec §I.5): a fallback
                         // written for failure must not run on a decision
@@ -3406,7 +3412,12 @@ impl Kernel {
                             };
                             match right_flow {
                                 ControlFlow::Normal(mut right_result) => {
-                                    self.drain_stderr_into(&mut right_result, ctx).await;
+                                    // execute_stmt_flow already published this
+                                    // operand's stderr. An unpublished chunk here
+                                    // would reach the stream after it; today only a
+                                    // stderr redirect leaves one, and that redirect
+                                    // also takes the operand's own stderr.
+                                    self.drain_stderr_ahead(&mut right_result, ctx).await;
                                     self.update_last_result(&right_result).await;
                                     let mut combined = left_result;
                                     accumulate_result(&mut combined, &right_result);
@@ -3584,8 +3595,8 @@ impl Kernel {
                                 anyhow::anyhow!("{}", message.trim_end()),
                             ));
                         }
+                        self.drain_stderr_ahead(&mut result, ctx).await;
                         ctx.publish_job_stderr(&mut result).await;
-                        self.drain_stderr_into(&mut result, ctx).await;
                         // A cancelled body reports its kill as a Normal
                         // result (130, or 128+signal for a killed child —
                         // see `spawn.rs`), not an Err, and `execute()`'s
@@ -3622,12 +3633,12 @@ impl Kernel {
                             ControlFlow::Break { result, .. }
                             | ControlFlow::Continue { result, .. }
                             | ControlFlow::Exit { result, .. } => {
+                                self.drain_stderr_ahead(result, ctx).await;
                                 ctx.publish_job_stderr(result).await;
-                                self.drain_stderr_into(result, ctx).await;
                             }
                             ControlFlow::Return { value } => {
+                                self.drain_stderr_ahead(value, ctx).await;
                                 ctx.publish_job_stderr(value).await;
-                                self.drain_stderr_into(value, ctx).await;
                             }
                             ControlFlow::Normal(_) => unreachable!("matched above"),
                         }
@@ -5241,6 +5252,17 @@ impl Kernel {
     async fn drain_stderr_into(&self, result: &mut ExecResult, ctx: &ExecContext) {
         self.drain_stderr_onto(&mut result.err, &mut result.stderr_published_len, ctx, true)
             .await;
+    }
+
+    /// Put the drained stderr channel ahead of `result.err`. What reached the
+    /// channel during a statement — a `$(…)` in its arguments, an earlier
+    /// pipeline stage — was written before the statement's own stderr.
+    async fn drain_stderr_ahead(&self, result: &mut ExecResult, ctx: &ExecContext) {
+        let mut drained = String::new();
+        let mut drained_published_len = 0;
+        self.drain_stderr_onto(&mut drained, &mut drained_published_len, ctx, false)
+            .await;
+        join_drained_stderr(&drained, drained_published_len, result);
     }
 
     /// Append the drained stderr channel to `err`, publishing it in a
