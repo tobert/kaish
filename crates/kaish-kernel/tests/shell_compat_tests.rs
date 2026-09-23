@@ -1380,25 +1380,25 @@ shell_compat! {
 
 shell_compat! {
     name: redirect_stdout_then_merge_sends_both_to_the_file,
-    script: "ls /kaish-compat-nonexistent > /tmp/kaish-compat-redir-a 2>&1; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-a)\"",
+    script: "d=\"/tmp/kaish-compat-redir-${BASH_VERSINFO:-kaish}\"; ls /kaish-compat-nonexistent > \"$d-a\" 2>&1; echo \"lines:$(wc -l < \"$d-a\")\"",
     eq: "lines:1",
 }
 
 shell_compat! {
     name: merge_then_redirect_stdout_sends_stderr_to_the_old_stdout,
-    script: "ls /kaish-compat-nonexistent 2>&1 > /tmp/kaish-compat-redir-b | wc -l; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-b)\"",
+    script: "d=\"/tmp/kaish-compat-redir-${BASH_VERSINFO:-kaish}\"; ls /kaish-compat-nonexistent 2>&1 > \"$d-b\" | wc -l; echo \"lines:$(wc -l < \"$d-b\")\"",
     eq: "1\nlines:0",
 }
 
 shell_compat! {
     name: both_redirect_sends_both_to_the_file,
-    script: "ls /kaish-compat-nonexistent &> /tmp/kaish-compat-redir-c; echo \"lines:$(wc -l < /tmp/kaish-compat-redir-c)\"",
+    script: "d=\"/tmp/kaish-compat-redir-${BASH_VERSINFO:-kaish}\"; ls /kaish-compat-nonexistent &> \"$d-c\"; echo \"lines:$(wc -l < \"$d-c\")\"",
     eq: "lines:1",
 }
 
 shell_compat! {
     name: stderr_to_file_then_stdout_to_stderr_sends_both_to_the_file,
-    script: "echo kaish-compat-out 2> /tmp/kaish-compat-redir-d 1>&2; echo \"file:$(cat /tmp/kaish-compat-redir-d)\"",
+    script: "d=\"/tmp/kaish-compat-redir-${BASH_VERSINFO:-kaish}\"; echo kaish-compat-out 2> \"$d-d\" 1>&2; echo \"file:$(cat \"$d-d\")\"",
     eq: "file:kaish-compat-out",
 }
 
