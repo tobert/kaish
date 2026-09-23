@@ -669,7 +669,10 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 >   to open.
 > - A `$(...)` in a target sees the files before any target truncates them.
 > - A `$(...)` in a target writes its stderr to the command's stderr, not to
->   a `2>` to its left, and reads no stdin.
+>   a `2>` to its left.
+> - A `$(...)` in a target reads the stdin the command started with, not a
+>   `<` to its left: `echo piped | cat < in > "out-$(cat)"` writes
+>   `out-piped`. bash reads `in` there instead.
 > - The same-file refusal happens before any target opens, so a `2>` to
 >   its left is not opened and the error goes to stderr.
 > - Hard links to one file are not detected as the same file; backends
