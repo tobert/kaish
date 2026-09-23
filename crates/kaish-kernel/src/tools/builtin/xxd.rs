@@ -293,7 +293,7 @@ async fn reverse_hex(input: &str, plain: bool, ctx: &mut ExecContext) -> ExecRes
             (Some(h), Some(l)) => bytes.push((h * 16 + l) as u8),
             _ => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!("xxd: invalid hex at position {}", i),
                 )
             }

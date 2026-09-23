@@ -119,11 +119,11 @@ impl Tool for Seq {
                 let last = value_to_f64(v3);
                 (first, increment, last)
             }
-            _ => return ExecResult::failure(1, "seq: missing argument"),
+            _ => return ExecResult::failure(2, "seq: missing argument"),
         };
 
         if increment == 0.0 {
-            return ExecResult::failure(1, "seq: increment cannot be zero");
+            return ExecResult::failure(2, "seq: increment cannot be zero");
         }
 
         // `separator` is a named/flag value only (`-s`/`--separator`), never

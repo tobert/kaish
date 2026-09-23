@@ -77,10 +77,10 @@ impl Tool for Wait {
                         let digits = s.strip_prefix('%').unwrap_or(s);
                         match digits.parse::<u64>() {
                             Ok(i) => JobId(i),
-                            Err(_) => return ExecResult::failure(1, format!("wait: invalid job id: {}", s)),
+                            Err(_) => return ExecResult::failure(2, format!("wait: invalid job id: {}", s)),
                         }
                     }
-                    _ => return ExecResult::failure(1, "wait: job id must be a number"),
+                    _ => return ExecResult::failure(2, "wait: job id must be a number"),
                 };
 
                 match manager.wait(id).await {

@@ -90,11 +90,15 @@ impl Tool for FromJsonl {
         parsed.global.apply(ctx);
 
         // Input text: an explicit positional argument wins; otherwise stdin.
-        // Mirrors fromjson's resolution exactly (see that module).
-        let input = match args.positional.first() {
-            Some(Value::String(s)) => s.clone(),
+        // Mirrors fromjson's resolution exactly (see that module), including
+        // the split it draws between the two: text the caller typed inline
+        // (a positional) is argv, so a bad line there is theirs to fix (2);
+        // text read from stdin is data from the world, so a bad line there
+        // is a result (1).
+        let (input, from_stdin) = match args.positional.first() {
+            Some(Value::String(s)) => (s.clone(), false),
             Some(Value::Bytes(b)) => match std::str::from_utf8(b) {
-                Ok(s) => s.to_string(),
+                Ok(s) => (s.to_string(), false),
                 Err(_) => return ExecResult::failure(1, "fromjsonl: input is binary, not text"),
             },
             // An already-structured value: re-serialize its compact JSON text,
@@ -102,20 +106,24 @@ impl Tool for FromJsonl {
             // `fromjsonl $v` yields `[$v]` (a one-element wrap), not `$v`
             // back. Typed values that want to stay themselves don't need a
             // door at all.
-            Some(other) => kaish_types::value_to_json(other).to_string(),
+            Some(other) => (kaish_types::value_to_json(other).to_string(), false),
             None => match ctx.read_stdin_to_text().await {
-                Ok(Some(s)) => s,
+                Ok(Some(s)) => (s, true),
                 // No stdin connected at all (as opposed to an empty pipe,
                 // which is legitimate zero-document input) is a usage error.
                 Ok(None) => {
                     return ExecResult::failure(
-                        1,
+                        2,
                         "fromjsonl: no input (pass JSONL text or pipe stdin)",
                     )
                 }
-                Err(e) => return ExecResult::failure(2, format!("fromjsonl: {e}")),
+                // stdin carried bytes that are not valid UTF-8: the data
+                // itself is at fault, not the invocation.
+                Err(e) => return ExecResult::failure(1, format!("fromjsonl: {e}")),
             },
         };
+
+        let bad_line_code = if from_stdin { 1 } else { 2 };
 
         let mut elements: Vec<serde_json::Value> = Vec::new();
         let mut offset = 0usize;
@@ -137,7 +145,10 @@ impl Tool for FromJsonl {
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(v) => elements.push(v),
                 Err(e) => {
-                    return ExecResult::failure(1, diagnose_line_error(&input[start..], line_no, &e));
+                    return ExecResult::failure(
+                        bad_line_code,
+                        diagnose_line_error(&input[start..], line_no, &e),
+                    );
                 }
             }
         }

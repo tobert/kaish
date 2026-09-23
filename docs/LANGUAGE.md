@@ -616,6 +616,12 @@ cmd 2>&1 | tee log.txt          # capture both streams
 cmd > log.txt 2>&1              # both streams to log.txt
 cmd 2>&1 > log.txt              # stderr to the old stdout, stdout to log.txt
 
+# Targets open left to right BEFORE the command runs.
+mkdir -p out; cmd > out/log.txt # correct — a redirect never creates a directory
+cmd > missing-dir/log.txt       # exit 1 — cmd does not run
+sort < f > f.tmp; mv f.tmp f    # correct — rewrite a file through a temp file
+sort < f > f                    # error — f is both input and output
+
 # A redirect target is a SINGLE word — quote it when it interpolates.
 # Command substitution runs in the target (and in here-doc bodies).
 echo hi > "$dir/out.log"        # correct
@@ -635,6 +641,39 @@ jq -r '.name' <<< "$RESULT"     # canonical JSON field extraction
 cat <<< "hello $NAME"           # interpolation works like double quotes
 cat <<< 'raw $VAR'              # single quotes stay literal
 ```
+
+> **Targets open before the command runs.** kaish evaluates every target
+> first, then opens them left to right: `>`, `2>`, and `&>` truncate the
+> file, and `>>` opens it for append, creating it if missing. If a target
+> cannot open, the command does not run and exits 1; the error goes where
+> stderr points at that moment (`cmd 2>&1 > /missing/f` sends it to
+> stdout). A missing parent directory is an error, never created — run
+> `mkdir -p` first. `cat f > f` empties `f`, as in bash, because `>`
+> truncates before `cat` reads.
+>
+> **One file as input and output is refused.** `sort < f > f` exits 1
+> with `redirect: f is both input and output (> empties it before it is
+> read); write to a temp file, then mv it over f`, and `f` keeps its
+> content. bash would empty `f`. `cat < f >> f` is refused too, because the
+> command would read its own output without end. Paths are compared after
+> symlinks and `.`/`..` resolve. A missing `<` file is not compared; it
+> fails with `no such file or directory` when it opens. When both targets
+> are literals, the validator reports E023 before anything runs, so
+> `kaish --plan` shows it.
+>
+> **Known differences from bash.** bash evaluates and opens each target in
+> turn; kaish evaluates all of them before opening any, so the same-file
+> check sees every target. As a result:
+>
+> - A `$(...)` in a later target runs even when an earlier target fails
+>   to open.
+> - A `$(...)` in a target sees the files before any target truncates them.
+> - A `$(...)` in a target writes its stderr to the command's stderr, not to
+>   a `2>` to its left, and reads no stdin.
+> - The same-file refusal happens before any target opens, so a `2>` to
+>   its left is not opened and the error goes to stderr.
+> - Hard links to one file are not detected as the same file; backends
+>   expose no inode.
 
 > **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
 > combining two of them on the same command is a parse error (rather than
@@ -1215,12 +1254,13 @@ on it to abort never does. Write the check the other way instead —
 one it actually gets.
 
 `set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
-**1** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
+**2** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
 `trash`) — an unknown name is never silently ignored, because a caller that
-thinks it turned something on needs to know it didn't.
+thinks it turned something on needs to know it didn't. The name is argv the
+caller can fix, so it is a usage error, not an operational 1.
 `set -o approvals` and `set -o latch` — retired spellings from
 the removed approval subsystem and confirmation latch — fail the same way;
-they turn nothing on. `set -o output-limit=<unparseable size>` also exits 1
+they turn nothing on. `set -o output-limit=<unparseable size>` also exits 2
 instead of leaving the limit unchanged. A bare unrecognized short flag
 (`set -q`, `set -u`, `set -x`) is still silently ignored — bash has dozens
 kaish doesn't implement, with no fixed set to check a typo against the way
@@ -1352,12 +1392,27 @@ a mistake.**
 A builtin that answers a question spends `1` on the negative answer and nothing
 else. `grep` exits 1 only when it searched and matched nothing; `test` exits 1
 only when the condition was false; `cmp` and `diff` exit 1 only when the inputs
-differ. In those builtins every error — an unreadable file, a missing operand, a
-pattern that does not compile — exits `2`, so a caller branching on 1 never
-reads a broken command as a negative answer.
+differ; `read` exits 1 only at end of input, which is what ends a `while read`
+loop; `glob` exits 1 only when a pattern matched no files. In those builtins
+every error — an unreadable file, a missing operand, a pattern that does not
+compile — exits `2`, so a caller branching on 1 never reads a broken command as
+a negative answer.
+
+```sh
+printf 'a\nb\n' | while read l; do echo "$l"; done   # read's 1 ends the loop
+read                                                  # 2 — no variable named
+```
 
 A builtin where `1` is free keeps the familiar split: `2` for a usage error,
-`1` for an operational failure. `cat missing.txt` exits 1.
+`1` for an operational failure. The split follows what the caller can fix —
+argv, or the world:
+
+```sh
+rm                              # 2 — missing path argument
+rm missing.txt                  # 1 — the path was fine, the file was not
+kaish-trash bogus               # 2 — unknown subcommand
+find . -type x                  # 2 — a flag value find cannot use
+```
 
 A whole program kaish refuses exits `2`. A lex, parse, or validation failure
 means no statement ran, which is the same class of mistake as bad argv:
@@ -1366,6 +1421,25 @@ means no statement ran, which is the same class of mistake as bad argv:
 kaish -c 'if'                   # 2 — parse error
 kaish --plan 'if'               # 2 — the same source, the same code
 ```
+
+**A builtin that ingests text draws the same argv-or-world line by where the
+text came from, not by what's wrong with it.** Text the caller typed inline
+as a positional argument is argv; data read from stdin or a file is the
+world, even though a file *path* is itself an argument:
+
+```sh
+fromjson '{not json}'           # 2 — the caller typed this
+echo '{not json}' | fromjson    # 1 — the pipe's content, not the invocation
+jq . bad.json                   # 1 — bad.json's content, not the path argument
+jq . < bad.json                 # 1 — same content, read from stdin instead
+```
+
+A jq filter is the same split one level up: a *literal* filter that cannot
+compile is caught by the validator before anything runs (a program-refused
+`2`, above), but a *computed* one (`jq "$expr"`) or one shadowed by an
+`--arg`/`--argjson` name only fails at runtime — still argv, so still `2`,
+the same rule a computed `grep` pattern follows. `--argjson NAME VALUE` with
+a `VALUE` that isn't JSON is a flag value the builtin cannot use, also `2`.
 
 `124` (timeout) and `123` (a scatter worker failed) are the documented
 exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".

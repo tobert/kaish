@@ -65,7 +65,7 @@ impl Tool for KaishIgnore {
             Some("add") => {
                 let file = match args.get_string("", 1) {
                     Some(f) => f,
-                    None => return ExecResult::failure(1, "kaish-ignore add: missing filename"),
+                    None => return ExecResult::failure(2, "kaish-ignore add: missing filename"),
                 };
                 ctx.ignore_config.add_file(&file);
                 show_config(ctx)
@@ -73,7 +73,7 @@ impl Tool for KaishIgnore {
             Some("remove") => {
                 let file = match args.get_string("", 1) {
                     Some(f) => f,
-                    None => return ExecResult::failure(1, "kaish-ignore remove: missing filename"),
+                    None => return ExecResult::failure(2, "kaish-ignore remove: missing filename"),
                 };
                 ctx.ignore_config.remove_file(&file);
                 show_config(ctx)
@@ -86,7 +86,7 @@ impl Tool for KaishIgnore {
                 let on = match args.get_string("", 1).as_deref() {
                     Some("on") | Some("true") | Some("1") => true,
                     Some("off") | Some("false") | Some("0") => false,
-                    _ => return ExecResult::failure(1, "kaish-ignore defaults: expected 'on' or 'off'"),
+                    _ => return ExecResult::failure(2, "kaish-ignore defaults: expected 'on' or 'off'"),
                 };
                 ctx.ignore_config.set_defaults(on);
                 show_config(ctx)
@@ -95,7 +95,7 @@ impl Tool for KaishIgnore {
                 let on = match args.get_string("", 1).as_deref() {
                     Some("on") | Some("true") | Some("1") => true,
                     Some("off") | Some("false") | Some("0") => false,
-                    _ => return ExecResult::failure(1, "kaish-ignore auto: expected 'on' or 'off'"),
+                    _ => return ExecResult::failure(2, "kaish-ignore auto: expected 'on' or 'off'"),
                 };
                 ctx.ignore_config.set_auto_gitignore(on);
                 show_config(ctx)
@@ -104,12 +104,12 @@ impl Tool for KaishIgnore {
                 let scope = match args.get_string("", 1).as_deref() {
                     Some("advisory") => IgnoreScope::Advisory,
                     Some("enforced") => IgnoreScope::Enforced,
-                    _ => return ExecResult::failure(1, "kaish-ignore scope: expected 'advisory' or 'enforced'"),
+                    _ => return ExecResult::failure(2, "kaish-ignore scope: expected 'advisory' or 'enforced'"),
                 };
                 ctx.ignore_config.set_scope(scope);
                 show_config(ctx)
             }
-            Some(other) => ExecResult::failure(1, format!(
+            Some(other) => ExecResult::failure(2, format!(
                 "kaish-ignore: unknown subcommand '{}' (try: add, remove, clear, defaults, auto, scope)",
                 other
             )),

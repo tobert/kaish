@@ -1135,6 +1135,7 @@ dependencies = [
  "async-trait",
  "clap",
  "kaish-types",
+ "tokio",
 ]
 
 [[package]]

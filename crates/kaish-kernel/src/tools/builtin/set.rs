@@ -199,7 +199,7 @@ impl Tool for Set {
                     // Consume next positional as option name
                     if let Some(&name) = positionals.get(i + 1) {
                         if let Err(msg) = apply_set_o(ctx, name, true) {
-                            return ExecResult::failure(1, msg);
+                            return ExecResult::failure(2, msg);
                         }
                         i += 1; // skip the option name
                     }
@@ -207,7 +207,7 @@ impl Tool for Set {
                 "+o" => {
                     if let Some(&name) = positionals.get(i + 1) {
                         if let Err(msg) = apply_set_o(ctx, name, false) {
-                            return ExecResult::failure(1, msg);
+                            return ExecResult::failure(2, msg);
                         }
                         i += 1;
                     }
@@ -235,7 +235,7 @@ impl Tool for Set {
         {
             if let Some(&name) = positionals.first() {
                 if let Err(msg) = apply_set_o(ctx, name, true) {
-                    return ExecResult::failure(1, msg);
+                    return ExecResult::failure(2, msg);
                 }
             }
         }

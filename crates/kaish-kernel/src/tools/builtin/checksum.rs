@@ -98,7 +98,7 @@ impl Tool for Checksum {
         // Validate algorithm
         if !matches!(algo.as_str(), "sha256" | "sha1" | "md5") {
             return ExecResult::failure(
-                1,
+                2,
                 format!("checksum: unknown algorithm '{}' (use sha256, sha1, or md5)", algo),
             );
         }

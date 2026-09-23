@@ -41,18 +41,26 @@ impl Filesystem for BuiltinFs {
         if self.tools.get(name).is_some() {
             Ok(format!("#!/v/bin — kaish builtin: {}\n", name).into_bytes())
         } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "builtin not found"))
+            // The name alone — "builtin not found" restated
+            // `ErrorKind::NotFound`'s own meaning, and
+            // `BackendError::NotFound`'s Display adds "not found:" once
+            // when this crosses that boundary, and named neither the
+            // requested name nor a path either way.
+            Err(io::Error::new(io::ErrorKind::NotFound, name.to_string()))
         }
     }
 
     async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "/v/bin is read-only"))
+        Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "/v/bin is read-only"))
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         let p = path.to_str().unwrap_or("");
         if !p.is_empty() && p != "." {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "not a directory"));
+            // Wrong kind before this fix too: every entry under `/v/bin` is
+            // a file, so listing one is `NotADirectory`, not `NotFound` —
+            // and the path was missing outright.
+            return Err(io::Error::new(io::ErrorKind::NotADirectory, p.to_string()));
         }
         let mut entries: Vec<DirEntry> = self.tools.names().iter().map(|name| {
             DirEntry::file(name.to_string(), 0)
@@ -69,16 +77,16 @@ impl Filesystem for BuiltinFs {
         if self.tools.get(name).is_some() {
             Ok(DirEntry::file(name, 0))
         } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "builtin not found"))
+            Err(io::Error::new(io::ErrorKind::NotFound, name.to_string()))
         }
     }
 
     async fn mkdir(&self, _path: &Path) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "/v/bin is read-only"))
+        Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "/v/bin is read-only"))
     }
 
     async fn remove(&self, _path: &Path) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "/v/bin is read-only"))
+        Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "/v/bin is read-only"))
     }
 
     fn read_only(&self) -> bool {

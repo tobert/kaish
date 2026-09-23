@@ -99,7 +99,7 @@ impl Tool for Awk {
         // Get program (first positional or named)
         let program = match args.get_string("program", 0) {
             Some(p) => p,
-            None => return ExecResult::failure(1, "awk: missing program"),
+            None => return ExecResult::failure(2, "awk: missing program"),
         };
 
         // Parse program

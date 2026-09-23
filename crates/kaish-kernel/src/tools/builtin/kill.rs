@@ -247,7 +247,7 @@ impl Tool for Kill {
 
         if targets.is_empty() {
             return ExecResult::failure(
-                1,
+                2,
                 "kill: usage: kill [--signal SIG | -SIG | -N] target...".to_string(),
             );
         }
@@ -258,6 +258,9 @@ impl Tool for Kill {
         // `kill %1 %2` reported success having signalled only `%1`.
         let mut out = String::new();
         let mut any_failed = false;
+        // The strongest code any target produced: 2 (the command was used wrong)
+        // outranks 1 (a target could not be signalled).
+        let mut worst_code = 0i64;
 
         for target in &targets {
             let target_str = match target {
@@ -265,6 +268,7 @@ impl Tool for Kill {
                 Value::Int(i) => i.to_string(),
                 other => {
                     any_failed = true;
+                    worst_code = worst_code.max(2);
                     out.push_str(&format!("kill: invalid target: {other:?}\n"));
                     continue;
                 }
@@ -273,6 +277,10 @@ impl Tool for Kill {
             let result = kill_one(ctx, &target_str, &signal_name, no_wait).await;
             if result.code != 0 {
                 any_failed = true;
+                // Keep the worst code, so a usage error (an unknown signal,
+                // which is wrong for the whole command) is not flattened into
+                // the 1 that means "a target could not be signalled".
+                worst_code = worst_code.max(result.code);
             }
             let text = result.text_out();
             let text = text.trim_end();
@@ -288,7 +296,7 @@ impl Tool for Kill {
 
         let out = out.trim_end().to_string();
         if any_failed {
-            ExecResult::failure(1, out)
+            ExecResult::failure(worst_code.max(1), out)
         } else {
             ExecResult::success(out)
         }
@@ -311,7 +319,7 @@ async fn kill_one(
         let job_id = match job_num.parse::<u64>() {
             Ok(i) => JobId(i),
             Err(_) => {
-                return ExecResult::failure(1, format!("kill: invalid job reference: {target_str}"))
+                return ExecResult::failure(2, format!("kill: invalid job reference: {target_str}"))
             }
         };
         let manager = match &ctx.job_manager {
@@ -466,7 +474,7 @@ async fn kill_job(
                  (arbitrary-signal delivery needs the subprocess capability)"
             ),
         ),
-        None => ExecResult::failure(1, format!("kill: unknown signal: {signal_name}")),
+        None => ExecResult::failure(2, format!("kill: unknown signal: {signal_name}")),
     }
 }
 
@@ -496,7 +504,7 @@ async fn kill_job(
 
     let signal = match parse_signal(signal_name) {
         Some(s) => s,
-        None => return ExecResult::failure(1, format!("kill: unknown signal: {signal_name}")),
+        None => return ExecResult::failure(2, format!("kill: unknown signal: {signal_name}")),
     };
     let terminating = matches!(
         signal,
@@ -609,11 +617,11 @@ async fn kill_job(
 fn kill_pid(target: &str, signal_name: &str) -> ExecResult {
     let signal = match parse_signal(signal_name) {
         Some(s) => s,
-        None => return ExecResult::failure(1, format!("kill: unknown signal: {signal_name}")),
+        None => return ExecResult::failure(2, format!("kill: unknown signal: {signal_name}")),
     };
     let pid_num: i32 = match target.parse() {
         Ok(p) => p,
-        Err(_) => return ExecResult::failure(1, format!("kill: invalid pid: {target}")),
+        Err(_) => return ExecResult::failure(2, format!("kill: invalid pid: {target}")),
     };
     let pid = nix::unistd::Pid::from_raw(pid_num);
     if let Err(e) = nix::sys::signal::kill(pid, signal) {

@@ -56,7 +56,7 @@ impl Tool for Touch {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "touch: missing path argument");
+            return ExecResult::failure(2, "touch: missing path argument");
         }
 
         // POSIX: `touch a b c` touches each. Continue past errors and report

@@ -64,14 +64,14 @@ impl Tool for KaishOutputLimit {
             Some("set") => {
                 let size_str = match args.get_string("", 1) {
                     Some(s) => s,
-                    None => return ExecResult::failure(1, "kaish-output-limit set: missing size (e.g., 64K, 1M, 65536)"),
+                    None => return ExecResult::failure(2, "kaish-output-limit set: missing size (e.g., 64K, 1M, 65536)"),
                 };
                 match parse_size(&size_str) {
                     Ok(bytes) => {
                         ctx.output_limit.set_limit(Some(bytes));
                         show_config(ctx)
                     }
-                    Err(e) => ExecResult::failure(1, format!("kaish-output-limit set: {}", e)),
+                    Err(e) => ExecResult::failure(2, format!("kaish-output-limit set: {}", e)),
                 }
             }
             Some("on") => {
@@ -87,30 +87,30 @@ impl Tool for KaishOutputLimit {
             Some("head") => {
                 let size_str = match args.get_string("", 1) {
                     Some(s) => s,
-                    None => return ExecResult::failure(1, "kaish-output-limit head: missing size"),
+                    None => return ExecResult::failure(2, "kaish-output-limit head: missing size"),
                 };
                 match parse_size(&size_str) {
                     Ok(bytes) => {
                         ctx.output_limit.set_head_bytes(bytes);
                         show_config(ctx)
                     }
-                    Err(e) => ExecResult::failure(1, format!("kaish-output-limit head: {}", e)),
+                    Err(e) => ExecResult::failure(2, format!("kaish-output-limit head: {}", e)),
                 }
             }
             Some("tail") => {
                 let size_str = match args.get_string("", 1) {
                     Some(s) => s,
-                    None => return ExecResult::failure(1, "kaish-output-limit tail: missing size"),
+                    None => return ExecResult::failure(2, "kaish-output-limit tail: missing size"),
                 };
                 match parse_size(&size_str) {
                     Ok(bytes) => {
                         ctx.output_limit.set_tail_bytes(bytes);
                         show_config(ctx)
                     }
-                    Err(e) => ExecResult::failure(1, format!("kaish-output-limit tail: {}", e)),
+                    Err(e) => ExecResult::failure(2, format!("kaish-output-limit tail: {}", e)),
                 }
             }
-            Some(other) => ExecResult::failure(1, format!(
+            Some(other) => ExecResult::failure(2, format!(
                 "kaish-output-limit: unknown subcommand '{}' (try: set, on, off, head, tail)",
                 other
             )),

@@ -142,7 +142,7 @@ impl Tool for Find {
             // `lstat`, which is the only way to tell a link from a file.
             Some("l") => EntryTypes::files_only(),
             Some(t) => {
-                return ExecResult::failure(1, format!("find: invalid type '{}': use 'f', 'd', or 'l'", t));
+                return ExecResult::failure(2, format!("find: invalid type '{}': use 'f', 'd', or 'l'", t));
             }
             None => EntryTypes::all(),
         };
@@ -155,7 +155,7 @@ impl Tool for Find {
                 Ok(d) => Some(d),
                 Err(_) => {
                     return ExecResult::failure(
-                        1,
+                        2,
                         format!("find: invalid -maxdepth '{s}': expected a non-negative integer"),
                     )
                 }
@@ -176,7 +176,7 @@ impl Tool for Find {
                 Ok(d) => Some(d),
                 Err(_) => {
                     return ExecResult::failure(
-                        1,
+                        2,
                         format!("find: invalid -mindepth '{s}': expected a non-negative integer"),
                     )
                 }
@@ -325,7 +325,7 @@ impl Tool for Find {
                     Ok(glob) => walker = walker.with_pattern(glob),
                     Err(e) => {
                         return ExecResult::failure(
-                            1,
+                            2,
                             format!("find: invalid pattern '{}': {}", pattern, e),
                         );
                     }

@@ -440,8 +440,10 @@ async fn sed_in_place_without_operands_is_a_loud_error() {
     let dir = tempdir();
     let session = kernel_at(dir.path());
     // Editing a stream in place is meaningless — loud error, not a fall-through.
+    // No file operand is argv the caller can fix, so this is a usage error (2),
+    // not the per-file operational failure the case above pins at 1.
     let r = run(&session, "echo hi | sed -i 's/h/H/'").await;
-    assert_eq!(r.code, 1, "no file operands must error: {}", r.err);
+    assert_eq!(r.code, 2, "no file operands must be a usage error: {}", r.err);
     assert!(r.err.contains("requires file operands"), "err: {}", r.err);
 }
 

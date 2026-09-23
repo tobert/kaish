@@ -764,9 +764,10 @@ script — it exits 1 when `secret` IS in `f` and 0 when it is absent, but
 
 Env var: `KAISH_TRASH=1` enables trash at startup.
 
-`set -o NAME` / `set +o NAME` on a name kaish doesn't implement exits **1**
+`set -o NAME` / `set +o NAME` on a name kaish doesn't implement exits **2**
 and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`, `trash`) — it never
-silently no-ops.
+silently no-ops. The name is argv the caller can fix, so this is a usage
+error, not an operational 1.
 `set -o approvals` and `set -o latch` — retired spellings from the removed
 approval subsystem and the confirmation latch — fail the same way; they
 turn nothing on. A bare unrecognized short flag (`-u`, `-x`) is still

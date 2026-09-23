@@ -80,11 +80,11 @@ impl DevFs {
         trimmed.is_empty() || trimmed == "."
     }
 
+    // "/dev/{path}" alone — "no such device" restated `ErrorKind::NotFound`'s
+    // own meaning in different words, and `BackendError::NotFound`'s Display
+    // adds "not found:" once when this crosses that boundary.
     fn not_found(path: &Path) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no such device: /dev/{}", path.display()),
-        )
+        io::Error::new(io::ErrorKind::NotFound, format!("/dev/{}", path.display()))
     }
 
     /// The error for asking an infinite device for "everything". Names the fix.
@@ -191,9 +191,12 @@ impl Filesystem for DevFs {
             return Ok(Self::NAMES.iter().map(|n| Self::entry(n)).collect());
         }
         if Self::device(path).is_some() {
+            // The path alone — `ErrorKind::NotADirectory` already says what
+            // happened, and `BackendError::NotDirectory`'s Display adds
+            // "not a directory:" once when this crosses that boundary.
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                format!("not a directory: /dev/{}", path.display()),
+                format!("/dev/{}", path.display()),
             ));
         }
         Err(Self::not_found(path))
@@ -220,14 +223,14 @@ impl Filesystem for DevFs {
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             format!("/dev is read-only: cannot create {}", path.display()),
         ))
     }
 
     async fn remove(&self, path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             format!("/dev is read-only: cannot remove {}", path.display()),
         ))
     }
@@ -338,6 +341,26 @@ mod tests {
         assert_eq!(
             fs.write(Path::new("sda"), b"x").await.unwrap_err().kind(),
             io::ErrorKind::NotFound
+        );
+    }
+
+    /// `DevFs` can't join `conformance::CASES` (most cases assume a generic
+    /// writable root — `mkdir`/`symlink`/arbitrary paths — and DevFs is a
+    /// fixed set of devices), so this pins the same invariant
+    /// `conformance::a_missing_path_names_the_phrase_once` checks for
+    /// LocalFs/MemoryFs/OverlayFs directly against `DevFs`: once `not_found`
+    /// crosses into a `BackendError`, the "not found" phrase appears exactly
+    /// once.
+    #[tokio::test]
+    async fn unknown_device_names_the_phrase_once() {
+        let fs = DevFs::new();
+        let io_err = fs.read(Path::new("sda")).await.unwrap_err();
+        let backend_err: kaish_types::backend::BackendError = io_err.into();
+        let rendered = backend_err.to_string();
+        assert_eq!(
+            rendered.matches("not found").count(),
+            1,
+            "doubled phrase: {rendered}"
         );
     }
 
