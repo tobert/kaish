@@ -349,3 +349,155 @@ async fn colon_adjacent_tilde_in_assignment_value_is_unsupported() {
     assert!(out.ok(), "{out:?}");
     assert_eq!(out.text_out().trim(), "a:~/b", "kaish does not expand ~ after a colon (unlike bash)");
 }
+
+// --- alias bodies: bash re-parses the text, so a bare ~ expands ------------
+//
+// bash (HOME=/tmp/tildetest/h, aliases need `shopt -s expand_aliases` and a
+// separate command line from the `alias` statement, since bash resolves
+// aliases while READING a command line — a `-c` script's whole text is read
+// before any of it runs):
+//   alias e='echo ~'; e         -> /tmp/tildetest/h
+//   alias e='echo ~/x'; e       -> /tmp/tildetest/h/x
+//   alias ll='cd ~'; ll; pwd    -> /tmp/tildetest/h
+//
+// This was a regression from the round-1 fix: alias invocation splits the
+// stored text on whitespace and wraps every piece as `Expr::Literal`
+// (`kernel.rs`'s `execute_command_depth`), so no `Expr::TildePath` node
+// existed for a bare `~` piece to become. Main expanded these through the
+// value-level sink the round-1 fix removed. `classify_alias_word` fixes it
+// by lexing each piece in isolation and reclassifying one that lexes to
+// exactly one `Tilde`/`TildePath` token — reusing the same unquoted-word
+// rule the string door uses, without giving alias bodies quote-awareness,
+// glob expansion, or `$VAR` interpolation they never had.
+#[tokio::test]
+async fn alias_body_bare_tilde_expands() {
+    let kernel = kernel();
+    let out = kernel.execute("alias e='echo ~'; e").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}\n"));
+}
+
+#[tokio::test]
+async fn alias_body_bare_tilde_path_expands() {
+    let kernel = kernel();
+    let out = kernel.execute("alias e='echo ~/x'; e").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/x\n"));
+}
+
+#[tokio::test]
+async fn alias_body_cd_tilde_expands() {
+    let kernel = kernel();
+    let out = kernel.execute("mkdir -p /home/fixture; alias ll='cd ~'; ll; pwd").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), HOME);
+}
+
+// Pre-existing, unrelated limitation, checked (not fixed) per the review's
+// request: alias-body splitting is `split_whitespace`, never a re-lex, so
+// it has never stripped quotes at all. A quoted `'~'` piece keeps its
+// quote MARKS as literal text — this was already true on main, before
+// either tilde fix: the old value-level sink only fired on a string
+// starting with `~`, and `'~'` (with the quote marks) does not. Not this
+// suite's bug; pinned so a future alias rewrite doesn't silently change it.
+#[tokio::test]
+async fn alias_body_quoted_tilde_keeps_its_quote_marks_pre_existing() {
+    let kernel = kernel();
+    let out = kernel.execute("alias e=\"echo '~'\"; e").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), "'~'\n", "alias bodies never strip quotes - not this fix's bug");
+}
+
+// --- glob words with a leading tilde-prefix ---------------------------------
+//
+// bash (HOME=/tmp/tildetest/h, with h/src/{a,b}.rs present):
+//   ls ~/src/*.rs                        -> h/src/a.rs \n h/src/b.rs
+//   echo ~/src/*.rs                      -> h/src/a.rs h/src/b.rs
+//   for f in ~/src/*.rs; do echo $f; done -> h/src/a.rs \n h/src/b.rs
+//   x=~/src/*.rs; echo $x                -> h/src/*.rs  (tilde expands,
+//                                            the glob itself does not -
+//                                            bash never pathname-expands
+//                                            an assignment value)
+//
+// `~/src/*.rs` lexes as one `GlobWord` (`lexer::is_glob_mergeable` folds
+// `Tilde`/`TildePath` into a glob run), so it becomes a single
+// `Expr::GlobPattern("~/src/*.rs")` — a node the round-1 fix never taught
+// to expand, since glob patterns were never `Expr::TildePath`. Before this
+// fix `ls ~/src/*.rs` failed with "no matches: ~/src/*.rs" (confirmed on
+// this branch pre-fix; the deleted `apply_tilde_expansion` never reached a
+// `GlobPattern` either, since every call site special-cased and
+// `continue`d past it before reaching the value-level sink — so this was
+// ALSO broken on main, not a regression from round 1).
+async fn kernel_with_src_files() -> Kernel {
+    let kernel = kernel();
+    kernel
+        .execute("mkdir -p /home/fixture/src; touch /home/fixture/src/a.rs /home/fixture/src/b.rs")
+        .await
+        .unwrap();
+    kernel
+}
+
+#[tokio::test]
+async fn echo_glob_word_with_tilde_prefix_expands_before_matching() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("echo ~/src/*.rs").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/src/a.rs {HOME}/src/b.rs\n"));
+}
+
+#[tokio::test]
+async fn ls_glob_word_with_tilde_prefix_expands_before_matching() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("ls ~/src/*.rs").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/src/a.rs\n{HOME}/src/b.rs"));
+}
+
+#[tokio::test]
+async fn for_loop_glob_word_with_tilde_prefix_expands_before_matching() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("for f in ~/src/*.rs; do echo $f; done").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/src/a.rs\n{HOME}/src/b.rs\n"));
+}
+
+#[tokio::test]
+async fn assignment_glob_word_with_tilde_prefix_expands_tilde_but_not_glob() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("x=~/src/*.rs; echo $x").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/src/*.rs\n"));
+}
+
+#[tokio::test]
+async fn quoted_glob_word_with_tilde_prefix_never_expands() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("echo '~/src/*.rs'").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), "~/src/*.rs\n");
+}
+
+// --- background job command display: show the source word, not "..." -----
+//
+// `Kernel::format_pipeline`/`format_expr` render `/v/jobs/N/command` — a
+// diagnostic of what the statement WAS, matching `ast::plan::render_expr`'s
+// contract ("unexpanded"). `Expr::TildePath` fell into `format_expr`'s
+// catch-all `_ => "..."` before this fix.
+#[tokio::test]
+async fn background_job_command_shows_the_tilde_word_not_ellipsis() {
+    let kernel = kernel();
+    kernel.execute("echo ~/f &").await.unwrap();
+    // Poll briefly for the job to register; this mirrors
+    // `background_execution_tests.rs`'s own wait pattern.
+    let mut command_text = String::new();
+    for _ in 0..50 {
+        let out = kernel.execute("cat /v/jobs/1/command").await.unwrap();
+        if out.ok() {
+            command_text = out.text_out().into_owned();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(command_text.contains("~/f"), "expected the raw ~/f word, got: {command_text:?}");
+    assert!(!command_text.contains("..."), "TildePath must not render as an ellipsis: {command_text:?}");
+}
