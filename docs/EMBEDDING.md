@@ -786,15 +786,16 @@ let result = kernel.execute_argv("my-tool", &[Value::Bytes(blob)]).await?;
 Semantics:
 
 - **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no command
-  substitution, no word splitting — the "single-quoted word" rule taken to its
-  end. `execute_argv("echo", &[Value::String("*.txt".into())])` emits `*.txt`.
-  And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
-  door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
-  a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
-  choose, which is the point of the typed door. **Exception:** a leading `~` is
-  expanded against the session `HOME`, matching the string door (kaish expands
-  `~` uniformly, even in quotes — so the doors agree); pass a pre-resolved path
-  if you need it byte-literal.
+  substitution, no word splitting, and no tilde expansion — the "single-quoted
+  word" rule taken to its end. `execute_argv("echo", &[Value::String("*.txt"
+  .into())])` emits `*.txt`; `execute_argv("echo", &[Value::String("~/a".into())
+  ])` emits `~/a` unexpanded, same as `execute("echo '~/a'")` — an argv token
+  carries no quoting, so it is treated the same as a quoted source word. Pass
+  an already-expanded path if you need one resolved. And no **number
+  coercion**: a `Value::String("00")` stays `"00"` (the string door's lexer
+  would coerce the bare word `00` to an integer and print `0`). Pass a
+  `Value::Int`/`Value::Float` when you mean a number — the type is yours to
+  choose, which is the point of the typed door.
 - **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
   no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
   not a subset that drops expressiveness, it's a different door that converges with
@@ -1414,12 +1415,15 @@ fn myapp_data_dir() -> PathBuf {
 }
 ```
 
-For user-facing path handling, use `expand_tilde`:
+For user-facing path handling, use `expand_tilde`. It takes the home
+directory explicitly — the kernel is hermetic and never reads the host
+`$HOME` on its own — so pass the session's `HOME` (or `None`, which leaves
+`~` unexpanded rather than guessing):
 
 ```rust
 use kaish_kernel::expand_tilde;
 
-let path = expand_tilde("~/projects/myrepo");
+let path = expand_tilde("~/projects/myrepo", Some("/home/username"));
 // → /home/username/projects/myrepo
 ```
 
