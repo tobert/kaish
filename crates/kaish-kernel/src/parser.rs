@@ -57,12 +57,14 @@ impl Drop for ContinuationGapsGuard {
 
 thread_local! {
     /// The full source text of the current [`parse`] call, installed
-    /// alongside [`CONTINUATION_GAPS`] by the same entry point. Read only by
-    /// `validate_glued_args`'s own success branch, to slice the exact
-    /// refused word for its error message — unlike `CONTINUATION_GAPS`,
-    /// nothing here is load-bearing for parse correctness. A missing or
-    /// stale value just means a message stays at [`GLUED_ARGS_MESSAGE`]'s
-    /// generic examples instead of naming the word, never a wrong parse.
+    /// alongside [`CONTINUATION_GAPS`] by the same entry point. `glued_args_message`
+    /// reads it to slice the exact refused word for its error message — a
+    /// missing value there just means the message falls back to
+    /// [`GLUED_ARGS_MESSAGE`]'s generic examples. But `reject_glued_args`
+    /// also reads it to decide whether a glued run FUSES (`fuse_plain_eq_run`),
+    /// which is load-bearing for parse correctness: same as
+    /// [`CONTINUATION_GAPS`], a miss here is an internal bug, not a quiet
+    /// default, and must panic rather than silently skip fusion.
     static PARSE_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -2436,36 +2438,48 @@ fn is_glue_candidate(arg: &Arg) -> bool {
     )
 }
 
-/// The exact, unprocessed source text of `arg` at `span`, when `arg` is a
-/// plain literal string whose value IS that source text verbatim — a
-/// bareword or a bare `=`/`==`/`!=` operator token, never a quoted string
-/// (its source carries quote marks the value lacks), a substitution, or a
-/// typed non-string literal (`Int`, `Bool`, …).
+/// The exact, unprocessed source text of `arg` at `span`, when `arg` is
+/// plain enough for [`fuse_plain_eq_run`] to join losslessly: a bareword or
+/// a bare `=`/`==`/`!=` operator token (`Literal(String)` whose value IS the
+/// source text verbatim), or a numeral (`Literal(Int|Float|Bool)`,
+/// `NumericLiteral`) — for a numeral, the SOURCE SLICE is returned, never
+/// the formatted value, so `1.50` stays `1.50` and never becomes `1.5`.
 ///
-/// This is [`fuse_plain_eq_run`]'s safety test: two such fragments
-/// concatenate losslessly with no runtime value in play, unlike a quoted
-/// prefix (`"foo"bar`) or a substitution (`/tmp/$(echo x).txt`), where an
-/// implicit join would hide a real value boundary from the reader.
+/// `None` for everything else: a quoted string (its source carries quote
+/// marks the value lacks), `VarRef`, `CommandSubst`, `Arithmetic`,
+/// `GlobPattern`, and flags (`LongFlag`/`ShortFlag`) all keep the run
+/// un-fusable. A quoted prefix (`"foo"bar`) or a substitution
+/// (`/tmp/$(echo x).txt`) is exactly the case an implicit join must not
+/// hide: the value boundary there is real.
 fn plain_literal_source_text<'src>(arg: &Arg, span: Span, source: &'src str) -> Option<&'src str> {
-    let Arg::Positional(Expr::Literal(Value::String(s))) = arg else {
-        return None;
-    };
     let slice = source.get(span.start..span.end)?;
-    (slice == s).then_some(slice)
+    match arg {
+        Arg::Positional(Expr::Literal(Value::String(s))) => (slice == s).then_some(slice),
+        Arg::Positional(Expr::Literal(Value::Int(_) | Value::Float(_) | Value::Bool(_))) => {
+            Some(slice)
+        }
+        Arg::Positional(Expr::NumericLiteral { raw, .. }) => (slice == raw).then_some(slice),
+        _ => None,
+    }
 }
 
 /// Fuse a maximal glued run into one literal word when doing so is
-/// unambiguous: every member is a plain, unquoted literal
-/// ([`plain_literal_source_text`]) and at least one is bare `==` or `!=` —
-/// the two operators `test_operator_arg_parser` reads from
+/// unambiguous: every member is plain enough to hand back its own source
+/// text ([`plain_literal_source_text`]) and at least one is bare `==` or
+/// `!=` — the two operators `test_operator_arg_parser` reads from
 /// `Token::EqEq`/`Token::NotEq`. Neither can ever be part of a real
 /// `NAME=value` assignment (that needs exactly one bare `=`), so finding
 /// one in an otherwise-plain run proves the lexer split one word instead
 /// of the caller pasting two — `echo ===` (`EqEq` then `Eq`), `echo ==x`,
-/// and `echo a==b` all reach here. A run with a bare `=` but no `==`/`!=`
-/// (`./bin=1`) or a typed value (`x==1`'s `Int`) is left for the caller to
-/// reject exactly as before: single bare `=` still marks a run that looks
-/// like a botched assignment, which stays an error asking for a quote.
+/// `echo a==b`, and a numeral glued the same way (`echo ===1`, `echo
+/// ===2024===`) all reach here and fuse. `x==1` also fuses now (`Int` is
+/// no longer excluded), and reads as the bareword `x==1` — the same
+/// "reached the parser as one plain word" answer `x==y` already gave.
+///
+/// A run with a bare `=` but no `==`/`!=` (`./bin=1`) is left for the
+/// caller to reject exactly as before: a single bare `=` still marks a run
+/// that looks like a botched assignment, which stays an error asking for a
+/// quote.
 ///
 /// Returns `None` when the run is not eligible.
 fn fuse_plain_eq_run(run: &[(Arg, Span)], source: &str) -> Option<Arg> {
@@ -2521,8 +2535,13 @@ fn reject_glued_args<'src>(
             end += 1;
         }
         if end - i >= 2 {
-            if let Some(fused) = source.as_deref().and_then(|src| fuse_plain_eq_run(&args[i..end], src))
-            {
+            let Some(src) = source.as_deref() else {
+                unreachable!(
+                    "reject_glued_args ran without parse's SourceTextGuard \
+                     installed on this thread"
+                );
+            };
+            if let Some(fused) = fuse_plain_eq_run(&args[i..end], src) {
                 result.push(fused);
                 i = end;
                 continue;
@@ -2548,10 +2567,11 @@ const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are 
 ///
 /// Called ONLY from [`validate_glued_args`]'s own success branch, where the
 /// caller guarantees `span` is the full, corrected run: a bare-punctuation
-/// paste with a typed value (`x==1`) has no `/tmp/`, no `$(echo x).txt`,
+/// paste with a single `=` and no `==`/`!=` marker (`./bin=1`, still a real
+/// paste — see [`fuse_plain_eq_run`]) has no `/tmp/`, no `$(echo x).txt`,
 /// and no `$dir` to relate to, so the shipped examples were pointing at a
 /// shape that never occurred, and naming the actual word fixes that.
-/// (`echo ===` itself is no longer a paste at all — see
+/// (`echo ===` and `x==1` are no longer a paste at all — see
 /// `fuse_plain_eq_run`.) `reject_glued_args`'s own
 /// raw span, and the "no run found" fallback that leaves the grammar's span
 /// standing (documented on `validate_glued_args`, and on `is_word_token` for

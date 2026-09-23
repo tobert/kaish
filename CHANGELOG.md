@@ -35,8 +35,10 @@ breaking entries are marked **BREAKING**.
   section separator) no longer fails to parse. `=`/`==`/`!=` stayed their
   own tokens next to a bareword with no space, so the lexer split one word
   into pieces that then looked pasted; such a run now fuses back into one
-  literal word unless it also carries a typed value (`x==1` still errors,
-  unchanged) or a substitution.
+  literal word whenever it carries a bare `==`/`!=` — `echo ===1`,
+  `echo ===1.50===` (source spelling kept), and `export X==1` all parse
+  now. A run with a single bare `=` and no `==`/`!=` (`./bin=1`), or a
+  substitution, still errors, unchanged.
 - Usage errors across the builtins now exit 2 instead of 1: a missing operand,
   an unknown subcommand, a flag value the builtin cannot use. The sweep and a
   follow-up review together cover 114 sites in 56 builtins. What a caller can
