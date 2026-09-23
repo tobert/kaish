@@ -378,17 +378,24 @@ async fn alpha_class_interval_matches_gnu_grep() {
 /// `-i '[[:upper:]]'` case-folds a non-ASCII letter, as GNU does: `héllo
 /// wörld` matches because `é`/`ö` fold to letters `[:upper:]` recognizes.
 ///
-/// Not a full GNU match: glibc's `-i` additionally widens `[:upper:]`/
-/// `[:lower:]` to `[:alpha:]` outright, so GNU also matches the all-CJK line
-/// (case-less, so no fold reaches it). Replicating that would mean passing
-/// `ignore_case` into the class translation, which the sed/awk branch
-/// stacked on this one needs `gnu_bre_to_regex`'s signature to not grow.
+/// The all-CJK line is GNU's too; see the gap test below.
 #[tokio::test]
 async fn upper_class_case_folds_non_ascii_letters_like_gnu_grep() {
     let (_dir, kernel) = unicode_fixture_kernel(UNICODE_ALPHA_FIXTURE);
     let (out, code) = run(&kernel, r#"grep -i '[[:upper:]]' fx.txt"#).await;
     assert_eq!(code, 0);
-    assert_eq!(lines(&out), &[UNICODE_ALPHA_FIXTURE[0]]);
+    assert!(lines(&out).contains(&UNICODE_ALPHA_FIXTURE[0]));
+}
+
+/// glibc's `-i` widens `[:upper:]`/`[:lower:]` to `[:alpha:]`, so GNU also
+/// matches the case-less all-CJK line. kaish's class table does not see `-i`.
+#[tokio::test]
+#[ignore = "gap: GNU -i widens [:upper:]/[:lower:] to [:alpha:]"]
+async fn gap_ignore_case_widens_upper_class_to_alpha_like_gnu_grep() {
+    let (_dir, kernel) = unicode_fixture_kernel(UNICODE_ALPHA_FIXTURE);
+    let (out, code) = run(&kernel, r#"grep -i '[[:upper:]]' fx.txt"#).await;
+    assert_eq!(code, 0);
+    assert_eq!(lines(&out), UNICODE_ALPHA_FIXTURE);
 }
 
 /// GNU grep's output for the wider bracket-class table, row by row.
