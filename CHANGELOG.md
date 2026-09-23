@@ -123,6 +123,10 @@ breaking entries are marked **BREAKING**.
 - `grep -w` keeps an alternation inside the word boundaries and accepts a
   pattern that ends on punctuation (`grep -w 'KjCaller {'`), as GNU grep does.
 - `grep -o` prints only non-empty matches, as GNU grep does.
+- `[[:alpha:]]` and its eleven siblings are Unicode-aware in both `grep` and
+  `grep -E`, matching GNU grep in a UTF-8 locale: `grep -o '[[:alpha:]]'`
+  on `héllo 日本語` now prints every letter, not just the ASCII ones.
+  `[:digit:]` stays ASCII-only, as GNU's does.
 - A pattern that arrives through a variable (`p='[cast:'; grep "$p" f`) now
   exits 2 like a literal one. The validator skips a computed pattern, so the
   failure surfaced from the regex builders inside `grep` instead.
