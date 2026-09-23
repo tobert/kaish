@@ -115,6 +115,23 @@ async fn external_resolution_is_hermetic_no_os_path_fallback() {
 }
 
 #[tokio::test]
+async fn spawn_command_resolution_is_hermetic_no_os_path_fallback() {
+    // Same shape as `external_resolution_is_hermetic_no_os_path_fallback`:
+    // `spawn`'s own `--command` resolution used to fall back to
+    // `std::env::var("PATH")` when kaish's scope had none, a hermeticity
+    // leak the external-command path never had. `printenv` is a real
+    // external present on every Linux PATH, so resolving it here would
+    // prove the leak.
+    let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // initial_vars empty → no PATH
+    let result = kernel.execute("spawn --command printenv").await.unwrap();
+    assert_eq!(
+        result.code, 127,
+        "with no PATH in scope, spawn's own resolution must report \
+         command-not-found, not fall back to the OS PATH: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn exporting_a_structured_value_to_a_subprocess_is_a_loud_error() {
     // A list/record can't cross the process boundary; the external spawn refuses
     // rather than silently JSON-serializing it into the child's environment.
@@ -540,6 +557,167 @@ async fn env_prefix_reaches_subprocess_then_does_not_leak() {
     );
 }
 
+// ============================================================================
+// `spawn` env hermeticity — same contract as the external-command path above,
+// pinned separately because `spawn` builds its own child environment rather
+// than going through `try_execute_external`.
+// ============================================================================
+
+#[tokio::test]
+async fn spawn_child_does_not_see_an_unexported_os_var() {
+    // Same shape as `external_command_is_hermetic_by_default`: cargo always
+    // sets PATH for the test process, but a kernel with no `initial_vars`
+    // never exports it, so a spawned child must not see it either. An
+    // absolute path (`spawn` no longer has an OS-PATH fallback of its own —
+    // see `spawn_command_resolution_is_hermetic_no_os_path_fallback`)
+    // sidesteps spawn's own `--command` resolution entirely, so a failure
+    // here can only mean the CHILD's own `printenv PATH` came up empty.
+    // Asserting printenv's own "var not found" exit code (1), not just
+    // `!ok()`, proves the child actually ran rather than spawn failing to
+    // resolve or launch it at all (a different failure with the same
+    // `!ok()`-and-empty-stdout shape).
+    assert!(
+        std::env::var_os("PATH").is_some(),
+        "test precondition: cargo should set PATH"
+    );
+    let kernel = Kernel::new(KernelConfig::repl()).expect("kernel"); // no initial_vars
+    let result = kernel
+        .execute("spawn --command /usr/bin/printenv --argv PATH")
+        .await
+        .unwrap();
+    assert_eq!(
+        result.code, 1,
+        "printenv's own exit code for a missing var, proving the child ran: {result:?}"
+    );
+    assert!(
+        result.text_out().trim().is_empty(),
+        "no PATH in the child's env, got stdout={:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn spawn_child_sees_exported_and_initial_vars() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("MY_INITIAL".to_string(), Value::String("from_initial".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
+
+    let initial = kernel
+        .execute("spawn --command /usr/bin/printenv --argv MY_INITIAL")
+        .await
+        .unwrap();
+    assert!(initial.ok(), "initial_vars must reach the spawned child: {initial:?}");
+    assert_eq!(initial.text_out().trim(), "from_initial");
+
+    let exported = kernel
+        .execute("export MY_EXPORTED=from_export; spawn --command /usr/bin/printenv --argv MY_EXPORTED")
+        .await
+        .unwrap();
+    assert!(exported.ok(), "an exported var must reach the spawned child: {exported:?}");
+    assert_eq!(exported.text_out().trim(), "from_export");
+}
+
+#[tokio::test]
+async fn spawn_env_flag_overrides_an_exported_var() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("MY_VAR".to_string(), Value::String("exported_value".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
+
+    let result = kernel
+        .execute(r#"spawn --command /usr/bin/printenv --argv MY_VAR --env '{"MY_VAR":"overridden"}'"#)
+        .await
+        .unwrap();
+    assert!(result.ok(), "spawn --env should succeed: {result:?}");
+    assert_eq!(result.text_out().trim(), "overridden");
+}
+
+#[tokio::test]
+async fn spawn_clear_env_starts_empty_then_applies_env() {
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("MY_VAR".to_string(), Value::String("exported_value".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars)).expect("kernel");
+
+    // `--clear-env` drops even the kernel's own exported vars. Asserting the
+    // exact code (1, printenv's own "var not found") rather than just
+    // `!ok()` proves the child ran under a genuinely cleared env, not that
+    // spawn failed to launch it at all.
+    let cleared = kernel
+        .execute("spawn --command /usr/bin/printenv --argv MY_VAR --clear-env")
+        .await
+        .unwrap();
+    assert_eq!(cleared.code, 1, "--clear-env must drop exported vars too: {cleared:?}");
+    assert!(cleared.text_out().trim().is_empty());
+
+    // `--env` still applies on top of the cleared environment.
+    let with_env = kernel
+        .execute(r#"spawn --command /usr/bin/printenv --argv ONLY --clear-env --env '{"ONLY":"present"}'"#)
+        .await
+        .unwrap();
+    assert!(with_env.ok(), "--env on top of --clear-env should succeed: {with_env:?}");
+    assert_eq!(with_env.text_out().trim(), "present");
+}
+
+// ============================================================================
+// `spawn` default cwd — mirrors the shell's `cd`, not the kaish process's own
+// OS working directory.
+// ============================================================================
+
+#[tokio::test]
+async fn spawn_without_cwd_uses_the_shells_cwd_not_the_process_cwd() {
+    let kernel = repl_kernel();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_string_lossy().to_string();
+    kernel.execute(&format!("cd {path}")).await.unwrap();
+
+    let result = kernel.execute("spawn --command pwd").await.unwrap();
+    assert!(result.ok(), "spawn pwd should succeed: {result:?}");
+    assert!(
+        result.text_out().contains(&path),
+        "spawn with no --cwd must run in the shell's cwd ({path}), got: {:?}",
+        result.text_out()
+    );
+}
+
+#[cfg(feature = "overlay")]
+#[tokio::test]
+async fn spawn_without_cwd_refuses_a_virtual_shell_cwd() {
+    // Same shape as `external_command_under_overlay_gives_friendly_virtual_cwd_error`:
+    // an overlay cwd has no real filesystem location, so `spawn` with no
+    // `--cwd` override must refuse loudly rather than silently falling back
+    // to the kaish process's own OS cwd.
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut vars = HashMap::new();
+    vars.insert(
+        "PATH".to_string(),
+        Value::String(std::env::var("PATH").unwrap_or_default()),
+    );
+    let config = KernelConfig::agent_with_root(dir.path().to_path_buf())
+        .with_overlay(true)
+        .with_trash(false)
+        .with_allow_unwrapped_commands(true)
+        .with_initial_vars(vars);
+    let kernel = Kernel::new(config).expect("overlay kernel");
+
+    let result = kernel.execute("spawn --command true").await.unwrap();
+    assert_eq!(result.code, 127, "must refuse, not silently spawn in the process cwd: {result:?}");
+    assert!(
+        result.err.contains("real filesystem"),
+        "should explain the actual cause: {result:?}"
+    );
+}
+
 // Linux-gated + absolute path so the external spawn is unconditionally taken.
 // The Decision-D export guard fires at spawn time, so it needs a real binary —
 // a nonexistent path errors on resolution before the guard is reached.
@@ -771,8 +949,10 @@ async fn external_binary_output_redirects_raw() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn spawn_forwards_and_captures_binary() {
-    // Binary into an external command's stdin (forwarded raw) and back out
-    // (captured as bytes): xxd -r -p makes the 0xFF byte, cat echoes it.
+    // Binary into an external command's stdin (forwarded raw, through the
+    // same streaming StdinPolicy::Piped path spawn_streams_stdin_instead_
+    // of_draining_to_eof_first pins directly) and back out (captured as
+    // bytes): xxd -r -p makes the 0xFF byte, cat echoes it.
     let kernel = repl_kernel();
     let r = kernel
         .execute("echo ff | xxd -r -p | spawn --command cat")
@@ -781,6 +961,18 @@ async fn spawn_forwards_and_captures_binary() {
     assert!(r.is_bytes(), "binary round-trip through cat should be Bytes");
     assert_eq!(r.out_bytes(), Some(&[0xffu8][..]));
 }
+
+// spawn's own stdin streaming (vs. its old eager-drain-to-EOF) is pinned as
+// a unit test in spawn.rs (test_spawn_streams_stdin_instead_of_draining_to_
+// eof_first), not here: kaish's `A | B` pipeline hands a stage its full
+// input only once the upstream stage RETURNS (never chunk by chunk — see
+// job_live_output_tests.rs's own doc comment on this), so a script-level
+// `slow-producer | spawn ...` proves the pipeline's own stage-to-stage
+// handoff, not spawn's stdin handling — confirmed by `yes | head` alone
+// (no spawn involved) hanging identically. The unit test instead feeds
+// spawn a live `scheduler::PipeReader` directly, the same seam
+// `Kernel::execute_with_pipe_stdin` uses for a frontend's own live process
+// stdin, bypassing the pipeline entirely.
 
 // ============================================================================
 // Bounded-Stream Overflow Tests (GH #191)

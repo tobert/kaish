@@ -178,13 +178,80 @@ pub(crate) fn hermetic_env(scope: &Scope) -> anyhow::Result<Vec<(String, String)
 /// guard is the single place that covers all returns — explicit per-return
 /// aborts were error-prone (an earlier version missed the two `Inherit`
 /// returns).
-struct AbortStdinCopyOnDrop(Option<tokio::task::JoinHandle<()>>);
+struct AbortStdinCopyOnDrop(Option<tokio::task::JoinHandle<Result<(), String>>>);
+
+impl AbortStdinCopyOnDrop {
+    /// Take the handle out without aborting it. Used on the success path,
+    /// where the task is expected to stop on its own shortly after the
+    /// child exits (the next write to its now-closed stdin pipe fails), so
+    /// its `Result` is worth collecting rather than discarding — see the
+    /// call site in `spawn_process`'s captured-output branch.
+    fn take(&mut self) -> Option<tokio::task::JoinHandle<Result<(), String>>> {
+        self.0.take()
+    }
+}
 
 impl Drop for AbortStdinCopyOnDrop {
     fn drop(&mut self) {
         if let Some(task) = self.0.take() {
             task.abort();
         }
+    }
+}
+
+/// A write to the child's own stdin pipe failing with `BrokenPipe` means the
+/// child closed its end — expected whenever it stops reading before EOF
+/// (`head -n1` after its first line, a command that never reads stdin at
+/// all). Any other write error is real: something is wrong on OUR end of
+/// the pipe, not "the child was done."
+fn stdin_write_error_is_expected(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::BrokenPipe
+}
+
+/// Copy `prefix` then `pipe_in` to `child_stdin`, without pre-draining.
+///
+/// `Ok(())` covers a clean EOF and an expected write failure (the child
+/// closed its own stdin — see [`stdin_write_error_is_expected`]). `Err`
+/// covers everything else: a genuine write failure, or ANY read failure on
+/// `pipe_in` — "the upstream pipe broke" and "there was no more stdin" are
+/// different facts, and this must not collapse them the way the pre-fix
+/// version did (`Err(_) => break`, indistinguishable from `Ok(0) => break`).
+///
+/// Generic over the reader/writer so a test can inject a source that fails
+/// at `poll_read`/`poll_write` — the real `pipe_stream()` reader never
+/// produces a read error by construction (its `poll_read` only ever returns
+/// `Ok`), so that branch is otherwise untestable through the real type.
+async fn copy_stdin_to_child<R, W>(prefix: Option<Vec<u8>>, mut pipe_in: R, mut child_stdin: W) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if let Some(data) = prefix
+        && let Err(e) = child_stdin.write_all(&data).await
+    {
+        return if stdin_write_error_is_expected(&e) {
+            Ok(()) // child closed stdin; dropping it signals EOF
+        } else {
+            Err(format!("writing to the child's stdin: {e}"))
+        };
+    }
+    let mut buf = [0u8; 8192];
+    loop {
+        match pipe_in.read(&mut buf).await {
+            Ok(0) => return Ok(()), // EOF
+            Ok(n) => {
+                if let Err(e) = child_stdin.write_all(&buf[..n]).await {
+                    return if stdin_write_error_is_expected(&e) {
+                        Ok(()) // child closed stdin
+                    } else {
+                        Err(format!("writing to the child's stdin: {e}"))
+                    };
+                }
+            }
+            Err(e) => return Err(format!("reading stdin: {e}")),
+        }
+        // Dropping child_stdin (on any return above) signals EOF to the child.
     }
 }
 
@@ -342,47 +409,29 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
     // concurrently — and a child that never reads stdin (or is killed) just
     // breaks the copy, which stops. A buffered byte vector is written verbatim
     // (no text detour), so binary stdin survives.
-    let stdin_task: Option<tokio::task::JoinHandle<()>> = match stdin {
+    let stdin_task: Option<tokio::task::JoinHandle<Result<(), String>>> = match stdin {
         StdinPolicy::Piped {
             prefix,
-            pipe: Some(mut pipe_in),
-        } => child.stdin.take().map(|mut child_stdin| {
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                if let Some(data) = prefix
-                    && child_stdin.write_all(&data).await.is_err()
-                {
-                    return; // child closed stdin; dropping it signals EOF
-                }
-                let mut buf = [0u8; 8192];
-                loop {
-                    match pipe_in.read(&mut buf).await {
-                        Ok(0) => break, // EOF
-                        Ok(n) => {
-                            if child_stdin.write_all(&buf[..n]).await.is_err() {
-                                break; // child closed stdin
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                // Dropping child_stdin signals EOF to the child.
-            })
-        }),
+            pipe: Some(pipe_in),
+        } => child
+            .stdin
+            .take()
+            .map(|child_stdin| tokio::spawn(copy_stdin_to_child(prefix, pipe_in, child_stdin))),
         // Write the buffered bytes from a detached task too — NOT inline.
         // An inline write blocks once the stdin pipe fills, and the output
         // drain hasn't spawned yet, so a child that emits a lot before
-        // consuming all its input (every pipe buffer full) deadlocks. A
-        // write error here is normal, not a failure: a child that closes
-        // stdin early (e.g. `head`) breaks the pipe. Dropping child_stdin
-        // signals EOF.
+        // consuming all its input (every pipe buffer full) deadlocks.
         StdinPolicy::Piped {
             prefix: Some(data),
             pipe: None,
         } => child.stdin.take().map(|mut child_stdin| {
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
-                let _ = child_stdin.write_all(&data).await;
+                match child_stdin.write_all(&data).await {
+                    Ok(()) => Ok(()),
+                    Err(e) if stdin_write_error_is_expected(&e) => Ok(()),
+                    Err(e) => Err(format!("writing to the child's stdin: {e}")),
+                }
             })
         }),
         StdinPolicy::Piped {
@@ -392,7 +441,7 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         | StdinPolicy::Inherit
         | StdinPolicy::Null => None,
     };
-    let _stdin_copy_guard = AbortStdinCopyOnDrop(stdin_task);
+    let mut stdin_copy_guard = AbortStdinCopyOnDrop(stdin_task);
 
     if inherit_output {
         // Job control path: use waitpid with WUNTRACED for Ctrl-Z support
@@ -653,6 +702,38 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             crate::kernel::exit_code_from_status(&status)
         };
 
+        // The stdin-copy task spawned above writes to the child's own stdin
+        // pipe, which the OS closes once the child exits — by now (the
+        // child has already been reaped) the task has stopped on its own,
+        // via EOF, an expected write failure (the child closed its own
+        // stdin early), or a genuine error. Collecting the `JoinHandle`
+        // (rather than letting the drop guard silently abort it, the old
+        // behavior) is what makes the last case visible instead of reading
+        // as silent EOF. Bounded by a short race against the task, not an
+        // unconditional await: a still-open, idle upstream producer (no
+        // more data, no close) can leave the task parked on its own next
+        // read past the point the child exited, and spawn must not block
+        // its return on a producer that may never write again — on that
+        // timeout the task is aborted (matching the old fire-and-forget
+        // behavior) and the diagnostic is given up on, not fabricated.
+        let stdin_error = match stdin_copy_guard.take() {
+            Some(mut task) => {
+                tokio::select! {
+                    res = &mut task => match res {
+                        Ok(Ok(())) => None,
+                        Ok(Err(msg)) => Some(msg),
+                        Err(e) if e.is_cancelled() => None,
+                        Err(e) => Some(format!("stdin task panicked: {e}")),
+                    },
+                    () = tokio::time::sleep(Duration::from_millis(200)) => {
+                        task.abort();
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
         // Read stdout as RAW bytes: text if valid UTF-8, else a Bytes
         // result, so `curl url`, `curl url > file.bin`, etc. keep binary
         // intact. stderr stays text. See docs/binary-data.md.
@@ -696,6 +777,12 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         }
         stderr.insert_str(0, &markers);
         result.stderr_published_len = if stderr_marker_tee.is_some() { stderr.len() } else { 0 };
+        if let Some(msg) = stdin_error {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!("{label}: {msg}\n"));
+        }
         result.err = stderr;
         result
     }
@@ -714,4 +801,100 @@ fn signal_leftover_group(target: Option<&crate::pidfd::KillTarget>) {
         return;
     };
     target.signal_pg(Signal::SIGKILL);
+}
+#[cfg(test)]
+mod stdin_copy_tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    /// Always fails `poll_read` — proves a genuine upstream read error is
+    /// surfaced as `Err`, not silently treated as EOF. `pipe_stream()`'s real
+    /// `PipeReader` cannot produce this by construction (see its own
+    /// `poll_read`), so this is the only way to exercise this branch.
+    struct FailingReader;
+    impl AsyncRead for FailingReader {
+        fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::other("synthetic upstream read failure")))
+        }
+    }
+
+    /// Yields one chunk then EOF — a normal, well-behaved upstream.
+    struct OneChunkThenEof(Option<&'static [u8]>);
+    impl AsyncRead for OneChunkThenEof {
+        fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            if let Some(chunk) = self.0.take() {
+                buf.put_slice(chunk);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Every write fails with `BrokenPipe` — simulates a child that closed
+    /// its stdin (e.g. `head -n1` after its first line).
+    struct BrokenPipeWriter;
+    impl AsyncWrite for BrokenPipeWriter {
+        fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "synthetic: child closed stdin")))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Every write fails with a non-`BrokenPipe` error — simulates a real
+    /// failure on OUR end of the pipe (not "the child was done").
+    struct FailingWriter;
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::other("synthetic disk-full-style failure")))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn genuine_read_error_is_not_silent_eof() {
+        let result = copy_stdin_to_child(None, FailingReader, Vec::<u8>::new()).await;
+        assert!(
+            result.is_err(),
+            "a real read failure on the upstream pipe must surface as Err, not the same Ok(()) as a clean EOF"
+        );
+        assert!(result.unwrap_err().contains("reading stdin"));
+    }
+
+    #[tokio::test]
+    async fn broken_child_stdin_is_quiet_not_an_error() {
+        let result = copy_stdin_to_child(None, OneChunkThenEof(Some(b"data")), BrokenPipeWriter).await;
+        assert_eq!(
+            result,
+            Ok(()),
+            "the child closing its own stdin early (BrokenPipe) is expected and must not be treated as a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn genuine_write_error_is_not_silent() {
+        let result = copy_stdin_to_child(None, OneChunkThenEof(Some(b"data")), FailingWriter).await;
+        assert!(
+            result.is_err(),
+            "a write failure that is NOT BrokenPipe is real and must surface as Err"
+        );
+        assert!(result.unwrap_err().contains("writing to the child's stdin"));
+    }
+
+    #[tokio::test]
+    async fn clean_eof_with_no_data_is_ok() {
+        let result = copy_stdin_to_child(None, OneChunkThenEof(None), Vec::<u8>::new()).await;
+        assert_eq!(result, Ok(()));
+    }
 }

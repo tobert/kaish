@@ -72,12 +72,10 @@ impl Tool for Which {
 
         let all_matches = parsed.all;
 
-        // Get PATH from scope or environment
-        let path_var = ctx
-            .scope
-            .get("PATH")
-            .map(value_to_string)
-            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+        // Get PATH from scope. The kernel never reads the OS env — a
+        // frontend that wants host PATH seeds it via `initial_vars`. No PATH
+        // in scope means nothing resolves, same as the external-command path.
+        let path_var = ctx.scope.get("PATH").map(value_to_string).unwrap_or_default();
 
         let path_dirs: Vec<&str> = path_var.split(':').collect();
 
@@ -274,5 +272,23 @@ mod tests {
                 result.text_out().starts_with("/usr/bin/") || result.text_out().starts_with("/bin/")
             );
         }
+    }
+
+    /// kaibo round-3 finding: `which` fell back to `std::env::var("PATH")`
+    /// when scope had none — the kernel is hermetic and never reads the OS
+    /// env. `ls` is a real command present on every Linux PATH, so finding
+    /// it here with no PATH anywhere in scope would prove the leak.
+    #[tokio::test]
+    async fn test_which_is_hermetic_no_os_path_fallback() {
+        let mut ctx = make_ctx(); // fresh scope, no PATH set at all
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("ls".into()));
+
+        let result = Which.execute(args, &mut ctx).await;
+        assert!(
+            !result.ok(),
+            "with no PATH in scope, `which` must not fall back to the OS PATH: {result:?}"
+        );
     }
 }

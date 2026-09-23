@@ -17,12 +17,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(target_os = "linux", feature = "subprocess"))]
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use kaish_kernel::ast::Value;
 use kaish_kernel::{Kernel, KernelConfig};
 
+/// The kernel is hermetic — it never reads the OS env — so the `sh -c
+/// "sleep ..."` scripts below need PATH exported to find `sleep` themselves,
+/// the same way `external_command_tests.rs::repl_kernel` seeds it.
 fn kernel_at(dir: &Path) -> Kernel {
-    let config = KernelConfig::repl().with_cwd(dir.to_path_buf());
+    let mut vars = HashMap::new();
+    vars.insert("PATH".to_string(), Value::String(std::env::var("PATH").unwrap_or_default()));
+    let config = KernelConfig::repl().with_cwd(dir.to_path_buf()).with_initial_vars(vars);
     Kernel::new(config).expect("kernel")
 }
 
@@ -106,7 +113,15 @@ async fn a_signal_death_inside_the_timeout_is_not_reported_as_one() {
     let script = r#"spawn --command sh --argv '["-c", "kill -9 $$"]' --timeout 10000"#;
     let result = kernel.execute(script).await.expect("kernel execute");
 
-    assert_ne!(result.code, 124, "the child died by signal, well inside the timeout");
+    // kaibo round-3 finding: `assert_ne!(_, 124)` alone can pass on a
+    // DIFFERENT spawn failure (e.g. `sh` not resolving) as easily as on the
+    // real fix — pinning the exact signal-death code (128 + SIGKILL) proves
+    // the child actually ran and killed itself, not that spawn failed some
+    // other way that also happens not to be 124.
+    assert_eq!(
+        result.code, 137,
+        "the child died by SIGKILL (128+9), well inside the timeout: {result:?}"
+    );
     assert!(
         !result.err.contains("timed out"),
         "no timeout diagnostic belongs on a signal death: {:?}",

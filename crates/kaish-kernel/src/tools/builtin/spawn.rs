@@ -15,14 +15,14 @@
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+use crate::spawn::{hermetic_env, OutputPolicy, SpawnContext, SpawnRequest, StdinPolicy};
 use crate::tools::builtin::get_path_string;
 use crate::tools::{exec_context,
     external_commands_unavailable_error, schema_from_clap, ExternalCommandsUnavailable,
@@ -40,11 +40,22 @@ struct SpawnArgs {
     #[arg(long = "command")]
     command: Option<String>,
 
-    /// Arguments as JSON array or single string.
+    /// Arguments as a JSON array or a single string. A JSON array element
+    /// that isn't a string is stringified (`1` becomes `"1"`); a nested
+    /// array or record is refused. A value starting with `[` that doesn't
+    /// parse as a JSON array is refused too, not read as one literal
+    /// argument. Alternatively, list arguments as trailing positionals
+    /// after the command (`spawn cmd a b c`, or `spawn --command cmd a b
+    /// c`) — each positional is exactly one literal argument, with no JSON
+    /// parsing. Combining `--argv` with positional arguments is an error;
+    /// use one form or the other.
     #[arg(long = "argv")]
     argv: Option<String>,
 
-    /// Environment variables as JSON object string.
+    /// Environment variables added to the child, as a record or a JSON
+    /// object string. A non-string value is stringified (`1` becomes
+    /// `"1"`); a list or record VALUE is refused, naming the key. Applied
+    /// on top of kaish's exported variables, or alone with `--clear-env`.
     #[arg(long = "env")]
     env: Option<String>,
 
@@ -58,14 +69,16 @@ struct SpawnArgs {
     #[arg(long = "timeout")]
     timeout: Option<String>,
 
-    /// Start with empty environment.
+    /// Start the child with no environment, instead of kaish's exported
+    /// variables. `--env` entries still apply on top.
     #[arg(long = "clear-env", visible_alias = "clear_env")]
     clear_env: bool,
 
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Command and its arguments (alternative to `--command` / `--argv`).
+    /// Command and its arguments, as trailing positionals — an alternative
+    /// to `--command`/`--argv`. Each word is exactly one literal argument.
     command_argv: Vec<String>,
 }
 
@@ -121,40 +134,88 @@ impl Tool for Spawn {
             Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
         };
 
-        // Resolve command path (PATH lookup if not absolute)
+        // Resolve command path (PATH lookup if not absolute). The kernel
+        // never reads the OS env — a frontend that wants host PATH seeds it
+        // via `initial_vars` (the REPL does, with `os_env_vars()`), same as
+        // the external-command path (`try_execute_external_on_path`). No
+        // PATH in scope means nothing resolves; refuse immediately with the
+        // same "command not found" shape a PATH-miss reports there, rather
+        // than falling through to a bare, unresolved name and letting the
+        // OS's own exec report whatever it finds (or an OS-level PATH
+        // default kaish has no control over).
         let command = if command_name.starts_with('/') || command_name.starts_with("./") {
             command_name.clone()
         } else {
-            // Try to find in PATH
-            let path_var = ctx
-                .scope
-                .get("PATH")
-                .map(value_to_string)
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
-
+            let path_var = ctx.scope.get("PATH").map(value_to_string).unwrap_or_default();
             match resolve_in_path(&command_name, &path_var) {
                 Some(resolved) => resolved,
-                None => command_name.clone(), // Fall back to name, let OS report error
+                None => {
+                    return ExecResult::failure(127, format!("spawn: {}: command not found", command_name))
+                }
             }
         };
 
-        // Get argv (optional). Decision D: a collection *element* (or a record
-        // as the whole argv) can't cross the process boundary — loud, not a
-        // silent JSON stringify. spawn's argv is legitimately a list of
-        // strings, so only nested collections trip the guard.
-        let argv = match args.get_named("argv").or_else(|| args.get_positional(1)) {
-            Some(v) => match extract_string_array(v) {
-                Ok(argv) => argv,
+        // Get argv (optional). Two spellings, mutually exclusive:
+        // `--argv` (a JSON array or a single string — `extract_string_array`,
+        // Decision D: a collection *element*, or a record as the whole argv,
+        // can't cross the process boundary), or the command's own trailing
+        // positionals (`spawn /bin/echo a b c`, or `spawn --command
+        // /bin/echo hello`) — the published, documented alternative that a
+        // published `command_argv` schema field with no reader behind it
+        // used to silently drop (kaibo round-4 finding: `spawn /bin/echo a b
+        // c` ran `echo a` with `b c` gone; `spawn --command /bin/echo hello`
+        // ran `echo` with NO arguments at all).
+        //
+        // A positional word is one literal argument — no JSON sniffing, the
+        // one thing that sets it apart from `--argv`'s single-string
+        // spelling (`extract_positional_argv_element`'s own doc explains
+        // why). Which positionals count as "the argv part" depends on
+        // whether the command itself came from a positional: a named
+        // `--command` consumes none, so every positional is argv; a bare
+        // command word (`spawn /bin/echo ...`) consumes positional 0, so
+        // argv starts at 1.
+        let command_from_positional = args.get_named("command").is_none();
+        let argv_positionals: &[Value] = if command_from_positional {
+            args.positional.get(1..).unwrap_or(&[])
+        } else {
+            &args.positional
+        };
+        let argv = match args.get_named("argv") {
+            Some(v) => {
+                if !argv_positionals.is_empty() {
+                    return ExecResult::failure(
+                        2,
+                        "spawn: cannot combine --argv with additional positional arguments; use one form or the other"
+                            .to_string(),
+                    );
+                }
+                match extract_string_array(v) {
+                    Ok(argv) => argv,
+                    Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
+                }
+            }
+            None => {
+                let mut out = Vec::with_capacity(argv_positionals.len());
+                for v in argv_positionals {
+                    match extract_positional_argv_element(v) {
+                        Ok(mut words) => out.append(&mut words),
+                        Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
+                    }
+                }
+                out
+            }
+        };
+
+        // Get env (optional). A shape that isn't a record, a JSON-object
+        // string, or a string that parses as one goes loud rather than
+        // silently running with no env vars at all.
+        let env_vars = match args.get_named("env") {
+            Some(v) => match extract_string_object(v) {
+                Ok(vars) => vars,
                 Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),
             },
             None => Vec::new(),
         };
-
-        // Get env (optional)
-        let env_vars = args
-            .get_named("env")
-            .map(extract_string_object)
-            .unwrap_or_default();
 
         // Get cwd (optional). A binary value goes loud rather than silently
         // being treated as "no cwd override".
@@ -192,211 +253,184 @@ impl Tool for Spawn {
         // Get clear_env flag
         let clear_env = args.has_flag("clear-env");
 
-        // Build command
-        let mut cmd = Command::new(&command);
-        cmd.args(&argv);
-        // Backstop: kill the OS process if this Command/Child is dropped
-        // before we have waited on it — an early return between the spawn
-        // and the wait would otherwise leave the child running, a real leak
-        // for a long-lived agent. The timeout arm below kills explicitly so
-        // it can read the child's partial output first. Mirrors the same
-        // call in dispatch.rs and the "backstop" kill_on_drop in kernel.rs.
-        cmd.kill_on_drop(true);
-
-        // Set working directory if specified
-        if let Some(ref dir) = cwd {
-            let vfs_cwd = ctx.resolve_path(dir);
-            // Resolve VFS path to real filesystem path
-            let real_cwd = match ctx.backend.resolve_real_path(&vfs_cwd) {
-                Some(p) => p,
-                None => {
+        // Working directory: an explicit `--cwd` resolves through the VFS,
+        // same as before. With none given, use the SHELL's cwd (`ctx.cwd`),
+        // the same real-path resolution `try_execute_external_on_path` does
+        // for every other external command — not the kaish process's own OS
+        // cwd, which is a different directory once a script has `cd`ed.
+        // `virtual_cwd_error` refuses loudly (127) rather than silently
+        // falling back to the process cwd when a cwd has no real filesystem
+        // location (an overlay, an in-memory VFS mount, `/dev`) — one shape
+        // for both the explicit and the default case, not two.
+        //
+        // A resolved-but-missing directory (a real mount, but that specific
+        // subpath doesn't exist) is a different failure and gets its own
+        // message naming the cwd: without this check, `cmd.spawn()` would
+        // fail on the chdir and report a raw ENOENT blaming the COMMAND
+        // ("spawn: /bin/true: No such file or directory") for a problem
+        // that is the cwd's, not the command's.
+        let cwd_path = match &cwd {
+            Some(dir) => {
+                let vfs_cwd = ctx.resolve_path(dir);
+                match ctx.backend.resolve_real_path(&vfs_cwd) {
+                    Some(p) if p.is_dir() => p,
+                    Some(p) => {
+                        return ExecResult::failure(
+                            1,
+                            format!("spawn: cwd '{}' does not exist or is not a directory", p.display()),
+                        )
+                    }
+                    None => return virtual_cwd_error(&command_name, &vfs_cwd),
+                }
+            }
+            None => match ctx.backend.resolve_real_path(&ctx.cwd) {
+                Some(p) if p.is_dir() => p,
+                // A resolved-but-missing shell cwd (e.g. a directory `cd`ed
+                // into and then deleted out from under the shell) is the
+                // same class as an explicit `--cwd` naming a missing
+                // directory just above — the message must name the cwd,
+                // not raise a raw ENOENT that blames the command
+                // ("spawn: /bin/true: No such file or directory") for a
+                // problem that is the cwd's, not the command's.
+                Some(p) => {
                     return ExecResult::failure(
                         1,
-                        format!("spawn: cwd '{}' is not on a real filesystem", vfs_cwd.display()),
+                        format!("spawn: cwd '{}' does not exist or is not a directory", p.display()),
                     )
                 }
-            };
-            cmd.current_dir(&real_cwd);
-        }
-
-        if clear_env {
-            cmd.env_clear();
-        }
-
-        for (key, value) in &env_vars {
-            cmd.env(key, value);
-        }
-
-        // Handle stdin — forward raw bytes so binary survives into the child.
-        let stdin_data = match ctx.read_stdin_to_bytes().await {
-            Ok(d) => d,
-            Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
+                None => return virtual_cwd_error(&command_name, &ctx.cwd),
+            },
         };
-        cmd.stdin(if stdin_data.is_some() {
-            std::process::Stdio::piped()
+
+        // Env: hermetic, matching `try_execute_external_on_path` — the
+        // kernel never reads the OS env, so the child sees only what kaish
+        // has exported (`hermetic_env`, fed by `KernelConfig::initial_vars`
+        // and `export`), never this process's own ambient environment.
+        // `--clear-env` drops even that, starting empty. `--env` entries
+        // apply last either way, so they win on a name collision.
+        let mut env: Vec<(String, String)> = if clear_env {
+            Vec::new()
         } else {
-            std::process::Stdio::null()
+            match hermetic_env(&ctx.scope) {
+                Ok(env) => env,
+                Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
+            }
+        };
+        env.extend(env_vars);
+
+        // Handle stdin — take the buffered prefix and the live pipe (if any)
+        // WITHOUT draining, same as `try_execute_external_on_path`
+        // (kernel.rs). `read_stdin_to_bytes()` reads the pipe to EOF before
+        // spawning anything, so a caller feeding spawn a live pipe (e.g. via
+        // `Kernel::execute_with_pipe_stdin`, or any other command whose
+        // stdin is a still-open reader) used to block spawning the child at
+        // all until that pipe closed, however long that took — see the
+        // `test_spawn_streams_stdin_instead_of_draining_to_eof_first` unit
+        // test below. `StdinPolicy::Piped`'s `pipe` field streams it to the
+        // child AFTER spawn instead. `Null` (not an empty `Piped`) so a
+        // command reading stdin with neither present sees immediate EOF
+        // rather than a pipe that never closes.
+        let pipe_stdin = ctx.pipe_stdin.take();
+        let stdin_bytes = ctx.take_stdin();
+        let stdin = if pipe_stdin.is_some() || stdin_bytes.is_some() {
+            StdinPolicy::Piped { prefix: stdin_bytes, pipe: pipe_stdin }
+        } else {
+            StdinPolicy::Null
+        };
+
+        let mut spawn_ctx = SpawnContext::from_exec_context(ctx);
+
+        // `--timeout` is spawn's own deadline, independent of whatever
+        // cancellation the caller's `ctx.cancel` already carries. A child
+        // token lets `spawn_process`'s SIGTERM-grace-SIGKILL cascade reach
+        // this child on either signal, while `timed_out` tells the two
+        // apart afterward: `ctx.cancel` itself is never touched, so a real
+        // cancellation is still readable from it once `spawn_process`
+        // returns. Mirrors the `timeout` builtin's own token derivation.
+        //
+        // The timer claims the kill only if it is the first cause: a
+        // SIGTERM-ignoring child stays alive for the whole `kill_grace`
+        // window a `kill %1` (or any other parent cancellation) already
+        // opened, and a `--timeout` shorter than that grace elapses squarely
+        // inside it. Storing `timed_out = true` unconditionally there
+        // reported `killed:124` for a job that `kill %1` — not the deadline —
+        // actually killed. Checking the PARENT token (never touched by this
+        // swap) at the instant the timer wakes tells the two apart: if it is
+        // already cancelled, the real cancellation reached this child's
+        // token first via child-token propagation, and the timer backs off.
+        //
+        // Two narrower races remain, both accepted rather than closed:
+        //
+        // 1. Check-to-store: a parent cancel landing in the gap between
+        //    `!parent_cancel.is_cancelled()` reading false and the two
+        //    statements right after it running still reports 124, not 130 —
+        //    the read and the store aren't one atomic operation, and the two
+        //    signals (a `CancellationToken` and this `AtomicBool`) have no
+        //    shared lock to combine them under. The window is nanoseconds
+        //    wide (a load, a store, and a token cancel — no `.await` between
+        //    them), and at that exact boundary one cause has to be treated
+        //    as first; nothing in this design makes that call any more
+        //    "correct," only narrower.
+        // 2. Abort doesn't preempt a running body: `timer.abort()` below
+        //    only takes effect at the timer task's next `.await` — on a
+        //    multi-thread runtime, if the timer's sleep has already elapsed
+        //    and its body is mid-execution (past the parent-cancel check,
+        //    about to store/cancel) at the very instant `spawn_process`
+        //    returns, the abort can land too late to stop it. The result is
+        //    the same shape as race 1: a child that finished on its own
+        //    right at the deadline can still see `timed_out` flip true a
+        //    moment later.
+        //
+        // Neither race can misreport a child that actually failed as
+        // success, or vice versa — they can only mislabel WHICH of two
+        // simultaneous "the run is over" signals (timeout, cancel, natural
+        // exit) gets named in the diagnostic, at a boundary where more than
+        // one is true at once. And the `!result.ok()` guard on the cancel
+        // arm below (and this file's own trap-and-exit-0 test) still holds
+        // regardless: a child that installs a trap and exits 0 on its own
+        // keeps that 0 on either race, because the mislabeling is confined
+        // to the diagnostic and the 124/130 rewrite, never to a result the
+        // child's own exit already made ok().
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timer = timeout_ms.map(|ms| {
+            let deadline_token = spawn_ctx.cancel.child_token();
+            spawn_ctx.cancel = deadline_token.clone();
+            let timed_out = timed_out.clone();
+            let parent_cancel = ctx.cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                if !parent_cancel.is_cancelled() {
+                    timed_out.store(true, Ordering::SeqCst);
+                    deadline_token.cancel();
+                }
+            })
         });
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
 
-        // Put the child in its own process group, same mechanism the
-        // shared spawner uses (`crate::spawn::spawn_process`'s
-        // `setpgid(0, 0)` in `pre_exec`, also duplicated in
-        // `dispatch.rs`) — so a timeout's kill below can reach a
-        // grandchild the child backgrounded (`sh -c 'sleep 100 & wait'`),
-        // not just the direct child. Without this, `--timeout` killed the
-        // direct child and left the grandchild running, and if the
-        // grandchild still held the stdout/stderr pipe open, the drains
-        // below never reached EOF either.
-        #[cfg(unix)]
-        // SAFETY: setpgid is async-signal-safe per POSIX; safe to call
-        // between fork and exec.
-        #[allow(unsafe_code)]
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
-                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
-            });
-        }
-
-        // Spawn the process
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => return ExecResult::failure(127, format!("spawn: {}: {}", command, e)),
-        };
-        // Captured right after spawn, before any wait/kill can reap the
-        // child and clear `Child::id()`. `setpgid(0, 0)` above makes this
-        // pid double as the child's own process-group id.
-        #[cfg(unix)]
-        let child_pgid = child.id().map(|id| nix::unistd::Pid::from_raw(id as i32));
-
-        // Write stdin if present
-        if let Some(data) = stdin_data
-            && let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                if let Err(e) = stdin.write_all(&data).await {
-                    return ExecResult::failure(1, format!("spawn: failed to write stdin: {}", e));
-                }
-            }
-
-        // Drain both pipes into tasks writing to shared buffers, rather than
-        // letting `wait_with_output()` own them. That future owns everything
-        // it has read, so a timeout OR a cancel used to drop the child's
-        // partial output with it: a child that printed a diagnostic and then
-        // hung reported nothing but the timeout/cancel note. Needed
-        // unconditionally now — a cancel can interrupt either an untimed or
-        // a `--timeout`-bounded wait. Shared buffers also mean an aborted
-        // drain still leaves its bytes here.
-        let captured_stdout = Arc::new(Mutex::new(Vec::new()));
-        let captured_stderr = Arc::new(Mutex::new(Vec::new()));
-        let stdout_task = tokio::spawn(drain_pipe(child.stdout.take(), captured_stdout.clone()));
-        let stderr_task = tokio::spawn(drain_pipe(child.stderr.take(), captured_stderr.clone()));
-
-        // Race the wait against `ctx.cancel` the way the shared spawner's
-        // `wait_or_kill` (kernel.rs) does — `biased` so an already-fired
-        // token wins over a child that happens to exit at the same instant.
-        // Without this race, a Ctrl-C or an embedder/job cancellation never
-        // reached `spawn`'s child at all: `child.wait()`/`wait_with_output()`
-        // only resolves when the child exits on its own or the `--timeout`
-        // deadline elapses.
-        enum WaitOutcome {
-            Exited(Option<i32>),
-            TimedOut,
-            Cancelled,
-        }
-        let outcome = if let Some(ms) = timeout_ms {
-            tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => WaitOutcome::Cancelled,
-                r = tokio::time::timeout(Duration::from_millis(ms), child.wait()) => match r {
-                    // A child that died by signal has no code. It is not a
-                    // timeout, and reading `None` as one would report 124 and
-                    // a "timed out" line for a segfault.
-                    Ok(Ok(status)) => WaitOutcome::Exited(status.code()),
-                    Ok(Err(e)) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
-                    Err(_) => WaitOutcome::TimedOut,
-                },
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => WaitOutcome::Cancelled,
-                r = child.wait() => match r {
-                    Ok(status) => WaitOutcome::Exited(status.code()),
-                    Err(e) => return ExecResult::failure(1, format!("spawn: failed to wait: {}", e)),
-                },
-            }
+        let request = SpawnRequest {
+            executable: PathBuf::from(&command),
+            argv,
+            cwd: cwd_path,
+            env,
+            stdin,
+            output: OutputPolicy::Captured,
+            label: format!("spawn: {command}"),
         };
 
-        // Bound before the match below consumes `outcome` — the combined
-        // `TimedOut | Cancelled` arm runs the identical kill, but the two
-        // still need to report differently afterward (124 + a timeout line
-        // vs. a cancel note and the top-level cancel normalization).
-        let was_timeout = matches!(outcome, WaitOutcome::TimedOut);
-        let was_cancelled = matches!(outcome, WaitOutcome::Cancelled);
-
-        let mut kill_note = None;
-        let (exit_code, expired, cancelled) = match outcome {
-            WaitOutcome::Exited(code) => (code, false, false),
-            WaitOutcome::TimedOut | WaitOutcome::Cancelled => {
-                // Kill first: a reader reaches EOF only once every write end
-                // of the pipe is closed. Kill the whole process group —
-                // `child.start_kill()` alone only reaches the direct child,
-                // and a grandchild it backgrounded (and any pipe write-end
-                // fd that grandchild inherited) would otherwise survive
-                // either a timeout or a cancel.
-                #[cfg(unix)]
-                let kill_result = match child_pgid {
-                    Some(pgid) => nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
-                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32)),
-                    // No pid to target (spawn raced a reap) — nothing
-                    // left to kill.
-                    None => Ok(()),
-                };
-                #[cfg(not(unix))]
-                let kill_result = child.start_kill();
-                match kill_result {
-                    // Unreachable for an unreaped child on Unix. Report
-                    // it and skip the wait, which would have nothing to
-                    // reap; `kill_on_drop` is still the backstop.
-                    Err(e) => kill_note = Some(format!("spawn: failed to kill: {e}")),
-                    Ok(()) => {
-                        if let Err(e) = child.wait().await {
-                            return ExecResult::failure(1, format!("spawn: failed to wait: {}", e));
-                        }
-                    }
-                }
-                (None, was_timeout, was_cancelled)
-            }
-        };
-
-        // Bounded join. The child is reaped, so everything it wrote is
-        // already in the pipe buffer and the drains need only a moment
-        // to pick it up. On Unix the process-group kill above reaches
-        // a grandchild too, closing its copy of the write end — but
-        // the kill and the drain race, and on a non-Unix target
-        // `start_kill()` only ever reached the direct child, so a
-        // grandchild holding the write end could still keep EOF from
-        // arriving. The grace collects what is there and then stops
-        // waiting either way; the bytes are in the shared buffers
-        // regardless.
-        let stdout = finish_drain(stdout_task, &captured_stdout).await;
-        let mut stderr = finish_drain(stderr_task, &captured_stderr).await;
-
-        if let Some(note) = kill_note {
-            append_line(&mut stderr, note.as_bytes());
+        let mut result = crate::spawn::spawn_process(request, &spawn_ctx).await;
+        if let Some(timer) = timer {
+            timer.abort();
         }
-        if expired {
-            append_line(
-                &mut stderr,
-                format!("spawn: {}: timed out after {}ms", command, timeout_ms.unwrap_or_default()).as_bytes(),
-            );
+
+        if timed_out.load(Ordering::SeqCst) {
             // 124 is `timeout(1)`'s code, and the partial output the child
-            // did produce rides along with it.
-            capture_to_result(Some(124), stdout, stderr)
-        } else if cancelled {
-            append_line(&mut stderr, format!("spawn: {}: cancelled", command).as_bytes());
+            // did produce rides along with it — `spawn_process` keeps
+            // whatever it captured before the kill.
+            result.code = 124;
+            append_line(
+                &mut result.err,
+                &format!("spawn: {}: timed out after {}ms", command, timeout_ms.unwrap_or_default()),
+            );
+        } else if ctx.cancel.is_cancelled() && !result.ok() {
             // 130 is the documented cancellation code (`sleep`'s own
             // `ctx.cancel` arm returns it the same way). A foreground call
             // gets 130 either way — `Kernel::execute_with_options`'s
@@ -408,82 +442,28 @@ impl Tool for Spawn {
             // cancel-aware rewrite. Reporting 130 here directly, rather than
             // relying on a normalization only one of spawn's two callers
             // applies, is what makes `killed:130` true for both.
-            capture_to_result(Some(130), stdout, stderr)
-        } else {
-            capture_to_result(exit_code, stdout, stderr)
+            //
+            // `!result.ok()` matches the same guard `Kernel`'s own two cancel
+            // sites use (kernel.rs's `execute_streaming_inner` and
+            // `execute_with_options`): the token, not the code — a child
+            // that already exited 0 before the token tripped keeps its
+            // result, rather than a coincidental later cancellation
+            // relabeling a real success as killed.
+            result.code = 130;
+            append_line(&mut result.err, &format!("spawn: {}: cancelled", command));
         }
+        result
     }
 }
 
-/// How long a reaped child's drains get to pick up what is already buffered
-/// before the wait is abandoned. Only a grandchild holding the pipe's write
-/// end open makes this matter.
-const DRAIN_GRACE: Duration = Duration::from_millis(200);
-
-/// Read one child pipe to EOF into a shared buffer.
-///
-/// The buffer is shared so an abandoned drain still leaves the bytes it read.
-/// A read error ends the drain and is returned rather than discarded.
-async fn drain_pipe<R>(pipe: Option<R>, into: Arc<Mutex<Vec<u8>>>) -> Option<std::io::Error>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    use tokio::io::AsyncReadExt;
-    let mut pipe = pipe?;
-    let mut chunk = [0u8; 8192];
-    loop {
-        match pipe.read(&mut chunk).await {
-            Ok(0) => return None,
-            Ok(n) => into.lock().await.extend_from_slice(&chunk[..n]),
-            Err(e) => return Some(e),
-        }
+/// Append a line to a text diagnostic, adding the separator only when the
+/// text already there does not end in one.
+fn append_line(buffer: &mut String, line: &str) {
+    if !buffer.is_empty() && !buffer.ends_with('\n') {
+        buffer.push('\n');
     }
-}
-
-/// Give a drain [`DRAIN_GRACE`] to finish, then take what it collected.
-///
-/// A read error or a panicked reader is appended to the bytes as a
-/// diagnostic — neither is dropped, and neither replaces the output.
-async fn finish_drain(
-    mut task: tokio::task::JoinHandle<Option<std::io::Error>>,
-    buffer: &Arc<Mutex<Vec<u8>>>,
-) -> Vec<u8> {
-    let note = match tokio::time::timeout(DRAIN_GRACE, &mut task).await {
-        Ok(Ok(None)) => None,
-        Ok(Ok(Some(e))) => Some(format!("spawn: failed to read child output: {e}")),
-        Ok(Err(e)) => Some(format!("spawn: output reader did not finish: {e}")),
-        // The grace elapsed: a surviving grandchild still holds the pipe's
-        // write end, so EOF will not arrive. Abort rather than detach — a
-        // detached reader would hold the pipe for the life of the process —
-        // and say the output may be short rather than call it complete.
-        Err(_) => {
-            task.abort();
-            Some("spawn: output may be incomplete: a surviving child still holds the pipe".to_string())
-        }
-    };
-    let mut bytes = std::mem::take(&mut *buffer.lock().await);
-    if let Some(note) = note {
-        append_line(&mut bytes, note.as_bytes());
-    }
-    bytes
-}
-
-/// Append a line to captured output, adding the separator only when the
-/// bytes already there do not end in one.
-fn append_line(buffer: &mut Vec<u8>, line: &[u8]) {
-    if !buffer.is_empty() && !buffer.ends_with(b"\n") {
-        buffer.push(b'\n');
-    }
-    buffer.extend_from_slice(line);
-    buffer.push(b'\n');
-}
-
-/// Build a result from a child's captured stdout/stderr: stdout keeps binary
-/// intact (text if valid UTF-8, else a Bytes result); stderr stays text.
-fn capture_to_result(code: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8>) -> ExecResult {
-    let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code.unwrap_or(-1) as i64);
-    result.err = String::from_utf8_lossy(&stderr).into_owned();
-    result
+    buffer.push_str(line);
+    buffer.push('\n');
 }
 
 /// Friendly, actionable error for the "nowhere to spawn" case: the shell's
@@ -558,72 +538,165 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
+/// Convert a parsed JSON array into an argv list: each element becomes one
+/// argument (a string as itself, any other scalar stringified — `1` becomes
+/// `"1"`, matching a bareword's own typed-scalar handling), and a nested
+/// array or object anywhere in it is a loud error, never a silent drop or a
+/// JSON re-stringify. The one function both `Value::Json(Array)` (an actual
+/// typed array) and a JSON-array-shaped `--argv` STRING route through, so
+/// the two spellings of "argv is a JSON array" agree.
+fn json_array_to_argv(arr: &[serde_json::Value]) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &Value::Json(v.clone())) {
+            return Err(msg);
+        }
+        out.push(match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+    }
+    Ok(out)
+}
+
 /// Extract an array of strings from a Value.
 ///
 /// Supports:
 /// - JSON array (Value::Json): use elements directly
 /// - JSON array string: parse and extract string items
-/// - Plain string: one-element array (no implicit splitting)
+/// - Any other scalar (string, int, float, bool, null): one-element array
+///   (no implicit splitting) — `spawn --command sleep --argv 60` types `60`
+///   as `Value::Int`, and it must reach the child as one argument, "60".
 ///
 /// Decision D: a nested-collection element (a list/record *inside* the argv
-/// list), or a record used as the whole argv, is a loud error — never a silent
-/// JSON stringify or a silently-dropped element. The top-level list itself is
-/// legitimate (spawn's argv is a list of strings). Reuses the shared
-/// `structured_boundary_error` so the message matches every other boundary.
+/// list), a record used as the whole argv, or binary anywhere in it, is a
+/// loud error — never a silent JSON stringify, a silently-dropped element,
+/// or a `[binary: N bytes]` placeholder substituted in as if it were the
+/// real argument text. The top-level list itself is legitimate (spawn's
+/// argv is a list of strings). Reuses the shared `structured_boundary_error`
+/// so the collection-boundary message matches every other boundary.
 fn extract_string_array(value: &Value) -> Result<Vec<String>, String> {
     match value {
-        Value::Json(serde_json::Value::Array(arr)) => {
-            let mut out = Vec::with_capacity(arr.len());
-            for v in arr {
-                if let Some(msg) = crate::interpreter::structured_boundary_error(
-                    "a command argument",
-                    &Value::Json(v.clone()),
-                ) {
-                    return Err(msg);
-                }
-                out.push(match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                });
-            }
-            Ok(out)
-        }
+        Value::Json(serde_json::Value::Array(arr)) => json_array_to_argv(arr),
         Value::Json(obj @ serde_json::Value::Object(_)) => Err(
             crate::interpreter::structured_boundary_error("a command argument", &Value::Json(obj.clone()))
                 .unwrap_or_else(|| "argv must be a list of strings".to_string()),
         ),
         Value::String(s) => {
-            // Try to parse as JSON array
-            if s.starts_with('[')
-                && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
-                    return Ok(arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect());
-                }
+            // A string starting with `[` is read as JSON-array TEXT — the
+            // compact single-flag spelling of a whole array (`--argv
+            // '[1,2]'`). kaibo round-4 finding: this used to
+            // `.filter_map(|v| v.as_str()...)`, which silently DROPPED any
+            // non-string element (`--argv '[1,2]'` became an empty argv,
+            // `--argv '["a",[1]]'` became just `["a"]`) instead of the
+            // Value::Json(Array) arm's own stringify-scalars/refuse-nested
+            // rule just above — two different rules for the same JSON
+            // shape, depending only on which Value variant it arrived as.
+            // Same fix applies to an unparseable `[`-prefixed string
+            // (`--argv '[1,2'`): it used to fall through and become ONE
+            // literal argument, "[1,2", while `--env`'s equivalent already
+            // errored on an unparseable object-shaped string — inconsistent
+            // for the same mistake (a truncated/malformed structured
+            // value). Both now go through `json_array_to_argv` or refuse
+            // loudly, matching `--env`'s shape exactly.
+            if s.starts_with('[') {
+                return match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+                    Ok(arr) => json_array_to_argv(&arr),
+                    Err(e) => Err(format!("argv must be a JSON array, got a string that doesn't parse as one: {e}")),
+                };
+            }
             // Plain string is one argument — no implicit whitespace splitting
             Ok(vec![s.clone()])
         }
-        _ => Ok(vec![]),
+        // Binary crosses the process boundary the same way it does at every
+        // other Decision-D guard in this file — loud, never the local
+        // `value_to_string`'s `[binary: N bytes]` placeholder substituted in
+        // as if it were the real argument text.
+        Value::Bytes(_) => Err(format!(
+            "argv must be a JSON array or a string, got {}",
+            value_to_string(value)
+        )),
+        // Any other bare scalar (Int, Float, Bool, Null) is legitimately one
+        // argument, the same as a bare string — `spawn --command sleep
+        // --argv 60` types `60` as `Value::Int` (kaish's typed argv
+        // barewords), and it must still reach the child as the text "60".
+        other => Ok(vec![value_to_string(other)]),
     }
+}
+
+/// One element of the positional-argv form (`spawn /bin/echo a b c`, or
+/// `spawn --command /bin/echo hello`).
+///
+/// A bareword positional is exactly one literal argument, even if its text
+/// happens to start with `[` — unlike `extract_string_array`'s `String` arm,
+/// which exists for `--argv`'s compact single-flag spelling of a whole
+/// array. A shell word is never silently re-parsed as JSON just because it
+/// looks like one; that would make `spawn echo '[not json'` (a perfectly
+/// ordinary literal argument) behave differently from `spawn echo '[1,2]'`
+/// depending on whether the text happens to parse.
+///
+/// A genuine typed array in this slot (e.g. an unflattened list
+/// substitution landing as one `Value::Json` array, not text) still expands
+/// into its own elements — the type carries the structure, not the text —
+/// applying the same Decision-D per-element guard `extract_string_array`'s
+/// array arm uses; a record or binary here is refused the same way too.
+fn extract_positional_argv_element(value: &Value) -> Result<Vec<String>, String> {
+    match value {
+        Value::String(s) => Ok(vec![s.clone()]),
+        other => extract_string_array(other),
+    }
+}
+
+/// Convert a parsed JSON object into an env var list: each value becomes one
+/// string (a string as itself, any other scalar stringified — `1` becomes
+/// `"1"`, matching `json_array_to_argv`'s own rule and `hermetic_env`'s
+/// stringify-scalars treatment of kaish's own exported vars), and a nested
+/// array or object as a value is a loud error naming the key, never a
+/// silent drop. The one function both `Value::Json(Object)` (a record) and
+/// a JSON-object-shaped `--env` STRING route through, so the two spellings
+/// of "env is a JSON object" agree.
+fn json_object_to_env(obj: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        if let Some(msg) =
+            crate::interpreter::structured_boundary_error(&format!("the value of env var '{k}'"), &Value::Json(v.clone()))
+        {
+            return Err(msg);
+        }
+        let text = match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        out.push((k.clone(), text));
+    }
+    Ok(out)
 }
 
 /// Extract a string→string mapping from a Value.
 ///
 /// Supports:
-/// - String: parse as JSON object
-fn extract_string_object(value: &Value) -> Vec<(String, String)> {
+/// - A record (`Value::Json` object): the natural, obvious spelling for
+///   key-value data — used directly, same field extraction as the
+///   string-parsed case below.
+/// - String: parsed as a JSON object.
+///
+/// A shape that is none of these — a scalar, an array, or a string that
+/// doesn't parse as a JSON object — is a loud error rather than a silent
+/// "no env vars at all". Neither spelling silently drops a key whose value
+/// isn't a JSON string either (kaibo round-4 finding: `.filter_map(|(k, v)|
+/// v.as_str()...)` used to do exactly that — `--env '{"FOO": 1}'` ran with
+/// no `FOO` at all) — see `json_object_to_env`.
+fn extract_string_object(value: &Value) -> Result<Vec<(String, String)>, String> {
     match value {
-        Value::String(s) => {
-            if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s) {
-                return obj
-                    .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect();
-            }
-            vec![]
-        }
-        _ => vec![],
+        Value::Json(serde_json::Value::Object(obj)) => json_object_to_env(obj),
+        Value::String(s) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s) {
+            Ok(obj) => json_object_to_env(&obj),
+            Err(e) => Err(format!("env must be a JSON object, got a string that doesn't parse as one: {e}")),
+        },
+        other => Err(format!(
+            "env must be a JSON object (a record) or a JSON-object string, got {}",
+            crate::interpreter::value_to_string(other)
+        )),
     }
 }
 
@@ -634,10 +707,18 @@ mod tests {
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 
+    /// `spawn`'s default cwd (no `--cwd` given) is now `ctx.cwd` resolved to
+    /// a real filesystem location, matching the external-command path —
+    /// so every test here needs one, not just `test_spawn_with_cwd`. `/tmp`
+    /// is mounted as `LocalFs` and set as `ctx.cwd`, same real directory
+    /// `test_spawn_with_cwd` already points `--cwd` at.
     fn make_ctx() -> ExecContext {
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
-        ExecContext::new(Arc::new(vfs))
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        ctx.cwd = PathBuf::from("/tmp");
+        ctx
     }
 
     #[tokio::test]
@@ -671,6 +752,108 @@ mod tests {
         assert_eq!(&*result.text_out(), "hello world");
     }
 
+    /// kaibo round-3 finding: `spawn` used to drain its stdin to EOF
+    /// (`ctx.read_stdin_to_bytes()`, which reads a live pipe to completion)
+    /// BEFORE even spawning the child, unlike the shared spawner's
+    /// `StdinPolicy::Piped { pipe: Some(..), .. }` arm (spawn.rs's own
+    /// module docs; `try_execute_external_on_path` never drains eagerly
+    /// either). A live `scheduler::pipe_stream()` feeds one line, then
+    /// sleeps 5s before writing a second and closing — the same seam
+    /// `Kernel::execute_with_pipe_stdin` uses for a frontend's own live
+    /// process stdin, so this exercises spawn.rs's stdin handling directly
+    /// without kaish's `A | B` pipeline in the way (a pipeline hands a
+    /// stage its full input only once the upstream stage RETURNS, never
+    /// chunk by chunk, so a script-level `slow-producer | spawn ...` would
+    /// prove the pipeline's own buffering, not spawn's). `head -n1` reads
+    /// the first line and exits; a draining spawn would block on the
+    /// pipe's 5s-delayed second write (and its close) before `head` ever
+    /// started, an eagerly-streaming one lets it finish almost at once.
+    #[tokio::test]
+    async fn test_spawn_streams_stdin_instead_of_draining_to_eof_first() {
+        use crate::scheduler::pipe_stream;
+        use tokio::io::AsyncWriteExt;
+
+        let mut ctx = make_ctx();
+        let (mut writer, reader) = pipe_stream(8192);
+        ctx.pipe_stdin = Some(reader);
+
+        tokio::spawn(async move {
+            let _ = writer.write_all(b"line1\n").await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = writer.write_all(b"line2\n").await;
+            // Dropping `writer` here closes the pipe (EOF).
+        });
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/head".into()));
+        args.named
+            .insert("argv".to_string(), Value::String(r#"["-n1"]"#.into()));
+
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(10), Spawn.execute(args, &mut ctx))
+            .await
+            .expect("spawn must not hang waiting for the pipe's 5s-delayed second write");
+        let elapsed = start.elapsed();
+
+        assert!(result.ok(), "head failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "line1");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "spawn must stream stdin to head as it arrives, not drain the pipe \
+             to EOF before head ever starts: took {elapsed:?}"
+        );
+    }
+
+    /// Round-4 kaibo finding: the streaming-stdin task (round 3) treated
+    /// every write and read error alike, so a broken upstream pipe read as
+    /// silent EOF — the same class of bug the fix distinguishes now (see
+    /// `crate::spawn::copy_stdin_to_child` and its own `stdin_copy_tests`
+    /// for the read-error side, which needs a synthetic reader since the
+    /// real `pipe_stream()` reader cannot itself produce a read error).
+    /// This is the integration-level half: a continuous producer (`yes`,
+    /// simulated here since `pipe_stream()`'s writer never stalls) keeps
+    /// writing well past the point `head -n1` reads one line, closes its
+    /// own stdin, and exits — the resulting `BrokenPipe` on our next write
+    /// is EXPECTED and must stay quiet, not show up as a spurious
+    /// diagnostic in the command's own stderr.
+    #[tokio::test]
+    async fn test_spawn_child_closing_stdin_early_is_quiet() {
+        use crate::scheduler::pipe_stream;
+        use tokio::io::AsyncWriteExt;
+
+        let mut ctx = make_ctx();
+        let (mut writer, reader) = pipe_stream(8192);
+        ctx.pipe_stdin = Some(reader);
+
+        tokio::spawn(async move {
+            loop {
+                if writer.write_all(b"y\n").await.is_err() {
+                    break; // reader (spawn's stdin-copy task) went away
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/head".into()));
+        args.named
+            .insert("argv".to_string(), Value::String(r#"["-n1"]"#.into()));
+
+        let result = tokio::time::timeout(Duration::from_secs(5), Spawn.execute(args, &mut ctx))
+            .await
+            .expect("spawn must not hang when the child closes stdin early on a live producer");
+
+        assert!(result.ok(), "head failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "y");
+        assert!(
+            result.err.is_empty(),
+            "a child closing its own stdin early (BrokenPipe) is expected and must stay quiet: {}",
+            result.err
+        );
+    }
+
     #[tokio::test]
     async fn test_spawn_with_env() {
         let mut ctx = make_ctx();
@@ -687,6 +870,81 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().contains("MY_TEST_VAR=test_value"));
+    }
+
+    /// Unit-level pin on the exact code path `hermetic_env(&ctx.scope)`
+    /// takes: a plain (non-exported) scope var never reaches the child, an
+    /// exported one does. The integration-level proof, through a real
+    /// `Kernel` and `printenv`, lives in
+    /// `external_command_tests.rs::spawn_child_does_not_see_an_unexported_os_var`
+    /// and `spawn_child_sees_exported_and_initial_vars`.
+    #[tokio::test]
+    async fn test_spawn_env_is_hermetic_not_ambient() {
+        let mut ctx = make_ctx();
+        ctx.scope.set_global("NOT_EXPORTED", Value::String("leaked".into()));
+        ctx.scope.set_exported("IS_EXPORTED", Value::String("visible".into()));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(
+            !result.text_out().contains("NOT_EXPORTED"),
+            "a non-exported scope var must not reach the child: {}",
+            result.text_out()
+        );
+        assert!(
+            result.text_out().contains("IS_EXPORTED=visible"),
+            "an exported scope var must reach the child: {}",
+            result.text_out()
+        );
+    }
+
+    /// kaibo round-3 finding: the cancel arm rewrote ANY result to 130 on
+    /// token state alone. `ctx.cancel` cancels from a concurrent task after
+    /// 50ms, not before the call: `wait_or_kill` sends the SIGTERM the
+    /// instant it observes a cancelled token, so cancelling before the
+    /// child even runs raced its own `trap : TERM` installation and killed
+    /// it before the trap existed to ignore anything — a genuine SIGTERM
+    /// death (128+15), not the clean-exit case this test means to prove.
+    /// 50ms is ample for `sh` to install the trap and be well into its
+    /// (builtin-only, no forked `sleep`) busy loop before the cancel fires;
+    /// the loop then ignores the SIGTERM and exits 0 on its own, comfortably
+    /// inside the 20s grace (generous against a heavily oversubscribed box
+    /// stretching the loop's own CPU time). A forked `sleep N` was tried
+    /// first and rejected: it sits in `sh`'s own process group and dies
+    /// from the group-wide SIGTERM on ITS OWN default disposition
+    /// regardless of `sh`'s trap, and `sh` (POSIX, no `set -e`) would then
+    /// just continue to exit 0 anyway — passing for the wrong reason,
+    /// without the trap ever having to protect anything. The `!result.ok()`
+    /// guard (matching `Kernel`'s own two cancel sites) must keep the clean
+    /// exit, not relabel it as killed.
+    #[tokio::test]
+    async fn test_spawn_cancel_arm_keeps_a_clean_exit() {
+        let mut ctx = make_ctx();
+        ctx.kill_grace = Duration::from_secs(20);
+        let cancel = ctx.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/sh".into()));
+        args.named.insert(
+            "argv".to_string(),
+            Value::String(r#"["-c", "trap : TERM; i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done"]"#.into()),
+        );
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert_eq!(
+            result.code, 0,
+            "a child that exited 0 on its own, inside the kill grace, must keep \
+             that code even though ctx.cancel fired mid-run: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -716,6 +974,13 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_path_resolution() {
         let mut ctx = make_ctx();
+        // spawn's own `--command` resolution reads PATH from scope only (the
+        // kernel never reads the OS env) — seeding it here from this test
+        // PROCESS's real PATH is fixture code reading OS env, which is fine;
+        // it is not spawn reaching into the OS on its own.
+        ctx.scope
+            .set_exported("PATH", Value::String(std::env::var("PATH").unwrap_or_default()));
+
         let mut args = ToolArgs::new();
         // Use command name instead of full path
         args.named
@@ -740,7 +1005,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("pwd".into()));
+            .insert("command".to_string(), Value::String("/bin/pwd".into()));
         args.named
             .insert("cwd".to_string(), Value::String("/tmp".into()));
 
@@ -750,12 +1015,101 @@ mod tests {
         assert!(result.text_out().contains("tmp"), "expected tmp in output: {}", result.text_out());
     }
 
+    /// kaibo round-3 finding: an explicit `--cwd` on a virtual path (no real
+    /// filesystem location) returned exit 1 with spawn's own ad hoc message,
+    /// while the default (no `--cwd`) virtual-cwd case already used
+    /// `virtual_cwd_error` (127) — one condition, two shapes. Both must
+    /// refuse the same way.
+    #[tokio::test]
+    async fn test_spawn_explicit_cwd_on_virtual_path_refuses_with_127() {
+        // "/" is MemoryFs only (no LocalFs mount) — virtual.
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+        args.named.insert("cwd".to_string(), Value::String("/".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 127, "must match the default virtual-cwd case: {result:?}");
+        assert!(
+            result.err.contains("real filesystem"),
+            "should use the shared virtual_cwd_error wording: {result:?}"
+        );
+    }
+
+    /// kaibo round-3 finding: `--cwd /some/real/mount/does-not-exist` (a
+    /// real filesystem, but the specific directory is missing) failed at
+    /// `cmd.spawn()` with a raw ENOENT blaming the COMMAND ("spawn: /bin/true:
+    /// No such file or directory") — true of the OS error, but misleading:
+    /// the command exists, the cwd doesn't. The message must name the cwd.
+    #[tokio::test]
+    async fn test_spawn_explicit_cwd_missing_directory_names_the_cwd_not_the_command() {
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+        args.named.insert(
+            "cwd".to_string(),
+            Value::String("/tmp/kaish-spawn-cwd-does-not-exist-xyz".into()),
+        );
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a missing cwd directory must refuse: {result:?}");
+        assert!(
+            result.err.contains("kaish-spawn-cwd-does-not-exist-xyz"),
+            "error must name the cwd that doesn't exist: {result:?}"
+        );
+        assert!(
+            !result.err.contains("/bin/true:"),
+            "error must not blame the command for the cwd's own problem: {result:?}"
+        );
+    }
+
+    /// kaibo round-4 finding: the DEFAULT-cwd branch (no `--cwd` given) was
+    /// missing the `is_dir()` check the explicit `--cwd` branch just above
+    /// has — a shell cwd that resolves to a real filesystem location but
+    /// doesn't exist there any more (e.g. `cd`ed into, then deleted out
+    /// from under the shell) fell straight through to `spawn_process`,
+    /// which failed on the chdir and reported a raw ENOENT blaming the
+    /// COMMAND, the same misleading shape the explicit-`--cwd` fix already
+    /// closed for the other branch.
+    #[tokio::test]
+    async fn test_spawn_default_cwd_missing_directory_names_the_cwd_not_the_command() {
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        vfs.mount("/tmp", crate::vfs::LocalFs::new("/tmp"));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        ctx.cwd = PathBuf::from("/tmp/kaish-spawn-default-cwd-does-not-exist-xyz");
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/true".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a missing default cwd directory must refuse: {result:?}");
+        assert!(
+            result.err.contains("kaish-spawn-default-cwd-does-not-exist-xyz"),
+            "error must name the cwd that doesn't exist: {result:?}"
+        );
+        assert!(
+            !result.err.contains("/bin/true:"),
+            "error must not blame the command for the cwd's own problem: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_spawn_with_timeout() {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("sleep".into()));
+            .insert("command".to_string(), Value::String("/bin/sleep".into()));
         args.named
             .insert("argv".to_string(), Value::String("10".into()));
         // Timeout after 100ms
@@ -823,7 +1177,7 @@ mod tests {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.named
-            .insert("command".to_string(), Value::String("echo".into()));
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
         args.named
             .insert("argv".to_string(), Value::String("quick".into()));
         // Long timeout that won't trigger
@@ -833,5 +1187,310 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().contains("quick"));
+    }
+
+    /// kaibo round-3 finding: a non-string scalar `--argv` (e.g. a bare
+    /// `Value::Int` — `spawn --command sleep --argv 60` types `60` this way,
+    /// kaish's typed argv barewords) hit `extract_string_array`'s catch-all
+    /// `_ => Ok(vec![])` and silently became NO argv at all — `sleep` ran
+    /// with no arguments instead of sleeping 60 seconds, an existing,
+    /// intentional usage this fix must not break. A bare scalar is now one
+    /// argument, the same as a bare string already was.
+    #[tokio::test]
+    async fn test_spawn_argv_bare_int_is_one_argument_not_dropped() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named.insert("argv".to_string(), Value::Int(60));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "60");
+    }
+
+    /// A NAMED `--argv=<bytes>` never reaches `extract_string_array` at all:
+    /// `ToolArgs::to_argv()` (called at the very top of `execute`, before
+    /// `extract_string_array` is invoked) refuses ANY named `Value::Bytes`
+    /// with `ToolArgvError::BinaryNamedValue` — a generic guard shared by
+    /// every builtin, unrelated to spawn's own Decision-D logic. This test
+    /// only pins that generic, upstream guard; it does NOT exercise
+    /// `extract_string_array`'s own `Value::Bytes` arm. Verified by mutation:
+    /// gutting that arm (`Value::Bytes(_) => Ok(vec![])`) left this test
+    /// green.
+    #[tokio::test]
+    async fn test_spawn_argv_named_binary_scalar_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named
+            .insert("argv".to_string(), Value::Bytes(vec![0xff, 0x00]));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "binary argv must refuse, not become a placeholder string: {result:?}");
+        assert!(result.err.contains("argv"), "should name the flag: {}", result.err);
+    }
+
+    /// The shape that actually reaches `extract_string_array`'s own
+    /// Decision-D guard: a POSITIONAL `Value::Bytes` (e.g. `spawn /bin/echo
+    /// $binary_var`). `ToolArgs::to_argv()` renders a positional `Bytes` as
+    /// an inert `[binary: N bytes]` placeholder rather than erroring (it's a
+    /// validation-only sink — see `value_to_argv_token`'s doc comment), so
+    /// this value survives past the top-of-`execute` `to_argv()` call and
+    /// reaches `args.get_positional(1)` — and therefore
+    /// `extract_string_array` — as the real `Value::Bytes`, unlike the named
+    /// case above. This is the test that actually pins the Decision-D guard
+    /// this file's comments describe.
+    #[tokio::test]
+    async fn test_spawn_argv_positional_binary_scalar_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::Bytes(vec![0xff, 0x00]));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "binary argv must refuse, not become a placeholder string: {result:?}");
+        assert!(result.err.contains("argv"), "should name the flag: {}", result.err);
+    }
+
+    /// kaibo round-4 finding: `command_argv: Vec<String>` is published in
+    /// spawn's own schema and documented as "an alternative to
+    /// `--command`/`--argv`", but nothing ever read it — argv extraction
+    /// only ever looked at ONE positional (`args.get_positional(1)`).
+    /// `spawn /bin/echo a b c` ran `echo a`, silently dropping `b` and `c`.
+    #[tokio::test]
+    async fn test_spawn_bareword_form_reads_all_trailing_positionals() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::String("a".into()));
+        args.positional.push(Value::String("b".into()));
+        args.positional.push(Value::String("c".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "a b c");
+    }
+
+    /// kaibo round-4 finding, the other shape of the same bug: with
+    /// `--command` given by name, no positional is the command, so ALL of
+    /// them should be argv — but the old single-positional read
+    /// (`args.get_positional(1)`) looked at INDEX 1, which is empty when
+    /// the only positional is the lone trailing word. `spawn --command
+    /// /bin/echo hello` ran `echo` with no arguments at all, silently
+    /// dropping `hello`.
+    #[tokio::test]
+    async fn test_spawn_command_flag_with_trailing_positional_argv() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.positional.push(Value::String("hello".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(result.text_out().trim(), "hello");
+    }
+
+    /// A positional argv word is literal, unlike `--argv`'s single-string
+    /// spelling: it must NOT be JSON-sniffed just because its text starts
+    /// with `[` — `extract_positional_argv_element`'s own doc explains why
+    /// (a shell word must not behave differently depending on whether its
+    /// text happens to parse as JSON).
+    #[tokio::test]
+    async fn test_spawn_positional_argv_word_is_not_json_sniffed() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::String(r#"[1,2]"#.into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(
+            result.text_out().trim(),
+            "[1,2]",
+            "a literal positional word must reach the child verbatim, not get JSON-parsed into two words"
+        );
+    }
+
+    /// `--argv` and additional positional arguments are mutually exclusive
+    /// spellings — combining them is a usage error, not a silent pick-one.
+    #[tokio::test]
+    async fn test_spawn_argv_flag_and_positional_args_conflict_loudly() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bin/echo".into()));
+        args.positional.push(Value::String("extra".into()));
+        args.named
+            .insert("argv".to_string(), Value::String("hello".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "combining --argv with positional args must refuse: {result:?}");
+        assert!(result.err.contains("--argv"), "should name the conflicting flag: {}", result.err);
+    }
+
+    /// kaibo round-3 finding: `--env` given a kaish record (`Value::Json`
+    /// object) — the natural, obvious spelling for key-value data — hit
+    /// `extract_string_object`'s catch-all `_ => vec![]` and silently ran
+    /// with no env vars at all. A record is now accepted directly, the same
+    /// shape a JSON-object string already parses into.
+    #[tokio::test]
+    async fn test_spawn_env_record_is_accepted() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert(
+            "env".to_string(),
+            Value::Json(serde_json::json!({"FOO": "bar"})),
+        );
+        args.flags.insert("clear-env".to_string());
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(
+            result.text_out().contains("FOO=bar"),
+            "a record --env must reach the child: {}",
+            result.text_out()
+        );
+    }
+
+    /// kaibo round-3 finding: an `--env` that is neither a record nor a
+    /// JSON-object string (nor a string that fails to parse as one) hit the
+    /// same silent `vec![]` catch-all.
+    #[tokio::test]
+    async fn test_spawn_env_non_object_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert("env".to_string(), Value::Int(5));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a non-object env must refuse, not silently run with no env vars: {result:?}");
+        assert!(result.err.contains("env"), "should name the flag: {}", result.err);
+    }
+
+    /// kaibo round-4 finding: a JSON-array-shaped `--argv` STRING (as
+    /// opposed to an actual `Value::Json` array) used
+    /// `.filter_map(|v| v.as_str()...)`, silently DROPPING any non-string
+    /// element — `--argv '[1,2]'` ran with an EMPTY argv, not `["1", "2"]`.
+    #[tokio::test]
+    async fn test_spawn_argv_json_string_stringifies_non_string_elements() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named
+            .insert("argv".to_string(), Value::String("[1,2]".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert_eq!(
+            result.text_out().trim(),
+            "1 2",
+            "non-string JSON array elements must be stringified, not dropped"
+        );
+    }
+
+    /// Same bug, mixed shape: `--argv '["a",[1]]'` used to drop the whole
+    /// nested-array element via `filter_map`, silently becoming `["a"]`
+    /// instead of refusing the structural boundary violation loudly (the
+    /// `Value::Json(Array)` arm already refused this correctly — only the
+    /// String-parsed arm had the silent-drop bug).
+    #[tokio::test]
+    async fn test_spawn_argv_json_string_refuses_nested_array_element() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named
+            .insert("argv".to_string(), Value::String(r#"["a",[1]]"#.into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a nested array element must refuse, not silently drop: {result:?}");
+    }
+
+    /// kaibo round-4 finding: `--argv '[1,2'` (unparseable, but starts with
+    /// `[`) used to fall through to "plain string, one argument" and run
+    /// with the literal text `"[1,2"` as a single argument — while `--env`'s
+    /// equivalent (an unparseable `{`-shaped string) already refused
+    /// loudly. The two are now consistent: both refuse.
+    #[tokio::test]
+    async fn test_spawn_argv_unparseable_bracket_string_is_a_loud_error() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/bin/echo".into()));
+        args.named.insert("argv".to_string(), Value::String("[1,2".into()));
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(
+            !result.ok(),
+            "an unparseable `[`-prefixed argv string must refuse, not become one literal argument: {result:?}"
+        );
+    }
+
+    /// kaibo round-4 finding: `--env '{"FOO": 1}'` used
+    /// `.filter_map(|(k, v)| v.as_str()...)`, silently dropping the `FOO`
+    /// key entirely (a non-string value) rather than stringifying it —
+    /// `printenv` would see no `FOO` at all.
+    #[tokio::test]
+    async fn test_spawn_env_json_string_stringifies_non_string_values() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named
+            .insert("env".to_string(), Value::String(r#"{"FOO": 1}"#.into()));
+        args.flags.insert("clear-env".to_string());
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(
+            result.text_out().contains("FOO=1"),
+            "a non-string JSON value must be stringified into the env var, not dropped: {}",
+            result.text_out()
+        );
+    }
+
+    /// Same bug, record spelling: a `Value::Json` object with a non-string
+    /// value hit the same `filter_map` drop.
+    #[tokio::test]
+    async fn test_spawn_env_record_stringifies_non_string_values() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert(
+            "env".to_string(),
+            Value::Json(serde_json::json!({"FOO": 1, "BAR": true})),
+        );
+        args.flags.insert("clear-env".to_string());
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(result.ok(), "spawn failed: {}", result.err);
+        assert!(result.text_out().contains("FOO=1"), "{}", result.text_out());
+        assert!(result.text_out().contains("BAR=true"), "{}", result.text_out());
+    }
+
+    /// A record env value that is itself a nested list/record can't cross
+    /// the process boundary — refused loudly, naming the key, never a
+    /// silent drop or a JSON re-stringify.
+    #[tokio::test]
+    async fn test_spawn_env_refuses_nested_collection_value() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("command".to_string(), Value::String("/usr/bin/env".into()));
+        args.named.insert(
+            "env".to_string(),
+            Value::Json(serde_json::json!({"FOO": [1, 2]})),
+        );
+
+        let result = Spawn.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "a nested-collection env value must refuse, not silently drop: {result:?}");
+        assert!(result.err.contains("FOO"), "should name the key: {}", result.err);
     }
 }

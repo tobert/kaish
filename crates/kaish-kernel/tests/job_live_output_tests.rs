@@ -121,6 +121,61 @@ async fn stdout_is_readable_while_the_job_is_still_running() {
     );
 }
 
+/// The `spawn` builtin gets the same live tee once it runs its child through
+/// `crate::spawn::spawn_process` — before that migration, `spawn` drained its
+/// child into its own buffer and never touched the job's stdout/stderr
+/// stream, so `spawn --command ... &`'s node stayed empty until the job
+/// finished. Same shape as `stdout_is_readable_while_the_job_is_still_running`
+/// above, `spawn --command sh` in place of a bare external `sh -c`.
+#[tokio::test]
+async fn spawn_builtin_streams_stdout_while_the_job_is_still_running() {
+    let kernel = kernel();
+    kernel
+        .execute(r#"spawn --command sh --argv '["-c", "echo first; sleep 2; echo second"]' &"#)
+        .await
+        .expect("spawn failed");
+    let id = JobId(1);
+
+    let deadline = Instant::now() + LIVE_TIMEOUT;
+    loop {
+        let status = status_of(&kernel, id).await;
+        let out = stdout_of(&kernel, id).await;
+
+        if out.contains("first") {
+            assert_eq!(
+                status, "running",
+                "the job was already finished the first time any output appeared — \
+                 spawn's child is not being teed live"
+            );
+            assert!(
+                !out.contains("second"),
+                "the whole buffer arrived at once ({out:?}) — spawn is still buffering \
+                 to completion instead of teeing"
+            );
+            break;
+        }
+
+        assert_eq!(
+            status, "running",
+            "the job finished before a single byte was readable — the stream is not live"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "no output appeared within {LIVE_TIMEOUT:?} while the job ran"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(wait_done(&kernel, id).await, "done:0");
+    let out = stdout_of(&kernel, id).await;
+    assert!(out.contains("first") && out.contains("second"), "final stream: {out:?}");
+    assert_eq!(
+        out.matches("first").count(),
+        1,
+        "the completion path must not re-write bytes the live tee already delivered: {out:?}"
+    );
+}
+
 /// The same liveness, read the way a model reads it: `cat /v/jobs/1/stdout`.
 #[tokio::test]
 async fn the_vfs_node_grows_while_the_job_runs() {
