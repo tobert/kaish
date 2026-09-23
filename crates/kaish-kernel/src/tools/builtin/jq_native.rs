@@ -532,21 +532,26 @@ impl Tool for JqNative {
         // Get filter (required, positional 0)
         let filter_str = match args.get_string("filter", 0) {
             Some(f) => f,
-            None => return ExecResult::failure(1, "jq: filter expression required"),
+            None => return ExecResult::failure(2, "jq: filter expression required"),
         };
 
         // Collect `--arg NAME VALUE` (string) and `--argjson NAME VALUE` (JSON)
         // bindings in declaration order. jaq needs the names at compile time
         // and the values at run time — same order on both sides.
+        // `--argjson NAME VALUE` with a VALUE that isn't JSON is a flag value
+        // the builtin cannot use — argv, like an unparseable `--maxdepth`.
         let (global_var_names, global_var_values) = match collect_bindings(&args) {
             Ok(pair) => pair,
-            Err(e) => return ExecResult::failure(1, e),
+            Err(e) => return ExecResult::failure(2, e),
         };
 
-        // Compile filter (validates at execution time)
+        // Compile filter (validates at execution time): a filter that fails
+        // to compile — computed, or shadowed by an `--arg`/`--argjson` name —
+        // is argv the caller can fix, the same rule `grep`'s computed
+        // pattern follows.
         let filter = match compile_filter(&filter_str, &global_var_names) {
             Ok(f) => f,
-            Err(e) => return ExecResult::failure(1, e),
+            Err(e) => return ExecResult::failure(2, e),
         };
 
         let raw_output = parsed.raw || args.has_flag("raw") || args.has_flag("r");
@@ -603,6 +608,9 @@ impl Tool for JqNative {
                                     Err(e) => {
                                         let hint =
                                             jsonl_hint_for_trailing_error(&text, &e).unwrap_or_default();
+                                        // The file's content is data, exactly
+                                        // like stdin's — the path named where
+                                        // to read it, not what's in it.
                                         return ExecResult::failure(
                                             1,
                                             format!("jq: invalid JSON in {}: {}{}", path, e, hint),
@@ -769,7 +777,10 @@ fn jsonl_hint_for_trailing_error(text: &str, err: &serde_json::Error) -> Option<
 /// `execute`. Returns `(exit_code, message)` on failure so the caller can
 /// preserve the existing 1-vs-2 exit-code split (parse/runtime vs. plumbing).
 async fn resolve_stdin_json(ctx: &mut ExecContext, slurp: bool) -> Result<serde_json::Value, (i64, String)> {
-    let (data, text) = ctx.resolve_stdin().await.map_err(|e| (2, format!("jq: {e}")))?;
+    // Only failure mode is a stdin decode error (non-UTF-8 bytes) — the
+    // data is at fault, not the invocation, so this joins the rest of this
+    // function's stdin-content errors at 1.
+    let (data, text) = ctx.resolve_stdin().await.map_err(|e| (1, format!("jq: {e}")))?;
     if let Some(data) = data {
         // `.data` path: the upstream stage (scatter/gather, fromjson, …)
         // already handed over one structured value — that's the single

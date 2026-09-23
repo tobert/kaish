@@ -99,7 +99,7 @@ impl Tool for Cp {
         // Last positional is the destination.
         let (sources, dest_value) = match args.positional.split_last() {
             Some((last, rest)) if !rest.is_empty() => (rest, last),
-            _ => return ExecResult::failure(1, "cp: missing file operand (need source and destination)"),
+            _ => return ExecResult::failure(2, "cp: missing file operand (need source and destination)"),
         };
         let dest = match crate::interpreter::value_to_text_sink_named(dest_value, "a path") {
             Ok(d) => d,
@@ -214,18 +214,40 @@ impl LinkMode {
     }
 }
 
-/// Prefix a backend error with the path it happened to, keeping its variant;
-/// `From<io::Error>` drops the path.
+/// Prefix a backend error with the path it happened to, keeping its variant.
+/// `LocalFs` never names the path in its own message (the OS's bare errno
+/// text); `MemoryFs`/`OverlayFs` sometimes already do, which the body below
+/// accounts for.
+///
+/// Prefixes the variant's own payload, not `err`'s `Display` — `Display`
+/// already carries the variant's phrase (`"not found: {0}"`), so building
+/// `msg` from it and feeding `msg` back into the same variant doubled that
+/// phrase (`cp /nope x` read "not found: /nope: not found: nope").
 fn name_error(path: &Path, err: BackendError) -> BackendError {
-    let msg = format!("{}: {}", path.display(), err);
+    let path_str = path.display().to_string();
+    // A backend like MemoryFs/OverlayFs already names this same path inside
+    // `inner` — just possibly normalized without kaish's own leading `/`
+    // (kaish-vfs's own fix stops it from also restating the kind's phrase,
+    // but the path itself is legitimately there). Prefixing unconditionally
+    // repeated it: `cp /nope x` read "not found: /nope: nope". Only prefix
+    // when `inner` doesn't already end in the path — never for an empty
+    // `inner`, where "ends with" is vacuously true and prefixing is exactly
+    // what supplies the path at all.
+    let with_path = |inner: String| -> String {
+        if !inner.is_empty() && (inner == path_str || path_str.ends_with(inner.as_str())) {
+            inner
+        } else {
+            format!("{path_str}: {inner}")
+        }
+    };
     match err {
-        BackendError::NotFound(_) => BackendError::NotFound(msg),
-        BackendError::AlreadyExists(_) => BackendError::AlreadyExists(msg),
-        BackendError::PermissionDenied(_) => BackendError::PermissionDenied(msg),
-        BackendError::IsDirectory(_) => BackendError::IsDirectory(msg),
-        BackendError::NotDirectory(_) => BackendError::NotDirectory(msg),
-        BackendError::Io(_) => BackendError::Io(msg),
-        BackendError::InvalidOperation(_) => BackendError::InvalidOperation(msg),
+        BackendError::NotFound(inner) => BackendError::NotFound(with_path(inner)),
+        BackendError::AlreadyExists(inner) => BackendError::AlreadyExists(with_path(inner)),
+        BackendError::PermissionDenied(inner) => BackendError::PermissionDenied(with_path(inner)),
+        BackendError::IsDirectory(inner) => BackendError::IsDirectory(with_path(inner)),
+        BackendError::NotDirectory(inner) => BackendError::NotDirectory(with_path(inner)),
+        BackendError::Io(inner) => BackendError::Io(with_path(inner)),
+        BackendError::InvalidOperation(inner) => BackendError::InvalidOperation(with_path(inner)),
         // No payload to carry the path in, or context already present.
         other => other,
     }
@@ -642,6 +664,23 @@ mod tests {
 
         let result = Cp.execute(args, &mut ctx).await;
         assert!(!result.ok());
+        // `name_error` prefixes the backend error's own payload with the
+        // path it happened to. `MemoryFs` already names that same path
+        // inside the payload (kaish-vfs's own not-found fix), so an
+        // unconditional prefix repeated it: "not found: /nonexistent:
+        // nonexistent". One occurrence of the phrase, and one of the path.
+        assert_eq!(
+            result.err.matches("not found").count(),
+            1,
+            "doubled phrase: {}",
+            result.err
+        );
+        assert_eq!(
+            result.err.matches("nonexistent").count(),
+            1,
+            "doubled path: {}",
+            result.err
+        );
     }
 
     #[tokio::test]

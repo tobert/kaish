@@ -100,21 +100,28 @@ impl Tool for Uniq {
         let only_unique = parsed.unique;
         let ignore_case = parsed.ignore_case;
 
-        let lines: Vec<&str> = input.lines().collect();
-        if lines.is_empty() {
+        // Grouping is inherently one streaming pass, so it reads directly off
+        // `input.lines()` rather than an intermediate `Vec` — the checkpoint
+        // inside the loop below is what lets a script timeout stop a large
+        // input partway through.
+        let mut lines_iter = input.lines();
+        let Some(first_line) = lines_iter.next() else {
             return ExecResult::success("");
-        }
+        };
 
         // Group consecutive identical lines
         let mut groups: Vec<(usize, &str)> = Vec::new();
-        let mut current_line = lines[0];
+        let mut current_line = first_line;
         let mut count = 1;
 
-        for line in lines.iter().skip(1) {
+        for line in lines_iter {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("uniq");
+            }
             let matches = if ignore_case {
                 line.eq_ignore_ascii_case(current_line)
             } else {
-                *line == current_line
+                line == current_line
             };
 
             if matches {

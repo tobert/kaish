@@ -55,7 +55,7 @@ impl Tool for Assert {
 
         let condition = match args.get_positional(0) {
             Some(v) => v,
-            None => return ExecResult::failure(1, "assert: missing condition argument"),
+            None => return ExecResult::failure(2, "assert: missing condition argument"),
         };
 
         let message = args

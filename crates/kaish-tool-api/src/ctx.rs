@@ -41,6 +41,21 @@ impl PatientGuard {
     }
 }
 
+/// Returned by [`ToolCtx::checkpoint`] when this execution was cancelled.
+///
+/// A tool returns [`Interrupted::result`] at once: exit 130, the convention
+/// the kernel's own cancellation points use. When the cause was the script
+/// timeout, the kernel reports the result as 124.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interrupted;
+
+impl Interrupted {
+    /// The result a tool returns when interrupted: exit 130, `<tool>: interrupted`.
+    pub fn result(self, tool: &str) -> kaish_types::ExecResult {
+        kaish_types::ExecResult::failure(130, format!("{tool}: interrupted"))
+    }
+}
+
 /// The portable execution context a tool sees.
 ///
 /// This is deliberately small: it carries only what a well-behaved,
@@ -123,6 +138,31 @@ pub trait ToolCtx: sealed::Sealed + Send + Sync {
     fn patient(&self, budget: Duration) -> PatientGuard {
         let _ = budget;
         PatientGuard::inert()
+    }
+
+    /// Let the kernel run its timers, and stop if this execution was cancelled.
+    ///
+    /// Call it once per pass of any loop whose length depends on input or
+    /// arguments — a line, a record, a chunk, a generated number:
+    ///
+    /// ```ignore
+    /// for n in start..=end {
+    ///     if let Err(i) = ctx.checkpoint().await {
+    ///         return i.result("seq");
+    ///     }
+    ///     // ...
+    /// }
+    /// ```
+    ///
+    /// A loop that never awaits holds its thread. On a current-thread runtime
+    /// the script timeout cannot fire until that loop ends, so a long loop
+    /// without a checkpoint runs to completion past its deadline. The kernel's
+    /// context yields about once per 128 calls, so a call per pass is cheap.
+    ///
+    /// The default does nothing and never reports a cancel; the kernel's
+    /// context overrides it.
+    async fn checkpoint(&mut self) -> Result<(), Interrupted> {
+        Ok(())
     }
 
     /// Escape hatch for trusted in-tree tools: recover the concrete context.

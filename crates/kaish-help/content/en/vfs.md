@@ -91,6 +91,19 @@ loud error rather than a hang. Raw random bytes are binary, so move them with
 result that renders as a hex dump (REPL) or a base64 envelope (`--json`). In
 passthrough (REPL) mode `/dev` is the real host `/dev` instead.
 
+## Redirects
+
+```sh
+mkdir -p /tmp/out; cmd > /tmp/out/log.txt   # a redirect never creates a directory
+cmd > /v/jobs/x                             # exit 1 — read-only mount; cmd does not run
+```
+
+A redirect target resolves against `$PWD` and opens through the mount that
+owns it, before the command runs: `>` truncates, `>>` appends. A missing
+parent directory, a read-only mount, or a directory as the target exits 1
+and the command does not run. The same file as `<` input and `>` output is
+refused; write to a temp file, then `mv` it over the original.
+
 ## Sandbox Limitations
 
 **External binaries bypass the VFS sandbox.** Sandboxed mode restricts kaish builtins to `$HOME` + `/tmp`, but external commands (anything resolved via PATH), `exec`, `spawn`, and `env CMD` access the real filesystem directly.

@@ -67,7 +67,17 @@ impl Tool for Tac {
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => {
-                            let mut lines: Vec<&str> = s.lines().collect();
+                            // `reverse`/`join` below are each one long call
+                            // with no yield point; collecting via a
+                            // checkpointed loop rather than `.lines().collect()`
+                            // means a large file is already caught here.
+                            let mut lines: Vec<&str> = Vec::new();
+                            for line in s.lines() {
+                                if ctx.checkpoint().await.is_err() {
+                                    return kaish_tool_api::Interrupted.result("tac");
+                                }
+                                lines.push(line);
+                            }
                             lines.reverse();
                             if !output.is_empty() {
                                 output.push('\n');
@@ -114,7 +124,14 @@ impl Tool for Tac {
             },
         };
 
-        let mut lines: Vec<&str> = input.lines().collect();
+        // See the multi-file branch above for why this collects via a loop.
+        let mut lines: Vec<&str> = Vec::new();
+        for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("tac");
+            }
+            lines.push(line);
+        }
         lines.reverse();
 
         // Trailing-newline policy (builtin-sweep P4.1); empty input stays empty.

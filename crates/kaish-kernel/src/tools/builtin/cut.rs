@@ -121,16 +121,19 @@ impl Tool for Cut {
             .or_else(|| args.get_string("c", usize::MAX));
 
         if delimiter.chars().count() > 1 {
-            return ExecResult::failure(1, "cut: delimiter must be a single character");
+            return ExecResult::failure(2, "cut: delimiter must be a single character");
         }
 
         if fields.is_none() && characters.is_none() {
-            return ExecResult::failure(1, "cut: must specify either -f or -c");
+            return ExecResult::failure(2, "cut: must specify either -f or -c");
         }
 
         let mut output = Vec::new();
 
         for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("cut");
+            }
             if let Some(ref char_spec) = characters {
                 // Character mode
                 let chars: Vec<char> = line.chars().collect();

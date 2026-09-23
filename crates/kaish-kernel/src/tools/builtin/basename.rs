@@ -58,7 +58,7 @@ impl Tool for Basename {
 
         let path_str = match get_path_string(&args, "path", 0) {
             Ok(Some(p)) => p,
-            Ok(None) => return ExecResult::failure(1, "basename: missing path argument"),
+            Ok(None) => return ExecResult::failure(2, "basename: missing path argument"),
             Err(e) => return ExecResult::failure(1, format!("basename: {e}")),
         };
 

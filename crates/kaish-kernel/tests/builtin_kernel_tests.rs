@@ -768,7 +768,7 @@ async fn cut_without_field_or_char_spec_errors() {
     touch(dir.path(), "data.txt", "a b c\n");
     let kernel = kernel_at(dir.path());
     let (_out, err, code) = run_err(&kernel, "cut data.txt").await;
-    assert_eq!(code, 1, "no -f/-c → exit 1; err={err:?}");
+    assert_eq!(code, 2, "no -f/-c is a usage error → exit 2; err={err:?}");
     assert!(err.contains("-f or -c"), "err should explain the missing spec: {err:?}");
 }
 

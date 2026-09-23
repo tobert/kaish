@@ -98,20 +98,22 @@ impl Filesystem for JobFs {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid job path")
         })?;
 
+        // The path alone — "cannot read directory" restated
+        // `ErrorKind::IsADirectory`'s own meaning, and
+        // `BackendError::IsDirectory`'s Display adds "is a directory:" once
+        // when this crosses that boundary.
         let job_id = job_id.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::IsADirectory, "cannot read directory")
+            io::Error::new(io::ErrorKind::IsADirectory, path.display().to_string())
         })?;
 
         let file = file.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::IsADirectory, "cannot read directory")
+            io::Error::new(io::ErrorKind::IsADirectory, path.display().to_string())
         })?;
 
-        // Check job exists
+        // Check job exists. The id alone — "job ... not found" restated
+        // `ErrorKind::NotFound`'s own meaning.
         if !self.jobs.exists(job_id).await {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("job {} not found", job_id),
-            ));
+            return Err(io::Error::new(io::ErrorKind::NotFound, job_id.to_string()));
         }
 
         match file {
@@ -120,7 +122,7 @@ impl Filesystem for JobFs {
                     .jobs
                     .get_status_string(job_id)
                     .await
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))?;
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, job_id.to_string()))?;
                 Ok(format!("{}\n", status).into_bytes())
             }
             "command" => {
@@ -128,7 +130,7 @@ impl Filesystem for JobFs {
                     .jobs
                     .get_command(job_id)
                     .await
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))?;
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, job_id.to_string()))?;
                 Ok(format!("{}\n", command).into_bytes())
             }
             "stdout" => {
@@ -138,13 +140,13 @@ impl Filesystem for JobFs {
                 self.jobs
                     .read_stdout(job_id)
                     .await
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, job_id.to_string()))
             }
             "stderr" => {
                 self.jobs
                     .read_stderr(job_id)
                     .await
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, job_id.to_string()))
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -155,7 +157,7 @@ impl Filesystem for JobFs {
 
     async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             "jobfs is read-only",
         ))
     }
@@ -165,12 +167,12 @@ impl Filesystem for JobFs {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid job path")
         })?;
 
-        // Can't list a file
+        // Can't list a file. The path alone — "not a directory" restated
+        // `ErrorKind::NotADirectory`'s own meaning, and
+        // `BackendError::NotDirectory`'s Display adds "not a directory:"
+        // once when this crosses that boundary.
         if file.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                "not a directory",
-            ));
+            return Err(io::Error::new(io::ErrorKind::NotADirectory, path.display().to_string()));
         }
 
         match job_id {
@@ -191,12 +193,11 @@ impl Filesystem for JobFs {
                 Ok(entries)
             }
             Some(id) => {
-                // List job directory: status, command, stdout, stderr
+                // List job directory: status, command, stdout, stderr.
+                // The id alone — "job ... not found" restated
+                // `ErrorKind::NotFound`'s own meaning.
                 if !self.jobs.exists(id).await {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("job {} not found", id),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::NotFound, id.to_string()));
                 }
 
                 Ok(vec![
@@ -256,22 +257,17 @@ impl Filesystem for JobFs {
                 Ok(DirEntry::directory(name))
             }
             (Some(id), None) => {
-                // Job directory
+                // Job directory. The id alone — "job ... not found" restated
+                // `ErrorKind::NotFound`'s own meaning.
                 if !self.jobs.exists(id).await {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("job {} not found", id),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::NotFound, id.to_string()));
                 }
                 Ok(DirEntry::directory(name))
             }
             (Some(id), Some(file)) => {
                 // File inside job directory
                 if !self.jobs.exists(id).await {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("job {} not found", id),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::NotFound, id.to_string()));
                 }
 
                 // Validate file name
@@ -296,14 +292,14 @@ impl Filesystem for JobFs {
 
     async fn mkdir(&self, _path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             "jobfs is read-only",
         ))
     }
 
     async fn remove(&self, _path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             "jobfs is read-only",
         ))
     }

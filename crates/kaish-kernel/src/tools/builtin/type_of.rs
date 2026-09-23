@@ -117,7 +117,7 @@ impl Tool for TypeOf {
                 let name = type_name(value);
                 ExecResult::success_with_data(name, Value::String(name.to_string()))
             }
-            None => ExecResult::failure(1, "typeof: no argument (expected a value)"),
+            None => ExecResult::failure(2, "typeof: no argument (expected a value)"),
         }
     }
 }

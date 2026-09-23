@@ -61,7 +61,7 @@ impl Tool for Tee {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "tee: missing file argument");
+            return ExecResult::failure(2, "tee: missing file argument");
         }
 
         let append = args.has_flag("append") || args.has_flag("a");

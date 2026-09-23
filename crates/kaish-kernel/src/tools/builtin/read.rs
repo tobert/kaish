@@ -103,7 +103,7 @@ impl Tool for Read {
             .collect();
 
         if var_names.is_empty() {
-            return ExecResult::failure(1, "read: missing variable name");
+            return ExecResult::failure(2, "read: missing variable name");
         }
 
         // Refuse before binding anything: a name `$x` cannot read back is a
@@ -111,7 +111,7 @@ impl Tool for Read {
         // parser's own name scan never sees.
         for name in &var_names {
             if let Err(bad) = crate::name::validate(name) {
-                return ExecResult::failure(1, format!("read: `{name}': {bad}"));
+                return ExecResult::failure(2, format!("read: `{name}': {bad}"));
             }
         }
 

@@ -55,7 +55,7 @@ code is something agents can branch on:
 | `code` | Meaning | Recovery |
 |--------|---------|----------|
 | 0 | Success | — |
-| 1 | Failure | Read `err` |
+| 1 | Failure — also the negative answer for a builtin that spends 1 on a result rather than a mistake: `grep`/`test`/`cmp`/`diff` (no match/false/differ), `read`/`glob` (end of input/no match), `which` (not found), `kaish-validate` (invalid) | Read `err` |
 | 2 | Usage error, or a refusal that names what to do instead (e.g. `kaish-trash empty` without `--confirm`) | Read `err` |
 | 3 | Output truncated by the output limit | `original_code` holds the real exit code of the statement `code` reports. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
@@ -480,6 +480,26 @@ Nothing catches that for you. No assertion ties `read_only() == false` to
 reporting a mode, and the failure is a wrong answer rather than an error, so
 your backend's own tests will pass. If you add a writable backend, either
 report a mode or change `resolve` and this table together.
+
+### What a redirect asks of a backend
+
+A redirect opens its target before the command runs, then writes once the
+command finishes. For `cmd > f` a backend sees, in order:
+
+1. `canonicalize(f, true)`, then `stat` of the result's parent, which must
+   report a directory. A missing parent is refused with `redirect: f: no
+   such file or directory`; kaish never creates it.
+2. `write(f, b"", Overwrite)` — the truncation. `>>` calls `append(f,
+   b"")` instead, which must create a missing file.
+3. `write(f, data, Overwrite)` (or `append(f, data)`) after the command,
+   only when it produced bytes for `f`.
+
+An `OverlayFs` records the step-2 truncation as a write. A backend with
+implicit directories, such as an object store keyed by full path, must
+still answer `stat` on a parent prefix with a directory entry, or every
+redirect into it fails. Other writers (`write`, `tee`, `cp`) call
+`write`/`append` directly and keep the backend's own parent handling; only
+redirects check the parent first.
 
 ### Output Limits and Spill Mode (`OutputLimitConfig`)
 

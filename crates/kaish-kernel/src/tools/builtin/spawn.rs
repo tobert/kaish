@@ -130,7 +130,7 @@ impl Tool for Spawn {
         // silently being treated as "not given".
         let command_name = match get_path_string(&args, "command", 0) {
             Ok(Some(cmd)) => cmd,
-            Ok(None) => return ExecResult::failure(1, "spawn: command parameter required"),
+            Ok(None) => return ExecResult::failure(2, "spawn: command parameter required"),
             Err(e) => return ExecResult::failure(1, format!("spawn: {e}")),
         };
 

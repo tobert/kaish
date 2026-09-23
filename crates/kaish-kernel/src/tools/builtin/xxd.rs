@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Xxd tool: hex dump or reverse.
 pub struct Xxd;
@@ -130,7 +130,7 @@ impl Tool for Xxd {
             // above (file path and stdin), since both funnel into the same
             // `data: Vec<u8>` before this check.
             return match std::str::from_utf8(&data) {
-                Ok(s) => reverse_hex(s, plain),
+                Ok(s) => reverse_hex(s, plain, ctx).await,
                 Err(_) => ExecResult::failure(
                     2,
                     "xxd: -r input is not valid UTF-8 (binary data, not a hex dump?) \
@@ -156,9 +156,13 @@ impl Tool for Xxd {
         };
 
         let output = if plain {
-            plain_hex(bytes)
+            plain_hex(bytes, ctx).await
         } else {
-            classic_hex(bytes, seek)
+            classic_hex(bytes, seek, ctx).await
+        };
+        let output = match output {
+            Ok(s) => s,
+            Err(i) => return i.result("xxd"),
         };
 
         ExecResult::with_output(OutputData::text(output))
@@ -167,9 +171,14 @@ impl Tool for Xxd {
 
 /// Classic xxd format: address, hex pairs, ASCII representation.
 /// 16 bytes per line.
-fn classic_hex(bytes: &[u8], base_offset: usize) -> String {
+async fn classic_hex(
+    bytes: &[u8],
+    base_offset: usize,
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
     let mut output = String::new();
     for (i, chunk) in bytes.chunks(16).enumerate() {
+        ctx.checkpoint().await?;
         let addr = base_offset + i * 16;
 
         // Address
@@ -204,13 +213,17 @@ fn classic_hex(bytes: &[u8], base_offset: usize) -> String {
     }
 
     // Each line is newline-terminated, including the last (builtin-sweep P4.1).
-    output
+    Ok(output)
 }
 
 /// Plain hex: just hex bytes, no address or ASCII. 30 bytes per line.
-fn plain_hex(bytes: &[u8]) -> String {
+async fn plain_hex(
+    bytes: &[u8],
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
     let mut output = String::new();
     for (i, byte) in bytes.iter().enumerate() {
+        ctx.checkpoint().await?;
         output.push_str(&format!("{:02x}", byte));
         if i > 0 && (i + 1) % 30 == 0 {
             output.push('\n');
@@ -220,23 +233,33 @@ fn plain_hex(bytes: &[u8]) -> String {
     if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
     }
-    output
+    Ok(output)
 }
 
 /// Reverse: parse hex input back to text.
-fn reverse_hex(input: &str, plain: bool) -> ExecResult {
+async fn reverse_hex(input: &str, plain: bool, ctx: &mut ExecContext) -> ExecResult {
     let hex_str = if plain {
-        // Plain mode: input is just hex chars
-        input
-            .chars()
-            .filter(|c| c.is_ascii_hexdigit())
-            .collect::<String>()
+        // Plain mode: input is just hex chars. A manual loop (rather than
+        // `.filter().collect()`) so the checkpoint covers this whole pass.
+        let mut hex = String::with_capacity(input.len());
+        for c in input.chars() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("xxd");
+            }
+            if c.is_ascii_hexdigit() {
+                hex.push(c);
+            }
+        }
+        hex
     } else {
         // Classic mode: extract hex from xxd-format lines
         // Each line: "00000000: 6865 6c6c 6f0a       hello."
         // Take the hex portion between address and ASCII
         let mut hex = String::new();
         for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("xxd");
+            }
             // Skip empty lines
             let line = line.trim();
             if line.is_empty() {
@@ -261,13 +284,16 @@ fn reverse_hex(input: &str, plain: bool) -> ExecResult {
     let chars: Vec<char> = hex_str.chars().collect();
     let mut i = 0;
     while i + 1 < chars.len() {
+        if ctx.checkpoint().await.is_err() {
+            return kaish_tool_api::Interrupted.result("xxd");
+        }
         let high = chars[i].to_digit(16);
         let low = chars[i + 1].to_digit(16);
         match (high, low) {
             (Some(h), Some(l)) => bytes.push((h * 16 + l) as u8),
             _ => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!("xxd: invalid hex at position {}", i),
                 )
             }

@@ -624,8 +624,12 @@ impl Tool for Grep {
                 .await;
 
             // I/O error reading the file.
-            if let Err(e) = scan_result {
-                return ExecResult::failure(2, format!("grep: {}: {}", path, e));
+            let scan_result = match scan_result {
+                Ok(outcome) => outcome,
+                Err(e) => return ExecResult::failure(2, format!("grep: {}: {}", path, e)),
+            };
+            if scan_result == crate::tools::ScanOutcome::Interrupted {
+                return kaish_tool_api::Interrupted.result("grep");
             }
 
             // Flush the remaining carry.  `saw_invalid_utf8` is set if any
@@ -687,14 +691,18 @@ impl Tool for Grep {
             );
         }
 
-        let render = match grep_lines_structured(
+        let render = match grep_lines_structured_checkpointed(
+            ctx,
             &bytes,
             &matcher,
             &grep_opts,
             filename.as_deref(),
-        ) {
+        )
+        .await
+        {
             Ok(t) => t,
-            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+            Err(GrepScanError::Interrupted) => return kaish_tool_api::Interrupted.result("grep"),
+            Err(GrepScanError::Msg(e)) => return ExecResult::failure(2, format!("grep: {e}")),
         };
 
         // Quiet mode: just return exit code
@@ -744,7 +752,7 @@ impl Grep {
     #[allow(clippy::too_many_arguments)]
     async fn stream_grep(
         &self,
-        _ctx: &mut ExecContext,
+        ctx: &mut ExecContext,
         pipe_in: crate::scheduler::PipeReader,
         mut pipe_out: crate::scheduler::PipeWriter,
         regex: &regex::Regex,
@@ -761,9 +769,18 @@ impl Grep {
         // is the downstream stage closing the pipe (`grep x | head -1`), which
         // is ordinary and keeps the match-based code.
         let mut read_error: Option<std::io::Error> = None;
+        let mut interrupted = false;
 
         let mut line_buf = String::new();
         loop {
+            // `read_line` genuinely awaits, but it does not itself check for a
+            // cancel: an upstream stage that keeps producing lines faster than
+            // this one is interrupted would otherwise keep this loop running
+            // past the script timeout.
+            if ctx.checkpoint().await.is_err() {
+                interrupted = true;
+                break;
+            }
             line_buf.clear();
             match reader.read_line(&mut line_buf).await {
                 Ok(0) => break,
@@ -803,6 +820,9 @@ impl Grep {
         drop(reader);
         let _ = pipe_out.shutdown().await;
 
+        if interrupted {
+            return kaish_tool_api::Interrupted.result("grep");
+        }
         if let Some(e) = read_error {
             return ExecResult::failure(2, format!("grep: {e}"));
         }
@@ -860,6 +880,9 @@ impl Grep {
         };
 
         for file_path in files {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("grep");
+            }
             // Create relative filename for display
             let stripped = file_path.strip_prefix(root).unwrap_or(file_path);
             let display_name = match display_prefix {
@@ -963,7 +986,7 @@ impl Grep {
 /// Incremental, line-buffered grep scanner for streaming file reads.
 ///
 /// Fed arbitrary byte chunks via [`push`](GrepLineScanner::push), it produces
-/// the same `RenderResult` as [`grep_lines_structured`] for simple matches
+/// the same `RenderResult` as `grep_lines_structured` for simple matches
 /// (no context, no `-c`/`-q`/`-l`/`-o`) — without ever holding the whole file.
 ///
 /// Binary detection is incremental:
@@ -1261,6 +1284,9 @@ struct GrepOptions {
 /// Returns an error string when the searcher can't run (e.g. a bad
 /// encoding label). Match-not-found is *not* an error — it returns an
 /// empty `RenderResult` with `match_count == 0`.
+///
+/// [`grep_lines_structured_checkpointed`] searches in chunks, and calls this
+/// for one whole-buffer search when `-A`/`-B`/`-C` asks for context lines.
 fn grep_lines_structured(
     input: &[u8],
     matcher: &RegexMatcher,
@@ -1271,9 +1297,127 @@ fn grep_lines_structured(
     search_with(&mut searcher, input, matcher, opts, filename)
 }
 
+/// Either a real error or a cancelled scan — [`grep_lines_structured_checkpointed`]'s
+/// error type. Kept separate from the plain `String` the rest of this file
+/// uses so a cancel can't be mistaken for (or logged as) a usage/IO error.
+enum GrepScanError {
+    Msg(String),
+    Interrupted,
+}
+
+/// The checkpointed counterpart to `grep_lines_structured`, for the
+/// whole-buffer path (stdin, and any of `-c`/`-q`/`-l`/`-o`/`-A`/`-B`/`-C`
+/// over a single file) — the one grep path a script `request_timeout` could
+/// not reach: `grep_lines_structured` handed the whole buffer to
+/// `Searcher::search_slice` in one call, and a call that never awaits holds
+/// the thread past the deadline the same way the unchecked `seq` loop did.
+///
+/// Runs the search in `ExecContext::STREAM_CHUNK_SIZE` windows, cut at the
+/// nearest line boundary, checkpointing between them.
+///
+/// `-A`/`-B`/`-C` searches the whole buffer in one call instead, after a
+/// checkpoint. `Searcher::search_slice` resets its context tracking on every
+/// call, so a match within NUM lines of a chunk boundary would print fewer
+/// context lines than asked for — a wrong answer, where an uninterruptible
+/// search is only a slow one. That one call is not interruptible: a context
+/// grep over a file larger than one chunk runs to the end, and a script
+/// timeout lands after it.
+async fn grep_lines_structured_checkpointed(
+    ctx: &mut ExecContext,
+    input: &[u8],
+    matcher: &RegexMatcher,
+    opts: &GrepOptions,
+    filename: Option<&str>,
+) -> Result<RenderResult, GrepScanError> {
+    if opts.before_context.unwrap_or(0) > 0 || opts.after_context.unwrap_or(0) > 0 {
+        if ctx.checkpoint().await.is_err() {
+            return Err(GrepScanError::Interrupted);
+        }
+        return grep_lines_structured(input, matcher, opts, filename).map_err(GrepScanError::Msg);
+    }
+
+    let mut searcher = build_searcher(opts).map_err(GrepScanError::Msg)?;
+    let mut combined = RenderResult {
+        text: String::new(),
+        nodes: Vec::new(),
+        rich: Vec::new(),
+        match_count: 0,
+    };
+    let chunk_size = ExecContext::STREAM_CHUNK_SIZE as usize;
+    let mut line_offset: u64 = 0;
+    let mut pos = 0usize;
+    while pos < input.len() {
+        if ctx.checkpoint().await.is_err() {
+            return Err(GrepScanError::Interrupted);
+        }
+
+        // Cut this chunk at the nearest line boundary at or after the target
+        // size, so a chunk never splits a line in half.
+        let mut end = (pos + chunk_size).min(input.len());
+        if end < input.len() {
+            end = match input[pos..end].iter().rposition(|&b| b == b'\n') {
+                Some(rel) => pos + rel + 1,
+                None => match input[end..].iter().position(|&b| b == b'\n') {
+                    Some(rel) => end + rel + 1,
+                    None => input.len(),
+                },
+            };
+        }
+        let chunk = &input[pos..end];
+
+        // `--max-count` is applied per chunk below; once earlier chunks
+        // already emitted the limit, stop scanning rather than running the
+        // rest of a huge file for a bound already reached.
+        let mut chunk_opts = opts.clone();
+        if let Some(max) = opts.max_count {
+            let remaining = max.saturating_sub(combined.match_count);
+            if remaining == 0 {
+                break;
+            }
+            chunk_opts.max_count = Some(remaining);
+        }
+
+        let mut events = events_for(&mut searcher, chunk, matcher).map_err(GrepScanError::Msg)?;
+        offset_events(&mut events, line_offset);
+        let rendered = render_events(&events, &chunk_opts, filename);
+        combined.text.push_str(&rendered.text);
+        combined.nodes.extend(rendered.nodes);
+        combined.rich.extend(rendered.rich);
+        combined.match_count += rendered.match_count;
+
+        line_offset += chunk.iter().filter(|&&b| b == b'\n').count() as u64;
+        pos = end;
+    }
+    Ok(combined)
+}
+
+/// Add `offset` to every event's line number — used to stitch chunk-local
+/// numbering (each chunk's own `Searcher` counts from 1) back into the
+/// whole-input line numbers `grep -n` and `--json` report.
+fn offset_events(events: &mut [SearchEvent], offset: u64) {
+    if offset == 0 {
+        return;
+    }
+    for event in events.iter_mut() {
+        match event {
+            SearchEvent::Match(m) => {
+                if let Some(n) = m.line_number.as_mut() {
+                    *n += offset;
+                }
+            }
+            SearchEvent::Context(c) => {
+                if let Some(n) = c.line_number.as_mut() {
+                    *n += offset;
+                }
+            }
+            SearchEvent::ContextBreak => {}
+        }
+    }
+}
+
 /// Build the grep-searcher `Searcher` for these options.
 ///
-/// Split out from [`grep_lines_structured`] so a multi-file search builds it
+/// Split out from `grep_lines_structured` so a multi-file search builds it
 /// **once** and reuses it: a `Searcher` owns a 64 KiB zeroed line buffer plus an
 /// 8 KiB decode buffer, and building one per file made those two allocations
 /// 68% of all bytes allocated in the GH #48 grep-over-a-tree profile. Reuse is
@@ -1305,6 +1449,21 @@ fn build_searcher(opts: &GrepOptions) -> Result<Searcher, String> {
     Ok(sb.build())
 }
 
+/// Run the searcher over `input` and collect its raw event stream, with no
+/// rendering. Shared by [`search_with`] (one call, whole buffer) and
+/// [`grep_lines_structured_checkpointed`] (one call per checkpointed chunk).
+fn events_for(
+    searcher: &mut Searcher,
+    input: &[u8],
+    matcher: &RegexMatcher,
+) -> Result<Vec<SearchEvent>, String> {
+    let mut sink = AccumulatorSink::new(matcher, None);
+    searcher
+        .search_slice(matcher, input, &mut sink)
+        .map_err(|e| e.to_string())?;
+    Ok(sink.into_events())
+}
+
 /// Search one buffer with an already-built searcher and render the result.
 fn search_with(
     searcher: &mut Searcher,
@@ -1313,11 +1472,7 @@ fn search_with(
     opts: &GrepOptions,
     filename: Option<&str>,
 ) -> Result<RenderResult, String> {
-    let mut sink = AccumulatorSink::new(matcher, None);
-    searcher
-        .search_slice(matcher, input, &mut sink)
-        .map_err(|e| e.to_string())?;
-    let events = sink.into_events();
+    let events = events_for(searcher, input, matcher)?;
     Ok(render_events(&events, opts, filename))
 }
 
@@ -2387,7 +2542,7 @@ mod tests {
 
         let mut vfs = VfsRouter::new();
         vfs.mount("/", rec);
-        let ctx = ExecContext::new(Arc::new(vfs));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
 
         // Use read_file_chunked directly with a small chunk to force multiple reads.
         let regex = regex::Regex::new("line").unwrap();

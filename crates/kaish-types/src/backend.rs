@@ -62,6 +62,13 @@ pub enum BackendError {
     InvalidOperation(String),
 }
 
+/// The `io::Error` message becomes the variant's payload verbatim.
+/// `Filesystem` implementations (`LocalFs`, `MemoryFs`, `OverlayFs`, …) are
+/// responsible for never restating the `ErrorKind`'s own phrase in that
+/// message — this conversion adds it exactly once, via each variant's
+/// `#[error(...)]` `Display`. A backend that bakes the phrase in anyway
+/// doubles it here; that is a bug in the backend, not something this
+/// conversion should paper over by pattern-matching text.
 impl From<std::io::Error> for BackendError {
     fn from(err: std::io::Error) -> Self {
         use std::io::ErrorKind;
@@ -508,4 +515,14 @@ mod tests {
         assert_eq!(result.original_code, Some(2));
     }
 
+    /// `From<io::Error>` adds the `ErrorKind`'s phrase exactly once, via the
+    /// target variant's `#[error(...)]` `Display`. Whether a given backend's
+    /// message ever collides with that phrase is a backend concern, covered
+    /// per-backend in kaish-vfs (`conformance::a_missing_path_names_the_phrase_once`).
+    #[test]
+    fn from_io_error_adds_the_kind_phrase_to_a_bare_message() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "/nope");
+        let backend_err: BackendError = err.into();
+        assert_eq!(backend_err.to_string(), "not found: /nope");
+    }
 }

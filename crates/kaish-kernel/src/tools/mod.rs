@@ -29,7 +29,7 @@ pub use builtin::{resolve_in_path, virtual_cwd_error};
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use context::{
     external_commands_unavailable_error, ExecContext, ExternalCommandsUnavailable,
-    GateExpectations, OutputContext, OverwriteExpectation, DEFAULT_KILL_GRACE,
+    GateExpectations, OutputContext, OverwriteExpectation, ScanOutcome, DEFAULT_KILL_GRACE,
 };
 pub(crate) use context::{cas_overwrite, exec_context, is_trash_excluded, ExternalCommandOutcome};
 pub use global_flags::GlobalFlags;

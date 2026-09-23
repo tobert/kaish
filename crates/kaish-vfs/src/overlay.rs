@@ -77,11 +77,12 @@ struct OverlayState {
     dirty_symlinks: HashSet<PathBuf>,
 }
 
+/// The message carries only the path — `ErrorKind::NotFound` already says
+/// what happened, and `BackendError`'s `#[error("not found: {0}")]` adds
+/// that phrase once when this crosses into a `BackendError`. Baking the
+/// phrase in here too would double it there.
 fn not_found(path: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("not found: {}", path.display()),
-    )
+    io::Error::new(io::ErrorKind::NotFound, path.display().to_string())
 }
 
 fn is_not_found(error: &io::Error) -> bool {
@@ -535,11 +536,17 @@ impl OverlayFs {
             match change.kind {
                 ChangeKind::Added => {
                     if target.exists(&change.path).await {
+                        // The lead "exists in target" restated
+                        // `ErrorKind::AlreadyExists`'s own meaning, and
+                        // `BackendError::AlreadyExists`'s Display adds
+                        // "already exists:" once when this crosses that
+                        // boundary — the explanation past the path is what
+                        // the kind doesn't already say.
                         return Err(io::Error::new(
                             io::ErrorKind::AlreadyExists,
                             format!(
-                                "conflict: {} exists in target but is Added in the overlay; \
-                                 the overlay's snapshot pre-dates a concurrent add",
+                                "{}: Added in the overlay, but the overlay's snapshot \
+                                 pre-dates a concurrent add",
                                 change.path.display()
                             ),
                         ));
@@ -911,10 +918,10 @@ impl Filesystem for OverlayFs {
             && let Ok(entry) = self.lower.stat(&path).await
             && !entry.is_dir()
         {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("file exists: {}", path.display()),
-            ));
+            // The path alone — `ErrorKind::AlreadyExists` already says what
+            // happened, and `BackendError::AlreadyExists`'s Display adds
+            // "already exists:" once when this crosses that boundary.
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, path.display().to_string()));
         }
 
         self.upper.mkdir(&path).await?;
@@ -1072,11 +1079,11 @@ impl Filesystem for OverlayFs {
         let mut state = self.state.write().await;
 
         // A visible lower entry blocks creation, matching POSIX symlink(2).
+        // The path alone — `ErrorKind::AlreadyExists` already says what
+        // happened, and `BackendError::AlreadyExists`'s Display adds
+        // "already exists:" once when this crosses that boundary.
         if !state.whiteouts.contains(&link) && self.lower.lstat(&link).await.is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("file exists: {}", link.display()),
-            ));
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, link.display().to_string()));
         }
 
         self.upper.symlink(target, &link).await?;
@@ -1602,7 +1609,11 @@ mod tests {
 
         let err = overlay.commit_into(&*target).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        assert!(err.to_string().contains("conflict"));
+        // The message names the path and the concurrent-add explanation,
+        // not the word "conflict" — that's `AlreadyExists`'s own phrase's
+        // job once this crosses into a `BackendError`.
+        assert!(err.to_string().contains("added.txt"), "{err}");
+        assert!(err.to_string().contains("pre-dates a concurrent add"), "{err}");
         // Target untouched.
         assert_eq!(target.read(Path::new("added.txt")).await.unwrap(), b"already there");
     }

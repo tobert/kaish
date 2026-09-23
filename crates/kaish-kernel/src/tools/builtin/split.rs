@@ -110,7 +110,7 @@ impl Tool for Split {
             // Positional/named mode: first arg is the string
             (s, 1usize)
         } else {
-            return ExecResult::failure(1, "split: no input (provide string argument or pipe stdin)");
+            return ExecResult::failure(2, "split: no input (provide string argument or pipe stdin)");
         };
 
         // Get optional parameters — delimiter position shifts when using stdin
@@ -134,7 +134,7 @@ impl Tool for Split {
             // Regex split
             let re = match Regex::new(&pattern) {
                 Ok(r) => r,
-                Err(e) => return ExecResult::failure(1, format!("split: invalid regex: {}", e)),
+                Err(e) => return ExecResult::failure(2, format!("split: invalid regex: {}", e)),
             };
             // `--limit=N` caps the result at N fields (N-1 splits); the final
             // field keeps the rest of the string. `splitn(N)` does exactly that
@@ -177,17 +177,19 @@ impl Tool for Split {
             }
         };
 
-        // Build OutputData nodes for each part
-        let nodes: Vec<OutputNode> = parts
-            .iter()
-            .map(|s| OutputNode::new(*s))
-            .collect();
-
-        // Build JSON array for iteration via $(split ...)
-        let json_array: Vec<serde_json::Value> = parts
-            .iter()
-            .map(|s| serde_json::Value::String((*s).to_string()))
-            .collect();
+        // Build OutputData nodes and the JSON array (for `$(split ...)`
+        // iteration) in one checkpointed pass, rather than two separate
+        // `.map().collect()` chains, so a script timeout can stop a split
+        // into a very large number of parts.
+        let mut nodes: Vec<OutputNode> = Vec::with_capacity(parts.len());
+        let mut json_array: Vec<serde_json::Value> = Vec::with_capacity(parts.len());
+        for s in &parts {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("split");
+            }
+            nodes.push(OutputNode::new(*s));
+            json_array.push(serde_json::Value::String((*s).to_string()));
+        }
 
         // Emit a trailing newline (builtin-sweep P4.1 decision) so split's text
         // output matches the consensus and kaish's line tools; an empty result

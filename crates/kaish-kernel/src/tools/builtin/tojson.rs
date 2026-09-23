@@ -85,7 +85,7 @@ impl Tool for ToJson {
         let value = match args.positional.first() {
             Some(v) => v,
             None => {
-                return ExecResult::failure(1, "tojson: no value (pass a value to serialize)")
+                return ExecResult::failure(2, "tojson: no value (pass a value to serialize)")
             }
         };
 

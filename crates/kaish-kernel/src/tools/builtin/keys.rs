@@ -128,13 +128,13 @@ impl Tool for Keys {
                 ExecResult::success_data(Value::Json(serde_json::Value::Array(indices)))
             }
             Some(other) => ExecResult::failure(
-                1,
+                2,
                 format!(
                     "keys: expected a record or list, got {}",
                     describe_kind(other)
                 ),
             ),
-            None => ExecResult::failure(1, "keys: no argument (expected a record or list)"),
+            None => ExecResult::failure(2, "keys: no argument (expected a record or list)"),
         }
     }
 }

@@ -56,7 +56,7 @@ impl Tool for Realpath {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "realpath: missing path argument");
+            return ExecResult::failure(2, "realpath: missing path argument");
         }
 
         // GNU realpath (no flags): canonicalize each path fully; all components

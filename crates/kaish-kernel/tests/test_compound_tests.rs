@@ -266,7 +266,8 @@ async fn set_dash_o_is_structured() {
 async fn set_dash_o_with_a_name_still_applies() {
     let k = kernel();
     assert_eq!(k.execute("set -o trash").await.expect("exec").code, 0);
-    assert_eq!(k.execute("set -o bogus").await.expect("exec").code, 1);
+    // An unknown option name is argv the caller can fix — a usage error (2).
+    assert_eq!(k.execute("set -o bogus").await.expect("exec").code, 2);
 }
 
 // --- an operator word in OPERAND position is data, not an operator ---------
