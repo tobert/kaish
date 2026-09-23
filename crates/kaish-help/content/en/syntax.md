@@ -409,6 +409,7 @@ sed -n '/fn consult(/p' src/lib.rs  # same rule, sed's address
 grep 'error\|warn' log.txt          # \| alternation; \(…\) group; \{2,5\} interval; \+ \?
 sed 's/error\|warn/X/'              # sed reads the same escapes as operators
 grep -E 'error|warn' log.txt        # -E: ERE, bare a|b (…) x+ y? z{2,5}
+grep -E -o '\d' f                   # -E reads the same escapes: \d is literal d, not a digit class
 sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # -E/-r: same ERE; \1 \2 in the REPLACEMENT either way
 grep -F 'a|b' f                     # -F: fixed string, nothing is a metachar
 grep '[0-9]\+\.\w\b' f              # \w \s \b \< \> work; \d is a literal d, as in GNU
