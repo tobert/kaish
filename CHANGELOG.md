@@ -31,6 +31,15 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
+  digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
+  `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all
+  three.
+- `grep -E 'fn main() {'` matches: a `{` that starts no interval is literal,
+  as in GNU grep, and `{,2}` is an interval in `-E`.
+- `sed` prints a literal `&` for `\&` in a replacement and refuses `\2` past
+  the last group. `awk -v name` without `=` is refused, and a regex built from
+  a string follows gawk's escapes: `p="cat\|dog"` alternates.
 - Usage errors across the builtins now exit 2 instead of 1: a missing operand,
   an unknown subcommand, a flag value the builtin cannot use. The sweep and a
   follow-up review together cover 114 sites in 56 builtins. What a caller can
@@ -158,6 +167,9 @@ breaking entries are marked **BREAKING**.
 
 - **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does — bare
   `( ) { } | + ?` are literal (`grep 'fn consult('` works); use `grep -E '(a|b)'` for ERE.
+- **BREAKING**: `sed` without `-E`/`-r` reads GNU BRE, as GNU sed does:
+  `sed 's/fn main(/x/'` works, and `\(…\)`, `\{n\}`, `\|` are the operators.
+  `awk` reads gawk's ERE, where `\(` is a literal paren.
 - **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
   `Execution { error, output }`. `output` holds what ran before the fault; a
   `KernelError::Execution(e)` pattern no longer compiles.
