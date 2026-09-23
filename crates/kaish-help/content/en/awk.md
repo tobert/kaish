@@ -52,11 +52,14 @@ length($1)  length         # string length; bare `length` means length($0)
 substr(s,2,3) index(s,t) toupper(s) tolower(s) sprintf("%05.2f", x)
 ```
 
-Regex is the Rust `regex` crate (ERE-like), not gawk's engine:
-**no backreferences** in patterns. Use `*+?`, `{m,n}`, anchors, character
-classes, and alternation. The GNU BRE spellings `\|`, `\(…\)`, `\{n,m\}`, and
-`\+`/`\?` are also accepted (rewritten to ERE); awk has no `-E` flag, so match a
-literal `|`/`+` with a bracket class (`[|]`/`[+]`).
+awk has no BRE — it reads gawk's ERE exactly: bare `( ) { } | + ?` are
+operators (`/(GET|POST)/`, `/a{2,5}/`), and `\( \) \{n,m\} \| \+ \?` match
+the literal character (`/fn consult\(/`, `/a\|b/` matches the text `a|b`).
+`\<` `\>` `` \` `` `\'` `\y` are GNU word/buffer-boundary escapes; `\b` is a
+literal backspace, not a word boundary (`\y` is). **No back-references**
+(`\1`-`\9`) — the regex engine has none, and real gawk reads those as octal
+escapes rather than back-references anyway, so there's no substitute
+spelling; write the match another way.
 
 ## Control flow, arrays, output
 

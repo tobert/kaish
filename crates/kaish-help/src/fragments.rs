@@ -711,19 +711,25 @@ and adds `--exclude`, `--ftype`, and depth control."#,
         "regex",
         "Regex (grep, sed, awk)",
         r#"```sh
-# grep reads GNU BRE, as GNU grep does: bare ( ) { } | + ? are literal
+# grep and sed (without -E/-r) read GNU BRE, as GNU grep and GNU sed do:
+# bare ( ) { } | + ? are literal
 grep -n 'fn consult(' src/lib.rs    # a literal paren
+sed -n '/fn consult(/p' src/lib.rs  # same rule, sed's address
 grep 'error\|warn' log.txt          # \| alternation; \(…\) group; \{2,5\} interval; \+ \?
+sed 's/error\|warn/X/'              # sed reads the same escapes as operators
 grep -E 'error|warn' log.txt        # -E: ERE, bare a|b (…) x+ y? z{2,5}
+sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # -E/-r: same ERE; \1 \2 in the REPLACEMENT either way
 grep -F 'a|b' f                     # -F: fixed string, nothing is a metachar
 grep '[0-9]\+\.\w\b' f              # \w \s \b \< \> work; \d is a literal d, as in GNU
 
-# sed and awk read ERE, and also accept the GNU BRE spellings \| \(…\) \{n,m\}
-sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # (…) capture; \1 \2 in the REPLACEMENT
-sed 's/\(a\)\(b\)/\2\1/'            # ≡ s/(a)(b)/\2\1/
-awk '/^(GET|POST) /' access.log     # ERE alternation
-sed 's/[|]/,/g' f                   # a literal | in sed or awk: bracket class
-sed 's/(a)\1/x/'                    # ERROR — no backreference in a pattern; grep refuses \1 too
+# awk has no BRE — it reads gawk's ERE: bare ( ) { } | + ? are operators,
+# \( \) \{n,m\} \| \+ \? are literal, the opposite of sed's default
+awk '/^(GET|POST) /' access.log     # bare (…) and | are the ERE operators
+awk '/fn consult\(/ {print}'        # \( is a literal paren
+awk '{gsub(/a\|b/, "X")}'           # \| is a literal pipe, not alternation
+
+sed 's/[|]/,/g' f                   # a literal | anywhere: bracket class, or \| in sed's BRE
+sed 's/\(a\)\1/x/'                  # ERROR — no back-reference in the pattern; grep refuses \1 too
 ```"#,
     ),
     syntax_section(
