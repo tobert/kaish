@@ -1,9 +1,10 @@
 //! awk — Pattern scanning and text processing language.
 //!
-//! A Bourne-lite awk implementation focused on the 80% use case.
-//! Uses ERE (extended regex) syntax like egrep, consistent with sed. awk has no
-//! `-E`/`-r` flag, so the GNU BRE backslash-metas (`\|`, `\+`, `\(…\)`,
-//! `\{N,M\}`) are always accepted as a forgiving superset (issue #60).
+//! A Bourne-lite awk implementation focused on the 80% use case. awk has no
+//! BRE mode — it reads gawk's ERE exactly: bare `( ) { } | + ?` are
+//! operators, `\( \) \{N,M\} \| \+ \?` are literal. See
+//! [`gawk_ere_to_regex`] for the handful of spots gawk's own ERE reads
+//! differently from the regex engine's.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -16,19 +17,111 @@ use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
+use crate::tools::builtin::regex_dialect::gawk_ere_to_regex;
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
-/// Compile an awk ERE pattern, first rewriting the GNU BRE backslash-metas to
-/// ERE so `\|`/`\(…\)`/`\{N\}` behave as operators (issue #60). awk is ERE-only
-/// with no `-E` flag, so the rewrite always applies. Callers with their own
-/// error wording (FS, `split()`) rewrite with [`bre_metas_to_ere`] directly.
+/// Compile an awk regex literal (`/re/`) or dynamic string as gawk's ERE.
 fn compile_ere(pattern: &str) -> Result<Regex, String> {
-    let rewritten = bre_metas_to_ere(pattern);
-    let rewrote = rewritten != pattern;
-    // awk has no `-E` flag, so the hint offers only the bracket-class spelling.
-    Regex::new(&rewritten)
-        .map_err(|e| append_dialect_hint(format!("invalid regex: {e}"), rewrote, None))
+    let engine_pattern = gawk_ere_to_regex(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+    Regex::new(&engine_pattern).map_err(|e| format!("invalid regex: {e}"))
+}
+
+/// Unescape a `-F`, `-v`, or command-line `var=value` argument the way gawk
+/// reads a string constant before using it: real gawk runs every one of
+/// these through the same escaping as a program string literal (POSIX),
+/// so `awk -F '\|' ...` sees a literal `|`, not a two-character `\|` (gawk:
+/// `warning: escape sequence \`|' treated as plain \`|'`). `\\ \n \t \r \a
+/// \b \f \v \" \/` become their character, `\NNN` (1-3 octal digits) becomes
+/// that byte, and any other `\X` drops the backslash and keeps `X`.
+fn awk_unescape_cli_value(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('\\') => {
+                out.push('\\');
+                chars.next();
+            }
+            Some('n') => {
+                out.push('\n');
+                chars.next();
+            }
+            Some('t') => {
+                out.push('\t');
+                chars.next();
+            }
+            Some('r') => {
+                out.push('\r');
+                chars.next();
+            }
+            Some('a') => {
+                out.push('\u{7}');
+                chars.next();
+            }
+            Some('b') => {
+                out.push('\u{8}');
+                chars.next();
+            }
+            Some('f') => {
+                out.push('\u{c}');
+                chars.next();
+            }
+            Some('v') => {
+                out.push('\u{b}');
+                chars.next();
+            }
+            Some('"') => {
+                out.push('"');
+                chars.next();
+            }
+            Some('/') => {
+                out.push('/');
+                chars.next();
+            }
+            Some(d) if d.is_digit(8) => {
+                let mut value: u32 = 0;
+                for _ in 0..3 {
+                    match chars.peek().and_then(|d| d.to_digit(8)) {
+                        Some(digit) => {
+                            value = value * 8 + digit;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                out.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+            }
+            Some(other) => {
+                out.push(other);
+                chars.next();
+            }
+            // Trailing lone backslash: keep it, there is nothing to escape.
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Split `text` on a field/record separator the way gawk does: a raw
+/// one-character separator is a literal split (POSIX), and anything longer
+/// reads as a gawk ERE via [`gawk_ere_to_regex`]. `label` names the caller
+/// (`"FS"` or `"split() separator"`) in the compile-error message.
+fn split_on_field_separator(text: &str, sep: &str, label: &str) -> Result<Vec<String>, String> {
+    if sep == " " {
+        return Ok(text.split_whitespace().map(str::to_string).collect());
+    }
+    if sep.chars().count() == 1 {
+        return Ok(text.split(sep).map(str::to_string).collect());
+    }
+    let engine_pattern = gawk_ere_to_regex(sep)
+        .map_err(|e| format!("invalid {label} regex {sep:?}: {e}"))?;
+    let re = Regex::new(&engine_pattern)
+        .map_err(|e| format!("invalid {label} regex {sep:?}: {e}"))?;
+    Ok(re.split(text).map(str::to_string).collect())
 }
 
 /// Awk tool: pattern-directed scanning and processing.
@@ -149,7 +242,10 @@ impl Tool for Awk {
         // Build runtime with initial variables
         let mut runtime = AwkRuntime::new();
         if let Some(fs) = field_sep {
-            runtime.set_var("FS", AwkValue::String(fs));
+            // gawk runs `-F`'s value through the same string-escape rules as
+            // a program string literal before storing it, so `-F '\|'` is a
+            // literal pipe, not a two-character `\|`.
+            runtime.set_var("FS", AwkValue::String(awk_unescape_cli_value(&fs)));
         }
 
         // Handle -v assignments. Read from the *raw* args, not `parsed.var`: the
@@ -163,8 +259,9 @@ impl Tool for Awk {
         };
         for var_assign in var_assigns {
             if let Some((name, value)) = var_assign.split_once('=') {
-                // Command-line assignments are numeric strings (POSIX strnum).
-                runtime.set_var(name.trim(), AwkValue::StrNum(value.to_string()));
+                // Command-line assignments are numeric strings (POSIX strnum),
+                // unescaped the same way `-F`'s value is.
+                runtime.set_var(name.trim(), AwkValue::StrNum(awk_unescape_cli_value(value)));
             }
         }
 
@@ -1932,38 +2029,18 @@ impl AwkRuntime {
     }
 
     fn split_record(&mut self, record: &str) -> Result<(), String> {
-        let fs_raw = self.get_var("FS").to_string();
+        let fs = self.get_var("FS").to_string();
         self.fields = vec![AwkValue::StrNum(record.to_string())];
 
-        // Rewrite BRE metas BEFORE the single-char check: gawk demotes `\|` to
-        // plain `|` and a single-char FS is literal (POSIX), so `-F '\|'` /
-        // FS="\\|" split on a literal pipe — never the empty-alternation regex
-        // `|`, which would silently split between every character.
-        let fs = bre_metas_to_ere(&fs_raw);
-        let parts: Vec<&str> = if fs == " " {
-            // Default: split on whitespace, trim leading/trailing
-            record.split_whitespace().collect()
-        } else if fs.chars().count() == 1 {
-            // A single-character FS is a literal separator (POSIX), never a
-            // regex — `-F '['` splits on a literal `[`.
-            record.split(&fs).collect()
-        } else {
-            // Multi-character FS is an ERE. An invalid regex is a loud error,
-            // not a silent literal-split fallback (which silently miscounts
-            // fields). Matches gawk's fatal behavior. Report the FS as the user
-            // wrote it, with the dialect hint when the rewrite changed it.
-            let re = Regex::new(&fs).map_err(|e| {
-                append_dialect_hint(
-                    format!("invalid FS regex {:?}: {}", fs_raw, e),
-                    fs != fs_raw,
-                    None,
-                )
-            })?;
-            re.split(record).collect()
-        };
+        // FS reaching here is already the runtime value: a program string
+        // literal has been through the awk lexer's escaping, and a `-F`/`-v`
+        // value has been through `awk_unescape_cli_value`. Neither needs a
+        // further rewrite — a single character is a literal separator
+        // (POSIX), and anything longer is a gawk ERE.
+        let parts = split_on_field_separator(record, &fs, "FS")?;
 
-        for part in &parts {
-            self.fields.push(AwkValue::StrNum(part.to_string()));
+        for part in parts {
+            self.fields.push(AwkValue::StrNum(part));
         }
 
         self.nf = (self.fields.len() - 1) as i64;
@@ -2660,32 +2737,11 @@ impl AwkRuntime {
                     return Ok(AwkValue::Number(0.0));
                 }
 
-                // Honor the same separator rules as split_record:
-                //   BRE-meta rewrite first (so `"\\|"` → `|` → literal, like gawk)
-                //   " " (default FS) → whitespace mode (split on runs, trim ends)
-                //   single char → literal split
-                //   multi-char → ERE regex
-                let sep_raw = sep;
-                let sep = bre_metas_to_ere(&sep_raw);
-                let parts: Vec<String> = if sep == " " {
-                    s.split_whitespace().map(str::to_string).collect()
-                } else if sep.chars().count() == 1 {
-                    s.split(sep.as_str()).map(str::to_string).collect()
-                } else {
-                    // Multi-char separator is an ERE; an invalid regex is a loud
-                    // error, not a silent literal-split fallback (gawk: fatal).
-                    // Report the separator as the user wrote it, with the
-                    // dialect hint when the rewrite changed it.
-                    let re = Regex::new(&sep).map_err(|e| {
-                        append_dialect_hint(
-                            format!("invalid split() separator regex {:?}: {}", sep_raw, e),
-                            sep != sep_raw,
-                            None,
-                        )
-                    })?;
-                    re.split(&s).map(str::to_string).collect()
-                };
-
+                // Same separator rules as split_record: " " is whitespace
+                // mode, one character is a literal split, anything longer is
+                // a gawk ERE. An invalid regex is a loud error, not a silent
+                // literal-split fallback (gawk: fatal).
+                let parts = split_on_field_separator(&s, &sep, "split() separator")?;
                 let count = parts.len();
 
                 // Clear the target array first (awk semantics: split always empties it),

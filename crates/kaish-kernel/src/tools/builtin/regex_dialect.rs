@@ -1,7 +1,8 @@
 //! Regex dialect helpers shared by the pattern-matching builtins.
 //!
 //! The engine is Rust's `regex` crate, which speaks an ERE-like syntax. Two
-//! translations sit in front of it:
+//! translations sit in front of it, one per dialect the builtins actually
+//! read:
 //!
 //! - [`gnu_bre_to_regex`] is `grep`'s and `sed`'s default (no `-E`/`-r`) mode:
 //!   a faithful GNU BRE. Bare `( ) { } | + ?` are literal, `\( \) \{ \} \| \+
@@ -12,10 +13,13 @@
 //!   and `tests/sed_gnu_regex_tests.rs` record GNU's output. `tail` is the
 //!   caller's own "you may have meant ERE" reminder, so `grep`'s and `sed`'s
 //!   refusals never quote a flag the reader isn't running.
-//! - [`bre_metas_to_ere`] is the older superset `awk` still uses: bare ERE
-//!   operators AND the GNU BRE backslash spellings are both operators. A
-//!   follow-up commit gives `awk` its own gawk-ERE translation and retires
-//!   this one.
+//! - [`gawk_ere_to_regex`] is `awk`'s only mode: gawk has no BRE, so bare
+//!   `( ) { } | + ?` are already operators and `\( \) \{ \} \| \+ \?` are
+//!   already literal in both gawk and the engine — the translation only
+//!   touches the handful of spots where gawk's own ERE reads differently from
+//!   the engine's (a bare `{` that isn't digit-led, `\b`, `\y`, `\<`, `\>`,
+//!   `` \` ``, `\'`, `\d`, `\D`). `tests/awk_gnu_regex_tests.rs` records
+//!   gawk's output.
 //! - [`rewrite_posix_classes`] is `grep -E`'s pass: only `[...]` interiors
 //!   change, using the same [`posix_class_pattern`] table `gnu_bre_to_regex`
 //!   uses, since strict ERE otherwise passes straight through.
@@ -32,69 +36,6 @@ pub(crate) struct BreTranslation {
     pub(crate) pattern: String,
     pub(crate) warnings: Vec<String>,
 }
-
-/// The GNU BRE backslash-metacharacters kaish rewrites to their bare ERE form.
-/// `\|`→alternation, `\+`/`\?`→quantifiers, `\(`/`\)`→group, `\{`/`\}`→interval.
-const BRE_METAS: &[char] = &['|', '+', '?', '(', ')', '{', '}'];
-
-/// Append a dialect note to a regex compile error, when the rewrite is the
-/// likely culprit: `rewrote` is true when [`bre_metas_to_ere`] changed the
-/// pattern, so a formerly-literal escape like `:\)` became an operator and the
-/// engine's error (`unopened group` on `:)`) describes a pattern the author
-/// never wrote. `strict_flag` names the tool's strict-ERE escape hatch (`-E`,
-/// `-E/-r`); awk has none and passes `None`.
-pub(crate) fn append_dialect_hint(err: String, rewrote: bool, strict_flag: Option<&str>) -> String {
-    if !rewrote {
-        return err;
-    }
-    let escape_hatch = match strict_flag {
-        Some(flag) => format!(", or pass {flag} for strict ERE"),
-        None => String::new(),
-    };
-    format!(
-        "{err} (note: a backslashed |+?(){{}} is a GNU BRE operator in the default \
-         dialect — match the literal character with a bracket class like [)] or \
-         [|]{escape_hatch})"
-    )
-}
-
-/// Rewrite GNU BRE backslash-metas (`\| \+ \? \( \) \{ \}`) into the bare ERE
-/// operators Rust's `regex` crate understands. Any other escape is passed
-/// through verbatim, so `\.`, `\d`, `\b`, `\w`, and an escaped backslash `\\`
-/// keep their meaning — `a\\|b` stays "literal backslash, then alternation",
-/// never a stray BRE `\|`.
-///
-/// Bracket-expression interiors are deliberately *not* special-cased: for every
-/// meta in [`BRE_METAS`], the escaped and bare forms denote the same literal
-/// character inside a class (`[\|]` and `[|]` both match `|`), so rewriting
-/// there yields an equivalent pattern and needs no class tracking.
-pub(crate) fn bre_metas_to_ere(pattern: &str) -> String {
-    let mut out = String::with_capacity(pattern.len());
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            // `\<meta>` → drop the backslash, keep the operator.
-            Some(&next) if BRE_METAS.contains(&next) => {
-                out.push(next);
-                chars.next();
-            }
-            // `\<other>` → preserve both chars (incl. `\\`) untouched.
-            Some(&next) => {
-                out.push('\\');
-                out.push(next);
-                chars.next();
-            }
-            // Trailing lone backslash: leave it for the regex engine to judge.
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
 
 /// Format a BRE refusal: the value and the rule, plus `tail` — the caller's
 /// own reminder that the reader may have meant ERE (`grep`'s and `sed`'s
@@ -539,6 +480,173 @@ pub(crate) fn rewrite_posix_classes(pattern: &str) -> String {
     out
 }
 
+/// Translate a gawk ERE (every regex `awk` reads: `/re/`, a dynamic string,
+/// `FS`, `split()`'s separator) into the regex engine's syntax.
+///
+/// gawk's ERE is already close to the engine's native syntax — bare
+/// `( ) { } | + ?` are operators, an escaped one is literal, exactly like the
+/// engine — so this only touches the spots where gawk's regex reads
+/// differently:
+///
+/// - a bare `{` is literal unless a digit follows it immediately (gawk only
+///   commits to interval parsing when it sees one; the engine would otherwise
+///   refuse `a{` or `a{x}` as a bad repetition, where gawk reads a literal
+///   brace — once gawk commits, an invalid count (`a{2,1}`) or a `{n}` with
+///   nothing before it to repeat is a refusal in both);
+/// - `\<` `\>` are GNU word-start/end anchors, `` \` `` `\'` are GNU
+///   buffer-start/end anchors, and `\y` is a word boundary — gawk's spelling
+///   for what the engine calls `\b{start}`, `\b{end}`, `\A`, `\z`, `\b`;
+/// - `\b` itself is gawk's backspace character, not a word boundary (the
+///   engine's `\b` is the word boundary — `\y` is gawk's spelling for that);
+/// - `\d` `\D` are not gawk regexp operators, so they read as the literal
+///   letter, not the engine's Perl-style digit class;
+/// - `\1`-`\9` are refused: real gawk reads a backslash-digit as an octal
+///   escape, which the engine has no way to run (same gap as a BRE
+///   back-reference in `sed`/`grep`; unlike sed's/grep's back-reference
+///   reading, `\8`/`\9` are gawk's plain digits, since they're not valid
+///   octal — kaish refuses those two as well, a narrow, documented gap).
+///
+/// Everything else — `\n \t \r \a \f \v`, `\w \W \s \S \B`, every other
+/// escaped punctuation character, and a `[...]` bracket expression — already
+/// reads the same in gawk and the engine, so it passes through unchanged.
+/// Bracket-expression interiors are one narrow exception: gawk applies its
+/// own escape rules there too (`[\d]` is a class containing the literal
+/// letter `d`), but this translator does not — see the "known gaps" awk
+/// regex tests.
+pub(crate) fn gawk_ere_to_regex(pattern: &str) -> Result<String, String> {
+    GawkEreTranslator::new(pattern).run()
+}
+
+struct GawkEreTranslator {
+    chars: Vec<char>,
+    index: usize,
+    out: String,
+}
+
+impl GawkEreTranslator {
+    fn new(pattern: &str) -> Self {
+        Self {
+            chars: pattern.chars().collect(),
+            index: 0,
+            out: String::with_capacity(pattern.len() + 8),
+        }
+    }
+
+    fn peek(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.index + offset).copied()
+    }
+
+    fn run(mut self) -> Result<String, String> {
+        while let Some(c) = self.peek(0) {
+            self.index += 1;
+            match c {
+                '\\' => self.escape()?,
+                '[' => self.bracket()?,
+                // gawk commits to interval parsing only when a digit follows
+                // `{` immediately; anything else is a literal brace.
+                '{' if !matches!(self.peek(0), Some(d) if d.is_ascii_digit()) => {
+                    self.out.push_str(r"\{");
+                }
+                other => self.out.push(other),
+            }
+        }
+        Ok(self.out)
+    }
+
+    /// Translate the escape after a backslash; `self.index` is on its second
+    /// character.
+    fn escape(&mut self) -> Result<(), String> {
+        let Some(next) = self.peek(0) else {
+            return Err("trailing backslash — write `\\\\` to match a literal backslash".to_string());
+        };
+        self.index += 1;
+        match next {
+            'y' => self.out.push_str(r"\b"),
+            '<' => self.out.push_str(r"\b{start}"),
+            '>' => self.out.push_str(r"\b{end}"),
+            '`' => self.out.push_str(r"\A"),
+            '\'' => self.out.push_str(r"\z"),
+            // gawk's backslash-b is a literal backspace, not a word boundary.
+            'b' => self.out.push('\u{8}'),
+            '0'..='9' => {
+                return Err(format!(
+                    "`\\{next}` is not supported — kaish's awk regex has no octal \
+                     escapes or back-references; match the character directly"
+                ));
+            }
+            // gawk and the engine already agree on these control and class escapes.
+            'n' | 't' | 'r' | 'a' | 'f' | 'v' | 'w' | 'W' | 's' | 'S' | 'B' => {
+                self.out.push('\\');
+                self.out.push(next);
+            }
+            // Any other letter is not a gawk regexp operator — the literal letter
+            // (`\d`, `\D`, `\q`, …), never the engine's own meaning for it.
+            c if c.is_ascii_alphabetic() => self.out.push(c),
+            // Punctuation: literal in both dialects.
+            other => {
+                self.out.push('\\');
+                self.out.push(other);
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy a bracket expression `[...]` through unchanged onto `self.out`:
+    /// gawk's bracket rules already match the engine's (ranges, `[:class:]`,
+    /// `[.c.]`, `[=c=]`, and a backslash still escapes the next character —
+    /// unlike POSIX BRE/ERE, `[\]abc]` is one class matching `]`, `a`, `b`,
+    /// `c`, a GNU extension). `self.index` is just past `[`.
+    fn bracket(&mut self) -> Result<(), String> {
+        let unmatched = || {
+            "unmatched `[` — close the bracket expression with `]`, or write \
+             `\\[` to match a literal `[`"
+                .to_string()
+        };
+        self.out.push('[');
+        if self.peek(0) == Some('^') {
+            self.out.push('^');
+            self.index += 1;
+        }
+        let mut first = true;
+        loop {
+            let c = self.peek(0).ok_or_else(unmatched)?;
+            if c == '[' && matches!(self.peek(1), Some(':' | '.' | '=')) {
+                let delimiter = self.peek(1).unwrap_or(':');
+                let body_start = self.index + 2;
+                let mut end = body_start;
+                loop {
+                    match (self.chars.get(end), self.chars.get(end + 1)) {
+                        (Some(&a), Some(&b)) if a == delimiter && b == ']' => break,
+                        (Some(_), _) => end += 1,
+                        (None, _) => return Err(unmatched()),
+                    }
+                }
+                for &item in &self.chars[self.index..end + 2] {
+                    self.out.push(item);
+                }
+                self.index = end + 2;
+                first = false;
+                continue;
+            }
+            if c == ']' && !first {
+                self.out.push(']');
+                self.index += 1;
+                break;
+            }
+            first = false;
+            if c == '\\' && self.peek(1).is_some() {
+                self.out.push('\\');
+                self.out.push(self.peek(1).unwrap_or('\\'));
+                self.index += 2;
+            } else {
+                self.out.push(c);
+                self.index += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Write `c` as a literal inside an engine character class.
 fn push_class_char(out: &mut String, c: char) {
     if matches!(c, '\\' | '[' | ']' | '&' | '~' | '-' | '^') {
@@ -782,7 +890,6 @@ mod tests {
         assert!(message.contains("-E"), "names the ERE override: {message}");
     }
 
-
     #[rstest]
     // `[:alpha:]` matches a Unicode letter and, per the glibc quirk this
     // mirrors, a non-ASCII decimal digit — but not an ASCII one.
@@ -858,33 +965,5 @@ mod tests {
     #[case("[unclosed")]
     fn rewrite_posix_classes_leaves_malformed_brackets_alone(#[case] pattern: &str) {
         assert_eq!(rewrite_posix_classes(pattern), pattern);
-    }
-
-    #[rstest]
-    // Alternation — the issue's headline case.
-    #[case(r"foo\|bar", "foo|bar")]
-    #[case(r"a\|b\|c", "a|b|c")]
-    // Quantifiers.
-    #[case(r"a\+", "a+")]
-    #[case(r"a\?", "a?")]
-    // Groups and intervals.
-    #[case(r"\(foo\)\+", "(foo)+")]
-    #[case(r"x\{2,5\}", "x{2,5}")]
-    // Non-meta escapes are preserved verbatim.
-    #[case(r"\d\.\w\b", r"\d\.\w\b")]
-    // Escaped backslash stays literal; a following bare `|` is already ERE.
-    #[case(r"a\\|b", r"a\\|b")]
-    // Escaped backslash then BRE alternation → literal backslash, then `|`.
-    #[case(r"a\\\|b", r"a\\|b")]
-    // Bare ERE forms pass straight through.
-    #[case(r"foo|bar", "foo|bar")]
-    #[case(r"a+b?", "a+b?")]
-    // Inside a class the rewrite is equivalent (both match the literal char).
-    #[case(r"[\|]", "[|]")]
-    #[case(r"[\{]", "[{]")]
-    // Trailing lone backslash is left alone.
-    #[case(r"foo\", r"foo\")]
-    fn rewrites_gnu_bre_metas(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(bre_metas_to_ere(input), expected);
     }
 }
