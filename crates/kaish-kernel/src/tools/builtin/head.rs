@@ -186,7 +186,19 @@ impl Tool for Head {
 
         // Line mode: `-n N` = first N; `-n -N` = all but the last N.
         let (count, all_but_last) = Self::line_spec(&args);
-        let all_lines: Vec<&str> = input.lines().collect();
+        // The plain `-n N` case only keeps the first N lines, but the file
+        // above was already read whole (no bound to request), and `-n -N`
+        // needs every line to know what the "last N" are — so this
+        // collection is the O(n) pass on a large file. Collect via a
+        // checkpointed loop rather than `.lines().collect()` so a script
+        // timeout can stop it.
+        let mut all_lines: Vec<&str> = Vec::new();
+        for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("head");
+            }
+            all_lines.push(line);
+        }
         let take_n = if all_but_last {
             all_lines.len().saturating_sub(count)
         } else {
@@ -227,7 +239,13 @@ impl Head {
                             if i > 0 { output.push('\n'); }
                             output.push_str(&format!("==> {} <==\n", path));
                         }
-                        let file_lines: Vec<&str> = content.lines().collect();
+                        let mut file_lines: Vec<&str> = Vec::new();
+                        for line in content.lines() {
+                            if ctx.checkpoint().await.is_err() {
+                                return kaish_tool_api::Interrupted.result("head");
+                            }
+                            file_lines.push(line);
+                        }
                         let take_n = if all_but_last {
                             file_lines.len().saturating_sub(count)
                         } else {

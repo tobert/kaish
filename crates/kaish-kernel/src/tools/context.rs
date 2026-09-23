@@ -16,6 +16,7 @@ use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
 use crate::trash::TrashBackend;
 use crate::vfs::VfsRouter;
+use kaish_tool_api::ToolCtx as _;
 use kaish_vfs::ByteBudget;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -1351,18 +1352,32 @@ impl ExecContext {
     /// rest), so we don't keep reading a file the caller is done with. This is
     /// the shared engine for scan-oriented builtins (`wc`, `checksum`, `grep`)
     /// that walk a file front-to-back and must not hold it all in memory.
+    ///
+    /// Checkpoints once per chunk (see
+    /// [`ToolCtx::checkpoint`](kaish_tool_api::ToolCtx::checkpoint)), so a script
+    /// timeout stops the scan instead of running it to completion — a
+    /// `MemoryFs`/`OverlayFs` read never truly awaits, so without this the
+    /// watchdog would never get a turn on an in-memory file the size of
+    /// `seq 1 50000000`. Returns [`ScanOutcome::Interrupted`] instead of
+    /// silently reporting the partial scan as done: a caller that finalizes
+    /// (a hash, a count) on an interrupted scan would answer for less data
+    /// than it claims to, which is the data-corruption shape refused
+    /// elsewhere in kaish.
     pub async fn read_file_chunked<F>(
-        &self,
+        &mut self,
         path: &std::path::Path,
         chunk_size: u64,
         mut f: F,
-    ) -> kaish_types::backend::BackendResult<()>
+    ) -> kaish_types::backend::BackendResult<ScanOutcome>
     where
         F: FnMut(&[u8]) -> std::ops::ControlFlow<()>,
     {
         use kaish_types::ReadRange;
         let mut offset = 0u64;
         loop {
+            if self.checkpoint().await.is_err() {
+                return Ok(ScanOutcome::Interrupted);
+            }
             let chunk = self
                 .backend
                 .read(path, Some(ReadRange::bytes(offset, chunk_size)))
@@ -1375,8 +1390,22 @@ impl ExecContext {
                 break;
             }
         }
-        Ok(())
+        Ok(ScanOutcome::Complete)
     }
+}
+
+/// Whether a [`ExecContext::read_file_chunked`] scan reached the end of the
+/// file (or `f` chose to stop early) or was cut short by a cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanOutcome {
+    /// Reached EOF, or `f` returned `ControlFlow::Break` to stop the scan
+    /// itself (not a cancel).
+    Complete,
+    /// [`ToolCtx::checkpoint`](kaish_tool_api::ToolCtx::checkpoint) saw the
+    /// execution cancelled; the scan stopped before EOF. The caller must not
+    /// report the partial result as success — return
+    /// `kaish_tool_api::Interrupted.result(tool)` instead.
+    Interrupted,
 }
 
 /// The kernel's full execution context satisfies the trimmed portable
@@ -1385,9 +1414,9 @@ impl ExecContext {
 /// Trusted in-tree builtins recover the concrete `ExecContext` (job control,
 /// pipes, dispatcher) through
 /// [`ToolCtx::as_any_mut`](kaish_tool_api::ToolCtx::as_any_mut).
-#[async_trait]
 impl kaish_tool_api::sealed::Sealed for ExecContext {}
 
+#[async_trait]
 impl kaish_tool_api::ToolCtx for ExecContext {
     fn backend(&self) -> &Arc<dyn KernelBackend> {
         &self.backend
@@ -1419,6 +1448,22 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         match &self.watchdog {
             Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
             None => kaish_tool_api::PatientGuard::inert(),
+        }
+    }
+
+    async fn checkpoint(&mut self) -> Result<(), kaish_tool_api::Interrupted> {
+        // Yields only when this task's cooperative budget is spent, so the
+        // watchdog's timer gets a turn without a yield on every call.
+        tokio::task::consume_budget().await;
+        // `self.cancel` is fired by a request timeout or `Kernel::cancel()`;
+        // the dispatcher poll is an embedder's own out-of-band check
+        // (`ExecuteOptions::interrupt`) for a host that can't cancel a token
+        // from another thread. Either one stops a checkpointing builtin.
+        let dispatcher_cancelled = self.dispatcher.as_ref().is_some_and(|d| d.is_cancelled());
+        if self.cancel.is_cancelled() || dispatcher_cancelled {
+            Err(kaish_tool_api::Interrupted)
+        } else {
+            Ok(())
         }
     }
 

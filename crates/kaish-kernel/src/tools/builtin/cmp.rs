@@ -126,7 +126,7 @@ impl Tool for Cmp {
 /// chunks (1, 2, 3 bytes) to exercise chunk-boundary seams while production
 /// always passes `ExecContext::STREAM_CHUNK_SIZE`.
 async fn cmp_lockstep(
-    ctx: &ExecContext,
+    ctx: &mut ExecContext,
     path_a: &Path,
     path_b: &Path,
     name1: &str,
@@ -140,6 +140,9 @@ async fn cmp_lockstep(
     let mut newlines_a: u64 = 0;
 
     loop {
+        if ctx.checkpoint().await.is_err() {
+            return kaish_tool_api::Interrupted.result("cmp");
+        }
         let chunk_a = match ctx
             .backend
             .read(path_a, Some(ReadRange::bytes(offset, chunk_size)))
@@ -376,10 +379,10 @@ mod tests {
         mem.write(Path::new("a"), a).await.unwrap();
         mem.write(Path::new("b"), b).await.unwrap();
         vfs.mount("/", mem);
-        let ctx = ExecContext::new(Arc::new(vfs));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
 
         let r = cmp_lockstep(
-            &ctx,
+            &mut ctx,
             Path::new("/a"),
             Path::new("/b"),
             name1,
@@ -556,10 +559,10 @@ mod tests {
         // Two 1000-byte identical files: the loop must issue multiple chunk reads
         // and must never issue a whole-file read.
         let payload = vec![b'x'; 1000];
-        let (ctx, ranges) = make_recording_ctx(&payload, &payload).await;
+        let (mut ctx, ranges) = make_recording_ctx(&payload, &payload).await;
 
         let result = cmp_lockstep(
-            &ctx,
+            &mut ctx,
             Path::new("/a"),
             Path::new("/b"),
             "/a",
@@ -596,10 +599,10 @@ mod tests {
         let file_b = vec![b'y'; 1000];
         file_a[0] = b'X'; // differs at byte 0
 
-        let (ctx, ranges) = make_recording_ctx(&file_a, &file_b).await;
+        let (mut ctx, ranges) = make_recording_ctx(&file_a, &file_b).await;
 
         let result = cmp_lockstep(
-            &ctx,
+            &mut ctx,
             Path::new("/a"),
             Path::new("/b"),
             "/a",
@@ -636,10 +639,10 @@ mod tests {
         // Ensure that even for two identical files, the streaming path never
         // issues a `read(None)` whole-file request — all reads must be ranged.
         let payload = b"hello world, no whole-file reads here".to_vec();
-        let (ctx, ranges) = make_recording_ctx(&payload, &payload).await;
+        let (mut ctx, ranges) = make_recording_ctx(&payload, &payload).await;
 
         cmp_lockstep(
-            &ctx,
+            &mut ctx,
             Path::new("/a"),
             Path::new("/b"),
             "/a",

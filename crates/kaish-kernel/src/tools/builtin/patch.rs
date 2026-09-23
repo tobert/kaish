@@ -19,7 +19,7 @@ use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
 pub struct Patch;
@@ -208,16 +208,24 @@ impl Tool for Patch {
             // Computing the resulting content is a pure, heavily-tested step; a
             // hunk that matches nowhere (even with fuzz) is a loud failure, never
             // a blind splice.
-            let (new_content, report) =
-                match apply_hunks(&current_content, &file_hunks.hunks, reverse, DEFAULT_FUZZ) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return ExecResult::failure(
-                            1,
-                            format!("patch: failed to apply to '{}': {}", target_path, e),
-                        );
-                    }
-                };
+            let (new_content, report) = match apply_hunks(
+                &current_content,
+                &file_hunks.hunks,
+                reverse,
+                DEFAULT_FUZZ,
+                ctx,
+            )
+            .await
+            {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    return ExecResult::failure(
+                        1,
+                        format!("patch: failed to apply to '{}': {}", target_path, e),
+                    );
+                }
+                Err(i) => return i.result("patch"),
+            };
 
             if dry_run {
                 output.push_str(&format!("checking file {}\n", target_path));
@@ -515,12 +523,23 @@ fn matches_at(buf: &[String], src: &[&str], pos: usize) -> bool {
 /// preferring `center`. An empty `src` (pure insertion) "matches" at the clamped
 /// center. `limit` is `usize::MAX` for exact (full-context) matches and a tight
 /// window for fuzzed ones — see [`FUZZ_SEARCH_WINDOW`].
-fn search_block(buf: &[String], src: &[&str], center: usize, limit: usize) -> Option<usize> {
+///
+/// Checkpoints once per distance step: an exact-context search (`limit ==
+/// usize::MAX`) walks the whole target file, so on a large file with no yield
+/// point of its own this loop is the one this builtin actually needs to stop
+/// at a script timeout.
+async fn search_block(
+    buf: &[String],
+    src: &[&str],
+    center: usize,
+    limit: usize,
+    ctx: &mut ExecContext,
+) -> Result<Option<usize>, kaish_tool_api::Interrupted> {
     if src.is_empty() {
-        return Some(center.min(buf.len()));
+        return Ok(Some(center.min(buf.len())));
     }
     if src.len() > buf.len() {
-        return None;
+        return Ok(None);
     }
     let max_start = buf.len() - src.len();
     // Distance from the *unclamped* center to the farthest valid start in
@@ -533,24 +552,25 @@ fn search_block(buf: &[String], src: &[&str], center: usize, limit: usize) -> Op
     let max_possible = center.max(max_start.saturating_sub(center));
     let max_dist = max_possible.min(limit);
     for dist in 0..=max_dist {
+        ctx.checkpoint().await?;
         if dist == 0 {
             if center <= max_start && matches_at(buf, src, center) {
-                return Some(center);
+                return Ok(Some(center));
             }
             continue;
         }
         if center >= dist {
             let backward = center - dist;
             if backward <= max_start && matches_at(buf, src, backward) {
-                return Some(backward);
+                return Ok(Some(backward));
             }
         }
         let forward = center + dist;
         if forward <= max_start && matches_at(buf, src, forward) {
-            return Some(forward);
+            return Ok(Some(forward));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Apply unified-diff hunks to `content`, GNU-style. Each hunk is located by
@@ -560,12 +580,18 @@ fn search_block(buf: &[String], src: &[&str], center: usize, limit: usize) -> Op
 /// matched span is rewritten — trimmed-away context is left untouched, so fuzz
 /// never overwrites lines it didn't verify. Returns the rebuilt content plus a
 /// per-hunk report; a hunk that matches nowhere is a loud `Err`, never a splice.
-fn apply_hunks(
+///
+/// The outer `Result` is [`kaish_tool_api::Interrupted`]: a checkpoint saw the
+/// execution cancelled, which the caller must answer with
+/// `Interrupted::result("patch")`, not the partial rewrite built so far (a
+/// truncated patch apply is the data-corruption shape kaish refuses).
+async fn apply_hunks(
     content: &str,
     hunks: &[DiffHunk],
     reverse: bool,
     max_fuzz: usize,
-) -> Result<(String, Vec<HunkOutcome>), String> {
+    ctx: &mut ExecContext,
+) -> Result<Result<(String, Vec<HunkOutcome>), String>, kaish_tool_api::Interrupted> {
     // Internal consistency of each hunk body vs its header counts — independent
     // of the target file, so a malformed patch is rejected loudly up front.
     for (i, hunk) in hunks.iter().enumerate() {
@@ -580,14 +606,14 @@ fn apply_hunks(
             .filter(|l| matches!(l, DiffLine::Context(_) | DiffLine::Insert(_)))
             .count();
         if actual_old != hunk.old_count || actual_new != hunk.new_count {
-            return Err(format!(
+            return Ok(Err(format!(
                 "hunk {}: line count mismatch (header says -{}/+{}, actual -{}/+{})",
                 i + 1,
                 hunk.old_count,
                 hunk.new_count,
                 actual_old,
                 actual_new
-            ));
+            )));
         }
     }
 
@@ -605,6 +631,7 @@ fn apply_hunks(
     let mut applied_delta: isize = 0;
 
     for (i, hunk) in hunks.iter().enumerate() {
+        ctx.checkpoint().await?;
         let (anchor, source, result, lead_ctx, trail_ctx) = build_blocks(hunk, reverse);
 
         // 0-indexed position the full source block is expected at. A pure
@@ -636,7 +663,7 @@ fn apply_hunks(
             // Full-context (f==0) matches are trusted file-wide; fuzzed matches
             // must land near the header position (see FUZZ_SEARCH_WINDOW).
             let limit = if f == 0 { usize::MAX } else { FUZZ_SEARCH_WINDOW };
-            if let Some(pos) = search_block(&buf, &src, inner_expected, limit) {
+            if let Some(pos) = search_block(&buf, &src, inner_expected, limit, ctx).await? {
                 let res = result[lead_drop..result.len() - trail_drop].to_vec();
                 found = Some((pos, f, src.len(), res, inner_expected));
                 break;
@@ -646,11 +673,11 @@ fn apply_hunks(
         let (pos, fuzz, removed, res, inner_expected) = match found {
             Some(v) => v,
             None => {
-                return Err(format!(
+                return Ok(Err(format!(
                     "Hunk #{} FAILED to apply (no matching context near line {})",
                     i + 1,
                     expected + 1
-                ));
+                )));
             }
         };
 
@@ -669,7 +696,7 @@ fn apply_hunks(
     if had_trailing_newline && !new_content.is_empty() {
         new_content.push_str(line_ending);
     }
-    Ok((new_content, outcomes))
+    Ok(Ok((new_content, outcomes)))
 }
 
 #[cfg(test)]
@@ -678,6 +705,24 @@ mod tests {
     use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
+
+    /// Sync wrapper over the now-async `apply_hunks`, for the pure-core unit
+    /// tests below that predate the checkpoint and have no `ExecContext` of
+    /// their own. A fresh context is never cancelled, so `Interrupted` cannot
+    /// occur here.
+    fn apply_hunks_sync(
+        content: &str,
+        hunks: &[DiffHunk],
+        reverse: bool,
+        max_fuzz: usize,
+    ) -> Result<(String, Vec<HunkOutcome>), String> {
+        let mut ctx = ExecContext::new(Arc::new(VfsRouter::new()));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(apply_hunks(content, hunks, reverse, max_fuzz, &mut ctx))
+            .expect("a fresh test context is never cancelled")
+    }
 
     async fn make_test_ctx() -> ExecContext {
         let mut vfs = VfsRouter::new();
@@ -843,7 +888,7 @@ mod tests {
         );
         let files = parse_unified_diff(bad_patch).unwrap();
         let content = "line1\nline2\nline3\n";
-        let result = apply_hunks(content, &files[0].hunks, false, DEFAULT_FUZZ);
+        let result = apply_hunks_sync(content, &files[0].hunks, false, DEFAULT_FUZZ);
         assert!(result.is_err(), "should reject mismatched hunk counts");
         let err = result.unwrap_err();
         assert!(
@@ -859,7 +904,7 @@ mod tests {
     fn apply_hunks_clean_apply() {
         let files = parse_unified_diff(&simple_patch()).unwrap();
         let (new, report) =
-            apply_hunks("line1\nline2\nline3\n", &files[0].hunks, false, DEFAULT_FUZZ).unwrap();
+            apply_hunks_sync("line1\nline2\nline3\n", &files[0].hunks, false, DEFAULT_FUZZ).unwrap();
         assert_eq!(new, "line1\nmodified\nline3\n");
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].offset, 0);
@@ -872,7 +917,7 @@ mod tests {
         // Two extra leading lines: the hunk's header says line 1, but its context
         // actually sits at line 3 — GNU patch finds it and reports the offset.
         let files = parse_unified_diff(&simple_patch()).unwrap();
-        let (new, report) = apply_hunks(
+        let (new, report) = apply_hunks_sync(
             "x\ny\nline1\nline2\nline3\n",
             &files[0].hunks,
             false,
@@ -891,7 +936,7 @@ mod tests {
         // match fails, but trimming one context line (fuzz 1) still applies the
         // real change — and leaves the drifted context untouched.
         let files = parse_unified_diff(&simple_patch()).unwrap();
-        let (new, report) = apply_hunks(
+        let (new, report) = apply_hunks_sync(
             "line1\nline2\nDIFFERENT\n",
             &files[0].hunks,
             false,
@@ -908,7 +953,7 @@ mod tests {
         // Nothing resembling the hunk's context/changes — patch must refuse, not
         // splice blind.
         let files = parse_unified_diff(&simple_patch()).unwrap();
-        let err = apply_hunks("totally\ndifferent\nstuff\n", &files[0].hunks, false, DEFAULT_FUZZ)
+        let err = apply_hunks_sync("totally\ndifferent\nstuff\n", &files[0].hunks, false, DEFAULT_FUZZ)
             .unwrap_err();
         assert!(err.contains("FAILED"), "got: {err}");
     }
@@ -917,7 +962,7 @@ mod tests {
     fn apply_hunks_reverse_restores_original() {
         let files = parse_unified_diff(&simple_patch()).unwrap();
         let (new, _) =
-            apply_hunks("line1\nmodified\nline3\n", &files[0].hunks, true, DEFAULT_FUZZ).unwrap();
+            apply_hunks_sync("line1\nmodified\nline3\n", &files[0].hunks, true, DEFAULT_FUZZ).unwrap();
         assert_eq!(new, "line1\nline2\nline3\n");
     }
 
@@ -926,7 +971,7 @@ mod tests {
         // Patching one line of a CRLF file must not silently rewrite every line
         // to LF (whole-file corruption). The result keeps \r\n throughout.
         let files = parse_unified_diff(&simple_patch()).unwrap();
-        let (new, _) = apply_hunks(
+        let (new, _) = apply_hunks_sync(
             "line1\r\nline2\r\nline3\r\n",
             &files[0].hunks,
             false,
@@ -946,7 +991,7 @@ mod tests {
         let mut lines: Vec<String> = (0..100).map(|_| "x".to_string()).collect();
         lines[99] = "line2".to_string(); // > FUZZ_SEARCH_WINDOW from line 1
         let content = format!("{}\n", lines.join("\n"));
-        let err = apply_hunks(&content, &files[0].hunks, false, DEFAULT_FUZZ).unwrap_err();
+        let err = apply_hunks_sync(&content, &files[0].hunks, false, DEFAULT_FUZZ).unwrap_err();
         assert!(err.contains("FAILED"), "got: {err}");
     }
 
@@ -968,7 +1013,7 @@ mod tests {
             " ctxB\n",
         );
         let files = parse_unified_diff(patch).unwrap();
-        let err = apply_hunks("x\nold\ny\n", &files[0].hunks, false, DEFAULT_FUZZ).unwrap_err();
+        let err = apply_hunks_sync("x\nold\ny\n", &files[0].hunks, false, DEFAULT_FUZZ).unwrap_err();
         assert!(
             err.contains("FAILED"),
             "a fuzzed match far outside the window must fail loud, got: {err}"

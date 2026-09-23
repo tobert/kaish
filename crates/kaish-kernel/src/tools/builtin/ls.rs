@@ -554,6 +554,9 @@ impl Ls {
         let mut errors: Vec<String> = Vec::new();
 
         while let Some((dir_path, display_path, text_display_path)) = dirs_to_visit.pop() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("ls");
+            }
             // List this directory
             let entries = match ctx.backend.list(Path::new(&dir_path)).await {
                 Ok(e) => e,

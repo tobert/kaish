@@ -9,7 +9,7 @@ use base64::Engine;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Base64 tool: encode or decode base64 data.
 pub struct Base64Tool;
@@ -108,8 +108,21 @@ impl Tool for Base64Tool {
         };
 
         if decode {
-            // Strip whitespace before decoding (base64 input often has newlines).
-            let cleaned: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+            // Strip whitespace before decoding (base64 input often has
+            // newlines). A manual loop (rather than `.filter().collect()`) so
+            // the checkpoint covers this whole pass; `STANDARD.decode` itself
+            // is one opaque call from a dependency with no yield point of its
+            // own, so this pass is also this builtin's only chance to stop a
+            // large decode before it starts.
+            let mut cleaned: Vec<u8> = Vec::with_capacity(data.len());
+            for &b in &data {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("base64");
+                }
+                if !b.is_ascii_whitespace() {
+                    cleaned.push(b);
+                }
+            }
             match STANDARD.decode(&cleaned) {
                 // Decoded bytes: text if valid UTF-8, otherwise a binary result.
                 Ok(bytes) => ExecResult::success_text_or_bytes(bytes),
@@ -119,10 +132,21 @@ impl Tool for Base64Tool {
                 Err(e) => ExecResult::failure(1, format!("base64: invalid input: {}", e)),
             }
         } else {
+            // `STANDARD.encode` is one opaque call from a dependency with no
+            // yield point of its own; walk the input first so a script
+            // timeout has somewhere to stop a large file before that starts.
+            for _ in &data {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("base64");
+                }
+            }
             // Encode: raw input bytes → base64 text.
             let encoded = STANDARD.encode(&data);
             let mut output = if wrap_col > 0 {
-                wrap_lines(&encoded, wrap_col)
+                match wrap_lines(&encoded, wrap_col, ctx).await {
+                    Ok(s) => s,
+                    Err(i) => return i.result("base64"),
+                }
             } else {
                 encoded
             };
@@ -137,15 +161,20 @@ impl Tool for Base64Tool {
 }
 
 /// Wrap a string at the given column width.
-fn wrap_lines(s: &str, width: usize) -> String {
+async fn wrap_lines(
+    s: &str,
+    width: usize,
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
     let mut result = String::with_capacity(s.len() + s.len() / width);
     for (i, ch) in s.chars().enumerate() {
+        ctx.checkpoint().await?;
         if i > 0 && i % width == 0 {
             result.push('\n');
         }
         result.push(ch);
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]

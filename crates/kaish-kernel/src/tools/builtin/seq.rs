@@ -144,16 +144,19 @@ impl Tool for Seq {
         let mut current = first;
         let tolerance = increment.abs() * 1e-10;
 
-        if increment > 0.0 {
-            while current <= last + tolerance {
-                numbers.push(current);
-                current += increment;
+        let in_range = |current: f64| {
+            if increment > 0.0 {
+                current <= last + tolerance
+            } else {
+                current >= last - tolerance
             }
-        } else {
-            while current >= last - tolerance {
-                numbers.push(current);
-                current += increment;
+        };
+        while in_range(current) {
+            if let Err(i) = ctx.checkpoint().await {
+                return i.result("seq");
             }
+            numbers.push(current);
+            current += increment;
         }
 
         if numbers.is_empty() {
@@ -164,64 +167,51 @@ impl Tool for Seq {
         // Format output
         let is_integer = numbers.iter().all(|n| n.fract().abs() < f64::EPSILON);
 
-        let formatted: Vec<String> = if is_integer {
-            // Compute the total display width (including sign character) of the
-            // widest element so that every formatted number gets the same width.
-            // GNU seq -w counts the minus sign as part of the width:
-            //   seq -w -3 3  → width 2 ("-3"), positives padded as "00".."03"
-            //   seq -w -10 2 → width 3 ("-10"), positives padded as "000".."002"
-            let max_width = if pad_width {
-                numbers
-                    .iter()
-                    .map(|n| (*n as i64).to_string().len()) // includes the '-' for negatives
-                    .max()
-                    .unwrap_or(1)
-            } else {
-                0
-            };
-
+        // Compute the total display width (including sign character) of the
+        // widest element so that every formatted number gets the same width.
+        // GNU seq -w counts the minus sign as part of the width:
+        //   seq -w -3 3  → width 2 ("-3"), positives padded as "00".."03"
+        //   seq -w -10 2 → width 3 ("-10"), positives padded as "000".."002"
+        let max_width = if is_integer && pad_width {
             numbers
                 .iter()
-                .map(|n| {
-                    let i = *n as i64;
-                    if pad_width {
-                        if i < 0 {
-                            // Pad the absolute value to (max_width - 1) digits, then
-                            // prepend the minus sign.  This keeps the total width equal
-                            // to max_width for every element.
-                            let abs_width = max_width - 1; // subtract one for the '-'
-                            format!("-{:0>width$}", i.unsigned_abs(), width = abs_width)
-                        } else {
-                            format!("{:0>width$}", i, width = max_width)
-                        }
-                    } else {
-                        i.to_string()
-                    }
-                })
-                .collect()
+                .map(|n| (*n as i64).to_string().len()) // includes the '-' for negatives
+                .max()
+                .unwrap_or(1)
         } else {
-            numbers.iter().map(|n| format!("{}", n)).collect()
+            0
         };
 
-        // Build OutputNodes from formatted numbers
-        let nodes: Vec<OutputNode> = formatted
-            .iter()
-            .map(|s| OutputNode::new(s.as_str()))
-            .collect();
-
-        // Build JSON array of numbers for structured iteration
-        let json_array: Vec<serde_json::Value> = numbers
-            .iter()
-            .map(|n| {
-                if is_integer {
-                    serde_json::Value::Number((*n as i64).into())
+        let mut formatted: Vec<String> = Vec::with_capacity(numbers.len());
+        let mut json_array: Vec<serde_json::Value> = Vec::with_capacity(numbers.len());
+        for n in &numbers {
+            if let Err(i) = ctx.checkpoint().await {
+                return i.result("seq");
+            }
+            if is_integer {
+                let i = *n as i64;
+                formatted.push(if pad_width && i < 0 {
+                    // Pad the absolute value to (max_width - 1) digits, then
+                    // prepend the minus sign. This keeps the total width equal
+                    // to max_width for every element.
+                    let abs_width = max_width - 1; // subtract one for the '-'
+                    format!("-{:0>width$}", i.unsigned_abs(), width = abs_width)
+                } else if pad_width {
+                    format!("{:0>width$}", i, width = max_width)
                 } else {
+                    i.to_string()
+                });
+                json_array.push(serde_json::Value::Number(i.into()));
+            } else {
+                formatted.push(format!("{}", n));
+                json_array.push(
                     serde_json::Number::from_f64(*n)
                         .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::Null)
-                }
-            })
-            .collect();
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        let nodes: Vec<OutputNode> = formatted.iter().map(|s| OutputNode::new(s.as_str())).collect();
 
         // Create OutputData and preserve the custom separator in text output
         let output_data = OutputData::nodes(nodes);

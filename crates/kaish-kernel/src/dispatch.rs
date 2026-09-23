@@ -155,6 +155,20 @@ pub trait CommandDispatcher: Send + Sync {
     /// Kernel restores scope and cwd around the substitution.
     async fn eval_expr(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value>;
 
+    /// Poll this dispatcher's own out-of-band cancellation signal — an
+    /// embedder's `ExecuteOptions::interrupt` for the `Kernel` — distinct
+    /// from the `CancellationToken` a `ToolCtx::checkpoint` already carries
+    /// on `ExecContext::cancel`. A builtin loop that checkpoints calls this
+    /// too (through `ctx.dispatcher`), so an embedder whose only stop path
+    /// is a polled check (a single-threaded wasm host, say) can still
+    /// interrupt a busy builtin, not just an interpreter loop.
+    ///
+    /// The default is `false`: a dispatcher with no polled check of its own
+    /// (the test-only `BackendDispatcher`) never reports one.
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
     /// Fork the dispatcher for concurrent execution (detached).
     ///
     /// Returns a subsidiary dispatcher with independent mutable state, safe

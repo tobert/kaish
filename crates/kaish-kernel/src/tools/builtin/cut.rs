@@ -131,6 +131,9 @@ impl Tool for Cut {
         let mut output = Vec::new();
 
         for line in input.lines() {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("cut");
+            }
             if let Some(ref char_spec) = characters {
                 // Character mode
                 let chars: Vec<char> = line.chars().collect();

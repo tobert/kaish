@@ -17,7 +17,7 @@ use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Sed tool: stream editor for text transformations.
@@ -252,7 +252,10 @@ impl Tool for Sed {
                         continue;
                     }
                 };
-                let output = execute_sed(&content, &parsed, quiet);
+                let output = match execute_sed(&content, &parsed, quiet, ctx).await {
+                    Ok(o) => o,
+                    Err(i) => return i.result("sed"),
+                };
                 // Whole-file compare-and-swap, matching patch: the `expected`
                 // makes a concurrent change between read and write a loud
                 // Conflict, never a silent clobber.
@@ -297,7 +300,10 @@ impl Tool for Sed {
         };
 
         // Execute
-        let output = execute_sed(&input, &parsed, quiet);
+        let output = match execute_sed(&input, &parsed, quiet, ctx).await {
+            Ok(o) => o,
+            Err(i) => return i.result("sed"),
+        };
         ExecResult::with_output(OutputData::text(output))
     }
 }
@@ -752,13 +758,26 @@ fn parse_delimited(chars: &[char], delimiter: char) -> Result<(String, &[char]),
 // ============================================================================
 
 /// Execute sed expressions on input text.
-fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> String {
+///
+/// Checkpoints once per line: the program loops in memory with no I/O of its
+/// own, so without this a script timeout could not stop a large input from
+/// running to completion. `Err` means a checkpoint saw the execution
+/// cancelled — the caller answers with `Interrupted::result("sed")`, not the
+/// partial output built so far (a truncated rewrite is the data-corruption
+/// shape kaish refuses, especially under `-i`).
+async fn execute_sed(
+    input: &str,
+    expressions: &[SedExpression],
+    quiet: bool,
+    ctx: &mut ExecContext,
+) -> Result<String, kaish_tool_api::Interrupted> {
     let lines: Vec<&str> = input.lines().collect();
     let total_lines = lines.len();
     let mut output = String::new();
     let mut range_active: Vec<bool> = vec![false; expressions.len()];
 
     for (line_num, line) in lines.iter().enumerate() {
+        ctx.checkpoint().await?;
         let one_indexed = line_num + 1;
         let is_last = line_num + 1 == total_lines;
 
@@ -858,7 +877,7 @@ fn execute_sed(input: &str, expressions: &[SedExpression], quiet: bool) -> Strin
         }
     }
 
-    output
+    Ok(output)
 }
 
 /// Transliterate each char of `text` that appears in `from` to the char at the
@@ -1060,6 +1079,19 @@ mod tests {
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
+    /// Sync wrapper over the now-async `execute_sed`, for the parser/execution
+    /// unit tests below that predate the checkpoint and have no `ExecContext`
+    /// of their own. A fresh context is never cancelled, so `execute_sed`
+    /// cannot return `Err` here.
+    fn execute_sed_sync(input: &str, expressions: &[SedExpression], quiet: bool) -> String {
+        let mut ctx = ExecContext::new(Arc::new(VfsRouter::new()));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(execute_sed(input, expressions, quiet, &mut ctx))
+            .expect("a fresh test context is never cancelled")
+    }
+
     /// Test helper: parse a single-command expression. Most parser tests predate
     /// `;`-separated programs and assert against one `SedExpression`; this keeps
     /// them terse by unwrapping the one-element program `parse_program` returns.
@@ -1227,7 +1259,7 @@ mod tests {
     fn test_basic_substitution() {
         let input = "hello world\nhello there";
         let expr = parse_expression("s/hello/hi/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "hi world\nhi there\n");
     }
 
@@ -1235,7 +1267,7 @@ mod tests {
     fn test_global_substitution() {
         let input = "foo bar foo baz foo";
         let expr = parse_expression("s/foo/XXX/g").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "XXX bar XXX baz XXX\n");
     }
 
@@ -1243,7 +1275,7 @@ mod tests {
     fn test_case_insensitive() {
         let input = "Hello HELLO hello";
         let expr = parse_expression("s/hello/hi/gi").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "hi hi hi\n");
     }
 
@@ -1251,7 +1283,7 @@ mod tests {
     fn test_print_on_change() {
         let input = "hello world\nfoo bar";
         let expr = parse_expression("s/hello/hi/p").unwrap();
-        let output = execute_sed(input, &[expr], true); // quiet mode
+        let output = execute_sed_sync(input, &[expr], true); // quiet mode
         assert_eq!(output, "hi world\n");
     }
 
@@ -1259,7 +1291,7 @@ mod tests {
     fn test_capture_groups() {
         let input = "John Smith";
         let expr = parse_expression(r"s/(\w+) (\w+)/\2, \1/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "Smith, John\n");
     }
 
@@ -1267,7 +1299,7 @@ mod tests {
     fn test_ampersand_expansion() {
         let input = "hello world";
         let expr = parse_expression("s/hello/[&]/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "[hello] world\n");
     }
 
@@ -1275,7 +1307,7 @@ mod tests {
     fn test_delete_command() {
         let input = "keep\ndelete this\nkeep";
         let expr = parse_expression("/delete/d").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "keep\nkeep\n");
     }
 
@@ -1283,7 +1315,7 @@ mod tests {
     fn test_quiet_mode() {
         let input = "line 1\npattern here\nline 3";
         let expr = parse_expression("/pattern/p").unwrap();
-        let output = execute_sed(input, &[expr], true);
+        let output = execute_sed_sync(input, &[expr], true);
         assert_eq!(output, "pattern here\n");
     }
 
@@ -1291,7 +1323,7 @@ mod tests {
     fn test_line_number_address() {
         let input = "line 1\nline 2\nline 3";
         let expr = parse_expression("2s/line/LINE/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "line 1\nLINE 2\nline 3\n");
     }
 
@@ -1299,7 +1331,7 @@ mod tests {
     fn test_range_address() {
         let input = "line 1\nline 2\nline 3\nline 4";
         let expr = parse_expression("2,3d").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "line 1\nline 4\n");
     }
 
@@ -1307,7 +1339,7 @@ mod tests {
     fn test_quit_command() {
         let input = "line 1\nline 2\nline 3\nline 4";
         let expr = parse_expression("2q").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "line 1\nline 2\n");
     }
 
@@ -1316,7 +1348,7 @@ mod tests {
         let input = "abc 123";
         let e1 = parse_expression("s/a/X/").unwrap();
         let e2 = parse_expression("s/1/Y/").unwrap();
-        let output = execute_sed(input, &[e1, e2], false);
+        let output = execute_sed_sync(input, &[e1, e2], false);
         assert_eq!(output, "Xbc Y23\n");
     }
 
@@ -1361,7 +1393,7 @@ mod tests {
     fn test_empty_replacement() {
         let input = "hello world";
         let expr = parse_expression("s/hello //").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "world\n");
     }
 
@@ -1369,7 +1401,7 @@ mod tests {
     fn test_empty_input() {
         let input = "";
         let expr = parse_expression("s/foo/bar/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert!(output.is_empty());
     }
 
@@ -1377,7 +1409,7 @@ mod tests {
     fn test_no_matches_passthrough() {
         let input = "hello world";
         let expr = parse_expression("s/xyz/abc/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "hello world\n");
     }
 
@@ -1385,7 +1417,7 @@ mod tests {
     fn test_last_line_address() {
         let input = "line 1\nline 2\nline 3";
         let expr = parse_expression("$s/line/LAST/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "line 1\nline 2\nLAST 3\n");
     }
 
@@ -1393,7 +1425,7 @@ mod tests {
     fn test_pattern_range() {
         let input = "before\nSTART\nmiddle\nEND\nafter";
         let expr = parse_expression("/START/,/END/d").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "before\nafter\n");
     }
 
@@ -1401,7 +1433,7 @@ mod tests {
     fn test_escaped_backslash_replacement() {
         let input = "hello";
         let expr = parse_expression(r"s/hello/a\\b/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "a\\b\n");
     }
 
@@ -1409,7 +1441,7 @@ mod tests {
     fn test_newline_in_replacement() {
         let input = "hello world";
         let expr = parse_expression(r"s/ /\n/").unwrap();
-        let output = execute_sed(input, &[expr], false);
+        let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "hello\nworld\n");
     }
 
@@ -1419,7 +1451,7 @@ mod tests {
     fn semicolon_splits_into_multiple_commands() {
         let prog = parse_program("s/a/X/;s/b/Y/").unwrap();
         assert_eq!(prog.len(), 2);
-        let output = execute_sed("abc", &prog, false);
+        let output = execute_sed_sync("abc", &prog, false);
         assert_eq!(output, "XYc\n");
     }
 
@@ -1428,7 +1460,7 @@ mod tests {
         // `/x/d ; /y/d` (spaces around `;`) — two addressed deletes.
         let prog = parse_program("/b/d ; /d/d").unwrap();
         assert_eq!(prog.len(), 2);
-        let output = execute_sed("a\nb\nc\nd\n", &prog, false);
+        let output = execute_sed_sync("a\nb\nc\nd\n", &prog, false);
         assert_eq!(output, "a\nc\n");
     }
 
@@ -1437,7 +1469,7 @@ mod tests {
         // A `;` inside the pattern must not split the command.
         let prog = parse_program("s/a;b/X/").unwrap();
         assert_eq!(prog.len(), 1);
-        assert_eq!(execute_sed("a;b", &prog, false), "X\n");
+        assert_eq!(execute_sed_sync("a;b", &prog, false), "X\n");
     }
 
     #[test]
@@ -1451,19 +1483,19 @@ mod tests {
     #[test]
     fn substitute_nth_occurrence_only() {
         let expr = parse_expression("s/a/X/2").unwrap();
-        assert_eq!(execute_sed("aaa", &[expr], false), "aXa\n");
+        assert_eq!(execute_sed_sync("aaa", &[expr], false), "aXa\n");
     }
 
     #[test]
     fn substitute_nth_onward_with_g() {
         let expr = parse_expression("s/a/X/2g").unwrap();
-        assert_eq!(execute_sed("aaaa", &[expr], false), "aXXX\n");
+        assert_eq!(execute_sed_sync("aaaa", &[expr], false), "aXXX\n");
     }
 
     #[test]
     fn substitute_default_is_first_match() {
         let expr = parse_expression("s/a/X/").unwrap();
-        assert_eq!(execute_sed("aaa", &[expr], false), "Xaa\n");
+        assert_eq!(execute_sed_sync("aaa", &[expr], false), "Xaa\n");
     }
 
     // === a / i / c ===
@@ -1471,25 +1503,25 @@ mod tests {
     #[test]
     fn append_emits_text_after_the_line() {
         let expr = parse_expression("/B/a ---").unwrap();
-        assert_eq!(execute_sed("A\nB\nC", &[expr], false), "A\nB\n---\nC\n");
+        assert_eq!(execute_sed_sync("A\nB\nC", &[expr], false), "A\nB\n---\nC\n");
     }
 
     #[test]
     fn insert_emits_text_before_the_line() {
         let expr = parse_expression("1i top").unwrap();
-        assert_eq!(execute_sed("A\nB", &[expr], false), "top\nA\nB\n");
+        assert_eq!(execute_sed_sync("A\nB", &[expr], false), "top\nA\nB\n");
     }
 
     #[test]
     fn change_replaces_single_line() {
         let expr = parse_expression("/B/c NEW").unwrap();
-        assert_eq!(execute_sed("A\nB\nC", &[expr], false), "A\nNEW\nC\n");
+        assert_eq!(execute_sed_sync("A\nB\nC", &[expr], false), "A\nNEW\nC\n");
     }
 
     #[test]
     fn change_replaces_whole_range_once() {
         let expr = parse_expression("2,3c NEW").unwrap();
-        assert_eq!(execute_sed("A\nB\nC\nD", &[expr], false), "A\nNEW\nD\n");
+        assert_eq!(execute_sed_sync("A\nB\nC\nD", &[expr], false), "A\nNEW\nD\n");
     }
 
     #[test]
@@ -1497,14 +1529,14 @@ mod tests {
         // #1: a range whose end never matches must emit the change text once at
         // EOF, not silently delete to end-of-input with nothing in its place.
         let prog = parse_program("2,/NOPE/c NEW").unwrap();
-        assert_eq!(execute_sed("a\nb\nc\nd", &prog, false), "a\nNEW\n");
+        assert_eq!(execute_sed_sync("a\nb\nc\nd", &prog, false), "a\nNEW\n");
     }
 
     #[test]
     fn change_numeric_range_past_eof_emits_once() {
         // #1: numeric end beyond the input length also closes at EOF.
         let prog = parse_program("2,99c NEW").unwrap();
-        assert_eq!(execute_sed("a\nb\nc", &prog, false), "a\nNEW\n");
+        assert_eq!(execute_sed_sync("a\nb\nc", &prog, false), "a\nNEW\n");
     }
 
     #[test]
@@ -1512,7 +1544,7 @@ mod tests {
         // #2: `N,N` must span exactly one line, not two (the old `>=`-on-next-line
         // close included the following line as well).
         let prog = parse_program("2,2d").unwrap();
-        assert_eq!(execute_sed("a\nb\nc", &prog, false), "a\nc\n");
+        assert_eq!(execute_sed_sync("a\nb\nc", &prog, false), "a\nc\n");
     }
 
     #[test]
@@ -1520,21 +1552,21 @@ mod tests {
         // #2 + #3: a single-line range opens and closes on the same line, so the
         // change text is emitted once for that one line.
         let prog = parse_program("2,2c NEW").unwrap();
-        assert_eq!(execute_sed("a\nb\nc", &prog, false), "a\nNEW\nc\n");
+        assert_eq!(execute_sed_sync("a\nb\nc", &prog, false), "a\nNEW\nc\n");
     }
 
     #[test]
     fn descending_numeric_range_matches_only_start_line() {
         // GNU sed: a numeric end <= the start line collapses to the one start line.
         let prog = parse_program("3,1d").unwrap();
-        assert_eq!(execute_sed("a\nb\nc\nd", &prog, false), "a\nb\nd\n");
+        assert_eq!(execute_sed_sync("a\nb\nc\nd", &prog, false), "a\nb\nd\n");
     }
 
     #[test]
     fn append_text_emits_even_under_quiet() {
         // a/i/c print unconditionally, like real sed.
         let expr = parse_expression("/B/a ---").unwrap();
-        assert_eq!(execute_sed("A\nB\nC", &[expr], true), "---\n");
+        assert_eq!(execute_sed_sync("A\nB\nC", &[expr], true), "---\n");
     }
 
     #[test]
@@ -1550,7 +1582,7 @@ mod tests {
     #[test]
     fn transliterate_maps_chars() {
         let expr = parse_expression("y/abc/xyz/").unwrap();
-        assert_eq!(execute_sed("cabbage", &[expr], false), "zxyyxge\n");
+        assert_eq!(execute_sed_sync("cabbage", &[expr], false), "zxyyxge\n");
     }
 
     #[test]
@@ -1575,22 +1607,22 @@ mod tests {
         // Default mode: `\(...\)` become real capture groups, `\1`/`\2` backref
         // them — the agent-idiomatic spelling that used to be rejected.
         let expr = parse_expression(r"s/\(a\)\(b\)/\2\1/").unwrap();
-        assert_eq!(execute_sed("ab", &[expr], false), "ba\n");
+        assert_eq!(execute_sed_sync("ab", &[expr], false), "ba\n");
     }
 
     #[test]
     fn bre_alternation_translates() {
         // `cat\|dog` alternates (was a silent no-match / loud reject before #60).
         let expr = parse_expression(r"s/cat\|dog/X/g").unwrap();
-        assert_eq!(execute_sed("cat dog", &[expr], false), "X X\n");
+        assert_eq!(execute_sed_sync("cat dog", &[expr], false), "X X\n");
     }
 
     #[test]
     fn bre_interval_translates() {
         let expr = parse_expression(r"s/a\{2\}/X/").unwrap();
-        assert_eq!(execute_sed("aa", &[expr], false), "X\n");
+        assert_eq!(execute_sed_sync("aa", &[expr], false), "X\n");
         let expr = parse_expression(r"s/a\{2,\}/X/").unwrap();
-        assert_eq!(execute_sed("aaaa", &[expr], false), "X\n");
+        assert_eq!(execute_sed_sync("aaaa", &[expr], false), "X\n");
     }
 
     #[test]
@@ -1598,29 +1630,29 @@ mod tests {
         // `\+` is now the one-or-more quantifier (GNU BRE), not a literal `+`.
         // The literal `+` is available as a bracket class `[+]`.
         let expr = parse_expression(r"s/a\+/X/").unwrap();
-        assert_eq!(execute_sed("aaab", &[expr], false), "Xb\n");
+        assert_eq!(execute_sed_sync("aaab", &[expr], false), "Xb\n");
     }
 
     #[test]
     fn bre_idioms_work_in_addresses_too() {
         // Addresses compile a pattern as well; the same rewrite applies.
         let expr = parse_expression(r"/cat\|dog/d").unwrap();
-        assert_eq!(execute_sed("cat\nfish\ndog", &[expr], false), "fish\n");
+        assert_eq!(execute_sed_sync("cat\nfish\ndog", &[expr], false), "fish\n");
     }
 
     #[test]
     fn ere_interval_and_alternation_are_fine() {
         // The bare ERE forms keep working — the rewrite is a superset.
         let expr = parse_expression("s/a{2}/X/").unwrap();
-        assert_eq!(execute_sed("aa", &[expr], false), "X\n");
+        assert_eq!(execute_sed_sync("aa", &[expr], false), "X\n");
         let expr = parse_expression("s/cat|dog/X/g").unwrap();
-        assert_eq!(execute_sed("cat dog", &[expr], false), "X X\n");
+        assert_eq!(execute_sed_sync("cat dog", &[expr], false), "X X\n");
     }
 
     #[test]
     fn ere_groups_with_backref_work_normally() {
         let expr = parse_expression(r"s/(a)(b)/\2\1/").unwrap();
-        assert_eq!(execute_sed("ab", &[expr], false), "ba\n");
+        assert_eq!(execute_sed_sync("ab", &[expr], false), "ba\n");
     }
 
     #[test]
@@ -1628,9 +1660,9 @@ mod tests {
         // `-E`/`-r` is strict ERE: `\|` matches a literal pipe, `\(`/`\)` literal
         // parens — the escape hatch for matching those characters.
         let expr = parse_expression_ere(r"s/cat\|dog/X/").unwrap();
-        assert_eq!(execute_sed("cat|dog here", &[expr], false), "X here\n");
+        assert_eq!(execute_sed_sync("cat|dog here", &[expr], false), "X here\n");
         let expr = parse_expression_ere(r"s/\(x\)/Y/").unwrap();
-        assert_eq!(execute_sed("(x)", &[expr], false), "Y\n");
+        assert_eq!(execute_sed_sync("(x)", &[expr], false), "Y\n");
     }
 
     #[test]
@@ -1651,7 +1683,7 @@ mod tests {
         // the rewrite preserves `\\` as a unit, so the trailing `|` stays bare
         // ERE alternation and is not consumed as a BRE `\|`.
         let expr = parse_expression(r"s/a\\|b/X/").unwrap();
-        assert_eq!(execute_sed(r"a\ b c", &[expr], false), "X b c\n");
+        assert_eq!(execute_sed_sync(r"a\ b c", &[expr], false), "X b c\n");
     }
 
     // === Integration Tests ===
