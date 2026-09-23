@@ -20,13 +20,17 @@
 //!   the engine's (a bare `{` that isn't digit-led, `\b`, `\y`, `\<`, `\>`,
 //!   `` \` ``, `\'`, `\d`, `\D`). `tests/awk_gnu_regex_tests.rs` records
 //!   gawk's output.
-//! - [`rewrite_posix_classes`] is `grep -E`'s and `sed -E`/`-r`'s pass: only
-//!   `[...]` interiors change, using the same [`posix_class_pattern`] table
-//!   `gnu_bre_to_regex` uses, since strict ERE otherwise passes straight
-//!   through.
+//! - [`translate_strict_ere`] is `grep -E`'s and `sed -E`/`-r`'s pass:
+//!   `[...]` interiors are rewritten using the same [`posix_class_pattern`]
+//!   table `gnu_bre_to_regex` uses, and every backslash escape reads GNU's
+//!   way too, via the same [`classify_gnu_escape`] table `gnu_bre_to_regex`
+//!   reads — `grep -E '\d'` is the literal letter `d`, not the engine's own
+//!   digit class, with GNU's "stray \" warning; `\( \) \{ \} \| \+ \?` and
+//!   the rest of ERE's own metacharacters are already literal escaped in
+//!   both GNU ERE and the engine, so those pass straight through.
 //!
 //! Every bracket-expression translator — `gnu_bre_to_regex`,
-//! `rewrite_posix_classes`, and `gawk_ere_to_regex`'s own bracket handling —
+//! `translate_strict_ere`, and `gawk_ere_to_regex`'s own bracket handling —
 //! routes `[:alpha:]` and its eleven siblings through [`posix_class_pattern`],
 //! the regex engine's own `[:alpha:]` being ASCII-only where GNU grep, GNU
 //! sed, and gawk in a UTF-8 locale are not; all three agree on the same
@@ -41,11 +45,17 @@ pub(crate) struct BreTranslation {
     pub(crate) warnings: Vec<String>,
 }
 
-/// Format a BRE refusal: the value and the rule, plus `tail` — the caller's
-/// own reminder that the reader may have meant ERE (`grep`'s and `sed`'s
-/// wording differ: different flag, different example command).
+/// Format a regex refusal: the value and the rule, plus `tail` — the
+/// caller's own reminder that the reader may have meant a different dialect
+/// (`grep`'s and `sed`'s wording differ: different flag, different example
+/// command). Strict ERE is already the dialect a `tail` would point at, so
+/// its refusals pass `""` and get no trailing reminder.
 fn refusal(tail: &str, what: impl std::fmt::Display) -> String {
-    format!("invalid pattern: {what}. {tail}")
+    if tail.is_empty() {
+        format!("invalid pattern: {what}")
+    } else {
+        format!("invalid pattern: {what}. {tail}")
+    }
 }
 
 /// The POSIX class names GNU grep accepts inside `[...]`.
@@ -142,6 +152,138 @@ enum BracketItem {
     Class(String),
 }
 
+/// What GNU gives `\c` for a letter or digit `c` — the one table
+/// [`gnu_bre_to_regex`] and [`translate_strict_ere`] both read, so BRE and
+/// ERE cannot drift apart on it. `None` means `c` is not one of these: the
+/// caller's own "any other letter is stray" rule applies.
+enum GnuEscape {
+    /// `\w \W \s \S` — already the engine's own class syntax, and an atom a
+    /// quantifier can repeat.
+    WordClass,
+    /// `\b \B` — already the engine's own boundary syntax, but zero-width:
+    /// no quantifier follows it directly.
+    Boundary,
+    /// `` \< \> \` \' `` — GNU's word/buffer anchors; the engine spells them
+    /// differently.
+    Anchor(&'static str),
+    /// `\1`-`\9` — a back-reference. The engine has none.
+    Backreference,
+}
+
+fn classify_gnu_escape(c: char) -> Option<GnuEscape> {
+    Some(match c {
+        'w' | 'W' | 's' | 'S' => GnuEscape::WordClass,
+        'b' | 'B' => GnuEscape::Boundary,
+        '<' => GnuEscape::Anchor(r"\b{start}"),
+        '>' => GnuEscape::Anchor(r"\b{end}"),
+        '`' => GnuEscape::Anchor(r"\A"),
+        '\'' => GnuEscape::Anchor(r"\z"),
+        '1'..='9' => GnuEscape::Backreference,
+        _ => return None,
+    })
+}
+
+/// GNU's "stray \" warning text for a backslash before an ordinary
+/// character, shared by BRE and strict ERE.
+fn stray_warning(c: char) -> String {
+    let what = if c.is_whitespace() {
+        "white space".to_string()
+    } else if c.is_control() {
+        "unprintable character".to_string()
+    } else {
+        c.to_string()
+    };
+    format!("stray \\ before {what}")
+}
+
+/// Translate a bracket expression, shared by BRE and strict ERE — GNU grep
+/// and GNU sed read `[...]` the same way regardless of dialect: every
+/// character inside is literal, backslash included, and `[:class:]`,
+/// `[.c.]`, `[=c=]` are recognized. `index` is just past the opening `[`.
+fn bracket_expression(chars: &[char], index: &mut usize, tail: &str) -> Result<String, String> {
+    let unmatched = || refusal(tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
+    let mut out = String::from("[");
+    if chars.get(*index) == Some(&'^') {
+        out.push('^');
+        *index += 1;
+    }
+    let mut first = true;
+    loop {
+        let c = chars.get(*index).copied().ok_or_else(unmatched)?;
+        if c == ']' && !first {
+            *index += 1;
+            out.push(']');
+            break;
+        }
+        first = false;
+        let item = bracket_item(chars, index, tail)?;
+        let is_range =
+            chars.get(*index) == Some(&'-') && matches!(chars.get(*index + 1), Some(n) if *n != ']');
+        match item {
+            BracketItem::Char(low) if is_range => {
+                *index += 1;
+                let BracketItem::Char(high) = bracket_item(chars, index, tail)? else {
+                    return Err(refusal(tail, "a range cannot end in a character class"));
+                };
+                if high < low {
+                    return Err(refusal(
+                        tail,
+                        format!("invalid range `{low}-{high}` — write the lower end first"),
+                    ));
+                }
+                push_class_char(&mut out, low);
+                out.push('-');
+                push_class_char(&mut out, high);
+            }
+            BracketItem::Char(c) => push_class_char(&mut out, c),
+            BracketItem::Class(class) => out.push_str(&class),
+        }
+    }
+    Ok(out)
+}
+
+/// Read one bracket item: `[:class:]`, `[.c.]`, `[=c=]`, or a character.
+fn bracket_item(chars: &[char], index: &mut usize, tail: &str) -> Result<BracketItem, String> {
+    let unmatched = || refusal(tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
+    let c = chars.get(*index).copied().ok_or_else(unmatched)?;
+    let delimiter = match (c, chars.get(*index + 1)) {
+        ('[', Some(&d @ (':' | '.' | '='))) => d,
+        _ => {
+            *index += 1;
+            return Ok(BracketItem::Char(c));
+        }
+    };
+    let body_start = *index + 2;
+    let mut end = body_start;
+    while !(chars.get(end) == Some(&delimiter) && chars.get(end + 1) == Some(&']')) {
+        if end >= chars.len() {
+            return Err(unmatched());
+        }
+        end += 1;
+    }
+    let body: String = chars[body_start..end].iter().collect();
+    *index = end + 2;
+    if delimiter == ':' {
+        return match posix_class_pattern(&body) {
+            Some(pattern) => Ok(BracketItem::Class(pattern.to_string())),
+            None => Err(refusal(
+                tail,
+                format!("invalid character class `[:{body}:]` — use one of {}", POSIX_CLASSES.join(", ")),
+            )),
+        };
+    }
+    let mut body_chars = body.chars();
+    match (body_chars.next(), body_chars.next()) {
+        (Some(single), None) => Ok(BracketItem::Char(single)),
+        _ => Err(refusal(
+            tail,
+            format!(
+                "`[{delimiter}{body}{delimiter}]` is not supported — only a single character works inside `[{delimiter} {delimiter}]`"
+            ),
+        )),
+    }
+}
+
 struct BreTranslator {
     chars: Vec<char>,
     index: usize,
@@ -211,14 +353,7 @@ impl BreTranslator {
     }
 
     fn warn_stray(&mut self, c: char) {
-        let what = if c.is_whitespace() {
-            "white space".to_string()
-        } else if c.is_control() {
-            "unprintable character".to_string()
-        } else {
-            c.to_string()
-        };
-        self.warnings.push(format!("stray \\ before {what}"));
+        self.warnings.push(stray_warning(c));
     }
 
     fn run(mut self) -> Result<BreTranslation, String> {
@@ -292,21 +427,20 @@ impl BreTranslator {
                 self.push_literal(next);
             }
             '}' | '.' | '*' | '[' | ']' | '^' | '$' | '\\' => self.push_literal(next),
-            'w' | 'W' | 's' | 'S' => self.push_atom(&format!("\\{next}")),
-            'b' | 'B' => self.push_assertion(&format!("\\{next}")),
-            '<' => self.push_assertion(r"\b{start}"),
-            '>' => self.push_assertion(r"\b{end}"),
-            '`' => self.push_assertion(r"\A"),
-            '\'' => self.push_assertion(r"\z"),
-            '1'..='9' => {
-                return Err(self.refuse(format!(
-                    r"back-reference `\{next}` is not supported — the regex engine has no back-references"
-                )));
-            }
-            other => {
-                self.warn_stray(other);
-                self.push_literal(other);
-            }
+            _ => match classify_gnu_escape(next) {
+                Some(GnuEscape::WordClass) => self.push_atom(&format!("\\{next}")),
+                Some(GnuEscape::Boundary) => self.push_assertion(&format!("\\{next}")),
+                Some(GnuEscape::Anchor(text)) => self.push_assertion(text),
+                Some(GnuEscape::Backreference) => {
+                    return Err(self.refuse(format!(
+                        r"back-reference `\{next}` is not supported — the regex engine has no back-references"
+                    )));
+                }
+                None => {
+                    self.warn_stray(next);
+                    self.push_literal(next);
+                }
+            },
         }
         Ok(())
     }
@@ -364,127 +498,132 @@ impl BreTranslator {
 
     /// Translate a bracket expression; `self.index` is just past `[`.
     fn bracket(&mut self) -> Result<String, String> {
-        let tail = self.tail.clone();
-        let unmatched = || refusal(&tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
-        let mut out = String::from("[");
-        if self.peek(0) == Some('^') {
-            out.push('^');
-            self.index += 1;
-        }
-        let mut first = true;
-        loop {
-            let c = self.peek(0).ok_or_else(unmatched)?;
-            if c == ']' && !first {
-                self.index += 1;
-                out.push(']');
-                break;
-            }
-            first = false;
-            let item = self.bracket_item()?;
-            let is_range = self.peek(0) == Some('-') && matches!(self.peek(1), Some(n) if n != ']');
-            match item {
-                BracketItem::Char(low) if is_range => {
-                    self.index += 1;
-                    let BracketItem::Char(high) = self.bracket_item()? else {
-                        return Err(self.refuse("a range cannot end in a character class"));
-                    };
-                    if high < low {
-                        return Err(self.refuse(format!(
-                            "invalid range `{low}-{high}` — write the lower end first"
-                        )));
-                    }
-                    push_class_char(&mut out, low);
-                    out.push('-');
-                    push_class_char(&mut out, high);
-                }
-                BracketItem::Char(c) => push_class_char(&mut out, c),
-                BracketItem::Class(class) => out.push_str(&class),
-            }
-        }
-        Ok(out)
-    }
-
-    /// Read one bracket item: `[:class:]`, `[.c.]`, `[=c=]`, or a character.
-    fn bracket_item(&mut self) -> Result<BracketItem, String> {
-        let tail = self.tail.clone();
-        let unmatched = || refusal(&tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
-        let c = self.peek(0).ok_or_else(unmatched)?;
-        let delimiter = match (c, self.peek(1)) {
-            ('[', Some(d @ (':' | '.' | '='))) => d,
-            _ => {
-                self.index += 1;
-                return Ok(BracketItem::Char(c));
-            }
-        };
-        let body_start = self.index + 2;
-        let mut end = body_start;
-        while !(self.chars.get(end) == Some(&delimiter) && self.chars.get(end + 1) == Some(&']')) {
-            if end >= self.chars.len() {
-                return Err(unmatched());
-            }
-            end += 1;
-        }
-        let body: String = self.chars[body_start..end].iter().collect();
-        self.index = end + 2;
-        if delimiter == ':' {
-            return match posix_class_pattern(&body) {
-                Some(pattern) => Ok(BracketItem::Class(pattern.to_string())),
-                None => Err(self.refuse(format!(
-                    "invalid character class `[:{body}:]` — use one of {}",
-                    POSIX_CLASSES.join(", ")
-                ))),
-            };
-        }
-        let mut body_chars = body.chars();
-        match (body_chars.next(), body_chars.next()) {
-            (Some(single), None) => Ok(BracketItem::Char(single)),
-            _ => Err(self.refuse(format!(
-                "`[{delimiter}{body}{delimiter}]` is not supported — only a single character works inside `[{delimiter} {delimiter}]`"
-            ))),
-        }
+        bracket_expression(&self.chars, &mut self.index, &self.tail)
     }
 }
 
-/// Rewrite POSIX bracket classes for strict ERE (`grep -E`): only `[...]`
-/// interiors change, using [`posix_class_pattern`], the same translation
-/// [`gnu_bre_to_regex`] applies in default mode — the regex engine's own
-/// `[:alpha:]` is ASCII-only in both dialects. Every other ERE construct
-/// (`(...)`, `a|b`, `x{2,5}`, a backslashed literal) passes through
-/// untouched.
+/// Translate a strict ERE (`grep -E`; `sed -E`/`-r`) into the regex engine's
+/// syntax. `[...]` interiors are rewritten using [`posix_class_pattern`], the
+/// same table [`gnu_bre_to_regex`] uses in default mode — the regex engine's
+/// own `[:alpha:]` is ASCII-only in both dialects. Every backslash escape now
+/// reads GNU's way too: `\w \W \s \S \b \B \< \> \` \'` keep their GNU
+/// meaning, shared with [`gnu_bre_to_regex`] via [`classify_gnu_escape`] so
+/// BRE and ERE cannot drift apart on it; `\( \) \{ \} \| \+ \? \. \* \^ \$
+/// \[ \] \\` are already literal in both GNU ERE and the engine, so they pass
+/// through unchanged; a backslash before any other ordinary character is
+/// that character, with GNU's "stray \" warning — confirmed against
+/// `/usr/bin/grep -E`: `grep -E -o '\d'` matches the letter `d`, not a
+/// digit, which the regex engine's own `\d` would read as a digit class.
+///
+/// Back-references (`\1`) are refused — the same gap [`gnu_bre_to_regex`]
+/// documents for BRE. GNU ERE runs one as a GNU extension when a group
+/// precedes it; the regex engine has none in any dialect.
 ///
 /// A bracket expression the translator cannot make sense of (an unmatched
 /// `[`, an unrecognized class name) is left exactly as written, so the
-/// engine's own error stands for it; this function never fails.
-pub(crate) fn rewrite_posix_classes(pattern: &str) -> String {
-    // Errors are discarded below, so `tail` (an "-E" reminder) never surfaces.
-    let mut translator = BreTranslator::new(pattern, "");
-    let mut out = String::with_capacity(pattern.len());
-    while let Some(c) = translator.peek(0) {
-        if c == '\\' {
-            out.push(c);
-            translator.index += 1;
-            if let Some(next) = translator.peek(0) {
-                out.push(next);
-                translator.index += 1;
-            }
-            continue;
+/// engine's own error stands for it. Only an escape-level fault — a
+/// trailing backslash or a back-reference — fails outright; `tail` is
+/// appended to that refusal, empty for strict ERE, since ERE is already the
+/// dialect a `tail` would point the reader at.
+pub(crate) fn translate_strict_ere(pattern: &str, tail: &str) -> Result<BreTranslation, String> {
+    EreTranslator::new(pattern, tail).run()
+}
+
+/// A backslash before this character is already literal in both GNU ERE and
+/// the engine: no rewrite needed.
+fn is_ere_meta(c: char) -> bool {
+    matches!(c, '(' | ')' | '{' | '}' | '|' | '+' | '?' | '.' | '*' | '^' | '$' | '[' | ']' | '\\')
+}
+
+struct EreTranslator {
+    chars: Vec<char>,
+    index: usize,
+    out: String,
+    warnings: Vec<String>,
+    tail: String,
+}
+
+impl EreTranslator {
+    fn new(pattern: &str, tail: &str) -> Self {
+        Self {
+            chars: pattern.chars().collect(),
+            index: 0,
+            out: String::with_capacity(pattern.len() + 8),
+            warnings: Vec::new(),
+            tail: tail.to_string(),
         }
-        if c == '[' {
-            let saved = translator.index;
-            translator.index += 1;
-            match translator.bracket() {
-                Ok(text) => out.push_str(&text),
-                Err(_) => {
-                    translator.index = saved + 1;
-                    out.push(c);
+    }
+
+    fn peek(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.index + offset).copied()
+    }
+
+    fn run(mut self) -> Result<BreTranslation, String> {
+        while let Some(c) = self.peek(0) {
+            match c {
+                '\\' => {
+                    self.index += 1;
+                    self.escape()?;
+                }
+                '[' => {
+                    let saved = self.index;
+                    self.index += 1;
+                    match bracket_expression(&self.chars, &mut self.index, &self.tail) {
+                        Ok(text) => self.out.push_str(&text),
+                        Err(_) => {
+                            // Malformed: leave it exactly as written, so the
+                            // engine's own error names it.
+                            self.index = saved + 1;
+                            self.out.push(c);
+                        }
+                    }
+                }
+                other => {
+                    self.out.push(other);
+                    self.index += 1;
                 }
             }
-            continue;
         }
-        out.push(c);
-        translator.index += 1;
+        Ok(BreTranslation { pattern: self.out, warnings: self.warnings })
     }
-    out
+
+    /// Translate the escape after a backslash; `self.index` is on its second
+    /// character.
+    fn escape(&mut self) -> Result<(), String> {
+        let Some(next) = self.peek(0) else {
+            return Err(refusal(
+                &self.tail,
+                r"trailing backslash — write `\\` to match a literal backslash",
+            ));
+        };
+        self.index += 1;
+        if is_ere_meta(next) {
+            self.out.push('\\');
+            self.out.push(next);
+            return Ok(());
+        }
+        match classify_gnu_escape(next) {
+            Some(GnuEscape::WordClass) | Some(GnuEscape::Boundary) => {
+                self.out.push('\\');
+                self.out.push(next);
+            }
+            Some(GnuEscape::Anchor(text)) => self.out.push_str(text),
+            Some(GnuEscape::Backreference) => {
+                return Err(refusal(
+                    &self.tail,
+                    format!(
+                        r"back-reference `\{next}` is not supported — the regex engine has no back-references"
+                    ),
+                ));
+            }
+            None => {
+                let mut buffer = [0u8; 4];
+                self.out.push_str(&regex::escape(next.encode_utf8(&mut buffer)));
+                self.warnings.push(stray_warning(next));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Translate a gawk ERE (every regex `awk` reads: `/re/`, a dynamic string,
@@ -604,7 +743,7 @@ impl GawkEreTranslator {
     /// BRE/ERE, `[\]abc]` is one class matching `]`, `a`, `b`, `c`, a GNU
     /// extension), except `[:class:]`, rewritten through
     /// [`posix_class_pattern`] the same as `gnu_bre_to_regex` and
-    /// `rewrite_posix_classes` — the regex engine's own `[:alpha:]` is
+    /// `translate_strict_ere` — the regex engine's own `[:alpha:]` is
     /// ASCII-only, where gawk in a UTF-8 locale is not. An unrecognized class
     /// name is copied through unchanged, so the engine's own error names it.
     /// `self.index` is just past `[`.
@@ -966,12 +1105,12 @@ mod tests {
     // `-E` gets the same Unicode-aware classes, everything else untouched.
     #[case("[[:alpha:]]", '\u{65E5}', true)]
     #[case("(foo|bar)", 'x', false)] // ERE syntax passes straight through
-    fn rewrite_posix_classes_fixes_extended_mode(
+    fn strict_ere_fixes_bracket_classes(
         #[case] pattern: &str,
         #[case] c: char,
         #[case] expect_class_translated: bool,
     ) {
-        let rewritten = rewrite_posix_classes(pattern);
+        let rewritten = translate_strict_ere(pattern, TEST_TAIL).expect("valid ERE").pattern;
         if expect_class_translated {
             assert_ne!(rewritten, pattern, "class should have translated: {pattern:?}");
             let re = regex::Regex::new(&rewritten).expect("translation compiles");
@@ -986,7 +1125,68 @@ mod tests {
     // engine's own error names it.
     #[case("[[:bogus:]]")]
     #[case("[unclosed")]
-    fn rewrite_posix_classes_leaves_malformed_brackets_alone(#[case] pattern: &str) {
-        assert_eq!(rewrite_posix_classes(pattern), pattern);
+    fn strict_ere_leaves_malformed_brackets_alone(#[case] pattern: &str) {
+        assert_eq!(translate_strict_ere(pattern, TEST_TAIL).expect("valid ERE").pattern, pattern);
+    }
+
+    #[rstest]
+    // GNU ERE's own metacharacters are already literal escaped, in both GNU
+    // and the engine: no rewrite, no warning.
+    #[case(r"fn\(x\)", r"fn\(x\)")]
+    #[case(r"a\{2,5\}", r"a\{2,5\}")]
+    #[case(r"a\|b", r"a\|b")]
+    #[case(r"a\+b\?\.c\*", r"a\+b\?\.c\*")]
+    #[case(r"\^a\$", r"\^a\$")]
+    // GNU word/class/anchor escapes already read like the engine's, or are
+    // rewritten to the engine's spelling for them.
+    #[case(r"\w\W\s\S\b\B", r"\w\W\s\S\b\B")]
+    #[case(r"\<a\>", r"\b{start}a\b{end}")]
+    #[case(r"\`a\'", r"\Aa\z")]
+    fn strict_ere_leaves_gnu_extensions_alone(#[case] input: &str, #[case] expected: &str) {
+        let translation = translate_strict_ere(input, TEST_TAIL).expect("valid ERE");
+        assert_eq!(translation.pattern, expected, "input {input:?}");
+        assert!(translation.warnings.is_empty(), "input {input:?}");
+    }
+
+    #[rstest]
+    // A backslash before an ordinary letter is that letter, with GNU's
+    // "stray \" warning — the regex engine's own Perl-style class meaning
+    // for `\d` never applies. Confirmed against `/usr/bin/grep -E`.
+    #[case(r"\d", "d", r"stray \ before d")]
+    #[case(r"\D", "D", r"stray \ before D")]
+    #[case(r"\A", "A", r"stray \ before A")]
+    #[case(r"\z", "z", r"stray \ before z")]
+    #[case(r"\Z", "Z", r"stray \ before Z")]
+    #[case(r"\p", "p", r"stray \ before p")]
+    #[case(r"\x", "x", r"stray \ before x")]
+    #[case(r"\h", "h", r"stray \ before h")]
+    #[case(r"\v", "v", r"stray \ before v")]
+    #[case(r"\R", "R", r"stray \ before R")]
+    #[case(r"\K", "K", r"stray \ before K")]
+    #[case(r"\-", "-", r"stray \ before -")]
+    #[case(r"\/", "/", r"stray \ before /")]
+    fn strict_ere_stray_backslash_is_a_literal_with_a_warning(
+        #[case] input: &str,
+        #[case] expected: &str,
+        #[case] warning: &str,
+    ) {
+        let translation = translate_strict_ere(input, TEST_TAIL).expect("valid ERE");
+        let re = regex::Regex::new(&translation.pattern).expect("translation compiles");
+        assert!(re.is_match(expected), "{input:?} -> {:?} should match {expected:?}", translation.pattern);
+        assert_eq!(translation.warnings, vec![warning.to_string()]);
+    }
+
+    #[rstest]
+    #[case(r"\1")]
+    #[case(r"(a)\1")]
+    fn strict_ere_refuses_back_references(#[case] input: &str) {
+        let message = translate_strict_ere(input, TEST_TAIL).expect_err("no back-reference support");
+        assert!(message.contains("back-reference"), "{message}");
+    }
+
+    #[test]
+    fn strict_ere_refuses_trailing_backslash() {
+        let message = translate_strict_ere(r"a\", TEST_TAIL).expect_err("trailing backslash");
+        assert!(message.contains("trailing backslash"), "{message}");
     }
 }
