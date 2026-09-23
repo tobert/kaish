@@ -770,6 +770,40 @@ pub async fn canonicalize_allows_a_missing_final_component_only(
     Ok(())
 }
 
+/// `MAX_SYMLINK_HOPS` bounds `canonicalize`'s walk the same way it bounds
+/// `stat`'s; `stat_on_a_link_loop_errors_instead_of_hanging` above only pins
+/// the `stat` side. `canonicalize` runs its own hop-by-hop loop through
+/// `lstat`/`read_link` (the `Filesystem` default) or a host-path walk with
+/// its own counter (`LocalFs`), so a loop must refuse there too. The trait
+/// doc only promises "an error, never a silent stop" — not a specific
+/// `io::ErrorKind` or message, which each implementation of the cap is free
+/// to word its own way — so this checks exactly that contract, the same as
+/// `stat_on_a_link_loop_errors_instead_of_hanging` does for `stat`.
+pub async fn canonicalize_of_a_symlink_loop_errors_instead_of_hanging(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.symlink(Path::new("b"), Path::new("a"))
+        .await
+        .map_err(|e| format!("symlink a -> b: {e}"))?;
+    fs.symlink(Path::new("a"), Path::new("b"))
+        .await
+        .map_err(|e| format!("symlink b -> a: {e}"))?;
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fs.canonicalize(Path::new("a"), false),
+    )
+    .await
+    {
+        Ok(Ok(resolved)) => Err(format!(
+            "expected canonicalize(a) to error on a symlink loop, got Ok({})",
+            resolved.display()
+        )),
+        Ok(Err(_)) => Ok(()),
+        Err(_) => Err("canonicalize(a) hung on a symlink loop instead of erroring".to_string()),
+    }
+}
+
 pub async fn rename_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> {
     fs.write(Path::new("keep"), b"K")
         .await
@@ -865,6 +899,7 @@ pub const CASES: &[(&str, Case)] = &[
     case!(canonicalize_of_an_escaping_symlink_stays_in_bounds),
     case!(canonicalize_allows_a_missing_final_component_only),
     case!(a_missing_path_names_the_phrase_once),
+    case!(canonicalize_of_a_symlink_loop_errors_instead_of_hanging),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

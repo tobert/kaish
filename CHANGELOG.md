@@ -23,6 +23,9 @@ breaking entries are marked **BREAKING**.
 - **`kaish --plan` reports a `warnings` array** when the validator has
   something to say about a program it will still run. The first entry is
   W008, a literal operand a `[[ ]]` numeric comparison will refuse.
+- **Statement-level `!`** — `! cmd`, `! a | b` and `! for …; done` negate
+  the whole pipeline, as in bash. A negated statement never trips `set -e`,
+  whatever its status.
 
 ### Fixed
 
@@ -121,6 +124,26 @@ breaking entries are marked **BREAKING**.
 - `grep` reading from a pipe no longer discards a read error and reports it as
   "no lines matched". A read failure exits 2; a downstream close still keeps
   the match-based code.
+- A background job's stderr stream fills live, in order and once, from
+  builtins, externals, functions, compounds and `$(…)`. It was written at
+  completion and dropped a builtin's stderr after an external's.
+- `cmd > f 2>&1` writes both streams to `f`; stderr went to the terminal.
+  Redirects apply left to right, so `2>&1 > f` sends stderr to the old
+  stdout, as in bash.
+- A failing condition command (`if test 1 -eq abc`) prints its diagnostic
+  once; it printed three copies.
+- A cancel ends the wait on a pipe a backgrounded grandchild holds open; the
+  kernel waited for the grandchild to exit.
+- A function whose body spills reports `did_spill` and its real
+  `original_code`, including after `exit` or a `set -e` abort.
+- `spawn` runs its child in its own process group: `--timeout` and a cancel
+  kill a backgrounded grandchild too, and a killed `spawn … &` job reads
+  `killed:130`.
+- W008 covers `test abc -eq 1`, and a dynamic operand no longer hides W008
+  or E020 on its literal siblings.
+- `A=$((1/0)) cmd` names `A` in its error, like a plain assignment.
+- A `--plan` rendering re-parses to the same values: `"1"`, `"true"` and
+  `"1.5"` stay quoted.
 
 ### Changed
 
@@ -137,6 +160,17 @@ breaking entries are marked **BREAKING**.
   panics instead of returning exit 1 with an internal message. Sealing
   `ToolCtx` is what makes that branch unreachable: `ToolRegistry::get` and
   `Tool::execute` are public, so type privacy alone left it open.
+- **BREAKING** (`kaish-kernel`): `KernelConfig::allow_external_commands`
+  and `ExecContext::allow_external_commands` are now
+  `allow_unwrapped_commands`. The switch gates PATH lookup, `exec`, `spawn`
+  and `env CMD`, never wrapped commands. `with_allow_external_commands`
+  stays as a deprecated alias.
+- `exec` and `spawn` refuse with exit 127 when unwrapped commands are off,
+  like PATH lookup and `env CMD`; they returned 1.
+- A `!` glued to its operand is refused: `!true` names `! true`. `! cmd &`
+  is refused with E022, which names a form that negates inside the job.
+- `echo a\` with `b` at column 0 on the next line is refused as token
+  pasting. It ran as two words; bash reads one word, `ab`.
 
 ## [0.17.2] - 2026-09-09
 

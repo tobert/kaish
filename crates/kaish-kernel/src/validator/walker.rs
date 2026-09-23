@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    PipelineStage, Program, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
+    PipelineStage, Program, RedirectKind, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
     VarSegment,
     WhileLoop,
     Value,
@@ -335,6 +335,53 @@ impl<'a> Validator<'a> {
         // Validate redirects
         for redirect in &cmd.redirects {
             self.validate_expr(&redirect.target);
+        }
+        self.validate_redirect_input_is_output(cmd);
+    }
+
+    /// `sort < f > f`: the output's truncation would empty the input before
+    /// the command reads it. Only two literal spellings of one path are
+    /// visible here; the runtime compares resolved paths.
+    fn validate_redirect_input_is_output(&mut self, cmd: &Command) {
+        fn literal_path(expr: &Expr) -> Option<&str> {
+            match expr {
+                Expr::Literal(Value::String(path)) => Some(path),
+                _ => None,
+            }
+        }
+        fn same_path(a: &str, b: &str) -> bool {
+            let significant = |path: &str| {
+                std::path::Path::new(path)
+                    .components()
+                    .filter(|c| *c != std::path::Component::CurDir)
+                    .map(|c| c.as_os_str().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            significant(a) == significant(b)
+        }
+        let inputs: Vec<&str> = cmd
+            .redirects
+            .iter()
+            .filter(|r| r.kind == RedirectKind::Stdin)
+            .filter_map(|r| literal_path(&r.target))
+            .collect();
+        for redirect in &cmd.redirects {
+            let is_output = matches!(
+                redirect.kind,
+                RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend | RedirectKind::Stderr | RedirectKind::Both
+            );
+            if let (true, Some(path)) = (is_output, literal_path(&redirect.target))
+                && inputs.iter().any(|input| same_path(input, path))
+            {
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::RedirectInputIsOutput,
+                        crate::scheduler::pipeline::same_file_message(path, &redirect.kind),
+                    )
+                    .with_command(cmd.name.clone()),
+                );
+                return;
+            }
         }
     }
 
@@ -1584,6 +1631,47 @@ mod tests {
         assert!(issues
             .iter()
             .any(|i| i.code == IssueCode::PossiblyUndefinedVariable));
+    }
+
+    /// Suspected bug: an unquoted heredoc body rewrites `$((expr))` to the
+    /// longer, body-local `${__ARITH:expr__}` spelling before scanning for
+    /// interpolation parts (`lexer::rewrite_body_arithmetic`), and
+    /// `parse_interpolated_string_spanned` computes every part's offset from
+    /// THAT rewritten string's own byte positions, not the original source's
+    /// — `HereDocData::content`'s own doc comment already names this as a
+    /// known drift. A `PossiblyUndefinedVariable` for a variable that comes
+    /// AFTER an arithmetic part in the same body should therefore report a
+    /// span pointing past the real variable, off by the rewrite's length
+    /// difference (here `${__ARITH:1+2__}` is 8 bytes longer than `$((1+2))`).
+    ///
+    /// Not fixed here — kaibo's review flagged this for confirmation only.
+    /// If this starts passing, the drift was fixed elsewhere; delete the
+    /// `#[ignore]` and the surrounding doc note, not just the assertion.
+    #[test]
+    #[ignore = "known bug: heredoc arithmetic-rewrite offsets shift spans of \
+                later interpolation parts in the same body — see this test's \
+                doc comment and HereDocData::content's"]
+    fn heredoc_arithmetic_rewrite_shifts_later_span() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools, &[]);
+
+        let source = "cat <<EOF\n$((1+2)) ${UNDEF}\nEOF";
+        let program = crate::parser::parse(source).expect("must parse");
+        let issues = validator.validate(&program);
+
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::PossiblyUndefinedVariable)
+            .expect("UNDEF must be flagged as possibly undefined");
+        let span = issue.span.expect("the issue must carry a span");
+        assert_eq!(
+            source.get(span.start..span.end),
+            Some("${UNDEF}"),
+            "span {:?} must cover \"${{UNDEF}}\" in the original source, not a \
+             position shifted by the arithmetic rewrite's length delta: {:?}",
+            span,
+            source.get(span.start..span.end),
+        );
     }
 
     #[test]

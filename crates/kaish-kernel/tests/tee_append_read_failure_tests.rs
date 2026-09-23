@@ -13,7 +13,7 @@
 //! does).
 //!
 //! `>>` shares the same `KernelBackend::append` primitive
-//! (`scheduler/pipeline.rs`'s `redirect_append`), so this file also covers
+//! (`scheduler/pipeline.rs`'s `apply_redirects`), so this file also covers
 //! it on the same write-only fixture.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

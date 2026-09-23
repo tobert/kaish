@@ -23,39 +23,91 @@ thread_local! {
     /// Line continuations dropped from the current [`parse`] call's tokens,
     /// as `(start, end)` source offsets. `CACHED_PARSER` is built once per
     /// thread, so per-call data reaches its closures through here.
-    static CONTINUATION_GAPS: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    ///
+    /// `None` means no [`parse`] call has installed its gaps on this thread —
+    /// a source with genuinely no continuations still installs `Some(vec![])`.
+    /// Every caller of [`gap_is_only_continuations`] runs inside
+    /// [`ContinuationGapsGuard`]'s scope (see `parse_tokens`'s doc comment),
+    /// so `None` here is a bug, not a quiet default: answering from an empty
+    /// list would tell a backslash-continued word (`W\<newline>N`) it has a
+    /// real gap and let it split into two args with no error at all.
+    static CONTINUATION_GAPS: RefCell<Option<Vec<(usize, usize)>>> = const { RefCell::new(None) };
 }
 
 /// Installs one [`parse`] call's continuation gaps and restores the previous
 /// set on drop, so a nested `parse` (a quoted `$(...)` body) or a panic
 /// cannot leave the outer call reading the wrong gaps.
 struct ContinuationGapsGuard {
-    saved: Vec<(usize, usize)>,
+    saved: Option<Vec<(usize, usize)>>,
 }
 
 impl ContinuationGapsGuard {
     fn install(gaps: Vec<(usize, usize)>) -> Self {
-        let saved = CONTINUATION_GAPS.with(|c| std::mem::replace(&mut *c.borrow_mut(), gaps));
+        let saved = CONTINUATION_GAPS.with(|c| c.borrow_mut().replace(gaps));
         Self { saved }
     }
 }
 
 impl Drop for ContinuationGapsGuard {
     fn drop(&mut self) {
-        let saved = std::mem::take(&mut self.saved);
+        let saved = self.saved.take();
         CONTINUATION_GAPS.with(|c| *c.borrow_mut() = saved);
+    }
+}
+
+thread_local! {
+    /// The full source text of the current [`parse`] call, installed
+    /// alongside [`CONTINUATION_GAPS`] by the same entry point. Read only by
+    /// `validate_glued_args`'s own success branch, to slice the exact
+    /// refused word for its error message — unlike `CONTINUATION_GAPS`,
+    /// nothing here is load-bearing for parse correctness. A missing or
+    /// stale value just means a message stays at [`GLUED_ARGS_MESSAGE`]'s
+    /// generic examples instead of naming the word, never a wrong parse.
+    static PARSE_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Installs one [`parse`] call's source text and restores the previous one
+/// on drop — the same nesting discipline as [`ContinuationGapsGuard`], for
+/// the same reason: a nested `parse` (a quoted `$(...)` body) runs against
+/// its own, smaller source, then the outer call's source is current again.
+struct SourceTextGuard {
+    saved: Option<String>,
+}
+
+impl SourceTextGuard {
+    fn install(source: &str) -> Self {
+        let saved = PARSE_SOURCE.with(|c| c.borrow_mut().replace(source.to_string()));
+        Self { saved }
+    }
+}
+
+impl Drop for SourceTextGuard {
+    fn drop(&mut self) {
+        let saved = self.saved.take();
+        PARSE_SOURCE.with(|c| *c.borrow_mut() = saved);
     }
 }
 
 /// True when two spans touch, or the bytes between them are only dropped
 /// line continuations. bash removes a backslash-newline before it splits
 /// words, so `W\<newline>N` is one word; every adjacency check uses this.
+///
+/// Panics if no [`ContinuationGapsGuard`] is installed on this thread — see
+/// [`CONTINUATION_GAPS`]'s doc comment. Every real call path installs one
+/// first; a miss here is an internal bug, and it must stop the parse rather
+/// than silently answer as if the word had no continuation.
 fn gap_is_only_continuations(prev_end: usize, next_start: usize) -> bool {
     if prev_end >= next_start {
         return prev_end == next_start;
     }
     CONTINUATION_GAPS.with(|gaps| {
-        let gaps = gaps.borrow();
+        let borrowed = gaps.borrow();
+        let Some(gaps) = borrowed.as_ref() else {
+            unreachable!(
+                "gap_is_only_continuations ran without parse's ContinuationGapsGuard \
+                 installed on this thread"
+            );
+        };
         let mut pos = prev_end;
         while pos < next_start {
             let Some(gap) = gaps.iter().find(|gap| gap.0 == pos) else {
@@ -674,28 +726,26 @@ fn parse_interpolated_string_spanned(
                 push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
                 i += 2; // consume "$("
                 pos += 2;
-                let mut cmd_content = String::new();
-                let mut depth = 1;
-                let mut closed = false;
-                while let Some(&c) = chars_vec.get(i) {
+                // Find the matching ')' the same way the quoted double-quoted
+                // form does (`parse_interpolated_string`): tokenize what
+                // remains and walk it with `find_cmd_subst_close` instead of
+                // counting raw `(`/`)` characters. A per-character count
+                // can't tell a case-branch pattern's unpaired `)`
+                // (`case $x in a) …`) from a real close, and it also
+                // miscounts a literal `(`/`)` sitting inside a quoted
+                // argument of the substitution itself (`$(echo "(")`).
+                let remainder: String = chars_vec[i..].iter().collect();
+                // A missing close is reported before `parse` sees the body:
+                // the body can be a valid program on its own (`echo hi`), so
+                // falling back to it runs a substitution nobody closed.
+                let rparen_span = quoted_cmd_subst_close(&remainder)?;
+                let cmd_content = remainder[..rparen_span.start].to_string();
+                let mut consumed_bytes = 0usize;
+                while consumed_bytes < rparen_span.end {
+                    let Some(&c) = chars_vec.get(i) else { break };
                     i += 1;
                     pos += c.len_utf8();
-                    if c == '(' {
-                        depth += 1;
-                        cmd_content.push(c);
-                    } else if c == ')' {
-                        depth -= 1;
-                        if depth == 0 {
-                            closed = true;
-                            break;
-                        }
-                        cmd_content.push(c);
-                    } else {
-                        cmd_content.push(c);
-                    }
-                }
-                if !closed {
-                    return Err("unterminated command substitution: missing `)`".to_string());
+                    consumed_bytes += c.len_utf8();
                 }
                 // Both silent fallbacks are closed here rather than by reusing
                 // `parse_interpolated_string`: a heredoc body is not the inside
@@ -1318,6 +1368,7 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     let end_span: Span = (source.len()..source.len()).into();
 
     let _gaps = ContinuationGapsGuard::install(gaps);
+    let _src = SourceTextGuard::install(source);
     parse_tokens(tokens, end_span, (0..0).into())
 }
 
@@ -1333,6 +1384,17 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
 /// `stdin_anchor` is where the ambiguous-multiple-stdin-redirect diagnostic
 /// (which carries no AST span of its own) points: the source start for the
 /// top level, or the `$(...)` span for a nested body.
+///
+/// Precondition: a [`ContinuationGapsGuard`] for this token stream must
+/// already be installed on this thread — [`parse`] installs one before its
+/// own top-level call and before recursing into a `$(...)` body, and every
+/// recursive call into this function (`validate_cmd_subst_bodies`,
+/// `cmd_subst_parser`) runs from inside that same call tree. There is no
+/// gaps parameter here because the grammar this function drives is built
+/// once per thread (see `CACHED_PARSER`) and reused across calls; a fresh
+/// per-call parameter would have to thread through every combinator instead
+/// of the one thread-local read at the point of use. [`gap_is_only_continuations`]
+/// panics rather than guess if this precondition is ever violated.
 fn parse_tokens(
     tokens: Vec<(Token, Span)>,
     end_span: Span,
@@ -2302,7 +2364,7 @@ fn pipeline_into_stmt(p: Pipeline) -> Stmt {
 
 /// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
 /// command would silently depend on redirect ordering at execution time
-/// (`setup_stdin_redirects` is last-wins), so `parse()` rejects it loudly.
+/// (`open_redirects` is last-wins), so `parse()` rejects it loudly.
 fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
     cmd.redirects
         .iter()
@@ -2413,6 +2475,61 @@ fn reject_glued_args<'src>(
 const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are not joined into \
      one argument (kaish does no token pasting); quote the whole word, e.g. \
      \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"";
+
+/// The message for a glued-argv run at `span` — [`GLUED_ARGS_MESSAGE`]'s
+/// generic examples, or the actual refused word when it is plain enough to
+/// show literally.
+///
+/// Called ONLY from [`validate_glued_args`]'s own success branch, where the
+/// caller guarantees `span` is the full, corrected run: a bare-punctuation
+/// paste (`echo ===`) has no `/tmp/`, no `$(echo x).txt`, and no `$dir` to
+/// relate to, so the shipped examples were pointing at a shape that never
+/// occurred, and naming the actual word fixes that. `reject_glued_args`'s own
+/// raw span, and the "no run found" fallback that leaves the grammar's span
+/// standing (documented on `validate_glued_args`, and on `is_word_token` for
+/// the nine-keyword gap), are never a full, verified run — a wrong word FROM
+/// EITHER of those (unrelated to the real paste) would be actively
+/// misleading, so this function must never be reached for them.
+fn glued_args_message(span: Span) -> String {
+    let word = PARSE_SOURCE.with(|source| {
+        source.borrow().as_ref().and_then(|s| s.get(span.start..span.end)).map(str::to_string)
+    });
+    match word {
+        Some(word) if is_plain_glued_word(&word) => format!(
+            "adjacent words with no space between them are not joined into \
+             one argument (kaish does no token pasting); quote the whole \
+             word, e.g. {word:?}"
+        ),
+        _ => GLUED_ARGS_MESSAGE.to_string(),
+    }
+}
+
+/// True when `word` is safe to name verbatim in the fix-it example.
+///
+/// No `$`: a variable (`$VAR`, `${VAR}`) or a command substitution (`$(…)`)
+/// already has its own example in [`GLUED_ARGS_MESSAGE`]. No quote or
+/// backslash character: `"foo"bar`'s SOURCE text carries its own quote
+/// marks, so showing it verbatim inside another pair of quotes reads like
+/// the VALUE still has quotes in it — `{word:?}` is Rust's Debug quoting,
+/// not shell quoting, and does not fix this. No control or whitespace
+/// character: a run with no space between the words has no business
+/// containing either, and a literal backslash-newline (`echo a\<newline>b`
+/// glued) is neither the refused source text nor bash's joined `ab`.
+///
+/// The explicit checks above are re-verified against `{word:?}` itself as a
+/// second, independent guard: some Unicode format characters (bidi
+/// overrides, zero-width joiners) are neither `is_control()` nor
+/// `is_whitespace()`, but Rust's Debug escaper still refuses to print them
+/// bare, and its judgment wins over the hand-picked exclusion list above.
+fn is_plain_glued_word(word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let plain_chars = word
+        .chars()
+        .all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '$' | '"' | '\'' | '\\'));
+    plain_chars && format!("{word:?}") == format!("\"{word}\"")
+}
 
 /// True when `e` is `reject_glued_args`'s own rejection and nothing else —
 /// the only case where [`validate_glued_args`] may restate the span.
@@ -4059,7 +4176,7 @@ fn validate_glued_args(
         let span: Span = (units[start_idx].start..units[end_idx].end).into();
         return Err(vec![ParseError {
             span,
-            message: GLUED_ARGS_MESSAGE.to_string(),
+            message: glued_args_message(span),
         }]);
     }
     // No run at or after the grammar's position: say nothing and let its own
@@ -5906,6 +6023,22 @@ mod tests {
             }
             other => panic!("expected env-scoped, got {other:?}"),
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ContinuationGapsGuard precondition
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// `gap_is_only_continuations` must panic, not silently answer "no
+    /// continuation here", when read outside `parse`'s guard — see
+    /// `CONTINUATION_GAPS`'s doc comment for why an empty-list default would
+    /// be a silent argv-splat bug rather than a merely missing diagnostic.
+    #[test]
+    #[should_panic(expected = "ContinuationGapsGuard")]
+    fn gap_is_only_continuations_panics_without_installed_guard() {
+        // libtest gives every test its own thread, so `CONTINUATION_GAPS` is
+        // at its `None` default here — no `parse` call has run on it yet.
+        gap_is_only_continuations(0, 1);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

@@ -157,7 +157,7 @@ impl Filesystem for JobFs {
 
     async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             "jobfs is read-only",
         ))
     }
@@ -292,14 +292,14 @@ impl Filesystem for JobFs {
 
     async fn mkdir(&self, _path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             "jobfs is read-only",
         ))
     }
 
     async fn remove(&self, _path: &Path) -> io::Result<()> {
         Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
             "jobfs is read-only",
         ))
     }

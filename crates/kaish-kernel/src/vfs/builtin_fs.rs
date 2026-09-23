@@ -51,7 +51,7 @@ impl Filesystem for BuiltinFs {
     }
 
     async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "/v/bin is read-only"))
+        Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "/v/bin is read-only"))
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
@@ -82,11 +82,11 @@ impl Filesystem for BuiltinFs {
     }
 
     async fn mkdir(&self, _path: &Path) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "/v/bin is read-only"))
+        Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "/v/bin is read-only"))
     }
 
     async fn remove(&self, _path: &Path) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "/v/bin is read-only"))
+        Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "/v/bin is read-only"))
     }
 
     fn read_only(&self) -> bool {

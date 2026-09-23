@@ -481,6 +481,26 @@ reporting a mode, and the failure is a wrong answer rather than an error, so
 your backend's own tests will pass. If you add a writable backend, either
 report a mode or change `resolve` and this table together.
 
+### What a redirect asks of a backend
+
+A redirect opens its target before the command runs, then writes once the
+command finishes. For `cmd > f` a backend sees, in order:
+
+1. `canonicalize(f, true)`, then `stat` of the result's parent, which must
+   report a directory. A missing parent is refused with `redirect: f: no
+   such file or directory`; kaish never creates it.
+2. `write(f, b"", Overwrite)` — the truncation. `>>` calls `append(f,
+   b"")` instead, which must create a missing file.
+3. `write(f, data, Overwrite)` (or `append(f, data)`) after the command,
+   only when it produced bytes for `f`.
+
+An `OverlayFs` records the step-2 truncation as a write. A backend with
+implicit directories, such as an object store keyed by full path, must
+still answer `stat` on a parent prefix with a directory entry, or every
+redirect into it fails. Other writers (`write`, `tee`, `cp`) call
+`write`/`append` directly and keep the backend's own parent handling; only
+redirects check the parent first.
+
 ### Output Limits and Spill Mode (`OutputLimitConfig`)
 
 `KernelConfig::output_limit` caps how much a single command's output can grow
