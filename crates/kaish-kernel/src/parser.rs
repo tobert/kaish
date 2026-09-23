@@ -3540,8 +3540,11 @@ where
             // after a command name has been parsed, so there is no
             // ambiguity with that form.
             Token::Colon => Expr::Literal(Value::String(":".into())),
-            Token::Tilde => Expr::Literal(Value::String("~".into())),
-            Token::TildePath(s) => Expr::Literal(Value::String(s)),
+            // Bare `~`/`~user/path`: only the *unquoted* lexer tokens reach
+            // here, so `Expr::TildePath` is the sole route to tilde
+            // expansion — a quoted string never produces these tokens.
+            Token::Tilde => Expr::TildePath("~".into()),
+            Token::TildePath(s) => Expr::TildePath(s),
             Token::RelativePath(s) => Expr::Literal(Value::String(s)),
             Token::DotSlashPath(s) => Expr::Literal(Value::String(s)),
             // Digit-leading bareword (SHA prefix `019dda1c`, UUIDs).

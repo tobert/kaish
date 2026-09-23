@@ -694,6 +694,7 @@ impl<'a> Validator<'a> {
             Expr::Not(inner) => self.validate_expr(inner),
             Expr::Literal(_) => {}
             Expr::NumericLiteral { .. } => {}
+            Expr::TildePath(_) => {}
             Expr::VarRef(path) => self.validate_var_ref(path),
             Expr::Interpolated(parts) => {
                 for part in parts {

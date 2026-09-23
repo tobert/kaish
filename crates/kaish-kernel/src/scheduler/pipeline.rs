@@ -1301,6 +1301,9 @@ fn classify_subcommand_positional(expr: &Expr) -> SubcommandWord<'_> {
     match expr {
         Expr::Literal(Value::String(s)) => SubcommandWord::Word(s),
         Expr::Literal(_) => SubcommandWord::OtherLiteral,
+        // A subcommand name, not a path — the raw `~`/`~user` text, same as
+        // the plain-`Literal` case above (this classifier never expands).
+        Expr::TildePath(s) => SubcommandWord::Word(s),
         Expr::CommandSubst(_) | Expr::Command(_) => SubcommandWord::Computed("a command substitution `$(…)`"),
         Expr::VarRef(_)
         | Expr::VarWithDefault { .. }
@@ -1360,11 +1363,6 @@ impl crate::kernel::ArgValueSource for SyncEvalSource<'_> {
         Ok(None)
     }
 
-    async fn home(&self) -> Option<String> {
-        // No tilde expansion in this reduced context — unchanged from
-        // before GH #188 (scatter/gather's own flag values are never paths).
-        None
-    }
 }
 
 /// Build ToolArgs from AST Args, evaluating expressions — the reduced sync
@@ -1425,6 +1423,12 @@ fn command_subst_interpolated_value_message() -> String {
 pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Result<Option<Value>, String> {
     match expr {
         Expr::Literal(value) => Ok(Some(eval_literal(value, ctx))),
+        // This reduced context has never expanded tilde (see
+        // `SyncEvalSource`'s doc comment) — scatter/gather's own flag
+        // values are never paths, so the raw `~`/`~user/path` text binds
+        // literally, same as before `Expr::TildePath` existed as its own
+        // variant.
+        Expr::TildePath(raw) => Ok(Some(Value::String(raw.clone()))),
         Expr::VarRef(path) => match ctx.scope.resolve_path(path) {
             Ok(v) => Ok(Some(v)),
             // Unset BARE variable: coalesces (skip-the-arg) — this reduced

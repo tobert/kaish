@@ -27,7 +27,16 @@ fn tilde_assignment_has_an_assignment_delimiter(#[case] path: &str) {
     assert_eq!(tokens[2].span, 2..source.len());
     let program = parse(&source).unwrap();
     let Stmt::Assignment(assignment) = &program.statements[0] else { panic!("{program:?}") };
-    assert_eq!(assignment.value, Expr::Literal(Value::String(path.into())));
+    // A colon anywhere in the run triggers `lexer::merge_colon_adjacent`,
+    // which fuses the whole word (tilde included) into a plain `Ident`
+    // *before* the parser ever sees a `TildePath` token — so `~/a:b` binds
+    // an ordinary `Literal`, not `TildePath`, and never expands (see
+    // `tilde_expansion_tests.rs`'s `colon_adjacent_tilde_in_assignment_value_is_unsupported`).
+    if path.contains(':') {
+        assert_eq!(assignment.value, Expr::Literal(Value::String(path.into())));
+    } else {
+        assert_eq!(assignment.value, Expr::TildePath(path.into()));
+    }
 }
 
 #[rstest]

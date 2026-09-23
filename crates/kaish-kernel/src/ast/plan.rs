@@ -549,6 +549,7 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
         // embedder cannot peek them with `get_var`, so they are not listed.
         Expr::Literal(_)
         | Expr::NumericLiteral { .. }
+        | Expr::TildePath(_)
         | Expr::Positional(_)
         | Expr::AllArgs
         | Expr::ArgCount
@@ -843,6 +844,9 @@ pub(crate) fn render_expr(expr: &Expr) -> String {
         // Render the source text, not `value`'s canonical form — that is what
         // this variant is for.
         Expr::NumericLiteral { raw, .. } => raw.clone(),
+        // Unexpanded: the raw `~`/`~user/path` text, same as the author
+        // typed it — matches this function's contract.
+        Expr::TildePath(raw) => raw.clone(),
         Expr::Command(cmd) => render_command(cmd),
         Expr::LastExitCode => "$?".to_string(),
         Expr::CurrentPid => "$$".to_string(),

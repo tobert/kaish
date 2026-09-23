@@ -277,6 +277,7 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::NumericLiteral { value, raw } => {
             format!("(numeric-literal {} raw={:?})", format_value(value), raw)
         }
+        Expr::TildePath(raw) => format!("(tilde-path {:?})", raw),
         Expr::VarRef(path) => format!("(varref {})", format_varpath(path)),
         Expr::Interpolated(parts) => {
             let parts_str: Vec<String> = parts
