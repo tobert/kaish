@@ -131,10 +131,10 @@ impl Tool for Fg {
                         let digits = s.strip_prefix('%').unwrap_or(s);
                         match digits.parse::<u64>() {
                             Ok(i) => JobId(i),
-                            Err(_) => return ExecResult::failure(1, format!("fg: invalid job id: {}", s)),
+                            Err(_) => return ExecResult::failure(2, format!("fg: invalid job id: {}", s)),
                         }
                     }
-                    _ => return ExecResult::failure(1, "fg: job id must be a number"),
+                    _ => return ExecResult::failure(2, "fg: job id must be a number"),
                 }
             } else {
                 match manager.last_stopped().await {

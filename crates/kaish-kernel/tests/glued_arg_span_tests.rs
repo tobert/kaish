@@ -318,6 +318,112 @@ fn flush_line_continuation_is_a_glued_word(#[case] source: &str, #[case] expecte
     assert_eq!(glued_span_text(source), expected);
 }
 
+/// A paste with no variable or command substitution on either side (bare
+/// punctuation) cannot be fixed by either of the generic examples — neither
+/// `/tmp/$(echo x).txt` nor `$dir/out.txt` involves a bare word like this.
+/// The message must show the actual refused word instead.
+#[test]
+fn punctuation_only_glue_quotes_the_actual_word() {
+    let errors = parse("echo ===").expect_err("must be a parse error");
+    assert_eq!(errors.len(), 1, "expected exactly one error: {errors:?}");
+    let message = &errors[0].message;
+    assert!(
+        message.contains(r#"quote the whole word, e.g. "===""#),
+        "should quote the refused word itself: {message}"
+    );
+    assert!(
+        !message.contains("/tmp/$(echo x).txt"),
+        "a punctuation-only paste has no variable or substitution side, so the \
+         var/subst example must not appear: {message}"
+    );
+}
+
+/// A paste where one side is a variable or command substitution keeps the
+/// existing generic examples — they fit that shape.
+#[rstest]
+#[case("echo $dir/out.txt")]
+#[case("echo /tmp/$(echo x).txt")]
+fn variable_or_cmdsubst_glue_keeps_the_generic_examples(#[case] source: &str) {
+    let errors = parse(source).expect_err("must be a parse error");
+    let message = &errors[0].message;
+    assert!(
+        message.contains("/tmp/$(echo x).txt") && message.contains("$dir/out.txt"),
+        "a variable/substitution paste keeps both existing examples: {message}"
+    );
+}
+
+/// A plain word can span more than one byte per character and still be
+/// shown literally — "plain" is about which characters are present, not
+/// about ASCII-ness.
+#[test]
+fn multibyte_plain_glue_quotes_the_actual_word() {
+    let errors = parse("echo ===é").expect_err("must be a parse error");
+    let message = &errors[0].message;
+    assert!(
+        message.contains("quote the whole word, e.g. \"===é\""),
+        "a plain multi-byte word should be shown literally: {message}"
+    );
+}
+
+/// `{word:?}` is Rust's Debug quoting, not shell quoting — right for a
+/// bare `"`/`\` but wrong for a continuation-joined word carrying a literal
+/// backslash and newline: `"a\\\nb"` is neither the refused source text nor
+/// bash's joined `ab`. A word with a control character stays generic.
+#[test]
+fn continuation_glued_word_keeps_the_generic_examples() {
+    let errors = parse("echo a\\\nb").expect_err("must be a parse error");
+    let message = &errors[0].message;
+    assert!(
+        message.contains("/tmp/$(echo x).txt") && message.contains("$dir/out.txt"),
+        "a word holding a backslash/newline must not be shown raw: {message}"
+    );
+}
+
+/// Naming the word means quoting the SOURCE SPELLING, which is not always
+/// the VALUE: `"foo"bar`'s value is `foobar`, but the source text carries
+/// the quote marks too, so `e.g. "\"foo\"bar"` reads like the value still
+/// has quotes in it. A word carrying a quote character stays generic.
+#[test]
+fn quoted_prefix_glued_word_keeps_the_generic_examples() {
+    let errors = parse(r#"echo "foo"bar"#).expect_err("must be a parse error");
+    let message = &errors[0].message;
+    assert!(
+        message.contains("/tmp/$(echo x).txt") && message.contains("$dir/out.txt"),
+        "a word carrying its own quote characters must not be shown as a value: {message}"
+    );
+}
+
+/// `is_word_token` (the rescan's own token classifier) has a documented gap:
+/// nine keywords (`do`, `done`, `fi`, …) are never counted as a glue-unit,
+/// so a paste starting with one of them is never found by the rescan and
+/// the grammar's own, uncorrected span stands — which chumsky's alt
+/// bookkeeping can land on an unrelated, already-fine word (here,
+/// `checkout`). The message must fall back to the generic examples rather
+/// than name that wrong word as if it were the whole paste.
+#[test]
+fn keyword_glue_gap_falls_back_to_the_generic_examples() {
+    let errors = parse("git checkout do$(echo x)").expect_err("must be a parse error");
+    let message = &errors[0].message;
+    assert!(
+        !message.contains("e.g. \"checkout\"") && !message.contains("e.g. \"do\""),
+        "must not name a fragment of the real paste as if it were the whole word: {message}"
+    );
+    assert!(
+        message.contains("/tmp/$(echo x).txt") && message.contains("$dir/out.txt"),
+        "the rescan can't confirm the whole run here, so the message must stay generic: {message}"
+    );
+}
+
+/// Control for the case above: the known-gap comment's own example,
+/// `do:x`, does not actually reproduce it — `do:x` lexer-fuses into one
+/// bareword before the parser ever sees `do` as a keyword token, so
+/// nothing is glued here at all. Kept so a future lexer change that
+/// un-fuses this shape is caught by a test, not discovered silently.
+#[test]
+fn keyword_immediately_before_a_fused_colon_word_still_parses() {
+    parse("git checkout do:x").expect("do:x lexer-fuses into one bareword; nothing pasted");
+}
+
 /// Whitespace on either side of a continuation separates the words.
 ///
 /// The `ShortFlag` cases pin a known gap, not a decision: bash reads

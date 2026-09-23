@@ -184,7 +184,7 @@ impl Tool for Unalias {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "unalias: missing alias name");
+            return ExecResult::failure(2, "unalias: missing alias name");
         }
 
         for arg in &args.positional {

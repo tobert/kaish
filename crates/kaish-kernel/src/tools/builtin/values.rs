@@ -97,13 +97,13 @@ impl Tool for Values {
                 ExecResult::success_data(Value::Json(serde_json::Value::Array(items.clone())))
             }
             Some(other) => ExecResult::failure(
-                1,
+                2,
                 format!(
                     "values: expected a record or list, got {}",
                     describe_kind(other)
                 ),
             ),
-            None => ExecResult::failure(1, "values: no argument (expected a record or list)"),
+            None => ExecResult::failure(2, "values: no argument (expected a record or list)"),
         }
     }
 }

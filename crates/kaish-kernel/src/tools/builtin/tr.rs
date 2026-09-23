@@ -67,7 +67,7 @@ impl Tool for Tr {
 
         let set1 = match args.get_string("set1", 0) {
             Some(s) => s,
-            None => return ExecResult::failure(1, "tr: missing SET1 argument"),
+            None => return ExecResult::failure(2, "tr: missing SET1 argument"),
         };
 
         let set2 = args.get_string("set2", 1);
@@ -151,7 +151,7 @@ impl Tool for Tr {
                 Err(i) => return i.result("tr"),
             }
         } else {
-            return ExecResult::failure(1, "tr: SET2 required for translation");
+            return ExecResult::failure(2, "tr: SET2 required for translation");
         };
 
         ExecResult::with_output(OutputData::text(output))

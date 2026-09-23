@@ -955,7 +955,7 @@ mod tests {
             Ok(Vec::new())
         }
         async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+            Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "read-only"))
         }
         async fn list(&self, _path: &Path) -> io::Result<Vec<DirEntry>> {
             Ok(Vec::new())
@@ -964,10 +964,10 @@ mod tests {
             Ok(DirEntry::directory("."))
         }
         async fn mkdir(&self, _path: &Path) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+            Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "read-only"))
         }
         async fn remove(&self, _path: &Path) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+            Err(io::Error::new(io::ErrorKind::ReadOnlyFilesystem, "read-only"))
         }
         fn read_only(&self) -> bool {
             true

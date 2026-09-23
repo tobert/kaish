@@ -73,7 +73,7 @@ impl LocalFs {
     fn check_writable(&self) -> io::Result<()> {
         if self.read_only {
             Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::ReadOnlyFilesystem,
                 "filesystem is read-only",
             ))
         } else {
@@ -418,10 +418,11 @@ impl Filesystem for LocalFs {
                 None => false,
             };
             if !parent_exists || !allow_missing_final {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("No such file or directory: {}", path.display()),
-                ));
+                // The path alone — "No such file or directory" restated
+                // `ErrorKind::NotFound`'s own meaning, and
+                // `BackendError::NotFound`'s Display adds "not found:" once
+                // when this crosses that boundary.
+                return Err(io::Error::new(io::ErrorKind::NotFound, path.display().to_string()));
             }
         }
 
@@ -720,7 +721,7 @@ mod tests {
 
         let result = fs.write(Path::new("test.txt"), b"data").await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ReadOnlyFilesystem);
 
         cleanup(&dir).await;
     }

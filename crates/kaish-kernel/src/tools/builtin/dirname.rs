@@ -54,7 +54,7 @@ impl Tool for Dirname {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "dirname: missing path argument");
+            return ExecResult::failure(2, "dirname: missing path argument");
         }
 
         // POSIX: `dirname a/b c/d` prints one parent per line.

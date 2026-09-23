@@ -101,11 +101,18 @@ pub trait KernelBackend: Send + Sync {
     async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()>;
 
     /// Resolve `path` to its canonical form: follow every symlink hop, fold
-    /// `.` and `..` lexically. The final component may be missing when
-    /// `allow_missing_final` is true (GNU `readlink -f` semantics); a
-    /// missing INTERMEDIATE component is always an error. Symlink hops are
-    /// capped at 40, matching Linux `MAXSYMLINKS`; exceeding the cap is an
-    /// error, never a silent stop.
+    /// `.` and `..` lexically, VFS-absolute in and VFS-absolute out — same as
+    /// every other path `KernelBackend` takes and returns, and matching
+    /// `LocalBackend`'s override (`VfsRouter::canonicalize`). A relative
+    /// input is treated as already anchored at `/`, not at some caller-held
+    /// cwd — a builtin resolves against its own cwd (`ToolCtx::resolve_path`)
+    /// before calling this. `"/"` canonicalizes to `"/"`, never to an empty
+    /// path.
+    ///
+    /// The final component may be missing when `allow_missing_final` is
+    /// true (GNU `readlink -f` semantics); a missing INTERMEDIATE component
+    /// is always an error. Symlink hops are capped at 40, matching Linux
+    /// `MAXSYMLINKS`; exceeding the cap is an error, never a silent stop.
     ///
     /// The default walks component by component through
     /// [`KernelBackend::lstat`] and [`KernelBackend::read_link`], so it
@@ -115,7 +122,11 @@ pub trait KernelBackend: Send + Sync {
     async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> BackendResult<PathBuf> {
         let components: Vec<_> = path.components().collect();
         let total = components.len();
-        let mut current = PathBuf::new();
+        // Every path this trait hands back is VFS-absolute, so the walk
+        // always starts at "/" — even when `path` itself was written
+        // relative — instead of an empty `PathBuf` that would drop the
+        // leading slash a caller is entitled to expect back.
+        let mut current = PathBuf::from("/");
 
         for (idx, component) in components.iter().enumerate() {
             let is_last = idx + 1 == total;

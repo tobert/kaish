@@ -146,7 +146,7 @@ async fn unsupported_shorthand_name_fails_loudly_naming_supported_set() {
 async fn abrt_is_outside_the_fixed_table() {
     let kernel = setup().await;
     let r = kernel.execute("sleep 30 & kill --signal ABRT %1").await.expect("execute");
-    assert_eq!(r.code, 1, "ABRT is unknown to kaish's table: {:?}", r);
+    assert_eq!(r.code, 2, "ABRT is unknown to kaish's table, which is a usage error: {:?}", r);
     assert!(r.err.contains("unknown signal"), "got: {}", r.err);
     let _ = kernel.execute("kill %1").await;
 }

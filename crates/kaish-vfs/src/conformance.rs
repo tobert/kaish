@@ -1,9 +1,9 @@
-//! Cross-backend symlink conformance cases.
+//! Cross-backend conformance cases.
 //!
-//! Each case gets a fresh, empty writable root and exercises one symlink
-//! behavior against the [`Filesystem`] trait. An embedder runs the whole
-//! suite against its own backend via [`run_all`], supplying an adapter
-//! that builds a fresh root per case.
+//! Each case gets a fresh, empty writable root and exercises one behavior
+//! against the [`Filesystem`] trait — mostly symlinks, plus the error-shape
+//! cases below. An embedder runs the whole suite against its own backend
+//! via [`run_all`], supplying an adapter that builds a fresh root per case.
 
 use crate::Filesystem;
 use std::future::Future;
@@ -770,6 +770,40 @@ pub async fn canonicalize_allows_a_missing_final_component_only(
     Ok(())
 }
 
+/// `MAX_SYMLINK_HOPS` bounds `canonicalize`'s walk the same way it bounds
+/// `stat`'s; `stat_on_a_link_loop_errors_instead_of_hanging` above only pins
+/// the `stat` side. `canonicalize` runs its own hop-by-hop loop through
+/// `lstat`/`read_link` (the `Filesystem` default) or a host-path walk with
+/// its own counter (`LocalFs`), so a loop must refuse there too. The trait
+/// doc only promises "an error, never a silent stop" — not a specific
+/// `io::ErrorKind` or message, which each implementation of the cap is free
+/// to word its own way — so this checks exactly that contract, the same as
+/// `stat_on_a_link_loop_errors_instead_of_hanging` does for `stat`.
+pub async fn canonicalize_of_a_symlink_loop_errors_instead_of_hanging(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.symlink(Path::new("b"), Path::new("a"))
+        .await
+        .map_err(|e| format!("symlink a -> b: {e}"))?;
+    fs.symlink(Path::new("a"), Path::new("b"))
+        .await
+        .map_err(|e| format!("symlink b -> a: {e}"))?;
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fs.canonicalize(Path::new("a"), false),
+    )
+    .await
+    {
+        Ok(Ok(resolved)) => Err(format!(
+            "expected canonicalize(a) to error on a symlink loop, got Ok({})",
+            resolved.display()
+        )),
+        Ok(Err(_)) => Ok(()),
+        Err(_) => Err("canonicalize(a) hung on a symlink loop instead of erroring".to_string()),
+    }
+}
+
 pub async fn rename_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> {
     fs.write(Path::new("keep"), b"K")
         .await
@@ -785,6 +819,45 @@ pub async fn rename_refuses_the_root(fs: &dyn Filesystem) -> Result<(), String> 
         .map_err(|e| format!("read(keep) after the refusals: {e}"))?;
     if fs.lstat(Path::new("moved")).await.is_ok() {
         return Err("a path named moved appeared".to_string());
+    }
+    Ok(())
+}
+
+/// A missing path's `io::Error`, once it crosses into a `BackendError`,
+/// names the `NotFound` phrase exactly once, and never repeats the path.
+/// `impl From<io::Error> for BackendError` (kaish-types) adds the phrase
+/// exactly once, via `BackendError::NotFound`'s `#[error("not found: {0}")]`
+/// — a backend is responsible for never baking that same phrase into its
+/// own message. `ls` against a backend that got this wrong once read
+/// "not found: not found: /nope".
+///
+/// The path itself is not required to appear: `LocalFs` reports the OS's
+/// own errno text ("No such file or directory"), which never names the
+/// path at all — a separate change is tracking that gap. `MemoryFs` and
+/// `OverlayFs` do name it, and must never double it either.
+pub async fn a_missing_path_names_the_phrase_once(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    let path = Path::new("nope");
+    let io_err = match fs.stat(path).await {
+        Ok(entry) => {
+            return Err(format!("expected stat({}) to fail, got {entry:?}", path.display()));
+        }
+        Err(e) => e,
+    };
+    let backend_err: kaish_types::backend::BackendError = io_err.into();
+    let rendered = backend_err.to_string();
+    let phrase_count = rendered.matches("not found").count();
+    if phrase_count != 1 {
+        return Err(format!(
+            "expected \"not found\" exactly once, got {phrase_count} in: {rendered:?}"
+        ));
+    }
+    let path_count = rendered.matches("nope").count();
+    if path_count > 1 {
+        return Err(format!(
+            "expected the path at most once, got {path_count} in: {rendered:?}"
+        ));
     }
     Ok(())
 }
@@ -825,6 +898,8 @@ pub const CASES: &[(&str, Case)] = &[
     case!(rename_refuses_the_root),
     case!(canonicalize_of_an_escaping_symlink_stays_in_bounds),
     case!(canonicalize_allows_a_missing_final_component_only),
+    case!(a_missing_path_names_the_phrase_once),
+    case!(canonicalize_of_a_symlink_loop_errors_instead_of_hanging),
 ];
 
 /// Runs every case, each against its own fresh root from `make_root`.

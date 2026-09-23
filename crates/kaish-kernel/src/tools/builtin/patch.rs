@@ -103,7 +103,7 @@ impl Tool for Patch {
             Err(e) => return ExecResult::failure(2, format!("patch: {e}")),
         };
         if patch_content.is_empty() {
-            return ExecResult::failure(1, "patch: no input provided (use stdin)");
+            return ExecResult::failure(2, "patch: no input provided (use stdin)");
         }
 
         // Parse options

@@ -63,7 +63,7 @@ impl Tool for Stat {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "stat: missing path argument");
+            return ExecResult::failure(2, "stat: missing path argument");
         }
 
         let format = args

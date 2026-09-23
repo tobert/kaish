@@ -36,7 +36,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | Builtin | Limitation |
 |---------|------------|
 | `alias` | First word only; not in pipelines or compound commands |
-| `set` | `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (`-u`, `-x` ignored; an unknown `-o` name exits 1) |
+| `set` | `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]` (`-u`, `-x` ignored; an unknown `-o` name exits 2) |
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `ls`/`find`/`glob` | A name containing a newline is **refused** in text output (exit 2), naming the path and `--json`. One newline is one path boundary in text, so reporting such a name would split it into two paths that name no file. `--json` reads it losslessly. |
 | `ps` | Linux-only (reads `/proc`) |
@@ -52,6 +52,8 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 - **`scatter`/`gather` cannot share a pipeline with a compound stage** — exits 2. Run the compound on its own and pipe its output in.
 - **Scatter results are in item order**, never completion order — a row's position identifies its item.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
+- **Redirect targets open before the command runs** — a target that cannot open (missing directory, read-only mount) exits 1 and the command does not run. A redirect never creates a directory: `mkdir -p` first.
+- **`sort < f > f` and `cat < f >> f` are refused** (exit 1): bash empties `f` or grows it without end. Write to a temp file, then `mv` it over `f` (or append it).
 - **Recursion is depth-capped at 48** — nested `$(...)`, recursive shell functions, and `.kai` scripts sourcing each other are bounded so a runaway (or a missing base case) returns a loud `maximum recursion depth exceeded` error instead of overflowing the stack. Real recursion nests far shallower; this only stops runaways.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.
 
