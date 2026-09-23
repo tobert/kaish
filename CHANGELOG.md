@@ -146,84 +146,29 @@ breaking entries are marked **BREAKING**.
 - `A=$((1/0)) cmd` names `A` in its error, like a plain assignment.
 - A `--plan` rendering re-parses to the same values: `"1"`, `"true"` and
   `"1.5"` stay quoted.
-- A `$(...)`'s stderr now lands before its enclosing command's stderr in
-  every arm — `!`, either side of `&&`/`||`, and inside a `case` body —
-  matching the order the job stream and other arms already used.
-- `KernelBackend`'s default `canonicalize` now returns VFS-absolute paths,
-  agreeing with `LocalBackend`: `canonicalize("/")` returned `""` before and
-  now returns `"/"`, which only affects an embedder backend relying on the
-  default.
-- A fault inside a function body, `source`, or a script no longer reaches
-  its caller as a plain exit 2; `if`, `!` and `&&`/`||` no longer read it as
-  an ordinary false answer, e.g. `test 1 -eq abc`'s invalid comparison.
-- An embedder tool's `content_type` and baggage now survive when the tool
-  is the last statement of a function, `source`d file, script, or `$(...)`
-  — they were silently dropped before.
-- A spill inside `source` or a script now reports its own code as
-  `original_code` instead of the remapped 3 or an error's 1, and keeps
-  `did_spill` set through it; an error inside `$(...)` after a spill keeps
-  both too.
-- `exit` and `return` are now valueless signals like `break`/`continue`:
-  the typed value from the last real statement survives them everywhere,
-  including `exit` inside `if`/`while` and a top-level `exit`, which used
-  to lose it.
-- Output redirect targets now open, left to right, before the command runs,
-  so a target that cannot open means the command never runs at all: `touch
-  made > /nodir/log` no longer creates `made` and then fails, matching bash.
-- A command whose output redirect targets a file it also reads no longer
-  empties that file mid-run: `f() { echo a > out; }; f > out` used to leave
-  `out` empty; it now keeps `a`.
-- A redirected stdout now holds back its pipeline's writer, so a streaming
-  builtin can no longer write past its own redirect: `cat in > out | wc -c`
-  used to still count `in`'s bytes; it now counts 0.
-- A missing parent directory for an output redirect is now refused, naming
-  the fix, instead of being created silently: `echo x > new/dir/f` now
-  errors with `mkdir -p new/dir` rather than auto-creating it.
-- In a `scatter … gather` pipeline, `gather`'s output targets now open
-  before any worker runs, and a redirect on `scatter` or an input redirect
-  on `gather` is refused instead of silently dropped.
-- The token-pasting error now names the refused word only when it can be
-  quoted correctly, e.g. `echo ===` suggests `"==="`; a word containing `$`,
-  a quote, a backslash, or whitespace still gets the general examples.
+- Output redirect targets now open, left to right, before the command runs;
+  a missing parent directory refuses the command and names the fix
+  (`mkdir -p` it first), and `cat f | sort > f` is now racy like bash.
+- A fault inside a function, `source`, or a script no longer reaches its
+  caller as a plain exit 2 that `if`, `!` and `&&`/`||` misread as false;
+  `exit` and `return` are now valueless, so a typed value survives them
+  everywhere.
 - An unquoted heredoc body's `$(...)` now finds its closing paren by walking
   tokens instead of counting raw parentheses, so a `case` pattern's own `)`
   inside the substitution no longer ends it early.
 - A pipeline no longer hangs when a stage stops reading before its input
-  ends: `seq 1 100000 | grep --no-such-flag x` used to run forever; it now
-  exits the way bash does.
-- A per-call timeout now stops a busy builtin instead of only labeling it
-  124 after it eventually finishes: `seq 1 50000000` under a 200ms timeout
-  used to run to completion and exit 0.
-- `ExecuteOptions::interrupt`, the embedder-polled cancel flag, now reaches
-  a busy builtin and every pipeline stage; before, only kaish's own
-  interpreter loops noticed it, so a busy `while true` in a pipeline ran on.
-- A cancelled call now reports exit 130 instead of the last stage's own
-  exit code over truncated input: `seq 1 50000000 | wc -l` interrupted
-  mid-stream used to exit 0 with a partial count.
-- A pipeline stage's own redirects now open after its stdin is wired, so
-  `cat f | sort > f` is racy like bash instead of deterministically empty:
-  which content `sort` sees depends on timing against `cat`.
-- `grep -A`/`-B`/`-C` context near a large input's internal chunk boundary
-  now matches the true surrounding lines; it could silently lose context on
-  one side of a boundary before.
-- `spawn`'s child environment is now the kernel's exported variables only,
-  never the host process's, and its working directory is the shell's own,
-  not the kaish process's; a missing or virtual directory is refused by name.
-- A backgrounded `spawn … &` now streams to `/v/jobs/N/stdout` and
-  `/stderr` as the child runs; before, spawn's own output never reached
-  those streams at all.
-- `spawn` now reads every word of its positional form (`spawn /bin/echo a b
-  c` runs `echo` with all three arguments) and streams stdin to the child
-  instead of buffering it to EOF first.
-- `spawn --timeout` and cancellation now report accurately: a kill landing
-  during the shutdown grace period no longer reads 124 "timed out", and a
-  child that already exited is no longer relabeled 130.
-- A non-string value inside `spawn --argv` or `--env` is now stringified or
-  refused instead of silently dropped, and the short and long spelling of
-  each flag now agree.
-- `spawn`, `exec`, `which` and `env` no longer fall back to the host's
-  `PATH` when kaish's own scope has none; all four now refuse a bare
-  command name the same way, closing a leak in kaish's hermetic design.
+  ends: `seq 1 100000 | grep --no-such-flag x` used to never return; it now
+  exits 2, like bash.
+- A per-call timeout or an embedder's interrupt now stops a busy builtin
+  (`seq 1 50000000` under a 200ms timeout used to run to completion), and a
+  cancelled `seq 1 50000000 | wc -l` reports 130 now, not a truncated count.
+- `spawn`'s child now inherits only the kernel's exported variables, never
+  the host's, and runs in the shell's own directory, not the kaish
+  process's; `spawn`, `exec`, `which` and `env` now refuse a bare name with
+  no `PATH` in scope.
+- A background `spawn … &` now streams live to `/v/jobs/N/stdout`; `spawn
+  /bin/echo a b c` now runs all three arguments instead of just `echo a`;
+  and its stdin streams to the child instead of buffering to EOF first.
 - `exec()`'s SIGPIPE disposition is now restored after a failed underlying
   exec (such as `exec /nonexistent`), instead of staying defaulted; a later
   write to a closed pipe no longer kills the process outright.
