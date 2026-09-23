@@ -337,3 +337,23 @@ async fn gap_backslash_digit_is_an_octal_escape_like_gawk() {
     assert_eq!(out, "match", "gawk: \\1 is octal 1 (SOH), matching sprintf(\"%c\", 1)");
     assert_eq!(code, 0);
 }
+
+// ─── `-v` with no `=` is a loud error, not a silent no-op ────────────────────
+//
+// `awk -v foo '{print}'` used to silently drop the assignment. Confirmed
+// against gawk 5.4.1: `` `foo' argument to `-v' not in `var=value' form ``,
+// fatal, exit 1 — kaish refuses too, naming the fix.
+
+#[tokio::test]
+async fn dash_v_with_no_equals_sign_is_a_loud_error() {
+    let kernel = kernel_at(tempdir().unwrap().path());
+    let message = match kernel.execute("printf x | awk -v foo '{print}'").await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_ne!(result.code, 0, "must fail: {result:?}");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains("-v"), "names the flag: {message}");
+    assert!(message.contains("name=value"), "names the fix: {message}");
+}

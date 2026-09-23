@@ -258,11 +258,18 @@ impl Tool for Awk {
             Err(e) => return ExecResult::failure(2, format!("awk: -v: {e}")),
         };
         for var_assign in var_assigns {
-            if let Some((name, value)) = var_assign.split_once('=') {
-                // Command-line assignments are numeric strings (POSIX strnum),
-                // unescaped the same way `-F`'s value is.
-                runtime.set_var(name.trim(), AwkValue::StrNum(awk_unescape_cli_value(value)));
-            }
+            let Some((name, value)) = var_assign.split_once('=') else {
+                // gawk: `` `foo' argument to `-v' not in `var=value' form ``,
+                // fatal — kaish silently dropped it instead. Confirmed
+                // against gawk 5.4.1.
+                return ExecResult::failure(
+                    2,
+                    format!("awk: -v {var_assign:?} is not in `name=value` form — write -v name=value"),
+                );
+            };
+            // Command-line assignments are numeric strings (POSIX strnum),
+            // unescaped the same way `-F`'s value is.
+            runtime.set_var(name.trim(), AwkValue::StrNum(awk_unescape_cli_value(value)));
         }
 
         // Execute
