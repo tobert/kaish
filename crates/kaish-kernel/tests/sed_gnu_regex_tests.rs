@@ -328,6 +328,118 @@ async fn ampersand_and_backreference_replacement_still_work() {
     assert_eq!(code, 0);
 }
 
+// ─── Replacement escapes: `\&`, `\/`, and an unknown escape ──────────────────
+//
+// `s/foo/[\&]/` used to print `[\&]` — `expand_replacement` had no `\&` arm,
+// so the generic `\X` fallback re-emitted the backslash. Confirmed against
+// `/usr/bin/sed`, both dialects (the replacement is not regex syntax, so
+// `-E` makes no difference here): `\&` is a literal `&`, `\\` a literal
+// `\`, `\/` a literal `/`, `\r \a \f \v` the same control characters the
+// pattern side already reads, and any other backslash — `\z`, `\.`, `\$` —
+// drops the backslash and keeps just the character.
+
+#[rstest]
+#[case("", r"s/foo/[\&]/", "foo", "[&]")]
+#[case("-E", r"s/foo/[\&]/", "foo", "[&]")]
+#[case("", r"s/foo/a\/b/", "foo", "a/b")]
+#[case("-E", r"s/foo/a\/b/", "foo", "a/b")]
+#[case("", r"s/foo/a\zb/", "foo", "azb")]
+#[case("", r"s/foo/a\.b/", "foo", "a.b")]
+#[case("", r"s/foo/a\$b/", "foo", "a$b")]
+#[tokio::test]
+async fn replacement_reads_gnu_seds_escapes(
+    #[case] flags: &str,
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_sed(flags, program, input).await;
+    assert_eq!(out, expected, "flags {flags:?}, program {program:?}");
+    assert_eq!(code, 0, "flags {flags:?}, program {program:?}");
+}
+
+/// `\r \a \f \v` in the replacement, the same control characters the
+/// pattern side reads — `/usr/bin/sed`: `s/x/a\rb/` prints `a<CR>b`.
+#[tokio::test]
+async fn replacement_control_escapes_are_real_characters() {
+    let (out, code) = run_sed("", r"s/x/a\rb/", "x").await;
+    assert_eq!(out, "a\rb");
+    assert_eq!(code, 0);
+
+    let (out, code) = run_sed("", r"s/x/a\ab/", "x").await;
+    assert_eq!(out, "a\u{7}b");
+    assert_eq!(code, 0);
+
+    let (out, code) = run_sed("", r"s/x/a\fb/", "x").await;
+    assert_eq!(out, "a\u{c}b");
+    assert_eq!(code, 0);
+
+    let (out, code) = run_sed("", r"s/x/a\vb/", "x").await;
+    assert_eq!(out, "a\u{b}b");
+    assert_eq!(code, 0);
+}
+
+// ─── A replacement's `\N` past the pattern's group count refuses ─────────────
+//
+// `s/\(a\)/\2/` used to silently run with group 2 expanding to nothing.
+// Confirmed against `/usr/bin/sed`: "invalid reference \2 on 's' command's
+// RHS", exit 1, in BRE and the same message under `-E`, before the edit
+// ever runs.
+
+#[rstest]
+#[case(r"s/\(a\)/\2/")]
+#[case(r"s/\(a\)/\9/")]
+#[tokio::test]
+async fn out_of_range_group_reference_refuses(#[case] program: &str) {
+    let (_dir, kernel) = fixture_kernel();
+    let message = match kernel.execute(&format!("sed '{program}' fx.txt")).await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_ne!(result.code, 0, "program {program:?} must fail");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains("invalid reference"), "program {program:?}: {message}");
+}
+
+#[tokio::test]
+async fn out_of_range_group_reference_refuses_under_extended() {
+    let (_dir, kernel) = fixture_kernel();
+    let message = match kernel.execute(r"sed -E 's/(a)/\2/' fx.txt").await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_ne!(result.code, 0, "must fail");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains("invalid reference"), "{message}");
+}
+
+/// A reference within range still works, and a pattern with zero groups
+/// still lets a plain (group-free) replacement through.
+#[tokio::test]
+async fn in_range_group_reference_still_works() {
+    let (out, code) = run_sed("", r"s/\(a\)\(b\)/\2\1/", "ab").await;
+    assert_eq!(out, "ba");
+    assert_eq!(code, 0);
+}
+
+// ─── `-E` with a custom delimiter that is also an ERE metacharacter ──────────
+//
+// `s|a\|b|X|`: the delimiter parser always reads `\|` as "the literal
+// delimiter", stripping the backslash before the dialect translator ever
+// sees the pattern text — so the *bare* `|` left behind then reads per
+// whichever dialect is active. In BRE a bare `|` is literal (matches the
+// whole string `a|b`, the existing `custom_delimiter_escape_is_always_literal`
+// case below); in `-E` a bare `|` is alternation, so only `a` matches.
+// Confirmed against `/usr/bin/sed -E`.
+#[tokio::test]
+async fn custom_delimiter_with_extended_regex_alternates() {
+    let (out, code) = run_sed("-E", r"s|a\|b|X|", "a|b").await;
+    assert_eq!(out, "X|b", "the delimiter-stripped bare `|` alternates under -E");
+    assert_eq!(code, 0);
+}
+
 // ─── Addresses: /re/, ranges, and a real multi-line file ─────────────────────
 
 const FIXTURE: &[&str] =

@@ -653,6 +653,22 @@ fn parse_substitute(expr: &str, extended: bool) -> Result<(Command, String), Str
 
     let regex = compile_sed_pattern(&pattern_str, extended, case_insensitive, multiline)?;
 
+    // GNU sed refuses a replacement's `\N` before the edit ever runs, not
+    // silently as an empty string once it's too late to notice — confirmed
+    // against `/usr/bin/sed`: `s/\(a\)/\2/` is "invalid reference \2 on 's'
+    // command's RHS", the same message in BRE and in -E.
+    if let Some(max_ref) = max_group_reference(&replacement) {
+        let available = regex.captures_len() - 1;
+        if max_ref > available {
+            let fix = if available == 0 {
+                format!("the pattern has no capture groups — remove \\{max_ref} or add one with \\(...\\)")
+            } else {
+                format!("the pattern has {available} capture group(s) — write \\1 through \\{available}")
+            };
+            return Err(format!("invalid reference \\{max_ref} on 's' command's RHS — {fix}"));
+        }
+    }
+
     let rest: String = after_replacement[idx..].iter().collect();
     Ok((
         Command::Substitute {
@@ -775,34 +791,22 @@ fn compile_sed_pattern(
         if extended {
             e
         } else {
-            format!(
-                "{e} (the pattern above is the GNU BRE translated for the regex \
-                 engine; pass -E/-r to write ERE directly)"
-            )
+            format!("{e} (the pattern above is the GNU BRE rewritten for ERE; pass -E/-r to write ERE directly)")
         }
     })
 }
 
-/// Compile a sed pattern as ERE (the regex crate's native dialect), turning the
-/// one regex-crate limitation we care about — pattern-side backreferences — into
-/// a sed-specific message instead of the engine's raw "regex parse error". kaish
-/// sed is *always* ERE, and the linear-time engine has no backreferences in any
-/// dialect, so `s/(a)\1/…/` can't work here regardless of `-E`.
+/// Compile an already-dialect-translated pattern. Both [`gnu_bre_to_regex`]
+/// and [`translate_strict_ere`] refuse a pattern-side back-reference
+/// (`\1`-`\9`) before this ever runs — confirmed no sed pattern reaches here
+/// with one still in it — so the message below is whatever compile fault is
+/// actually left: a malformed bracket, bad bounds, and the like.
 fn compile_pattern(pattern: &str, case_insensitive: bool, multiline: bool) -> Result<Regex, String> {
     RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
         .multi_line(multiline)
         .build()
-        .map_err(|e| {
-            if e.to_string().contains("backreferences are not supported") {
-                "pattern uses a backreference (\\1-\\9); kaish sed regex is ERE on a \
-                 linear-time engine that can't backreference in the pattern — match \
-                 the text directly, or split the work across commands"
-                    .to_string()
-            } else {
-                format!("invalid pattern: {e}")
-            }
-        })
+        .map_err(|e| format!("invalid pattern: {e}"))
 }
 
 
@@ -1107,6 +1111,13 @@ fn substitute(
 }
 
 /// Expand replacement string with capture groups (\1-\9, &).
+///
+/// Confirmed against `/usr/bin/sed` for every escape kaish reads here:
+/// `\n \t \r \a \f \v` are the same control characters the pattern side
+/// reads; `\\` is a literal backslash and `\&` a literal `&` (GNU never
+/// leaves `&`'s special meaning armed after a backslash); any other
+/// backslash — `\z`, `\.`, `\$` — drops the backslash and keeps just the
+/// character, not "backslash + character".
 fn expand_replacement(replacement: &str, captures: &regex::Captures) -> String {
     let mut result = String::new();
     let chars: Vec<char> = replacement.chars().collect();
@@ -1123,15 +1134,16 @@ fn expand_replacement(replacement: &str, captures: &regex::Captures) -> String {
                 }
                 i += 2;
             } else {
-                // Other escapes: \n, \t, \\
                 match next {
                     'n' => result.push('\n'),
                     't' => result.push('\t'),
+                    'r' => result.push('\r'),
+                    'a' => result.push('\u{7}'),
+                    'f' => result.push('\u{c}'),
+                    'v' => result.push('\u{b}'),
                     '\\' => result.push('\\'),
-                    _ => {
-                        result.push('\\');
-                        result.push(next);
-                    }
+                    '&' => result.push('&'),
+                    _ => result.push(next),
                 }
                 i += 2;
             }
@@ -1148,6 +1160,28 @@ fn expand_replacement(replacement: &str, captures: &regex::Captures) -> String {
     }
 
     result
+}
+
+/// The highest `\N` group reference in `replacement`, walking the same
+/// escape rules [`expand_replacement`] reads — so `\\2` (an escaped
+/// backslash followed by the literal digit `2`) is never misread as a
+/// reference to group 2. `None` when the replacement references no group.
+fn max_group_reference(replacement: &str) -> Option<usize> {
+    let chars: Vec<char> = replacement.chars().collect();
+    let mut i = 0;
+    let mut max = None;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            if let Some(n) = chars[i + 1].to_digit(10) {
+                let n = n as usize;
+                max = Some(max.map_or(n, |m: usize| m.max(n)));
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    max
 }
 
 // ============================================================================
