@@ -15,9 +15,11 @@
 //! - `\b` is gawk's backspace character, not a word boundary (`\y` is);
 //! - `\d` `\D` are not gawk regexp operators — the literal letter, with a
 //!   warning, not the engine's own Perl-style digit class;
-//! - `-F`/`-v`/a command-line `var=value` run through the same string-escape
-//!   rules as a program string literal before the value is used — `-F '\|'`
-//!   sees the CLI text unescape to a literal `|` before FS is even compiled.
+//! - `-F`/`-v` run through the same string-escape rules as a program string
+//!   literal before the value is used — `-F '\|'` sees the CLI text
+//!   unescape to a literal `|` before FS is even compiled. kaish has no
+//!   operand `var=value` assignment (gawk's own between-files form) at all
+//!   — a documented gap, not covered by this rule.
 //!
 //! The expected values are what `gawk` (GNU Awk 5.4.1) produced for the same
 //! program, recorded as literals. CI need not have gawk; these tests never
@@ -407,4 +409,49 @@ async fn dynamic_regex_from_dropped_escape_can_be_an_unbalanced_group() {
         }
     };
     assert!(message.contains("invalid regex"), "{message}");
+}
+
+// ─── `\xHH` in `-F`/`-v` ───────────────────────────────────────────────────────
+//
+// `-F '\x2c'` used to give the four-character field separator `x2c`. gawk
+// reads 1-2 hex digits after `\x` — confirmed against gawk 5.4.1: a third
+// hex digit is its own character, and `\x` with no hex digit at all
+// degrades to the bare letter `x`.
+
+#[tokio::test]
+async fn field_separator_reads_hex_escape() {
+    let kernel = kernel_at(tempdir().unwrap().path());
+    let (out, code) = run(&kernel, r#"echo 'a,b' | awk -F '\x2c' '{print NF, $2}'"#).await;
+    assert_eq!(out, "2 b");
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn var_assignment_reads_hex_escape() {
+    let kernel = kernel_at(tempdir().unwrap().path());
+    // `\x412`: gawk reads at most 2 hex digits, so this is `\x41` (-> `A`)
+    // followed by the bare literal `2`, not a 3-hex-digit escape.
+    let (out, code) = run(&kernel, r#"printf x | awk -v 'x=\x412' 'BEGIN{print x}'"#).await;
+    assert_eq!(out, "A2", "a third hex digit is left as its own character");
+    assert_eq!(code, 0);
+}
+
+// ─── Known gaps: awk operands ────────────────────────────────────────────────
+
+/// Real gawk reads a file operand shaped `name=value` as a variable
+/// assignment that runs when gawk reaches that operand — it can sit between
+/// file operands, setting a variable partway through the run
+/// (`awk '{print x}' x=1 file` prints `1` for every line of `file`). kaish
+/// has no operand-assignment parsing at all: `x=1` is read as a file path,
+/// which fails loudly (a real gap, not a silent stand-in for gawk's
+/// feature) rather than being interpreted.
+#[tokio::test]
+#[ignore = "gap: gawk reads a file operand shaped name=value as an assignment; kaish reads it as a file path"]
+async fn gap_operand_var_equals_value_assignment_like_gawk() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("file.txt"), "hello\nworld\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "awk '{print x}' x=1 file.txt").await;
+    assert_eq!(out, "1\n1", "x=1 is an assignment, not a file, before file.txt is read");
+    assert_eq!(code, 0);
 }

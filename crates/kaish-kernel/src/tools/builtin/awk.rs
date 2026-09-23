@@ -26,13 +26,20 @@ fn compile_ere(pattern: &str) -> Result<Regex, String> {
     Regex::new(&engine_pattern).map_err(|e| format!("invalid regex: {e}"))
 }
 
-/// Unescape a `-F`, `-v`, or command-line `var=value` argument the way gawk
-/// reads a string constant before using it: real gawk runs every one of
-/// these through the same escaping as a program string literal (POSIX),
-/// so `awk -F '\|' ...` sees a literal `|`, not a two-character `\|` (gawk:
+/// Unescape a `-F` or `-v` argument the way gawk reads a string constant
+/// before using it: real gawk runs both through the same escaping as a
+/// program string literal (POSIX). kaish has no operand `var=value` form
+/// (gawk's `awk '{print x}' x=1 file` — unimplemented, see
+/// `gap_operand_var_equals_value_assignment_like_gawk`), so this function
+/// only ever sees `-F`'s and `-v`'s values, so
+/// `awk -F '\|' ...` sees a literal `|`, not a two-character `\|` (gawk:
 /// `warning: escape sequence \`|' treated as plain \`|'`). `\\ \n \t \r \a
 /// \b \f \v \" \/` become their character, `\NNN` (1-3 octal digits) becomes
-/// that byte, and any other `\X` drops the backslash and keeps `X`.
+/// that byte, `\xHH` (1-2 hex digits; confirmed against gawk 5.4.1: a third
+/// hex digit is left as its own character, and `\x` with no hex digit at
+/// all degrades to the bare letter `x`, a "no hex digits" warning gawk
+/// prints and kaish does not) becomes that byte, and any other `\X` drops
+/// the backslash and keeps `X`.
 fn awk_unescape_cli_value(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
@@ -81,6 +88,29 @@ fn awk_unescape_cli_value(raw: &str) -> String {
             Some('/') => {
                 out.push('/');
                 chars.next();
+            }
+            Some('x') => {
+                chars.next(); // consume 'x'
+                let mut value: u32 = 0;
+                let mut digits = 0;
+                while digits < 2 {
+                    match chars.peek().and_then(|d| d.to_digit(16)) {
+                        Some(digit) => {
+                            value = value * 16 + digit;
+                            chars.next();
+                            digits += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if digits == 0 {
+                    // No hex digit followed `\x` — gawk drops the backslash
+                    // and keeps the bare `x`, same as any other unknown
+                    // escape.
+                    out.push('x');
+                } else {
+                    out.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                }
             }
             Some(d) if d.is_digit(8) => {
                 let mut value: u32 = 0;
