@@ -2949,6 +2949,11 @@ impl Kernel {
                             scope.glob_enabled()
                         };
                         if glob_enabled {
+                            // Tilde expansion runs before globbing, like bash:
+                            // `for f in ~/src/*.rs` matches against $HOME, not
+                            // a literal `~` directory under cwd.
+                            let home = self.scope_home().await;
+                            let pattern = &expand_tilde(pattern, home.as_deref());
                             let (paths, cwd) = {
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
@@ -4044,6 +4049,9 @@ impl Kernel {
             Expr::Literal(Value::Null) => "null".to_string(),
             // Show the source text, not the typed value.
             Expr::NumericLiteral { raw, .. } => raw.clone(),
+            // Show the unexpanded source word, not the resolved path —
+            // this is a display of what the command WAS, not what it did.
+            Expr::TildePath(raw) => raw.clone(),
             Expr::VarRef(path) => {
                 let mut name = String::new();
                 for (i, seg) in path.segments.iter().enumerate() {
@@ -4107,7 +4115,7 @@ impl Kernel {
                 if let Some((alias_cmd, alias_args)) = parts.split_first() {
                     let mut new_args: Vec<Arg> = alias_args
                         .iter()
-                        .map(|a| Arg::Positional(Expr::Literal(Value::String(a.to_string()))))
+                        .map(|a| Arg::Positional(classify_alias_word(a)))
                         .collect();
                     new_args.extend_from_slice(args);
                     return Box::pin(self.execute_command_depth(alias_cmd, &new_args, alias_depth + 1, ctx)).await;
@@ -4506,6 +4514,9 @@ impl Kernel {
                             scope.glob_enabled()
                         };
                         if glob_enabled {
+                            // Tilde expansion runs before globbing, like bash.
+                            let home = self.scope_home().await;
+                            let pattern = &expand_tilde(pattern, home.as_deref());
                             let (paths, cwd) = {
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
@@ -4906,7 +4917,15 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 Ok(Value::Int(scope.pid() as i64))
             }
-            Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
+            // Tilde expansion runs before globbing, like bash — and also
+            // applies when the pattern is never actually glob-matched (an
+            // assignment value: `x=~/src/*.rs` expands `~` but not `*`, the
+            // same split bash draws between tilde expansion and pathname
+            // expansion) or when glob expansion is disabled in this session.
+            Expr::GlobPattern(s) => {
+                let home = self.scope_home().await;
+                Ok(Value::String(expand_tilde(s, home.as_deref())))
+            }
             Expr::ListLiteral(elems) => {
                 // Spread must itself be a list — a scalar/record spread is a
                 // loud error, never silently coerced or dropped (mirrors the
@@ -6809,6 +6828,10 @@ impl ArgValueSource for KernelArgSource<'_> {
         if !glob_enabled {
             return Ok(None);
         }
+        // Tilde expansion runs before globbing, like bash: `--path ~/*.rs`
+        // matches against $HOME, not a literal `~` directory under cwd.
+        let home = self.kernel.scope_home().await;
+        let pattern = &expand_tilde(pattern, home.as_deref());
         let (paths, cwd) = {
             let ctx = self.ctx.lock().await;
             let paths = ctx
@@ -8246,6 +8269,30 @@ fn classify_argv_token(token: &Value) -> Arg {
     }
 
     Arg::Positional(Expr::Literal(Value::String(s.clone())))
+}
+
+/// Classify one whitespace-split alias-body word for [`Self::execute_command_depth`].
+///
+/// Alias expansion is `split_whitespace` on the stored text, not a re-lex —
+/// it does not strip quotes, expand globs, or interpolate `$VAR` (a widening
+/// of alias semantics this function does not attempt). The one thing it must
+/// still do, to match bash re-parsing the alias body, is tilde-expand a bare
+/// `~`/`~/path`/`~user` word: lexing the word in isolation and requiring it
+/// collapse to exactly one `Tilde`/`TildePath` token reuses the same
+/// unquoted-word-start rule the string door uses, with no separate tilde
+/// heuristic to drift from it. A word that failed to lex at all, or that
+/// lexed to anything else — including a quoted `'~'` (the surrounding quotes
+/// survive `split_whitespace` untouched, so the word starts with `'`, not
+/// `~`) or a colon-fused `~/a:b` (one `Ident` token, not `TildePath`) — stays
+/// a plain literal, unchanged from before.
+fn classify_alias_word(word: &str) -> Expr {
+    if let Ok(tokens) = crate::lexer::tokenize(word)
+        && let [spanned] = tokens.as_slice()
+        && matches!(spanned.token, crate::lexer::Token::Tilde | crate::lexer::Token::TildePath(_))
+    {
+        return Expr::TildePath(word.to_string());
+    }
+    Expr::Literal(Value::String(word.to_string()))
 }
 
 /// A short-flag word: a leading ASCII letter, then only ASCII
