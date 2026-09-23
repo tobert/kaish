@@ -26,6 +26,8 @@ breaking entries are marked **BREAKING**.
 - **Statement-level `!`** — `! cmd`, `! a | b` and `! for …; done` negate
   the whole pipeline, as in bash. A negated statement never trips `set -e`,
   whatever its status.
+- **`grep -m` is a short alias for `--max-count`**, matching GNU grep; models
+  wrote `grep -m 5 PATTERN file` from habit and got a usage error.
 
 ### Fixed
 
