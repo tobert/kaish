@@ -199,13 +199,13 @@ breaking entries are marked **BREAKING**.
   is refused with E022, which names a form that negates inside the job.
 - `echo a\` with `b` at column 0 on the next line is refused as token
   pasting. It ran as two words; bash reads one word, `ab`.
-- **BREAKING**: A command naming the same file as both a `<` input and an
-  output target is now refused before anything opens (validator E023),
-  instead of letting the output truncate the file its own input reads.
+- **BREAKING**: `sort < f > f` (one file as input and output) exits 1 and
+  names the fix: write to a temp file, then `mv` it over `f`. `f` keeps its
+  content; `kaish --plan` reports it as E023 when both paths are literal.
 - **BREAKING**: A write to a read-only mount now reports
   `ErrorKind::ReadOnlyFilesystem` instead of `PermissionDenied`. An embedder
   matching `PermissionDenied` on `/v/jobs`, `/v/bin`, or a read-only
-  `LocalFs` mount must match `ReadOnly` too.
+  `LocalFs` mount must also match `ReadOnlyFilesystem`.
 
 ## [0.17.2] - 2026-09-09
 
