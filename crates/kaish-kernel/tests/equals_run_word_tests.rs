@@ -28,6 +28,8 @@
 //! value boundary or turn a botched assignment into silent text.
 //! `glued_arg_span_tests.rs` covers those and the pinned `./bin=1`-style
 //! cases that must keep erroring.
+//!
+//! A bare `!` is the third marker; `bang_arg_word_tests.rs` covers it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

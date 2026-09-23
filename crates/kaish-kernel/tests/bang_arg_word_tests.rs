@@ -94,6 +94,19 @@ async fn single_bare_bang_already_worked() {
 }
 
 #[tokio::test]
+async fn spaced_bang_mid_argv_stays_its_own_word() {
+    assert_eq!(run("echo a ! b").await, "a ! b\n");
+    assert_eq!(arg_count("echo a ! b").await, 3);
+}
+
+#[tokio::test]
+async fn bang_run_across_a_line_continuation_fuses_like_bash() {
+    let source = "echo !\\\nx";
+    assert_eq!(run(source).await, "!x\n");
+    assert_eq!(arg_count(source).await, 1);
+}
+
+#[tokio::test]
 async fn multiple_spaced_bang_runs_are_separate_args() {
     // Each glued run fuses on its own — assert the argv shape, not just
     // the printed text, the same way
