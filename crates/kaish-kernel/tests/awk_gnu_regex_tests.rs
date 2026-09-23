@@ -205,6 +205,36 @@ async fn posix_classes_are_unicode_aware_like_gawk(
     assert_eq!(code, 0);
 }
 
+// ─── An unrecognized class name always refuses ────────────────────────────────
+//
+// `awk '$0 ~ /[[:foo:]]/'` used to match — the bracket translator copied an
+// unrecognized class name through unchanged, and the engine read
+// `[[:foo:]]` as a plain six-character set instead of refusing. Confirmed
+// against gawk 5.4.1: `gawk '$0 ~ /[[:foo:]]/'` is a fatal "invalid
+// character class name". `[:alpha:]` (no outer brackets around the class)
+// stays lenient, matching gawk exactly — real gawk only warns
+// ("should probably be `[[:alpha:]]`") and still reads it as a plain
+// bracket set, unlike `grep`'s and `sed`'s shared translator, which refuses
+// that shape outright (`grep_gnu_bre_tests.rs`).
+
+#[tokio::test]
+async fn unrecognized_class_name_refuses() {
+    let kernel = kernel_at(tempdir().unwrap().path());
+    let result = kernel
+        .execute(r#"printf x | awk '$0 ~ /[[:foo:]]/ {print "match"}'"#)
+        .await
+        .expect("a bad regex is a runtime error, not a validation error");
+    assert_ne!(result.code, 0, "unrecognized class name must fail: {result:?}");
+    assert!(result.err.contains("foo"), "{result:?}");
+}
+
+#[tokio::test]
+async fn missing_outer_brackets_stays_lenient_like_gawk() {
+    let (out, code) = run_awk(r#"$0 ~ /[:alpha:]/ {print "match"}"#, ":").await;
+    assert_eq!(out, "match", "`:` is one of the six literal characters `[:alpha:]` reads as a set");
+    assert_eq!(code, 0);
+}
+
 // ─── FS / split(): a raw one-char separator is literal, longer is an ERE ─────
 
 #[tokio::test]

@@ -653,3 +653,198 @@ async fn gap_extended_mode_back_references_match_like_gnu_grep() {
     assert_eq!(lines(&out), &["(foo|bar)", "foo", "*foo", "foo bar", "foobar"]);
     assert_eq!(code, 0);
 }
+
+// ─── `-E`'s leniency for an operator with nothing to repeat ──────────────────
+//
+// `grep -E '{'` used to exit 2 (the engine refused the raw `{`). Confirmed
+// against `/usr/bin/grep -E`, `LC_ALL=C.UTF-8`, over [`OPERATOR_FIXTURE`]:
+// GNU grep reads a `{` with no atom before it — and no digit content after
+// it either, so it cannot even look like an interval — as one literal
+// character; `grep -E 'fn main() {'`/`grep -E 'KjCaller {'` is the case
+// models write from bash/Rust habit. kaish's rule generalizes this: any of
+// `{`, `*`, `+`, `?` with nothing to repeat reads as one literal character.
+// For `{` this matches GNU everywhere in this fixture. For a bare `*`/`+`/
+// `?`, real GNU does something stranger instead — see the gap tests below —
+// so kaish's literal reading there is a deliberate, simpler rule, not a
+// replication of GNU's own behavior. `sed -E` shares none of this leniency
+// — `/usr/bin/sed -E` refuses every one of these with its own regcomp
+// error; see `sed_gnu_regex_tests.rs` for the same corpus proving sed keeps
+// refusing.
+
+const OPERATOR_FIXTURE: &[&str] = &[
+    "fn main() {", "plain text", "{2}", "a{1", "*star line", "line with * in middle",
+    "+plus line", "?question line", "a**text", "a*+text", "(+)paren",
+];
+
+fn operator_fixture_kernel() -> (tempfile::TempDir, Kernel) {
+    let dir = tempdir().unwrap();
+    let mut text = OPERATOR_FIXTURE.join("\n");
+    text.push('\n');
+    fs::write(dir.path().join("fx.txt"), text).unwrap();
+    let kernel = kernel_at(dir.path());
+    (dir, kernel)
+}
+
+/// `grep -E PATTERN fx.txt` over [`OPERATOR_FIXTURE`]. The `{` rows and
+/// `a|{` match `/usr/bin/grep -E`'s own output exactly. `+a`/`?a` are
+/// kaish's own literal-reading rule, not GNU's — see the gap tests below for
+/// what `/usr/bin/grep -E` actually does with those two.
+#[rstest]
+// A trailing `{` with nothing after it to look like an interval: literal.
+// Matches GNU.
+#[case(r#"{"#, &[r#"fn main() {"#, r#"{2}"#, r#"a{1"#])]
+#[case(r#"a{"#, &[r#"a{1"#])]
+#[case(r#"a{x}"#, &[])]
+#[case(r#"a{1"#, &[r#"a{1"#])]
+#[case(r#"a{1,"#, &[])]
+#[case(r#"^{"#, &[r#"{2}"#])]
+#[case(r#"a|{"#, &[r#"fn main() {"#, r#"plain text"#, r#"{2}"#, r#"a{1"#, r#"*star line"#, r#"a**text"#, r#"a*+text"#, r#"(+)paren"#])]
+// A digit-led `{...}` after a real atom is a genuine interval, unaffected —
+// `a{,2}` is GNU's `{0,2}` shorthand, which the engine has no syntax for and
+// now gets rewritten. Matches GNU.
+#[case(r#"a{2}"#, &[])]
+#[case(r#"a{,2}"#, OPERATOR_FIXTURE)]
+// kaish's own rule, not GNU's (see the gap tests below).
+#[case(r#"+a"#, &[])]
+#[case(r#"?a"#, &[])]
+// Stacking a quantifier on top of a real one is unaffected (already worked):
+// `a*` matches empty everywhere. Matches GNU.
+#[case(r#"a**"#, OPERATOR_FIXTURE)]
+#[case(r#"a*+"#, OPERATOR_FIXTURE)]
+#[tokio::test]
+async fn extended_mode_operator_with_nothing_to_repeat_is_literal(
+    #[case] pattern: &str,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = operator_fixture_kernel();
+    let (out, code) = run(&kernel, &format!("grep -E -- '{pattern}' fx.txt")).await;
+    assert_eq!(lines(&out), gnu_lines, "pattern {pattern:?}");
+    assert_eq!(code, i64::from(gnu_lines.is_empty()), "pattern {pattern:?}");
+}
+
+/// `a{2,1}` (a real interval, bad bounds) still refuses — this was never
+/// part of the leniency, in GNU or in kaish.
+#[tokio::test]
+async fn extended_mode_bad_interval_bounds_still_refuses() {
+    let (_dir, kernel) = operator_fixture_kernel();
+    let result = kernel.execute("grep -E 'a{2,1}' fx.txt").await;
+    let code = match result {
+        Err(_) => return, // validation caught it before the search ran
+        Ok(result) => result.code,
+    };
+    assert_eq!(code, 2, "a{{2,1}} must still fail");
+}
+
+// ─── Known gaps: GNU grep's own degenerate reading, not replicated ──────────
+//
+// For an operator that is unquantifiable AND whose body still looks
+// digit-shaped (`{2}` at the very start, or a bare `*`/`+`/`?` anywhere
+// unquantifiable), real GNU grep does not read the operator as literal.
+// `grep -E -o '*a'` shows what actually happens: the `*` contributes a
+// non-empty match (the letter `a`) only on the three lines that start with
+// `a`, but the full-line match (no `-o`) additionally reports every OTHER
+// line that contains an `a` anywhere as "matching" too, as a zero-width
+// match — a leftover of the DFA fast path GNU builds for the pattern, not a
+// simple text substitution. There is no principled shape here a person or a
+// model could predict from the pattern text alone. kaish's simpler rule —
+// treat the operator itself as one literal character — was chosen instead;
+// it is what makes `grep -E 'fn main() {'`/`'KjCaller {'`-shaped patterns
+// behave sensibly, at the cost of not replicating this one. `(*)`, `(+)`,
+// `(?)` are a further, narrower GNU quirk: a group whose entire body is one
+// bare operator is a hard refusal ("Unmatched ("), unlike the same operator
+// outside parentheses.
+
+#[rstest]
+#[case(r#"*a"#, &[r#"fn main() {"#, r#"plain text"#, r#"a{1"#, r#"*star line"#, r#"a**text"#, r#"a*+text"#, r#"(+)paren"#])]
+#[case(r#"^*a"#, &[r#"fn main() {"#, r#"plain text"#, r#"a{1"#, r#"*star line"#, r#"a**text"#, r#"a*+text"#, r#"(+)paren"#])]
+#[tokio::test]
+#[ignore = "gap: GNU grep drops an unquantifiable operator silently instead of reading it as literal"]
+async fn gap_unquantifiable_operator_is_dropped_not_literal_like_gnu_grep(
+    #[case] pattern: &str,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = operator_fixture_kernel();
+    let (out, code) = run(&kernel, &format!("grep -E -- '{pattern}' fx.txt")).await;
+    assert_eq!(lines(&out), gnu_lines, "pattern {pattern:?}");
+    assert_eq!(code, 0, "pattern {pattern:?}");
+}
+
+/// `(+)` (and `(*)`, `(?)`): GNU refuses a group whose sole content is one
+/// unquantifiable operator, exit 2 ("Unmatched ( or \("), unlike the same
+/// operator outside parentheses. kaish's literal reading instead succeeds,
+/// matching text with a literal `+` — a narrower, deliberate divergence.
+#[tokio::test]
+#[ignore = "gap: GNU grep refuses a group whose entire body is one bare operator"]
+async fn gap_group_of_one_bare_operator_refuses_like_gnu_grep() {
+    let (_dir, kernel) = operator_fixture_kernel();
+    let result = kernel.execute("grep -E '(+)' fx.txt").await;
+    let code = match result {
+        Err(_) => return,
+        Ok(result) => result.code,
+    };
+    assert_eq!(code, 2, "(+) must fail like GNU grep");
+}
+
+// ─── Unknown class names always refuse, in every dialect ─────────────────────
+//
+// `grep -E '[[:foo:]]'` used to match — the strict-ERE translator left an
+// unrecognized class name exactly as written, and the engine read
+// `[[:foo:]]` as a plain six-character set (`:`, `f`, `o`, `o`, `:`) instead
+// of refusing the way GNU does. `[:alpha:]` (no outer brackets around the
+// class) is a second, distinct GNU refusal — confirmed against
+// `/usr/bin/grep`/`/usr/bin/grep -E`, `LC_ALL=C.UTF-8`: the message names
+// `space` regardless of the identifier actually written.
+
+const CLASS_FIXTURE: &[&str] = &["foo", "[:foo:]bar", "plain"];
+
+fn class_fixture_kernel() -> (tempfile::TempDir, Kernel) {
+    let dir = tempdir().unwrap();
+    let mut text = CLASS_FIXTURE.join("\n");
+    text.push('\n');
+    fs::write(dir.path().join("fx.txt"), text).unwrap();
+    let kernel = kernel_at(dir.path());
+    (dir, kernel)
+}
+
+#[rstest]
+#[case("", r#"[[:foo:]]"#, "foo")] // GNU: Invalid character class name
+#[case("-E", r#"[[:foo:]]"#, "foo")] // GNU: Invalid character class name
+#[case("", r#"[:alpha:]"#, "space")] // GNU: character class syntax is [[:space:]], not [:space:]
+#[case("-E", r#"[:alpha:]"#, "space")] // GNU: character class syntax is [[:space:]], not [:space:]
+#[case("-E", r#"[^:alpha:]"#, "space")]
+#[tokio::test]
+async fn unrecognized_class_name_refuses(#[case] flags: &str, #[case] pattern: &str, #[case] named: &str) {
+    let (_dir, kernel) = class_fixture_kernel();
+    let message = match kernel.execute(&format!("grep {flags} '{pattern}' fx.txt")).await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_eq!(result.code, 2, "flags {flags:?}, pattern {pattern:?} must fail with exit 2");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains(named), "flags {flags:?}, pattern {pattern:?}: {message}");
+}
+
+/// `[[.a.]]`/`[[=a=]]` (collating symbol / equivalence class, single
+/// character) already work, in both dialects — unaffected by the
+/// unrecognized-class-name fix. `[::]` (nothing between the colons) and
+/// `[:alpha:0-9]` (more content after the second colon) do not look like the
+/// missing-outer-bracket mistake, so they stay a plain bracket set, matching
+/// GNU.
+#[rstest]
+#[case("", r#"[[.a.]]"#, &[r#"[:foo:]bar"#, r#"plain"#])]
+#[case("-E", r#"[[.a.]]"#, &[r#"[:foo:]bar"#, r#"plain"#])]
+#[case("", r#"[[=a=]]"#, &[r#"[:foo:]bar"#, r#"plain"#])]
+#[case("-E", r#"[::]"#, &[r#"[:foo:]bar"#])]
+#[case("-E", r#"[:alpha:0-9]"#, &[r#"[:foo:]bar"#, r#"plain"#])]
+#[tokio::test]
+async fn class_syntax_edge_cases_match_gnu_grep(
+    #[case] flags: &str,
+    #[case] pattern: &str,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = class_fixture_kernel();
+    let (out, code) = run(&kernel, &format!("grep {flags} -- '{pattern}' fx.txt")).await;
+    assert_eq!(lines(&out), gnu_lines, "flags {flags:?}, pattern {pattern:?}");
+    assert_eq!(code, 0, "flags {flags:?}, pattern {pattern:?}");
+}

@@ -27,7 +27,12 @@
 //!   reads — `grep -E '\d'` is the literal letter `d`, not the engine's own
 //!   digit class, with GNU's "stray \" warning; `\( \) \{ \} \| \+ \?` and
 //!   the rest of ERE's own metacharacters are already literal escaped in
-//!   both GNU ERE and the engine, so those pass straight through.
+//!   both GNU ERE and the engine, so those pass straight through. One rule
+//!   does not travel with the rest: a bare `{`, `*`, `+`, or `?` with
+//!   nothing before it to repeat is a literal character in `/usr/bin/grep
+//!   -E` but a refusal in `/usr/bin/sed -E` — confirmed on the same corpus,
+//!   not assumed. `lenient_operators` is the one parameter where the two
+//!   callers differ; everything else about the pass is identical.
 //!
 //! Every bracket-expression translator — `gnu_bre_to_regex`,
 //! `translate_strict_ere`, and `gawk_ere_to_regex`'s own bracket handling —
@@ -152,6 +157,27 @@ enum BracketItem {
     Class(String),
 }
 
+/// A bracket expression [`bracket_expression`]/[`bracket_item`] could not
+/// translate. `Unmatched` covers a fault the engine's own error already
+/// names reasonably (an unclosed `[`, an unsupported multi-character
+/// collating symbol) — strict ERE may leave the bracket exactly as written
+/// and let that error stand. `Invalid` covers a fault the engine would
+/// otherwise accept silently, in a way GNU does not (an unrecognized class
+/// name, `[:name:]` written without its own brackets) — this must always
+/// refuse, in both dialects.
+enum BracketFault {
+    Unmatched(String),
+    Invalid(String),
+}
+
+impl BracketFault {
+    fn into_message(self) -> String {
+        match self {
+            BracketFault::Unmatched(m) | BracketFault::Invalid(m) => m,
+        }
+    }
+}
+
 /// What GNU gives `\c` for a letter or digit `c` — the one table
 /// [`gnu_bre_to_regex`] and [`translate_strict_ere`] both read, so BRE and
 /// ERE cannot drift apart on it. `None` means `c` is not one of these: the
@@ -196,16 +222,41 @@ fn stray_warning(c: char) -> String {
     format!("stray \\ before {what}")
 }
 
+/// GNU refuses `[:name:]` written without the class's own brackets —
+/// `[[:alpha:]]` is the required spelling, not `[:alpha:]`. Confirmed
+/// against `/usr/bin/grep -E`/`/usr/bin/sed -E`: the message names `space`
+/// regardless of the identifier actually written, and fires even when that
+/// identifier is not a real class name (`[:al pha:]`, `[^:alpha:]`);
+/// `[::]` (nothing between the colons) and `[:alpha:0-9]` (more content
+/// after the second colon) do not trigger it — GNU only reads this shape as
+/// the mistake when the colon-to-colon span is the bracket's entire body.
+/// `index` is just past the optional leading `^`.
+fn missing_class_brackets(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&':') {
+        return false;
+    }
+    let Some(close) = (index..chars.len()).find(|&i| chars[i] == ']') else {
+        return false;
+    };
+    close >= index + 3 && chars[close - 1] == ':'
+}
+
 /// Translate a bracket expression, shared by BRE and strict ERE — GNU grep
 /// and GNU sed read `[...]` the same way regardless of dialect: every
 /// character inside is literal, backslash included, and `[:class:]`,
 /// `[.c.]`, `[=c=]` are recognized. `index` is just past the opening `[`.
-fn bracket_expression(chars: &[char], index: &mut usize, tail: &str) -> Result<String, String> {
-    let unmatched = || refusal(tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
+fn bracket_expression(chars: &[char], index: &mut usize, tail: &str) -> Result<String, BracketFault> {
+    let unmatched = || BracketFault::Unmatched(refusal(tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`"));
     let mut out = String::from("[");
     if chars.get(*index) == Some(&'^') {
         out.push('^');
         *index += 1;
+    }
+    if missing_class_brackets(chars, *index) {
+        return Err(BracketFault::Invalid(refusal(
+            tail,
+            "character class syntax is `[[:space:]]`, not `[:space:]` — wrap the class name in its own `[...]`",
+        )));
     }
     let mut first = true;
     loop {
@@ -223,13 +274,13 @@ fn bracket_expression(chars: &[char], index: &mut usize, tail: &str) -> Result<S
             BracketItem::Char(low) if is_range => {
                 *index += 1;
                 let BracketItem::Char(high) = bracket_item(chars, index, tail)? else {
-                    return Err(refusal(tail, "a range cannot end in a character class"));
+                    return Err(BracketFault::Unmatched(refusal(tail, "a range cannot end in a character class")));
                 };
                 if high < low {
-                    return Err(refusal(
+                    return Err(BracketFault::Unmatched(refusal(
                         tail,
                         format!("invalid range `{low}-{high}` — write the lower end first"),
-                    ));
+                    )));
                 }
                 push_class_char(&mut out, low);
                 out.push('-');
@@ -243,8 +294,8 @@ fn bracket_expression(chars: &[char], index: &mut usize, tail: &str) -> Result<S
 }
 
 /// Read one bracket item: `[:class:]`, `[.c.]`, `[=c=]`, or a character.
-fn bracket_item(chars: &[char], index: &mut usize, tail: &str) -> Result<BracketItem, String> {
-    let unmatched = || refusal(tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
+fn bracket_item(chars: &[char], index: &mut usize, tail: &str) -> Result<BracketItem, BracketFault> {
+    let unmatched = || BracketFault::Unmatched(refusal(tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`"));
     let c = chars.get(*index).copied().ok_or_else(unmatched)?;
     let delimiter = match (c, chars.get(*index + 1)) {
         ('[', Some(&d @ (':' | '.' | '='))) => d,
@@ -266,21 +317,21 @@ fn bracket_item(chars: &[char], index: &mut usize, tail: &str) -> Result<Bracket
     if delimiter == ':' {
         return match posix_class_pattern(&body) {
             Some(pattern) => Ok(BracketItem::Class(pattern.to_string())),
-            None => Err(refusal(
+            None => Err(BracketFault::Invalid(refusal(
                 tail,
                 format!("invalid character class `[:{body}:]` — use one of {}", POSIX_CLASSES.join(", ")),
-            )),
+            ))),
         };
     }
     let mut body_chars = body.chars();
     match (body_chars.next(), body_chars.next()) {
         (Some(single), None) => Ok(BracketItem::Char(single)),
-        _ => Err(refusal(
+        _ => Err(BracketFault::Unmatched(refusal(
             tail,
             format!(
                 "`[{delimiter}{body}{delimiter}]` is not supported — only a single character works inside `[{delimiter} {delimiter}]`"
             ),
-        )),
+        ))),
     }
 }
 
@@ -498,7 +549,7 @@ impl BreTranslator {
 
     /// Translate a bracket expression; `self.index` is just past `[`.
     fn bracket(&mut self) -> Result<String, String> {
-        bracket_expression(&self.chars, &mut self.index, &self.tail)
+        bracket_expression(&self.chars, &mut self.index, &self.tail).map_err(BracketFault::into_message)
     }
 }
 
@@ -519,14 +570,32 @@ impl BreTranslator {
 /// documents for BRE. GNU ERE runs one as a GNU extension when a group
 /// precedes it; the regex engine has none in any dialect.
 ///
-/// A bracket expression the translator cannot make sense of (an unmatched
-/// `[`, an unrecognized class name) is left exactly as written, so the
-/// engine's own error stands for it. Only an escape-level fault — a
-/// trailing backslash or a back-reference — fails outright; `tail` is
-/// appended to that refusal, empty for strict ERE, since ERE is already the
-/// dialect a `tail` would point the reader at.
-pub(crate) fn translate_strict_ere(pattern: &str, tail: &str) -> Result<BreTranslation, String> {
-    EreTranslator::new(pattern, tail).run()
+/// A bracket expression the translator cannot make sense of because the
+/// engine's own error already names the fault (an unmatched `[`) is left
+/// exactly as written; an unrecognized class name always refuses instead —
+/// the engine would otherwise read `[[:foo:]]` as a plain set of the six
+/// characters `:foo:`, matching in a way GNU never does. An escape-level
+/// fault — a trailing backslash or a back-reference — fails outright too;
+/// `tail` is appended to every refusal, empty for strict ERE, since ERE is
+/// already the dialect a `tail` would point the reader at.
+///
+/// `a{` (unterminated), a bare `{2}` with nothing to its left to repeat, and
+/// a leading `*`/`+`/`?` are three more spots GNU grep and GNU sed disagree,
+/// confirmed against `/usr/bin/grep -E` and `/usr/bin/sed -E` on the same
+/// corpus: grep reads an operator with nothing to repeat as a literal
+/// character (`grep -E 'fn main() {'` is common, written from bash/Rust
+/// habit); sed's regcomp refuses every one of them outright, unchanged from
+/// before this leniency existed. `lenient_operators` is grep's opt-in; sed
+/// passes `false` and keeps refusing exactly as it did. Both dialects still
+/// gain GNU's `{,m}` shorthand for `{0,m}` regardless of `lenient_operators`
+/// — the regex engine has no syntax for an omitted low bound, so a
+/// legitimately GNU-shaped interval is rewritten either way.
+pub(crate) fn translate_strict_ere(
+    pattern: &str,
+    tail: &str,
+    lenient_operators: bool,
+) -> Result<BreTranslation, String> {
+    EreTranslator::new(pattern, tail, lenient_operators).run()
 }
 
 /// A backslash before this character is already literal in both GNU ERE and
@@ -541,16 +610,26 @@ struct EreTranslator {
     out: String,
     warnings: Vec<String>,
     tail: String,
+    /// Whether the position just scanned can take a quantifier: right after
+    /// a real atom (a literal, a bracket class, a closing group). `*`, `+`,
+    /// `?`, and a digit-led `{` need one — without it there is nothing to
+    /// repeat.
+    quantifiable: bool,
+    /// `grep -E`'s leniency for an operator with nothing to repeat — see
+    /// [`translate_strict_ere`].
+    lenient_operators: bool,
 }
 
 impl EreTranslator {
-    fn new(pattern: &str, tail: &str) -> Self {
+    fn new(pattern: &str, tail: &str, lenient_operators: bool) -> Self {
         Self {
             chars: pattern.chars().collect(),
             index: 0,
             out: String::with_capacity(pattern.len() + 8),
             warnings: Vec::new(),
             tail: tail.to_string(),
+            quantifiable: false,
+            lenient_operators,
         }
     }
 
@@ -569,22 +648,133 @@ impl EreTranslator {
                     let saved = self.index;
                     self.index += 1;
                     match bracket_expression(&self.chars, &mut self.index, &self.tail) {
-                        Ok(text) => self.out.push_str(&text),
-                        Err(_) => {
+                        Ok(text) => {
+                            self.out.push_str(&text);
+                            self.quantifiable = true;
+                        }
+                        Err(BracketFault::Invalid(message)) => return Err(message),
+                        Err(BracketFault::Unmatched(_)) => {
                             // Malformed: leave it exactly as written, so the
                             // engine's own error names it.
                             self.index = saved + 1;
                             self.out.push(c);
+                            self.quantifiable = true;
                         }
                     }
+                }
+                '{' if self.quantifiable => self.interval_or_literal_brace(),
+                '{' => self.literal_brace(),
+                // `(?s)`/`(?:...)` are the engine's own inline-flag and
+                // non-capturing-group syntax, not GNU ERE at all — kaish's
+                // `-U` multiline grep documents `(?s).` as the way to span
+                // newlines. A `?` straight after `(` passes through
+                // untouched rather than reading it as a bare, unquantifiable
+                // operator, so that escape hatch keeps working.
+                '?' if !self.quantifiable && self.out.ends_with('(') => {
+                    self.out.push('?');
+                    self.index += 1;
+                }
+                '*' | '+' | '?' if self.quantifiable => {
+                    self.out.push(c);
+                    self.index += 1;
+                }
+                '*' | '+' | '?' => self.literal_operator(c),
+                '(' => {
+                    self.out.push('(');
+                    self.index += 1;
+                    self.quantifiable = false;
+                }
+                ')' => {
+                    self.out.push(')');
+                    self.index += 1;
+                    self.quantifiable = true;
+                }
+                '|' => {
+                    self.out.push('|');
+                    self.index += 1;
+                    self.quantifiable = false;
+                }
+                '^' => {
+                    self.out.push('^');
+                    self.index += 1;
+                    self.quantifiable = false;
+                }
+                '$' => {
+                    self.out.push('$');
+                    self.index += 1;
+                    self.quantifiable = false;
                 }
                 other => {
                     self.out.push(other);
                     self.index += 1;
+                    self.quantifiable = true;
                 }
             }
         }
         Ok(BreTranslation { pattern: self.out, warnings: self.warnings })
+    }
+
+    /// `{` with nothing before it to repeat, or a body that is not a valid
+    /// interval — `grep -E`'s leniency reads it as one literal character;
+    /// `sed -E`'s does not, so the raw `{` passes to the engine unchanged
+    /// and its own refusal stands, exactly as before this leniency existed.
+    fn literal_brace(&mut self) {
+        if self.lenient_operators {
+            self.out.push_str(r"\{");
+        } else {
+            self.out.push('{');
+        }
+        self.index += 1;
+        self.quantifiable = true;
+    }
+
+    /// `*`, `+`, or `?` with nothing before it to repeat. Same leniency
+    /// split as [`Self::literal_brace`].
+    fn literal_operator(&mut self, c: char) {
+        if self.lenient_operators {
+            let mut buffer = [0u8; 4];
+            self.out.push_str(&regex::escape(c.encode_utf8(&mut buffer)));
+        } else {
+            self.out.push(c);
+        }
+        self.index += 1;
+        self.quantifiable = true;
+    }
+
+    /// `self.index` is on `{` and a real atom precedes it. Reads ahead for a
+    /// GNU-shaped interval body (digits, at most one comma, closed by `}`);
+    /// a valid body with an omitted low bound (`{,5}`) is GNU's shorthand
+    /// for `{0,5}`, which the engine has no syntax for, so it is rewritten —
+    /// every other valid body passes through unchanged, already engine
+    /// syntax. A body that is not this shape falls back to
+    /// [`Self::literal_brace`]/[`Self::literal_operator`]'s leniency split,
+    /// the same as an unquantifiable operator — GNU reads `a{x}` and `a{1`
+    /// as the literal text `a{x}` and `a{1` too.
+    fn interval_or_literal_brace(&mut self) {
+        let start = self.index + 1;
+        let mut end = start;
+        while matches!(self.chars.get(end), Some(c) if c.is_ascii_digit() || *c == ',') {
+            end += 1;
+        }
+        let commas = self.chars[start..end].iter().filter(|&&c| c == ',').count();
+        let valid_shape = self.chars.get(end) == Some(&'}') && end > start && commas <= 1;
+        if !valid_shape {
+            self.literal_brace();
+            return;
+        }
+        let body: String = self.chars[start..end].iter().collect();
+        match body.strip_prefix(',') {
+            Some(rest) => {
+                self.out.push_str(&format!("{{0,{rest}}}"));
+            }
+            None => {
+                self.out.push('{');
+                self.out.push_str(&body);
+                self.out.push('}');
+            }
+        }
+        self.index = end + 1;
+        self.quantifiable = true;
     }
 
     /// Translate the escape after a backslash; `self.index` is on its second
@@ -600,14 +790,24 @@ impl EreTranslator {
         if is_ere_meta(next) {
             self.out.push('\\');
             self.out.push(next);
+            self.quantifiable = true;
             return Ok(());
         }
         match classify_gnu_escape(next) {
-            Some(GnuEscape::WordClass) | Some(GnuEscape::Boundary) => {
+            Some(GnuEscape::WordClass) => {
                 self.out.push('\\');
                 self.out.push(next);
+                self.quantifiable = true;
             }
-            Some(GnuEscape::Anchor(text)) => self.out.push_str(text),
+            Some(GnuEscape::Boundary) => {
+                self.out.push('\\');
+                self.out.push(next);
+                self.quantifiable = false;
+            }
+            Some(GnuEscape::Anchor(text)) => {
+                self.out.push_str(text);
+                self.quantifiable = false;
+            }
             Some(GnuEscape::Backreference) => {
                 return Err(refusal(
                     &self.tail,
@@ -620,6 +820,7 @@ impl EreTranslator {
                 let mut buffer = [0u8; 4];
                 self.out.push_str(&regex::escape(next.encode_utf8(&mut buffer)));
                 self.warnings.push(stray_warning(next));
+                self.quantifiable = true;
             }
         }
         Ok(())
@@ -745,8 +946,14 @@ impl GawkEreTranslator {
     /// [`posix_class_pattern`] the same as `gnu_bre_to_regex` and
     /// `translate_strict_ere` — the regex engine's own `[:alpha:]` is
     /// ASCII-only, where gawk in a UTF-8 locale is not. An unrecognized class
-    /// name is copied through unchanged, so the engine's own error names it.
-    /// `self.index` is just past `[`.
+    /// name refuses outright — confirmed against gawk 5.4.1:
+    /// `gawk '$0 ~ /[[:foo:]]/'` is a fatal "invalid character class name",
+    /// not a silent match against the six characters `:foo:`.  gawk's own
+    /// leniency for `[:name:]` written without its own brackets (a warning,
+    /// not a refusal — `grep`'s and `sed`'s shared [`bracket_expression`]
+    /// disagrees, see [`missing_class_brackets`]) is untouched: this
+    /// translator never reads that shape as anything but a plain bracket
+    /// set, matching gawk. `self.index` is just past `[`.
     fn bracket(&mut self) -> Result<(), String> {
         let unmatched = || {
             "unmatched `[` — close the bracket expression with `]`, or write \
@@ -772,18 +979,20 @@ impl GawkEreTranslator {
                         (None, _) => return Err(unmatched()),
                     }
                 }
-                let translated = (delimiter == ':')
-                    .then(|| {
-                        let body: String = self.chars[body_start..end].iter().collect();
-                        posix_class_pattern(&body)
-                    })
-                    .flatten();
-                match translated {
-                    Some(pattern) => self.out.push_str(pattern),
-                    None => {
-                        for &item in &self.chars[self.index..end + 2] {
-                            self.out.push(item);
+                if delimiter == ':' {
+                    let body: String = self.chars[body_start..end].iter().collect();
+                    match posix_class_pattern(&body) {
+                        Some(pattern) => self.out.push_str(pattern),
+                        None => {
+                            return Err(format!(
+                                "invalid character class `[:{body}:]` — use one of {}",
+                                POSIX_CLASSES.join(", "),
+                            ));
                         }
+                    }
+                } else {
+                    for &item in &self.chars[self.index..end + 2] {
+                        self.out.push(item);
                     }
                 }
                 self.index = end + 2;
@@ -1110,7 +1319,7 @@ mod tests {
         #[case] c: char,
         #[case] expect_class_translated: bool,
     ) {
-        let rewritten = translate_strict_ere(pattern, TEST_TAIL).expect("valid ERE").pattern;
+        let rewritten = translate_strict_ere(pattern, TEST_TAIL, true).expect("valid ERE").pattern;
         if expect_class_translated {
             assert_ne!(rewritten, pattern, "class should have translated: {pattern:?}");
             let re = regex::Regex::new(&rewritten).expect("translation compiles");
@@ -1121,12 +1330,21 @@ mod tests {
     }
 
     #[rstest]
-    // A malformed or unrecognized class is left exactly as written, so the
-    // engine's own error names it.
-    #[case("[[:bogus:]]")]
+    // A malformed bracket the engine's own error already names (here, an
+    // unclosed `[`) is left exactly as written.
     #[case("[unclosed")]
     fn strict_ere_leaves_malformed_brackets_alone(#[case] pattern: &str) {
-        assert_eq!(translate_strict_ere(pattern, TEST_TAIL).expect("valid ERE").pattern, pattern);
+        assert_eq!(translate_strict_ere(pattern, TEST_TAIL, true).expect("valid ERE").pattern, pattern);
+    }
+
+    /// An unrecognized class name always refuses — the engine would
+    /// otherwise read `[[:bogus:]]` as a plain set of the seven characters
+    /// `:bogus:`, matching text GNU refuses to compile at all.
+    #[test]
+    fn strict_ere_refuses_unrecognized_class_name() {
+        let message =
+            translate_strict_ere("[[:bogus:]]", TEST_TAIL, true).expect_err("GNU refuses this class name");
+        assert!(message.contains("bogus"), "{message}");
     }
 
     #[rstest]
@@ -1143,7 +1361,7 @@ mod tests {
     #[case(r"\<a\>", r"\b{start}a\b{end}")]
     #[case(r"\`a\'", r"\Aa\z")]
     fn strict_ere_leaves_gnu_extensions_alone(#[case] input: &str, #[case] expected: &str) {
-        let translation = translate_strict_ere(input, TEST_TAIL).expect("valid ERE");
+        let translation = translate_strict_ere(input, TEST_TAIL, true).expect("valid ERE");
         assert_eq!(translation.pattern, expected, "input {input:?}");
         assert!(translation.warnings.is_empty(), "input {input:?}");
     }
@@ -1170,7 +1388,7 @@ mod tests {
         #[case] expected: &str,
         #[case] warning: &str,
     ) {
-        let translation = translate_strict_ere(input, TEST_TAIL).expect("valid ERE");
+        let translation = translate_strict_ere(input, TEST_TAIL, true).expect("valid ERE");
         let re = regex::Regex::new(&translation.pattern).expect("translation compiles");
         assert!(re.is_match(expected), "{input:?} -> {:?} should match {expected:?}", translation.pattern);
         assert_eq!(translation.warnings, vec![warning.to_string()]);
@@ -1180,13 +1398,13 @@ mod tests {
     #[case(r"\1")]
     #[case(r"(a)\1")]
     fn strict_ere_refuses_back_references(#[case] input: &str) {
-        let message = translate_strict_ere(input, TEST_TAIL).expect_err("no back-reference support");
+        let message = translate_strict_ere(input, TEST_TAIL, true).expect_err("no back-reference support");
         assert!(message.contains("back-reference"), "{message}");
     }
 
     #[test]
     fn strict_ere_refuses_trailing_backslash() {
-        let message = translate_strict_ere(r"a\", TEST_TAIL).expect_err("trailing backslash");
+        let message = translate_strict_ere(r"a\", TEST_TAIL, true).expect_err("trailing backslash");
         assert!(message.contains("trailing backslash"), "{message}");
     }
 }

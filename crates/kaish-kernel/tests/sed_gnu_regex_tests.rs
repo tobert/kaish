@@ -407,6 +407,84 @@ async fn invalid_patterns_fail_like_gnu_sed(#[case] program: &str, #[case] named
     assert!(message.contains("-E/-r"), "names the ERE override: {message}");
 }
 
+// ─── `-E` does NOT share `grep -E`'s leniency for a bare operator ────────────
+//
+// `grep -E`'s strict-ERE translator now reads a `{`/`*`/`+`/`?` with nothing
+// to repeat as a literal character (`grep_gnu_bre_tests.rs`). `sed -E`
+// shares the same translator, but NOT this leniency: confirmed against
+// `/usr/bin/sed -E` 4.10 on the same patterns, sed's own regcomp refuses
+// every one of them, unchanged from before the leniency existed. Both
+// dialects DO share GNU's `{,m}` shorthand for `{0,m}` — that is a genuine
+// interval GNU sed also accepts, not part of the leniency split.
+
+#[rstest]
+#[case("s/{/X/")]
+#[case("s/a{/X/")]
+#[case("s/a{x}/X/")]
+#[case("s/a{1/X/")]
+#[case("s/{2}/X/")]
+#[case("s/^{/X/")]
+#[case("s/*a/X/")]
+#[case("s/(*a)/X/")]
+#[case("s/+a/X/")]
+#[case("s/?a/X/")]
+#[case("s/(+)/X/")]
+#[tokio::test]
+async fn extended_mode_still_refuses_a_bare_operator(#[case] program: &str) {
+    let (_dir, kernel) = fixture_kernel();
+    let result = kernel.execute(&format!("sed -E '{program}' fx.txt")).await;
+    let code = match result {
+        Err(_) => return, // validation caught it before the edit ran
+        Ok(result) => result.code,
+    };
+    assert_ne!(code, 0, "program {program:?} must still fail, like /usr/bin/sed -E");
+}
+
+/// GNU's `{,m}` shorthand for `{0,m}` works in `-E` mode too — the engine
+/// has no syntax for an omitted low bound, so it needs the same rewrite
+/// `grep -E` gets. Confirmed against `/usr/bin/sed -E`: `a{,2}` matches
+/// zero to two `a`s, same as `a{0,2}`.
+#[rstest]
+#[case("-E", "s/a{,2}/X/", "aa", "X")]
+#[case("-E", "s/a{,2}/X/", "b", "Xb")]
+#[tokio::test]
+async fn extended_mode_omitted_low_bound_is_gnu_shorthand(
+    #[case] flags: &str,
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_sed(flags, program, input).await;
+    assert_eq!(out, expected, "program {program:?}, input {input:?}");
+    assert_eq!(code, 0, "program {program:?}");
+}
+
+// ─── Unknown class names always refuse, in both dialects ─────────────────────
+//
+// `sed -E 's/[[:foo:]]/X/'` used to match — the strict-ERE translator left
+// an unrecognized class name exactly as written, letting the engine read it
+// as a plain bracket set instead of refusing the way GNU sed does.
+// `[:alpha:]` (no outer brackets) is a second, distinct GNU refusal;
+// confirmed against `/usr/bin/sed`/`/usr/bin/sed -E`, `LC_ALL=C.UTF-8`.
+
+#[rstest]
+#[case("", r#"s/[[:foo:]]/X/"#, "foo")] // GNU: Invalid character class name
+#[case("-E", r#"s/[[:foo:]]/X/"#, "foo")] // GNU: Invalid character class name
+#[case("", r#"s/[:alpha:]/X/"#, "space")] // GNU: character class syntax is [[:space:]], not [:space:]
+#[case("-E", r#"s/[:alpha:]/X/"#, "space")] // GNU: character class syntax is [[:space:]], not [:space:]
+#[tokio::test]
+async fn unrecognized_class_name_refuses(#[case] flags: &str, #[case] program: &str, #[case] named: &str) {
+    let (_dir, kernel) = fixture_kernel();
+    let message = match kernel.execute(&format!("sed {flags} '{program}' fx.txt")).await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_ne!(result.code, 0, "flags {flags:?}, program {program:?} must fail");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains(named), "flags {flags:?}, program {program:?}: {message}");
+}
+
 // ─── Known gaps: GNU sed behavior the regex engine cannot reach ──────────────
 
 /// GNU sed supports back-references (`\1` to `\9`) in the pattern itself

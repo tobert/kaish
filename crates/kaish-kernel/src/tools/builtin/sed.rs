@@ -748,7 +748,9 @@ fn expand_sed_control_escapes(pattern: &str) -> String {
 
 /// Compile a sed pattern in the caller's dialect: `-E`/`-r` is strict ERE,
 /// translated in full (classes and escapes both) by
-/// [`translate_strict_ere`] — the same translation `grep -E` uses; the
+/// [`translate_strict_ere`] — the same translation `grep -E` uses, except
+/// for `grep`'s leniency toward an operator with nothing to repeat, which
+/// `/usr/bin/sed -E` does not share (see that function's doc comment); the
 /// default reads GNU BRE, translated in full by [`gnu_bre_to_regex`] — the
 /// same translation `grep` uses without `-E`. GNU sed does not warn on a
 /// stray backslash the way GNU grep does in either dialect, confirmed
@@ -762,7 +764,10 @@ fn compile_sed_pattern(
 ) -> Result<Regex, String> {
     let pattern = expand_sed_control_escapes(pattern);
     let engine_pattern = if extended {
-        translate_strict_ere(&pattern, "")?.pattern
+        // Unlike `grep -E`, `/usr/bin/sed -E` refuses a `{`/`*`/`+`/`?` with
+        // nothing before it to repeat (its own regcomp error) rather than
+        // reading it as a literal character — confirmed on the same corpus.
+        translate_strict_ere(&pattern, "", false)?.pattern
     } else {
         gnu_bre_to_regex(&pattern, SED_BRE_REFUSAL_TAIL)?.pattern
     };

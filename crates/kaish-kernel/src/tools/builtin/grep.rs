@@ -163,7 +163,10 @@ fn engine_pattern(
         return Ok((regex::escape(pattern), Vec::new()));
     }
     if extended {
-        return translate_strict_ere(pattern, "")
+        // GNU grep reads a `{`/`*`/`+`/`?` with nothing before it to repeat
+        // as a literal character (confirmed against `/usr/bin/grep -E`) —
+        // `sed -E` does not share this leniency, see `translate_strict_ere`.
+        return translate_strict_ere(pattern, "", true)
             .map(|translation| (translation.pattern, translation.warnings))
             .map_err(|message| format!("grep: {message}"));
     }
