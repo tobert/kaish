@@ -1498,3 +1498,64 @@ shell_compat! {
     kaish_eq: "rc=1\nb\na",
     bash_eq: "rc=0",
 }
+
+// ---- Tilde expansion: only an UNQUOTED source word expands ----------------
+//
+// `shell_compat!`'s kaish side always runs `KernelConfig::transient()`,
+// which seeds no `HOME` (the kernel is hermetic — see `hermetic_home_tests.rs`).
+// So a BARE `~` is a genuine, documented divergence here (kaish leaves it
+// literal with no session `HOME`; bash reads the real host `$HOME`) — that is
+// a HOME-seeding difference, not the bug this suite is about. A QUOTED `~`
+// is what actually pins the fix: it must come out identical, `~`, on both
+// sides, regardless of `HOME` — the exact case that used to leak the home
+// directory through a quoted string.
+
+shell_compat! {
+    name: tilde_quoted_single_stays_literal,
+    script: "echo '~'",
+    eq: "~",
+}
+
+shell_compat! {
+    name: tilde_quoted_double_stays_literal,
+    script: "echo \"~\"",
+    eq: "~",
+}
+
+shell_compat! {
+    name: tilde_quoted_value_via_variable_stays_literal,
+    script: "x='~'; echo \"$x\"",
+    eq: "~",
+}
+
+shell_compat! {
+    name: tilde_quoted_path_stays_literal,
+    script: "echo '~/a'",
+    eq: "~/a",
+}
+
+// Documented divergence: kaish's `transient()` config has no `HOME` in
+// scope, so a bare `~` stays literal there; bash always has the real host
+// `$HOME`. Both sides still agree that it's the UNQUOTED form that would
+// expand — see `hermetic_home_tests.rs` for the same contract with `HOME`
+// actually seeded.
+shell_compat! {
+    name: tilde_bare_word_diverges_on_home_seeding,
+    script: "echo ~",
+    kaish_eq: "~",
+    bash_eq: &std::env::var("HOME").unwrap_or_default(),
+}
+
+// `~` only starts a tilde-prefix at the START of a word (bash: `foo~bar` is
+// one literal word, `~` has no special meaning mid-word). kaish has no
+// bareword-pasting rule at all, so an unquoted `~` glued to a preceding
+// word is a PARSE ERROR (`parser::tests` / `tilde_expansion_tests.rs`'s
+// `tilde_not_at_word_start_is_never_a_tilde_expansion` pin that directly) —
+// `shell_compat!`'s kaish side `.expect()`s a successful parse, so that
+// case can't run through this macro; quoting it, which both shells accept
+// and neither expands, is what's left to compare here.
+shell_compat! {
+    name: tilde_mid_word_quoted_is_never_an_expansion,
+    script: "echo \"foo~bar\"",
+    eq: "foo~bar",
+}
