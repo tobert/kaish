@@ -583,3 +583,73 @@ async fn fixed_strings_backslash_pipe_is_verbatim_text() {
     assert_eq!(code, 0, "verbatim text should match; out={out:?}");
     assert_eq!(out.trim(), "a\\|b", "only the backslash-pipe line: {out:?}");
 }
+
+// ─── `-E` reads the same GNU escape table as the default mode ────────────────
+//
+// `grep -E '\d'` matches the letter `d`, not the regex engine's own
+// Perl-style digit class — GNU's stray-backslash rule applies in ERE too.
+// `/usr/bin/grep` (GNU grep 3.12, `LC_ALL=C.UTF-8`) over [`FIXTURE`].
+
+#[rstest]
+#[case(r#"\d"#, 0, &[r#"d1"#])] // GNU: grep: warning: stray \ before d
+#[case(r#"\n"#, 0, &[r#"fn consult(q)"#, r#"nt"#])] // GNU: grep: warning: stray \ before n
+#[case(r#"\w+"#, 0, &[r#"fn consult(q)"#, r#"KjCaller { x }"#, r#"(foo|bar)"#, r#"foo"#, r#"bar"#, r#"a+b"#, r#"aab"#, r#"a?b"#, r#"b"#, r#"x{2}"#, r#"xx"#, r#"a|b"#, r#"*foo"#, r#"a^b"#, r#"a$b"#, r#"a.b"#, r#"axb"#, r#"ab"#, r#"a\b"#, r#"x[y"#, r#"a&b"#, r#"a~b"#, r#"w-x"#, r#"foo bar"#, r#"foobar"#, r#"a]b"#, r#"d1"#, r#"123"#, r#"nt"#, r#"a}b"#, r#"+a"#, r#"aaa"#, r#"a"b"#, r#"FOO"#])]
+#[case(r#"\<bar"#, 0, &[r#"(foo|bar)"#, r#"bar"#, r#"foo bar"#])]
+#[case(r#"bar\>"#, 0, &[r#"(foo|bar)"#, r#"bar"#, r#"foo bar"#, r#"foobar"#])]
+#[case(r#"a\+b"#, 0, &[r#"a+b"#])] // escaped ERE meta is already literal, no warning
+#[tokio::test]
+async fn extended_mode_reads_the_same_gnu_escapes(
+    #[case] pattern: &str,
+    #[case] gnu_code: i64,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = fixture_kernel();
+    let (out, code) = run(&kernel, &format!("grep -E '{pattern}' fx.txt")).await;
+    assert_eq!(lines(&out), gnu_lines, "pattern {pattern:?}");
+    assert_eq!(code, gnu_code, "pattern {pattern:?}");
+}
+
+/// `-E`'s stray-backslash warning: same text as the default mode.
+#[rstest]
+#[case(r"\d", r"grep: warning: stray \ before d", &["d1"])]
+#[case(r"\-", r"grep: warning: stray \ before -", &["w-x"])]
+#[tokio::test]
+async fn extended_mode_stray_backslash_warns_like_gnu_grep(
+    #[case] pattern: &str,
+    #[case] gnu_stderr: &str,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = fixture_kernel();
+    let result = kernel
+        .execute(&format!("grep -E '{pattern}' fx.txt"))
+        .await
+        .expect("a stray backslash is a warning, not an error");
+    assert_eq!(lines(result.text_out().trim()), gnu_lines, "pattern {pattern:?}");
+    assert_eq!(result.err.trim(), gnu_stderr, "pattern {pattern:?}");
+}
+
+/// `-E` back-references (`\1`): refused, the same gap the default mode
+/// documents — the regex engine has no back-references in any dialect.
+#[tokio::test]
+async fn extended_mode_refuses_back_references() {
+    let (_dir, kernel) = fixture_kernel();
+    let message = match kernel.execute(r#"grep -E '(o)\1' fx.txt"#).await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_eq!(result.code, 2, "must fail with exit 2");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains("back-reference"), "{message}");
+}
+
+/// GNU grep's ERE back-references are a GNU extension: `(o)\1` matches
+/// "foo|bar" the way "oo" is a repeated group. The regex engine has none.
+#[tokio::test]
+#[ignore = "gap: GNU ERE back-references; the regex crate has no back-references"]
+async fn gap_extended_mode_back_references_match_like_gnu_grep() {
+    let (_dir, kernel) = fixture_kernel();
+    let (out, code) = run(&kernel, r#"grep -E '(o)\1' fx.txt"#).await;
+    assert_eq!(lines(&out), &["(foo|bar)", "foo", "*foo", "foo bar", "foobar"]);
+    assert_eq!(code, 0);
+}

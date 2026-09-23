@@ -170,6 +170,122 @@ async fn control_escapes_are_real_characters(
     assert_eq!(code, 0, "program {program:?}");
 }
 
+// ─── `-E`/`-r` reads the same GNU escape table as the default mode ───────────
+//
+// `sed -E 's/\d/X/'` matches the letter `d`, not the regex engine's own
+// Perl-style digit class. Confirmed against `/usr/bin/sed` 4.10,
+// `LC_ALL=C.UTF-8`. Unlike `grep -E`, GNU sed prints no stray-backslash
+// warning in either dialect.
+
+#[rstest]
+#[case("-E", r"s/\d/X/", "adb", "aXb")]
+#[case("-E", r"s/\w/X/g", "a3b", "XXX")]
+#[case("-E", r"s/\<foo\>/X/", "a foo b", "a X b")]
+#[case("-E", r"s/a\+b/X/", "a+b", "X")] // an escaped ERE meta is already literal
+#[case("-E", r"s/a\-b/X/", "a-b", "X")]
+#[tokio::test]
+async fn extended_mode_reads_the_same_gnu_escapes(
+    #[case] flags: &str,
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_sed(flags, program, input).await;
+    assert_eq!(out, expected, "program {program:?}, input {input:?}");
+    assert_eq!(code, 0, "program {program:?}");
+}
+
+/// `-E` back-references: GNU sed runs `(a)\1` as a GNU ERE extension when a
+/// group precedes it, and refuses `\1` outright when none does.
+#[rstest]
+#[case(r"s/(a)\1/X/")]
+#[case(r"s/\1/X/")]
+#[tokio::test]
+async fn extended_mode_back_reference_is_refused(#[case] program: &str) {
+    let (_dir, kernel) = fixture_kernel();
+    let message = match kernel.execute(&format!("sed -E '{program}' fx.txt")).await {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_ne!(result.code, 0, "program {program:?} must fail");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains("back-reference"), "program {program:?}: {message}");
+}
+
+/// GNU sed's ERE back-references are a GNU extension: `(a)\1` matches "aa".
+/// The regex engine has none in any dialect.
+#[tokio::test]
+#[ignore = "gap: GNU ERE back-references in the pattern; the regex crate has no back-references"]
+async fn gap_extended_mode_back_reference_matches_like_gnu_sed() {
+    let (out, code) = run_sed("-E", r"s/(a)\1/X/", "aa").await;
+    assert_eq!(out, "X");
+    assert_eq!(code, 0);
+}
+
+// ─── Bracket expressions: GNU sed's control escapes reach inside `[...]` ──────
+//
+// `sed 's/[\t]/X/'` matches a TAB, not a class of `\` or `t` — GNU sed reads
+// `\n \t \r \a \f \v` the same way inside a bracket expression as outside
+// one, in both dialects. kaish already gets this right: `\t` and its
+// siblings are expanded to the real control byte by
+// `expand_sed_control_escapes` *before* the bracket is even parsed, so the
+// bracket reader — grep's, reused as-is — never sees the backslash. Locked
+// in here since it was previously exercised only outside brackets.
+
+#[rstest]
+#[case("", r"s/[\t]/X/", "a\tb", "aXb")]
+#[case("-E", r"s/[\t]/X/", "a\tb", "aXb")]
+#[tokio::test]
+async fn bracket_control_escapes_are_real_characters(
+    #[case] flags: &str,
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_sed(flags, program, input).await;
+    assert_eq!(out, expected, "program {program:?}");
+    assert_eq!(code, 0, "program {program:?}");
+}
+
+/// `[\-] [\\] [\]]` inside a bracket read exactly like `grep`'s: no
+/// escaping happens there at all, so each backslash is its own literal
+/// class member alongside the character after it. Confirmed against
+/// `/usr/bin/sed`: `[\-]` matches a bare backslash *and* a dash.
+#[rstest]
+#[case(r"s/[\-]/X/", "a\\b", "aXb")]
+#[case(r"s/[\-]/X/", "a-b", "aXb")]
+#[case(r"s/[\\]/X/", "a\\b", "aXb")]
+#[tokio::test]
+async fn bracket_non_control_escapes_match_gnu_sed_literally(
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_sed("", program, input).await;
+    assert_eq!(out, expected, "program {program:?}, input {input:?}");
+    assert_eq!(code, 0, "program {program:?}");
+}
+
+/// GNU sed's `\dNNN`/`\oNNN`/`\xHH`/`\cX` decimal/octal/hex/control escapes
+/// (documented gap: `expand_sed_control_escapes` covers `\n \t \r \a \f \v`
+/// only) leave a visible trace even with no digits: bare `[\d]` drops the
+/// backslash and matches only the letter `d`, not `\` or `d`. Confirmed
+/// against `/usr/bin/sed`: `[\d]` against a lone backslash does not match.
+#[tokio::test]
+#[ignore = "gap: GNU sed's \\dNNN/\\oNNN/\\xHH/\\cX escapes are not implemented; \
+            bare \\d degenerates to dropping the backslash"]
+async fn gap_bracket_unrecognized_decimal_escape_drops_backslash_like_gnu_sed() {
+    let (out, code) = run_sed("", r"s/[\d]/X/", "adb").await;
+    assert_eq!(out, "aXb");
+    assert_eq!(code, 0);
+
+    // The backslash itself must NOT be part of the class.
+    let (out, code) = run_sed("", r"s/[\d]/X/", "a\\b").await;
+    assert_eq!(out, "a\\b", "backslash must not match once GNU's \\d wins");
+    assert_eq!(code, 0);
+}
+
 /// A custom delimiter's escaped form is always literal, even when that
 /// character also has a BRE meaning — the delimiter rule wins.
 #[rstest]
