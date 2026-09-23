@@ -157,6 +157,54 @@ async fn backslash_d_is_the_literal_letter_not_a_digit_class(
     assert_eq!(code, 0);
 }
 
+// ─── POSIX bracket classes are Unicode-aware ──────────────────────────────────
+//
+// The regex engine's own `[[:alpha:]]` support is ASCII-only; gawk in a
+// UTF-8 locale is not, and reads the same glibc class table grep and sed do.
+// `gawk` (GNU Awk 5.4.1), `LC_ALL=C.UTF-8`, over
+// `héllo日本語٣ 0␠x　y３「line」` (␠ = U+00A0 NBSP): `alpha` also takes the
+// Arabic-Indic digit `٣` and the fullwidth `３` (the glibc quirk shared with
+// `grep`'s and `sed`'s tables) but not ASCII `0`; `digit` stays ASCII-only;
+// `space` takes the ideographic space U+3000 but not the NBSP, which glibc
+// classifies `[:punct:]` instead.
+#[rstest]
+#[case(
+    "alpha",
+    "X",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "XXXXXXXXX 0\u{a0}X\u{3000}XX\u{300c}XXXX\u{300d}"
+)]
+#[case(
+    "digit",
+    "D",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} D\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}"
+)]
+#[case(
+    "space",
+    "_",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663}_0\u{a0}x_y\u{ff13}\u{300c}line\u{300d}"
+)]
+#[case(
+    "punct",
+    "P",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0Px\u{3000}y\u{ff13}PlineP"
+)]
+#[tokio::test]
+async fn posix_classes_are_unicode_aware_like_gawk(
+    #[case] class: &str,
+    #[case] replacement: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let program = format!(r#"{{gsub(/[[:{class}:]]/,"{replacement}"); print}}"#);
+    let (out, code) = run_awk(&program, input).await;
+    assert_eq!(out, expected, "class {class:?}, input {input:?}");
+    assert_eq!(code, 0);
+}
+
 // ─── FS / split(): a raw one-char separator is literal, longer is an ERE ─────
 
 #[tokio::test]

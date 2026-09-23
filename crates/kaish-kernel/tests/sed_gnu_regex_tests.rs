@@ -101,6 +101,57 @@ async fn extended_mode_is_strict_ere(
     assert_eq!(code, 0, "program {program:?}");
 }
 
+/// `-E`'s POSIX bracket classes are Unicode-aware, matching GNU sed in a
+/// UTF-8 locale — the engine's own `[[:alpha:]]` support is ASCII-only.
+/// `/usr/bin/sed` 4.10, `LC_ALL=C.UTF-8`, over
+/// `héllo日本語٣ 0␠x　y３「line」` (␠ = U+00A0 NBSP, between the two
+/// `[:space:]`-vs-`[:punct:]` cases): `alpha` also takes the Arabic-Indic
+/// digit `٣` (a glibc quirk shared with `grep`'s table) but not ASCII `0`;
+/// `digit` stays ASCII-only either dialect; `space` takes the ideographic
+/// space U+3000 but not the NBSP, which glibc classifies `[:punct:]` instead.
+#[rstest]
+#[case(
+    "-E",
+    "s/[[:alpha:]]/X/g",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "XXXXXXXXX 0\u{a0}X\u{3000}XX\u{300c}XXXX\u{300d}"
+)]
+#[case(
+    "-E",
+    "s/[[:digit:]]/D/g",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} D\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}"
+)]
+#[case(
+    "-E",
+    "s/[[:space:]]/_/g",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663}_0\u{a0}x_y\u{ff13}\u{300c}line\u{300d}"
+)]
+#[case(
+    "-E",
+    "s/[[:punct:]]/P/g",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0Px\u{3000}y\u{ff13}PlineP"
+)]
+#[case(
+    "-r",
+    "s/[[:alpha:]]/X/g",
+    "h\u{e9}llo\u{65e5}\u{672c}\u{8a9e}\u{663} 0\u{a0}x\u{3000}y\u{ff13}\u{300c}line\u{300d}",
+    "XXXXXXXXX 0\u{a0}X\u{3000}XX\u{300c}XXXX\u{300d}"
+)]
+#[tokio::test]
+async fn extended_mode_posix_classes_are_unicode_aware(
+    #[case] flags: &str,
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_sed(flags, program, input).await;
+    assert_eq!(out, expected, "program {program:?}, input {input:?}");
+    assert_eq!(code, 0, "program {program:?}");
+}
+
 /// GNU sed reads `\n \t \r` as real control characters, not "stray \n"
 /// literal letters — the opposite of GNU grep. `\n` matters most: it is
 /// what lets a pattern match across the two lines `N` joins.

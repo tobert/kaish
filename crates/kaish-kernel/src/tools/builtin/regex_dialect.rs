@@ -20,13 +20,17 @@
 //!   the engine's (a bare `{` that isn't digit-led, `\b`, `\y`, `\<`, `\>`,
 //!   `` \` ``, `\'`, `\d`, `\D`). `tests/awk_gnu_regex_tests.rs` records
 //!   gawk's output.
-//! - [`rewrite_posix_classes`] is `grep -E`'s pass: only `[...]` interiors
-//!   change, using the same [`posix_class_pattern`] table `gnu_bre_to_regex`
-//!   uses, since strict ERE otherwise passes straight through.
+//! - [`rewrite_posix_classes`] is `grep -E`'s and `sed -E`/`-r`'s pass: only
+//!   `[...]` interiors change, using the same [`posix_class_pattern`] table
+//!   `gnu_bre_to_regex` uses, since strict ERE otherwise passes straight
+//!   through.
 //!
-//! Both bracket-expression translators route `[:alpha:]` and its eleven
-//! siblings through [`posix_class_pattern`], the regex engine's own
-//! `[:alpha:]` being ASCII-only where GNU grep in a UTF-8 locale is not.
+//! Every bracket-expression translator — `gnu_bre_to_regex`,
+//! `rewrite_posix_classes`, and `gawk_ere_to_regex`'s own bracket handling —
+//! routes `[:alpha:]` and its eleven siblings through [`posix_class_pattern`],
+//! the regex engine's own `[:alpha:]` being ASCII-only where GNU grep, GNU
+//! sed, and gawk in a UTF-8 locale are not; all three agree on the same
+//! glibc class table.
 
 /// A GNU BRE rewritten into the regex engine's syntax, with the warnings GNU
 /// grep prints for it (`stray \ before d`), without the `grep: warning: `
@@ -59,6 +63,9 @@ const POSIX_CLASSES: &[&str] = &[
 /// regex engine's own `[:alpha:]` support, which is ASCII-only —
 /// `[[:alpha:]]` must match `日本語テキスト`, not just `héllo wörld`.
 /// `tests/grep_gnu_bre_tests.rs` records the corpus this was checked against.
+/// `/usr/bin/sed` 4.10 and gawk 5.4.1 read the same glibc locale data and
+/// agree with grep on every class in the corpus — `tests/sed_gnu_regex_tests.rs`
+/// and `tests/awk_gnu_regex_tests.rs` record the same table for them.
 ///
 /// Two real GNU/glibc quirks ride along, confirmed against 57 Unicode code
 /// points spanning every general category before landing on this table:
@@ -75,8 +82,8 @@ const POSIX_CLASSES: &[&str] = &[
 /// `[:cntrl:]` (Unicode calls it `Zl`, not `Cc`), and `-i` on `[:upper:]` or
 /// `[:lower:]` becomes `[:alpha:]` in glibc — neither is in the corpus this
 /// gap was found from, and the second would need the case-fold flag threaded
-/// into this translation, which the sed/awk branch stacked on this one
-/// depends on staying out of `gnu_bre_to_regex`'s signature.
+/// into this translation, which `sed`'s and `awk`'s own class rewrites
+/// depend on staying out of `gnu_bre_to_regex`'s signature.
 fn posix_class_pattern(name: &str) -> Option<&'static str> {
     Some(match name {
         "alpha" => r"[\p{Alphabetic}[\p{Nd}--0-9]]",
@@ -591,11 +598,16 @@ impl GawkEreTranslator {
         Ok(())
     }
 
-    /// Copy a bracket expression `[...]` through unchanged onto `self.out`:
-    /// gawk's bracket rules already match the engine's (ranges, `[:class:]`,
-    /// `[.c.]`, `[=c=]`, and a backslash still escapes the next character —
-    /// unlike POSIX BRE/ERE, `[\]abc]` is one class matching `]`, `a`, `b`,
-    /// `c`, a GNU extension). `self.index` is just past `[`.
+    /// Copy a bracket expression `[...]` through onto `self.out`: gawk's
+    /// bracket rules already match the engine's (ranges, `[.c.]`, `[=c=]`,
+    /// and a backslash still escapes the next character — unlike POSIX
+    /// BRE/ERE, `[\]abc]` is one class matching `]`, `a`, `b`, `c`, a GNU
+    /// extension), except `[:class:]`, rewritten through
+    /// [`posix_class_pattern`] the same as `gnu_bre_to_regex` and
+    /// `rewrite_posix_classes` — the regex engine's own `[:alpha:]` is
+    /// ASCII-only, where gawk in a UTF-8 locale is not. An unrecognized class
+    /// name is copied through unchanged, so the engine's own error names it.
+    /// `self.index` is just past `[`.
     fn bracket(&mut self) -> Result<(), String> {
         let unmatched = || {
             "unmatched `[` — close the bracket expression with `]`, or write \
@@ -621,8 +633,19 @@ impl GawkEreTranslator {
                         (None, _) => return Err(unmatched()),
                     }
                 }
-                for &item in &self.chars[self.index..end + 2] {
-                    self.out.push(item);
+                let translated = (delimiter == ':')
+                    .then(|| {
+                        let body: String = self.chars[body_start..end].iter().collect();
+                        posix_class_pattern(&body)
+                    })
+                    .flatten();
+                match translated {
+                    Some(pattern) => self.out.push_str(pattern),
+                    None => {
+                        for &item in &self.chars[self.index..end + 2] {
+                            self.out.push(item);
+                        }
+                    }
                 }
                 self.index = end + 2;
                 first = false;

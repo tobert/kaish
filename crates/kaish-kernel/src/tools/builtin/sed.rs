@@ -16,7 +16,7 @@ use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
-use crate::tools::builtin::regex_dialect::gnu_bre_to_regex;
+use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, rewrite_posix_classes};
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
@@ -747,7 +747,9 @@ fn expand_sed_control_escapes(pattern: &str) -> String {
 }
 
 /// Compile a sed pattern in the caller's dialect: `-E`/`-r` is strict ERE,
-/// passed straight to the engine; the default reads GNU BRE, translated by
+/// with only its `[...]` classes rewritten by [`rewrite_posix_classes`] — the
+/// regex engine's own `[:alpha:]` is ASCII-only, where GNU sed in a UTF-8
+/// locale is not; the default reads GNU BRE, translated in full by
 /// [`gnu_bre_to_regex`] — the same translation `grep` uses without `-E`. GNU
 /// sed does not warn on a stray backslash the way GNU grep does, so the
 /// translation's warnings are discarded here.
@@ -759,7 +761,7 @@ fn compile_sed_pattern(
 ) -> Result<Regex, String> {
     let pattern = expand_sed_control_escapes(pattern);
     let engine_pattern = if extended {
-        pattern
+        rewrite_posix_classes(&pattern)
     } else {
         gnu_bre_to_regex(&pattern, SED_BRE_REFUSAL_TAIL)?.pattern
     };
