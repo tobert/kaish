@@ -56,6 +56,35 @@ fn lines(out: &str) -> Vec<&str> {
     out.lines().collect()
 }
 
+/// The differential-test corpus (Latin diacritics, CJK) that found the POSIX
+/// bracket-class gap: the regex engine's own `[[:alpha:]]` is ASCII-only,
+/// GNU grep in a UTF-8 locale is not.
+const UNICODE_ALPHA_FIXTURE: &[&str] = &["héllo wörld", "日本語テキスト"];
+
+/// Non-ASCII coverage for every bracket class: a non-ASCII letter, an ASCII
+/// and a non-ASCII digit script, non-ASCII punctuation, a non-breaking space
+/// (glibc classifies it `[:punct:]`, not `[:space:]`), an ideographic space
+/// (which IS `[:space:]`), and a combining mark (also `[:punct:]`).
+const UNICODE_CLASS_FIXTURE: &[&str] = &[
+    "héllo wörld",
+    "日本語テキスト",
+    "abc123 ABC",
+    "\u{0663} \u{FF13}",             // Arabic-Indic 3, fullwidth 3
+    "「line」\u{2014} \u{00BF}",     // corner brackets, em dash, inverted question
+    "a\u{00A0}b",                    // U+00A0 NO-BREAK SPACE
+    "a\u{3000}b",                    // U+3000 IDEOGRAPHIC SPACE
+    "cafe\u{0301} bar",              // "e" + U+0301 COMBINING ACUTE ACCENT
+];
+
+fn unicode_fixture_kernel(corpus: &[&str]) -> (tempfile::TempDir, Kernel) {
+    let dir = tempdir().unwrap();
+    let mut text = corpus.join("\n");
+    text.push('\n');
+    fs::write(dir.path().join("fx.txt"), text).unwrap();
+    let kernel = kernel_at(dir.path());
+    (dir, kernel)
+}
+
 /// GNU grep's output for `grep FLAGS -e PATTERN fx.txt`, row by row.
 #[rstest]
 #[case(r#""#, r#"fn consult("#, 0, &[r#"fn consult(q)"#])]
@@ -291,6 +320,138 @@ async fn gap_only_matching_prefers_longest_alternative(
     let (out, code) = run(&kernel, &format!("grep {flags} '{pattern}' fx.txt")).await;
     assert_eq!(lines(&out), gnu_lines);
     assert_eq!(code, gnu_code);
+}
+
+// ─── POSIX bracket classes are Unicode-aware ──────────────────────────────────
+//
+// The regex engine's own `[[:alpha:]]` support is ASCII-only; GNU grep in a
+// UTF-8 locale is not. `alpha`/`alnum` also match a non-ASCII decimal digit
+// (glibc classifies every Unicode `Nd` character but the ASCII range as
+// alphabetic — a real quirk, confirmed against GNU grep 3.12, that this
+// mirrors); `digit` itself stays ASCII-only either way. `space`/`blank`
+// exclude U+00A0/U+2007/U+202F, which glibc classifies `[:punct:]` instead.
+
+/// `grep 'a|b'` on the differential-test corpus (issue: `[[:alpha:]]` matched
+/// `héllo wörld` but not `日本語テキスト`).
+#[rstest]
+#[case(r#""#, r#"[[:alpha:]]"#, 0, UNICODE_ALPHA_FIXTURE)]
+#[case(r#"-E"#, r#"[[:alpha:]]"#, 0, UNICODE_ALPHA_FIXTURE)]
+#[tokio::test]
+async fn alpha_class_matches_gnu_grep_on_non_ascii_letters(
+    #[case] flags: &str,
+    #[case] pattern: &str,
+    #[case] gnu_code: i64,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = unicode_fixture_kernel(UNICODE_ALPHA_FIXTURE);
+    let (out, code) = run(&kernel, &format!("grep {flags} '{pattern}' fx.txt")).await;
+    assert_eq!(lines(&out), gnu_lines, "pattern {pattern:?}");
+    assert_eq!(code, gnu_code, "pattern {pattern:?}");
+}
+
+/// `grep -o '[[:alpha:]]'`: GNU emits each non-ASCII letter on its own line,
+/// skipping the space and every digit.
+#[tokio::test]
+async fn alpha_class_extracts_non_ascii_letters_like_gnu_grep() {
+    let (_dir, kernel) = unicode_fixture_kernel(UNICODE_ALPHA_FIXTURE);
+    let (out, code) = run(&kernel, r#"grep -o '[[:alpha:]]' fx.txt"#).await;
+    assert_eq!(code, 0);
+    assert_eq!(
+        lines(&out),
+        &[
+            "h", "é", "l", "l", "o", "w", "ö", "r", "l", "d", "日", "本", "語", "テ", "キ", "ス",
+            "ト",
+        ],
+    );
+}
+
+/// `grep -o '[[:alpha:]]\{3\}'`: an interval over a Unicode-aware class,
+/// matching GNU byte for byte (`hél`/`wör`, `日本語`/`テキス`).
+#[tokio::test]
+async fn alpha_class_interval_matches_gnu_grep() {
+    let (_dir, kernel) = unicode_fixture_kernel(UNICODE_ALPHA_FIXTURE);
+    let (out, code) = run(&kernel, r#"grep -o '[[:alpha:]]\{3\}' fx.txt"#).await;
+    assert_eq!(code, 0);
+    assert_eq!(lines(&out), &["hél", "wör", "日本語", "テキス"]);
+}
+
+/// `-i '[[:upper:]]'` case-folds a non-ASCII letter, as GNU does: `héllo
+/// wörld` matches because `é`/`ö` fold to letters `[:upper:]` recognizes.
+///
+/// Not a full GNU match: glibc's `-i` additionally widens `[:upper:]`/
+/// `[:lower:]` to `[:alpha:]` outright, so GNU also matches the all-CJK line
+/// (case-less, so no fold reaches it). Replicating that would mean passing
+/// `ignore_case` into the class translation, which the sed/awk branch
+/// stacked on this one needs `gnu_bre_to_regex`'s signature to not grow.
+#[tokio::test]
+async fn upper_class_case_folds_non_ascii_letters_like_gnu_grep() {
+    let (_dir, kernel) = unicode_fixture_kernel(UNICODE_ALPHA_FIXTURE);
+    let (out, code) = run(&kernel, r#"grep -i '[[:upper:]]' fx.txt"#).await;
+    assert_eq!(code, 0);
+    assert_eq!(lines(&out), &[UNICODE_ALPHA_FIXTURE[0]]);
+}
+
+/// GNU grep's output for the wider bracket-class table, row by row.
+#[rstest]
+// `[[:alpha:]]` matches every line, including the digit-script line — GNU
+// classifies a non-ASCII decimal digit as alphabetic too (glibc quirk).
+#[case(r#""#, r#"[[:alpha:]]"#, 0, UNICODE_CLASS_FIXTURE)]
+#[case(r#"-E"#, r#"[[:alpha:]]"#, 0, UNICODE_CLASS_FIXTURE)]
+// `[:digit:]` stays ASCII-only: neither the Arabic-Indic nor the fullwidth
+// digit matches, only the ASCII `123`.
+#[case(r#""#, r#"[[:digit:]]"#, 0, &[r#"abc123 ABC"#])]
+// Negation: every line has a non-letter somewhere except the all-CJK line.
+#[case(r#""#, r#"[^[:alpha:]]"#, 0, &[r#"héllo wörld"#, r#"abc123 ABC"#, "\u{0663} \u{FF13}", "「line」\u{2014} \u{00BF}", "a\u{00A0}b", "a\u{3000}b", "cafe\u{0301} bar"])]
+// `[:space:]`/`[:blank:]`: the ideographic space counts, the no-break space
+// does not (both match the same lines here; they differ on vertical
+// whitespace GNU treats as `[:space:]` only, not covered by this fixture).
+#[case(r#""#, r#"[[:space:]]"#, 0, &[r#"héllo wörld"#, r#"abc123 ABC"#, "\u{0663} \u{FF13}", "「line」\u{2014} \u{00BF}", "a\u{3000}b", "cafe\u{0301} bar"])]
+#[case(r#""#, r#"[[:blank:]]"#, 0, &[r#"héllo wörld"#, r#"abc123 ABC"#, "\u{0663} \u{FF13}", "「line」\u{2014} \u{00BF}", "a\u{3000}b", "cafe\u{0301} bar"])]
+// `[:punct:]`: corner brackets/dash/question, the no-break space (glibc
+// quirk), and the combining mark.
+#[case(r#""#, r#"[[:punct:]]"#, 0, &["「line」\u{2014} \u{00BF}", "a\u{00A0}b", "cafe\u{0301} bar"])]
+#[tokio::test]
+async fn bracket_classes_match_gnu_grep_on_non_ascii_corpus(
+    #[case] flags: &str,
+    #[case] pattern: &str,
+    #[case] gnu_code: i64,
+    #[case] gnu_lines: &[&str],
+) {
+    let (_dir, kernel) = unicode_fixture_kernel(UNICODE_CLASS_FIXTURE);
+    let (out, code) = run(&kernel, &format!("grep {flags} '{pattern}' fx.txt")).await;
+    assert_eq!(lines(&out), gnu_lines, "pattern {pattern:?}");
+    assert_eq!(code, gnu_code, "pattern {pattern:?}");
+}
+
+/// A class mixed with an explicit range and `_`: `[[:alpha:]0-9_]\+` joins
+/// letters and ASCII digits into one run, unlike `[[:alpha:]]` alone, which
+/// would split `abc123` at the digits.
+#[tokio::test]
+async fn alpha_class_mixed_with_range_and_underscore_matches_gnu_grep() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("fx.txt"), "abc123 ABC\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, r#"grep -o '[[:alpha:]0-9_]\+' fx.txt"#).await;
+    assert_eq!(code, 0);
+    assert_eq!(lines(&out), &["abc123", "ABC"]);
+}
+
+/// Known gap: a combining mark (`e` + U+0301) is a word character for the
+/// regex engine's `\w`/`\b` (Unicode `\p{Mark}` continues a word) but not for
+/// glibc's (not alphanumeric, so it ends one). GNU's `-w cafe` matches
+/// `cafe` before the mark; kaish's does not, since the engine sees no
+/// boundary there.
+#[tokio::test]
+#[ignore = "gap: a combining mark is a \\w character for the regex engine, not for glibc"]
+async fn gap_word_boundary_before_combining_mark_matches_gnu_grep() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("fx.txt"), "cafe\u{0301} bar\n").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, r#"grep -wo 'cafe' fx.txt"#).await;
+    assert_eq!(code, 0);
+    assert_eq!(lines(&out), &["cafe"]);
 }
 
 // ─── Scenarios ───────────────────────────────────────────────────────────────
