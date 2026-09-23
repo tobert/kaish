@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    PipelineStage, Program, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
+    PipelineStage, Program, RedirectKind, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
     VarSegment,
     WhileLoop,
     Value,
@@ -335,6 +335,53 @@ impl<'a> Validator<'a> {
         // Validate redirects
         for redirect in &cmd.redirects {
             self.validate_expr(&redirect.target);
+        }
+        self.validate_redirect_input_is_output(cmd);
+    }
+
+    /// `sort < f > f`: the output's truncation would empty the input before
+    /// the command reads it. Only two literal spellings of one path are
+    /// visible here; the runtime compares resolved paths.
+    fn validate_redirect_input_is_output(&mut self, cmd: &Command) {
+        fn literal_path(expr: &Expr) -> Option<&str> {
+            match expr {
+                Expr::Literal(Value::String(path)) => Some(path),
+                _ => None,
+            }
+        }
+        fn same_path(a: &str, b: &str) -> bool {
+            let significant = |path: &str| {
+                std::path::Path::new(path)
+                    .components()
+                    .filter(|c| *c != std::path::Component::CurDir)
+                    .map(|c| c.as_os_str().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            significant(a) == significant(b)
+        }
+        let inputs: Vec<&str> = cmd
+            .redirects
+            .iter()
+            .filter(|r| r.kind == RedirectKind::Stdin)
+            .filter_map(|r| literal_path(&r.target))
+            .collect();
+        for redirect in &cmd.redirects {
+            let is_output = matches!(
+                redirect.kind,
+                RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend | RedirectKind::Stderr | RedirectKind::Both
+            );
+            if let (true, Some(path)) = (is_output, literal_path(&redirect.target))
+                && inputs.iter().any(|input| same_path(input, path))
+            {
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::RedirectInputIsOutput,
+                        crate::scheduler::pipeline::same_file_message(path, &redirect.kind),
+                    )
+                    .with_command(cmd.name.clone()),
+                );
+                return;
+            }
         }
     }
 
