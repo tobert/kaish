@@ -167,7 +167,10 @@ impl Tool for Ls {
                         errors.push(one.err.trim_end().to_string());
                     }
                     if one.code != 0 {
-                        code = one.code;
+                        // Worst, not last: `list_one` only fails operationally
+                        // today, but last-wins would drop a usage 2 behind a
+                        // later operand's 1 the moment one is added.
+                        code = code.max(one.code);
                     }
                     let chunk = one.text_out();
                     if !chunk.trim().is_empty() {
@@ -368,6 +371,10 @@ impl Ls {
         // Stat each match and build DirEntry list for sorting/formatting
         let mut entries: Vec<(String, DirEntry)> = Vec::new();
         let mut error_text = String::new();
+        // Worst, not a flat 1: every failure here happens to be operational
+        // today, but tracking the max keeps this arm honest with the -R
+        // arm's aggregation the moment one of them isn't.
+        let mut code = 0i64;
         for name in &names {
             let abs = ctx.resolve_path(name);
             // lstat: an operand that is a link renders as the link.
@@ -376,6 +383,7 @@ impl Ls {
                 Err(e) => {
                     if report_missing {
                         error_text.push_str(&format!("ls: cannot access '{}': {}\n", name, e));
+                        code = code.max(1);
                     }
                     // else: file disappeared between walk and stat; skip it
                 }
@@ -447,7 +455,7 @@ impl Ls {
         // even though the readable operands still list successfully.
         if !error_text.is_empty() {
             result.err.push_str(&error_text);
-            result.code = 1;
+            result.code = code;
         }
         result
     }
@@ -862,6 +870,17 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(!result.ok());
+        // `MemoryFs` phrases its own `io::Error` as "not found: <path>",
+        // matching `BackendError::NotFound`'s `#[error(...)]` text; the
+        // conversion used to double it into "not found: not found:
+        // /nonexistent". One occurrence only.
+        assert_eq!(
+            result.err.matches("not found").count(),
+            1,
+            "doubled phrase: {}",
+            result.err
+        );
+        assert!(result.err.contains("not found: nonexistent"), "{}", result.err);
     }
 
     async fn make_ctx_with_hidden() -> ExecContext {

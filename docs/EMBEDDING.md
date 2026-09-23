@@ -55,7 +55,7 @@ code is something agents can branch on:
 | `code` | Meaning | Recovery |
 |--------|---------|----------|
 | 0 | Success | — |
-| 1 | Failure | Read `err` |
+| 1 | Failure — also the negative answer for a builtin that spends 1 on a result rather than a mistake: `grep`/`test`/`cmp`/`diff` (no match/false/differ), `read`/`glob` (end of input/no match), `which` (not found), `kaish-validate` (invalid) | Read `err` |
 | 2 | Usage error, or a refusal that names what to do instead (e.g. `kaish-trash empty` without `--confirm`) | Read `err` |
 | 3 | Output truncated by the output limit | `original_code` holds the real exit code of the statement `code` reports. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |

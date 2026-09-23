@@ -110,7 +110,7 @@ impl Tool for Split {
             // Positional/named mode: first arg is the string
             (s, 1usize)
         } else {
-            return ExecResult::failure(1, "split: no input (provide string argument or pipe stdin)");
+            return ExecResult::failure(2, "split: no input (provide string argument or pipe stdin)");
         };
 
         // Get optional parameters — delimiter position shifts when using stdin
@@ -134,7 +134,7 @@ impl Tool for Split {
             // Regex split
             let re = match Regex::new(&pattern) {
                 Ok(r) => r,
-                Err(e) => return ExecResult::failure(1, format!("split: invalid regex: {}", e)),
+                Err(e) => return ExecResult::failure(2, format!("split: invalid regex: {}", e)),
             };
             // `--limit=N` caps the result at N fields (N-1 splits); the final
             // field keeps the rest of the string. `splitn(N)` does exactly that

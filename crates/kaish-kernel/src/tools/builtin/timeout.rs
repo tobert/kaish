@@ -75,7 +75,7 @@ impl Tool for Timeout {
 
         if args.positional.len() < 2 {
             return ExecResult::failure(
-                1,
+                2,
                 "timeout: usage: timeout DURATION COMMAND [ARGS...]",
             );
         }
@@ -86,7 +86,7 @@ impl Tool for Timeout {
             Value::Float(f) => f.to_string(),
             other => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!("timeout: invalid duration: {:?}", other),
                 )
             }
@@ -96,7 +96,7 @@ impl Tool for Timeout {
             Some(d) => d,
             None => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!(
                         "timeout: invalid duration '{}' (try: 30, 5s, 500ms, 2m, 1h)",
                         duration_str
@@ -109,7 +109,7 @@ impl Tool for Timeout {
             Value::String(s) => s.clone(),
             other => {
                 return ExecResult::failure(
-                    1,
+                    2,
                     format!("timeout: invalid command: {:?}", other),
                 )
             }

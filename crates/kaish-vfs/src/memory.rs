@@ -1,6 +1,17 @@
 //! In-memory filesystem implementation.
 //!
 //! Used for `/v` and testing. All data is ephemeral.
+//!
+//! `io::Error` messages below carry the path (and, where two paths are in
+//! play, which one) but never restate the phrase a `BackendError` variant's
+//! own `#[error(...)]` `Display` supplies for that `ErrorKind` — baking it
+//! into the message here doubled it (`ls` against `MemoryFs` read "not
+//! found: not found: /path"). The rule only binds a kind `BackendError`
+//! actually phrases (`NotFound`, `IsADirectory`, `NotADirectory`,
+//! `AlreadyExists`, `PermissionDenied`); `DirectoryNotEmpty` has no variant
+//! of its own — it falls to `BackendError::Io`, whose `#[error("io error:
+//! {0}")]` says nothing about emptiness — so its message keeps "directory
+//! not empty" as the only description a reader gets.
 
 use crate::budget::ByteBudget;
 use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
@@ -154,7 +165,7 @@ impl MemoryFs {
                 None => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("not found: {}", path.display()),
+                        path.display().to_string(),
                     ))
                 }
             }
@@ -188,7 +199,7 @@ impl MemoryFs {
                 Some(Entry::Directory { .. }) => {
                     return Err(io::Error::new(
                         io::ErrorKind::IsADirectory,
-                        format!("is a directory: {}", current.display()),
+                        current.display().to_string(),
                     ));
                 }
                 Some(Entry::File { .. }) | None => return Ok(current),
@@ -249,7 +260,7 @@ impl MemoryFs {
                 Some(Entry::File { data, .. }) => Ok(data.clone()),
                 Some(Entry::Directory { .. }) => Err(io::Error::new(
                     io::ErrorKind::IsADirectory,
-                    format!("is a directory: {}", path.display()),
+                    path.display().to_string(),
                 )),
                 Some(Entry::Symlink { target, .. }) => {
                     let next = Self::resolve_symlink_target(&normalized, target);
@@ -258,7 +269,7 @@ impl MemoryFs {
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("not found: {}", path.display()),
+                    path.display().to_string(),
                 )),
             }
         })
@@ -294,7 +305,7 @@ impl MemoryFs {
                 }
                 Some(Entry::Directory { .. }) => Err(io::Error::new(
                     io::ErrorKind::IsADirectory,
-                    format!("is a directory: {}", path.display()),
+                    path.display().to_string(),
                 )),
                 Some(Entry::Symlink { target, .. }) => {
                     let next = Self::resolve_symlink_target(&normalized, target);
@@ -303,7 +314,7 @@ impl MemoryFs {
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("not found: {}", path.display()),
+                    path.display().to_string(),
                 )),
             }
         })
@@ -377,7 +388,7 @@ impl MemoryFs {
                 Some((_, Some(next))) => self.stat_inner(&next, depth + 1).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("not found: {}", path.display()),
+                    path.display().to_string(),
                 )),
             }
         })
@@ -406,7 +417,7 @@ impl MemoryFs {
                         if matches!(e.get(), Entry::File { .. }) {
                             return Err(io::Error::new(
                                 io::ErrorKind::NotADirectory,
-                                format!("not a directory: {}", current.display()),
+                                current.display().to_string(),
                             ));
                         }
                     }
@@ -552,7 +563,7 @@ impl Filesystem for MemoryFs {
             ))),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no such file or directory: {}", path.display()),
+                path.display().to_string(),
             )),
         }
     }
@@ -567,7 +578,7 @@ impl Filesystem for MemoryFs {
             Some(Entry::File { .. }) | Some(Entry::Symlink { .. }) => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotADirectory,
-                    format!("not a directory: {}", path.display()),
+                    path.display().to_string(),
                 ))
             }
             None if normalized.as_os_str().is_empty() => {
@@ -576,7 +587,7 @@ impl Filesystem for MemoryFs {
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("not found: {}", path.display()),
+                    path.display().to_string(),
                 ))
             }
         }
@@ -674,7 +685,7 @@ impl Filesystem for MemoryFs {
             }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("not found: {}", path.display()),
+                path.display().to_string(),
             )),
         }
     }
@@ -691,7 +702,7 @@ impl Filesystem for MemoryFs {
             )),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("not found: {}", path.display()),
+                path.display().to_string(),
             )),
         }
     }
@@ -709,7 +720,7 @@ impl Filesystem for MemoryFs {
         if entries.contains_key(&normalized) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                format!("file exists: {}", link.display()),
+                link.display().to_string(),
             ));
         }
 
@@ -737,7 +748,7 @@ impl Filesystem for MemoryFs {
                 Entry::Directory { .. } => Ok(()), // Already exists, fine
                 Entry::File { .. } | Entry::Symlink { .. } => Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    format!("file exists: {}", path.display()),
+                    path.display().to_string(),
                 )),
             };
         }
@@ -780,7 +791,7 @@ impl Filesystem for MemoryFs {
         let removed = entries.remove(&normalized).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("not found: {}", path.display()),
+                path.display().to_string(),
             )
         })?;
         self.settle(Self::file_len(Some(&removed)), 0);
@@ -822,7 +833,7 @@ impl Filesystem for MemoryFs {
         let entry = entries.remove(&from_normalized).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("not found: {}", from.display()),
+                from.display().to_string(),
             )
         })?;
 
@@ -834,14 +845,14 @@ impl Filesystem for MemoryFs {
                     entries.insert(from_normalized, entry);
                     return Err(io::Error::new(
                         io::ErrorKind::IsADirectory,
-                        format!("destination is a directory: {}", to.display()),
+                        format!("destination: {}", to.display()),
                     ));
                 }
                 (Entry::Directory { .. }, Entry::File { .. }) => {
                     entries.insert(from_normalized, entry);
                     return Err(io::Error::new(
                         io::ErrorKind::NotADirectory,
-                        format!("destination is not a directory: {}", to.display()),
+                        format!("destination: {}", to.display()),
                     ));
                 }
                 _ => {}

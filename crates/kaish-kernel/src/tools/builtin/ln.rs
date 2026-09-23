@@ -67,13 +67,13 @@ impl Tool for Ln {
 
         let target = match get_path_string(&args, "target", 0) {
             Ok(Some(t)) => t,
-            Ok(None) => return ExecResult::failure(1, "ln: missing target argument"),
+            Ok(None) => return ExecResult::failure(2, "ln: missing target argument"),
             Err(e) => return ExecResult::failure(1, format!("ln: {e}")),
         };
 
         let link_name = match get_path_string(&args, "link_name", 1) {
             Ok(Some(l)) => l,
-            Ok(None) => return ExecResult::failure(1, "ln: missing link_name argument"),
+            Ok(None) => return ExecResult::failure(2, "ln: missing link_name argument"),
             Err(e) => return ExecResult::failure(1, format!("ln: {e}")),
         };
 

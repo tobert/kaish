@@ -99,7 +99,7 @@ impl Tool for KaishAst {
                 for err in errors {
                     msg.push_str(&format!("  {err}\n"));
                 }
-                ExecResult::failure(1, msg)
+                ExecResult::failure(2, msg)
             }
         }
     }

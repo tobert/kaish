@@ -113,6 +113,9 @@ impl Tool for Base64Tool {
             match STANDARD.decode(&cleaned) {
                 // Decoded bytes: text if valid UTF-8, otherwise a binary result.
                 Ok(bytes) => ExecResult::success_text_or_bytes(bytes),
+                // The bytes came from a file or stdin, never a positional
+                // literal — always data from the world, so this is a result
+                // (1), not a usage error.
                 Err(e) => ExecResult::failure(1, format!("base64: invalid input: {}", e)),
             }
         } else {

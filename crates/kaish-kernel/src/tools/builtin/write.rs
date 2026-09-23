@@ -80,7 +80,7 @@ impl Tool for Write {
 
         let path = match get_path_string(&args, "path", 0) {
             Ok(Some(p)) => p,
-            Ok(None) => return ExecResult::failure(1, "write: missing path argument"),
+            Ok(None) => return ExecResult::failure(2, "write: missing path argument"),
             Err(e) => return ExecResult::failure(1, format!("write: {e}")),
         };
 
@@ -116,10 +116,10 @@ impl Tool for Write {
                 || ctx.pipeline_position != crate::dispatch::PipelinePosition::Only;
             match ctx.read_stdin_to_bytes().await {
                 Ok(Some(bytes)) if bytes.is_empty() && !content_was_offered => {
-                    return ExecResult::failure(1, missing_content_error(&path))
+                    return ExecResult::failure(2, missing_content_error(&path))
                 }
                 Ok(Some(bytes)) => bytes,
-                Ok(None) => return ExecResult::failure(1, missing_content_error(&path)),
+                Ok(None) => return ExecResult::failure(2, missing_content_error(&path)),
                 Err(e) => return ExecResult::failure(1, format!("write: {e}")),
             }
         };

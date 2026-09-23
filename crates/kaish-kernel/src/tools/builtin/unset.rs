@@ -71,7 +71,7 @@ impl Tool for Unset {
         parsed.global.apply(ctx);
 
         if args.positional.is_empty() {
-            return ExecResult::failure(1, "unset: missing variable name");
+            return ExecResult::failure(2, "unset: missing variable name");
         }
 
         for arg in &args.positional {
@@ -89,7 +89,7 @@ impl Tool for Unset {
             // agree about what a name is, or the author learns the rule from
             // whichever one they happened to use.
             if let Err(bad) = crate::name::validate(&name) {
-                return ExecResult::failure(1, format!("unset: `{name}': {bad}"));
+                return ExecResult::failure(2, format!("unset: `{name}': {bad}"));
             }
 
             // POSIX: unsetting a nonexistent variable is not an error.

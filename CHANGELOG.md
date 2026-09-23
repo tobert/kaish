@@ -29,6 +29,17 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- Usage errors across the builtins now exit 2 instead of 1: a missing operand,
+  an unknown subcommand, a flag value the builtin cannot use. The sweep and a
+  follow-up review together cover 114 sites in 56 builtins. What a caller can
+  fix decides the code — argv is 2, the world is 1, so `rm` exits 2 and
+  `rm missing.txt` still exits 1. A builtin that ingests text draws the same
+  line by where the text came from: a positional argument is argv, but stdin
+  or a file's content is the world even though the file's path is itself an
+  argument, so `jq` and `base64 -d` read 1 on bad content, not 2.
+- `read` and `glob` join the builtins that spend exit 1 on a result. `read`
+  exits 1 at end of input, which is what ends a `while read` loop, and `glob`
+  exits 1 when a pattern matched nothing; neither is a usage error.
 - `spawn --timeout` keeps what the child already wrote. A child that printed
   a diagnostic and then hung reported 124 and nothing else; the partial
   stdout and stderr now ride the 124, with the timeout line after them.

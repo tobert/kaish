@@ -151,7 +151,7 @@ impl Tool for Glob {
             .map(crate::interpreter::value_to_string)
             .collect();
         if patterns.is_empty() {
-            return ExecResult::failure(1, "glob: missing pattern argument");
+            return ExecResult::failure(2, "glob: missing pattern argument");
         }
 
         // Parse options off the clap struct. A non-numeric `--depth` was
@@ -210,7 +210,7 @@ impl Tool for Glob {
         for pattern in &patterns {
             let glob = match GlobPath::new(pattern) {
                 Ok(g) => g,
-                Err(e) => return ExecResult::failure(1, format!("glob: invalid pattern: {}", e)),
+                Err(e) => return ExecResult::failure(2, format!("glob: invalid pattern: {}", e)),
             };
 
             // Names are reported relative to the conventional root — `/` for an

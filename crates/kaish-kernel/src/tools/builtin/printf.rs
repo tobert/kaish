@@ -289,7 +289,7 @@ impl Tool for Printf {
             }
             _ => match args.get_string("format", 0) {
                 Some(f) => f,
-                None => return ExecResult::failure(1, "printf: missing format argument"),
+                None => return ExecResult::failure(2, "printf: missing format argument"),
             },
         };
 

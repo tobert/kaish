@@ -1254,12 +1254,13 @@ on it to abort never does. Write the check the other way instead —
 one it actually gets.
 
 `set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
-**1** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
+**2** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
 `trash`) — an unknown name is never silently ignored, because a caller that
-thinks it turned something on needs to know it didn't.
+thinks it turned something on needs to know it didn't. The name is argv the
+caller can fix, so it is a usage error, not an operational 1.
 `set -o approvals` and `set -o latch` — retired spellings from
 the removed approval subsystem and confirmation latch — fail the same way;
-they turn nothing on. `set -o output-limit=<unparseable size>` also exits 1
+they turn nothing on. `set -o output-limit=<unparseable size>` also exits 2
 instead of leaving the limit unchanged. A bare unrecognized short flag
 (`set -q`, `set -u`, `set -x`) is still silently ignored — bash has dozens
 kaish doesn't implement, with no fixed set to check a typo against the way
@@ -1391,12 +1392,27 @@ a mistake.**
 A builtin that answers a question spends `1` on the negative answer and nothing
 else. `grep` exits 1 only when it searched and matched nothing; `test` exits 1
 only when the condition was false; `cmp` and `diff` exit 1 only when the inputs
-differ. In those builtins every error — an unreadable file, a missing operand, a
-pattern that does not compile — exits `2`, so a caller branching on 1 never
-reads a broken command as a negative answer.
+differ; `read` exits 1 only at end of input, which is what ends a `while read`
+loop; `glob` exits 1 only when a pattern matched no files. In those builtins
+every error — an unreadable file, a missing operand, a pattern that does not
+compile — exits `2`, so a caller branching on 1 never reads a broken command as
+a negative answer.
+
+```sh
+printf 'a\nb\n' | while read l; do echo "$l"; done   # read's 1 ends the loop
+read                                                  # 2 — no variable named
+```
 
 A builtin where `1` is free keeps the familiar split: `2` for a usage error,
-`1` for an operational failure. `cat missing.txt` exits 1.
+`1` for an operational failure. The split follows what the caller can fix —
+argv, or the world:
+
+```sh
+rm                              # 2 — missing path argument
+rm missing.txt                  # 1 — the path was fine, the file was not
+kaish-trash bogus               # 2 — unknown subcommand
+find . -type x                  # 2 — a flag value find cannot use
+```
 
 A whole program kaish refuses exits `2`. A lex, parse, or validation failure
 means no statement ran, which is the same class of mistake as bad argv:
@@ -1405,6 +1421,25 @@ means no statement ran, which is the same class of mistake as bad argv:
 kaish -c 'if'                   # 2 — parse error
 kaish --plan 'if'               # 2 — the same source, the same code
 ```
+
+**A builtin that ingests text draws the same argv-or-world line by where the
+text came from, not by what's wrong with it.** Text the caller typed inline
+as a positional argument is argv; data read from stdin or a file is the
+world, even though a file *path* is itself an argument:
+
+```sh
+fromjson '{not json}'           # 2 — the caller typed this
+echo '{not json}' | fromjson    # 1 — the pipe's content, not the invocation
+jq . bad.json                   # 1 — bad.json's content, not the path argument
+jq . < bad.json                 # 1 — same content, read from stdin instead
+```
+
+A jq filter is the same split one level up: a *literal* filter that cannot
+compile is caught by the validator before anything runs (a program-refused
+`2`, above), but a *computed* one (`jq "$expr"`) or one shadowed by an
+`--arg`/`--argjson` name only fails at runtime — still argv, so still `2`,
+the same rule a computed `grep` pattern follows. `--argjson NAME VALUE` with
+a `VALUE` that isn't JSON is a flag value the builtin cannot use, also `2`.
 
 `124` (timeout) and `123` (a scatter worker failed) are the documented
 exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".
