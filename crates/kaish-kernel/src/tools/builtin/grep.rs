@@ -132,8 +132,8 @@ struct GrepArgs {
     #[arg(long = "hidden")]
     hidden: bool,
 
-    /// Stop after NUM matching lines per file (GNU `--max-count`).
-    #[arg(long = "max-count")]
+    /// Stop after NUM matching lines per file (GNU `--max-count`/`-m`).
+    #[arg(short = 'm', long = "max-count")]
     max_count: Option<String>,
 
     #[command(flatten)]

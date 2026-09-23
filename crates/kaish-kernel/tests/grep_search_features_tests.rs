@@ -203,6 +203,77 @@ async fn max_count_caps_streaming_stdin() {
     assert_eq!(out.lines().count(), 2, "stdin stream capped at 2: {out:?}");
 }
 
+// ─── `-m` short flag (GNU alias for `--max-count`) ───────────────────────────
+// Models write `grep -m 5 PATTERN file` from GNU habit; kaish used to treat
+// `-m` as a usage error. `-m` and `--max-count` bind to the same field, so
+// these mirror the `--max-count` cases above under the short spelling.
+
+/// `grep -m 2 PAT file` caps a single-file search, same as `--max-count 2`.
+#[tokio::test]
+async fn max_count_short_flag_caps_single_file() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "x\nx\nx\nx\nx\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -m 2 x f.txt").await;
+    assert_eq!(code, 0, "match expected; out={out:?}");
+    assert_eq!(out.lines().count(), 2, "must cap at 2 lines: {out:?}");
+}
+
+/// `-m 0` matches nothing and exits 1, same as `--max-count 0`.
+#[tokio::test]
+async fn max_count_short_flag_zero_matches_nothing() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "x\nx\nx\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel.execute("grep -m 0 x f.txt").await.expect("execute");
+    assert_eq!(result.code, 1, "-m 0 matches nothing → exit 1");
+    assert!(result.text_out().trim().is_empty(), "no output: {:?}", result.text_out());
+}
+
+/// `-m` combines with other short flags on separate tokens (`-n -m 1`): line
+/// numbers stay on, and the count is still capped.
+#[tokio::test]
+async fn max_count_short_flag_combined_with_line_numbers() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "x\nx\nx\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "grep -n -m 1 x f.txt").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.lines().count(), 1, "must cap at 1 line: {out:?}");
+    assert!(out.trim_end().starts_with("1:"), "-n must still number the line: {out:?}");
+}
+
+/// A non-numeric `-m` value is a loud usage error (exit 2), same as
+/// `--max-count`.
+#[tokio::test]
+async fn max_count_short_flag_non_numeric_is_loud() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "needle\n").expect("write");
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel.execute("grep -m x needle f.txt").await.expect("execute");
+    assert_eq!(result.code, 2, "non-numeric -m must be a usage error: {:?}", result.text_out());
+    assert!(
+        result.err.contains("max-count") || result.err.contains("invalid"),
+        "error must name the bad flag or value: {:?}",
+        result.err
+    );
+}
+
+/// `-m` caps a piped (streaming-stdin) search, same as `--max-count`.
+#[tokio::test]
+async fn max_count_short_flag_caps_streaming_stdin() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let (out, code) = run(&kernel, "seq 5 | grep -m 2 .").await;
+    assert_eq!(code, 0, "out={out:?}");
+    assert_eq!(out.lines().count(), 2, "stdin stream capped at 2: {out:?}");
+}
+
 // ─── #105: `grep -r PATTERN FILE` (a file operand, not a dir) ────────────────
 // `-r` used to unconditionally treat the operand as a walk root; a file has
 // nothing "under" it, so the walk collected zero entries → 0 matches, exit 1,

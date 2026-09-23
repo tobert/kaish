@@ -23,6 +23,8 @@ breaking entries are marked **BREAKING**.
 - **`kaish --plan` reports a `warnings` array** when the validator has
   something to say about a program it will still run. The first entry is
   W008, a literal operand a `[[ ]]` numeric comparison will refuse.
+- **`grep -m` is a short alias for `--max-count`**, matching GNU grep; models
+  wrote `grep -m 5 PATTERN file` from habit and got a usage error.
 
 ### Fixed
 

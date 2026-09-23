@@ -70,6 +70,18 @@ async fn grep_glued_after_context() {
 }
 
 #[tokio::test]
+async fn grep_glued_max_count_short() {
+    // `-m2`: the GNU-habit short spelling of `--max-count`, glued.
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("f.txt"), "x\nx\nx\nx\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let (out, code) = run(&kernel, "grep -m2 x f.txt").await;
+    assert_eq!(code, 0, "got: {out}");
+    assert_eq!(out.lines().count(), 2, "must cap at 2 lines: {out:?}");
+}
+
+#[tokio::test]
 async fn combined_bools_then_glued_value_flag() {
     // `-inA1`: bools `i`,`n` stack, then value-taking `A` glues its value `1`.
     // Before the fix, `A` was treated as a bool and `1`... had nowhere to go.
