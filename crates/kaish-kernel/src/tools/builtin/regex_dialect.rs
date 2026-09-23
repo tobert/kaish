@@ -3,18 +3,19 @@
 //! The engine is Rust's `regex` crate, which speaks an ERE-like syntax. Two
 //! translations sit in front of it:
 //!
-//! - [`gnu_bre_to_regex`] is `grep`'s default mode: a faithful GNU BRE. Bare
-//!   `( ) { } | + ?` are literal, `\( \) \{ \} \| \+ \?` are operators, and the
-//!   context rules for `*`, `^`, `$`, and bracket expressions follow GNU grep.
-//!   Models write grep from GNU habit (`grep "fn consult("`), so GNU is the
-//!   specification; `tests/grep_gnu_bre_tests.rs` records GNU grep's output.
-//! - [`bre_metas_to_ere`] is the older superset that `sed` and `awk` still
-//!   use: bare ERE operators AND the GNU BRE backslash spellings are both
-//!   operators. Commercial LLMs reach for `foo\|bar` from GNU habit; under
-//!   bare ERE that escape means a literal `|`, so an agent's `sed 's/a\|b/x/'`
-//!   silently matched nothing (issue #60). The casualty is narrow: a backslash
-//!   before one of these metas is always the operator, never a literal; match
-//!   the character itself with a bracket class (`[+]`, `[|]`, `[{]`).
+//! - [`gnu_bre_to_regex`] is `grep`'s and `sed`'s default (no `-E`/`-r`) mode:
+//!   a faithful GNU BRE. Bare `( ) { } | + ?` are literal, `\( \) \{ \} \| \+
+//!   \?` are operators, and the context rules for `*`, `^`, `$`, and bracket
+//!   expressions follow GNU grep and GNU sed, which agree on all of this.
+//!   Models write both tools from GNU habit (`grep "fn consult("`, `sed
+//!   's/a\|b/x/'`), so GNU is the specification; `tests/grep_gnu_bre_tests.rs`
+//!   and `tests/sed_gnu_regex_tests.rs` record GNU's output. `tail` is the
+//!   caller's own "you may have meant ERE" reminder, so `grep`'s and `sed`'s
+//!   refusals never quote a flag the reader isn't running.
+//! - [`bre_metas_to_ere`] is the older superset `awk` still uses: bare ERE
+//!   operators AND the GNU BRE backslash spellings are both operators. A
+//!   follow-up commit gives `awk` its own gawk-ERE translation and retires
+//!   this one.
 //! - [`rewrite_posix_classes`] is `grep -E`'s pass: only `[...]` interiors
 //!   change, using the same [`posix_class_pattern`] table `gnu_bre_to_regex`
 //!   uses, since strict ERE otherwise passes straight through.
@@ -22,6 +23,15 @@
 //! Both bracket-expression translators route `[:alpha:]` and its eleven
 //! siblings through [`posix_class_pattern`], the regex engine's own
 //! `[:alpha:]` being ASCII-only where GNU grep in a UTF-8 locale is not.
+
+/// A GNU BRE rewritten into the regex engine's syntax, with the warnings GNU
+/// grep prints for it (`stray \ before d`), without the `grep: warning: `
+/// prefix.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BreTranslation {
+    pub(crate) pattern: String,
+    pub(crate) warnings: Vec<String>,
+}
 
 /// The GNU BRE backslash-metacharacters kaish rewrites to their bare ERE form.
 /// `\|`→alternation, `\+`/`\?`→quantifiers, `\(`/`\)`→group, `\{`/`\}`→interval.
@@ -86,17 +96,12 @@ pub(crate) fn bre_metas_to_ere(pattern: &str) -> String {
 }
 
 
-/// A GNU BRE rewritten into the regex engine's syntax, with the warnings GNU
-/// grep prints for it (`stray \ before d`), without the `grep: warning: `
-/// prefix.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct BreTranslation {
-    pub(crate) pattern: String,
-    pub(crate) warnings: Vec<String>,
+/// Format a BRE refusal: the value and the rule, plus `tail` — the caller's
+/// own reminder that the reader may have meant ERE (`grep`'s and `sed`'s
+/// wording differ: different flag, different example command).
+fn refusal(tail: &str, what: impl std::fmt::Display) -> String {
+    format!("invalid pattern: {what}. {tail}")
 }
-
-/// Appended to every refusal: the reader may have meant ERE.
-const BRE_REFUSAL_TAIL: &str = "grep without -E reads GNU BRE; pass -E for ERE, as in `grep -E '(a|b)'`";
 
 /// The POSIX class names GNU grep accepts inside `[...]`.
 const POSIX_CLASSES: &[&str] = &[
@@ -162,10 +167,12 @@ fn posix_class_pattern(name: &str) -> Option<&'static str> {
 /// - `\w \W \s \S \b \B \< \> \` \'` keep their GNU meaning; a backslash
 ///   before any other ordinary character is that character, with a warning.
 ///
-/// Back-references (`\1`) have no engine support and are refused. The error
-/// is the refusal text, without the `grep: ` prefix.
-pub(crate) fn gnu_bre_to_regex(pattern: &str) -> Result<BreTranslation, String> {
-    BreTranslator::new(pattern).run()
+/// Back-references (`\1`) have no engine support and are refused. `tail` is
+/// appended to every refusal — the caller's own "you may have meant ERE"
+/// reminder (`grep`'s names `-E`; `sed`'s names `-E`/`-r`) — so the error
+/// never leaks a message written for a tool the reader isn't running.
+pub(crate) fn gnu_bre_to_regex(pattern: &str, tail: &str) -> Result<BreTranslation, String> {
+    BreTranslator::new(pattern, tail).run()
 }
 
 /// Where the translator stands: what the next `*`, `^`, or `\+` means.
@@ -199,10 +206,12 @@ struct BreTranslator {
     atom_start: usize,
     /// Whether the last atom already carries a quantifier.
     quantified: bool,
+    /// The caller's "you may have meant ERE" reminder, appended to a refusal.
+    tail: String,
 }
 
 impl BreTranslator {
-    fn new(pattern: &str) -> Self {
+    fn new(pattern: &str, tail: &str) -> Self {
         Self {
             chars: pattern.chars().collect(),
             index: 0,
@@ -212,11 +221,12 @@ impl BreTranslator {
             position: BrePosition::Start,
             atom_start: 0,
             quantified: false,
+            tail: tail.to_string(),
         }
     }
 
-    fn refuse(what: impl std::fmt::Display) -> String {
-        format!("invalid pattern: {what}. {BRE_REFUSAL_TAIL}")
+    fn refuse(&self, what: impl std::fmt::Display) -> String {
+        refusal(&self.tail, what)
     }
 
     fn peek(&self, offset: usize) -> Option<char> {
@@ -283,7 +293,7 @@ impl BreTranslator {
             }
         }
         if !self.groups.is_empty() {
-            return Err(Self::refuse(r"unmatched `\(` — close the group with `\)`, or write `(` to match a literal `(`"));
+            return Err(self.refuse(r"unmatched `\(` — close the group with `\)`, or write `(` to match a literal `(`"));
         }
         Ok(BreTranslation { pattern: self.out, warnings: self.warnings })
     }
@@ -301,7 +311,7 @@ impl BreTranslator {
     /// character.
     fn escape(&mut self) -> Result<(), String> {
         let Some(next) = self.peek(0) else {
-            return Err(Self::refuse(r"trailing backslash — write `\\` to match a literal backslash"));
+            return Err(self.refuse(r"trailing backslash — write `\\` to match a literal backslash"));
         };
         self.index += 1;
         let quantifiable = self.position == BrePosition::Atom;
@@ -313,7 +323,7 @@ impl BreTranslator {
             }
             ')' => {
                 let Some(start) = self.groups.pop() else {
-                    return Err(Self::refuse(r"unmatched `\)` — write `)` to match a literal `)`"));
+                    return Err(self.refuse(r"unmatched `\)` — write `)` to match a literal `)`"));
                 };
                 self.out.push(')');
                 self.atom_start = start;
@@ -341,7 +351,7 @@ impl BreTranslator {
             '`' => self.push_assertion(r"\A"),
             '\'' => self.push_assertion(r"\z"),
             '1'..='9' => {
-                return Err(Self::refuse(format!(
+                return Err(self.refuse(format!(
                     r"back-reference `\{next}` is not supported — the regex engine has no back-references"
                 )));
             }
@@ -367,14 +377,15 @@ impl BreTranslator {
                     self.index += 1;
                 }
                 (None, _) => {
-                    return Err(Self::refuse(
+                    return Err(self.refuse(
                         r"unmatched `\{` — close the interval with `\}`, or write `{` to match a literal `{`",
                     ));
                 }
             }
         }
+        let tail = self.tail.clone();
         let invalid = || {
-            Self::refuse(format!(
+            refusal(&tail, format!(
                 r"invalid interval `\{{{body}\}}` — write `\{{2\}}`, `\{{2,5\}}`, `\{{2,\}}`, or `\{{,5\}}`, lower bound first"
             ))
         };
@@ -405,7 +416,8 @@ impl BreTranslator {
 
     /// Translate a bracket expression; `self.index` is just past `[`.
     fn bracket(&mut self) -> Result<String, String> {
-        let unmatched = || Self::refuse(r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
+        let tail = self.tail.clone();
+        let unmatched = || refusal(&tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
         let mut out = String::from("[");
         if self.peek(0) == Some('^') {
             out.push('^');
@@ -426,10 +438,10 @@ impl BreTranslator {
                 BracketItem::Char(low) if is_range => {
                     self.index += 1;
                     let BracketItem::Char(high) = self.bracket_item()? else {
-                        return Err(Self::refuse("a range cannot end in a character class"));
+                        return Err(self.refuse("a range cannot end in a character class"));
                     };
                     if high < low {
-                        return Err(Self::refuse(format!(
+                        return Err(self.refuse(format!(
                             "invalid range `{low}-{high}` — write the lower end first"
                         )));
                     }
@@ -446,7 +458,8 @@ impl BreTranslator {
 
     /// Read one bracket item: `[:class:]`, `[.c.]`, `[=c=]`, or a character.
     fn bracket_item(&mut self) -> Result<BracketItem, String> {
-        let unmatched = || Self::refuse(r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
+        let tail = self.tail.clone();
+        let unmatched = || refusal(&tail, r"unmatched `[` — close the bracket expression with `]`, or write `\[` to match a literal `[`");
         let c = self.peek(0).ok_or_else(unmatched)?;
         let delimiter = match (c, self.peek(1)) {
             ('[', Some(d @ (':' | '.' | '='))) => d,
@@ -468,7 +481,7 @@ impl BreTranslator {
         if delimiter == ':' {
             return match posix_class_pattern(&body) {
                 Some(pattern) => Ok(BracketItem::Class(pattern.to_string())),
-                None => Err(Self::refuse(format!(
+                None => Err(self.refuse(format!(
                     "invalid character class `[:{body}:]` — use one of {}",
                     POSIX_CLASSES.join(", ")
                 ))),
@@ -477,7 +490,7 @@ impl BreTranslator {
         let mut body_chars = body.chars();
         match (body_chars.next(), body_chars.next()) {
             (Some(single), None) => Ok(BracketItem::Char(single)),
-            _ => Err(Self::refuse(format!(
+            _ => Err(self.refuse(format!(
                 "`[{delimiter}{body}{delimiter}]` is not supported — only a single character works inside `[{delimiter} {delimiter}]`"
             ))),
         }
@@ -495,7 +508,8 @@ impl BreTranslator {
 /// `[`, an unrecognized class name) is left exactly as written, so the
 /// engine's own error stands for it; this function never fails.
 pub(crate) fn rewrite_posix_classes(pattern: &str) -> String {
-    let mut translator = BreTranslator::new(pattern);
+    // Errors are discarded below, so `tail` (an "-E" reminder) never surfaces.
+    let mut translator = BreTranslator::new(pattern, "");
     let mut out = String::with_capacity(pattern.len());
     while let Some(c) = translator.peek(0) {
         if c == '\\' {
@@ -624,6 +638,8 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
+    const TEST_TAIL: &str = "pass -E for ERE";
+
     #[rstest]
     // Strict ERE: a backslash is the literal form of every meta.
     #[case("[cast:", Some(r"write `\[` to match a literal `[`"))]
@@ -731,7 +747,7 @@ mod tests {
     #[case(r"\<a\>", r"\b{start}a\b{end}")]
     #[case(r"\w\s\b", r"\w\s\b")]
     fn translates_gnu_bre(#[case] input: &str, #[case] expected: &str) {
-        let translation = gnu_bre_to_regex(input).expect("valid GNU BRE");
+        let translation = gnu_bre_to_regex(input, TEST_TAIL).expect("valid GNU BRE");
         assert_eq!(translation.pattern, expected, "input {input:?}");
         assert!(translation.warnings.is_empty(), "input {input:?}");
     }
@@ -745,7 +761,7 @@ mod tests {
         #[case] expected: &str,
         #[case] warning: &str,
     ) {
-        let translation = gnu_bre_to_regex(input).expect("valid GNU BRE");
+        let translation = gnu_bre_to_regex(input, TEST_TAIL).expect("valid GNU BRE");
         assert_eq!(translation.pattern, expected);
         assert_eq!(translation.warnings, vec![warning.to_string()]);
     }
@@ -762,9 +778,10 @@ mod tests {
     #[case("[z-a]")]
     #[case(r"\(a\)\1")]
     fn refuses_what_gnu_grep_refuses(#[case] input: &str) {
-        let message = gnu_bre_to_regex(input).expect_err("GNU grep exits 2 on this");
+        let message = gnu_bre_to_regex(input, TEST_TAIL).expect_err("GNU grep exits 2 on this");
         assert!(message.contains("-E"), "names the ERE override: {message}");
     }
+
 
     #[rstest]
     // `[:alpha:]` matches a Unicode letter and, per the glibc quirk this
@@ -810,7 +827,7 @@ mod tests {
         #[case] c: char,
         #[case] expect_match: bool,
     ) {
-        let translation = gnu_bre_to_regex(pattern).expect("valid GNU BRE");
+        let translation = gnu_bre_to_regex(pattern, TEST_TAIL).expect("valid GNU BRE");
         let re = regex::Regex::new(&translation.pattern).expect("translation compiles");
         assert_eq!(re.is_match(&c.to_string()), expect_match, "{c:?} against {pattern:?}");
     }

@@ -147,6 +147,9 @@ struct GrepArgs {
     pattern: Vec<String>,
 }
 
+/// Appended to every default-mode refusal: the reader may have meant ERE.
+const BRE_REFUSAL_TAIL: &str = "grep without -E reads GNU BRE; pass -E for ERE, as in `grep -E '(a|b)'`";
+
 /// The pattern the regex engine compiles for grep's three modes, and the GNU
 /// warnings to print for it. `-F` escapes every character; `-E` is strict
 /// ERE, with only its `[...]` classes rewritten (the regex engine's own
@@ -163,7 +166,7 @@ fn engine_pattern(
     if extended {
         return Ok((rewrite_posix_classes(pattern), Vec::new()));
     }
-    gnu_bre_to_regex(pattern)
+    gnu_bre_to_regex(pattern, BRE_REFUSAL_TAIL)
         .map(|translation| (translation.pattern, translation.warnings))
         .map_err(|message| format!("grep: {message}"))
 }

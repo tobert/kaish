@@ -1,10 +1,11 @@
 //! sed — Stream editor for filtering and transforming text.
 //!
-//! A Bourne-lite sed implementation focused on the 80% use case.
-//! Uses ERE (extended regex) syntax like egrep. By default it also accepts the
-//! GNU BRE backslash-metas (`\|`, `\+`, `\(…\)`, `\{N,M\}`) as a forgiving
-//! superset (issue #60); pass `-E`/`-r` for strict ERE where those escapes are
-//! literals.
+//! A Bourne-lite sed implementation focused on the 80% use case. The default
+//! (no `-E`/`-r`) regex dialect is GNU BRE, matching `/usr/bin/sed`: bare
+//! `( ) { } | + ?` are literal and `\( \) \{N,M\} \| \+ \?` are operators, so
+//! `sed 's/fn consult(/x/'` matches the literal text and `sed 's/a\|b/X/'`
+//! alternates. Pass `-E`/`-r` for strict ERE, where those escapes are literal
+//! and the bare forms are the operators.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -15,7 +16,7 @@ use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
-use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
+use crate::tools::builtin::regex_dialect::gnu_bre_to_regex;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
@@ -39,10 +40,11 @@ struct SedArgs {
     #[arg(short = 'e', long = "expression")]
     expression: Vec<String>,
 
-    /// Strict ERE (-E/-r): backslash-escaped metas match the literal
-    /// character (`\|` is a `|`, `\(` a paren). Default mode also accepts
-    /// the GNU BRE spellings (`s/a\|b/X/`, `s/\(a\)\(b\)/\2\1/`) as
-    /// operators; see the regex notes in `help sed`.
+    /// Strict ERE (-E/-r): bare `( ) { } | + ?` are operators and a
+    /// backslash before one matches the literal character (`\|` is a `|`,
+    /// `\(` a paren). The default reads GNU BRE instead, where those
+    /// escapes are the operators (`s/a\|b/X/`, `s/\(a\)\(b\)/\2\1/`); see
+    /// the regex notes in `help sed`.
     #[arg(short = 'E', short_alias = 'r', long = "regexp-extended")]
     extended: bool,
 
@@ -116,7 +118,7 @@ impl Tool for Sed {
 
         // Nothing to validate if expressions are absent (execute() will also
         // reject this case at runtime with "missing expression").
-        // `-E`/`-r` selects strict ERE; default is the BRE-superset dialect.
+        // `-E`/`-r` selects strict ERE; default reads GNU BRE.
         let extended =
             args.has_flag("E") || args.has_flag("r") || args.has_flag("regexp-extended");
         for expr in &exprs {
@@ -128,8 +130,8 @@ impl Tool for Sed {
                     )
                     .with_suggestion(
                         "commands: s/pat/rep/[gipN], y/abc/xyz/, d, p, q, a/i/c TEXT; \
-                         chain with ; or -e; addresses: N, $, /re/, N,M; regex is ERE \
-                         (egrep-style; GNU BRE \\| \\(…\\) \\{N,M\\} also accepted)",
+                         chain with ; or -e; addresses: N, $, /re/, N,M; regex is GNU BRE \
+                         (\\| \\(…\\) \\{N,M\\} are operators; pass -E/-r for ERE)",
                     )
                     .with_command(self.name()),
                 );
@@ -562,11 +564,7 @@ fn parse_pattern_address(expr: &str, extended: bool) -> Result<(Regex, &str), St
         }
     }
 
-    // Default mode rewrites GNU BRE metas to ERE; `-E`/`-r` leaves them literal.
-    let rewritten = if extended { pattern.clone() } else { bre_metas_to_ere(&pattern) };
-    let rewrote = rewritten != pattern;
-    let regex = compile_pattern(&rewritten, false, false)
-        .map_err(|e| append_dialect_hint(e, rewrote, Some("-E/-r")))?;
+    let regex = compile_sed_pattern(&pattern, extended, false, false)?;
 
     // Calculate byte offset from char offset
     let consumed: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
@@ -653,17 +651,7 @@ fn parse_substitute(expr: &str, extended: bool) -> Result<(Command, String), Str
         n
     };
 
-    // Default mode rewrites GNU BRE metas to ERE (so `s/\(a\)\(b\)/\2\1/` works
-    // as capture groups); `-E`/`-r` leaves the escapes literal.
-    let (pattern_str, rewrote) = if extended {
-        (pattern_str, false)
-    } else {
-        let rewritten = bre_metas_to_ere(&pattern_str);
-        let rewrote = rewritten != pattern_str;
-        (rewritten, rewrote)
-    };
-    let regex = compile_pattern(&pattern_str, case_insensitive, multiline)
-        .map_err(|e| append_dialect_hint(e, rewrote, Some("-E/-r")))?;
+    let regex = compile_sed_pattern(&pattern_str, extended, case_insensitive, multiline)?;
 
     let rest: String = after_replacement[idx..].iter().collect();
     Ok((
@@ -699,6 +687,92 @@ fn parse_transliterate(expr: &str) -> Result<(Command, String), String> {
 
     let rest: String = after_to.iter().collect();
     Ok((Command::Transliterate { from, to }, rest))
+}
+
+/// Appended to every default-mode refusal: the reader may have meant ERE.
+const SED_BRE_REFUSAL_TAIL: &str =
+    "sed without -E/-r reads GNU BRE; pass -E/-r for ERE, as in `sed -E 's/(a|b)/x/'`";
+
+/// Expand GNU sed's control-character escapes (`\n \t \r \a \f \v`) to the
+/// real byte, in both regex dialects — unlike GNU grep, where a backslash
+/// before an ordinary letter like `n` is that letter (a stray-backslash
+/// warning), GNU sed reads `\n` as an actual newline (useful after `N`
+/// joins two lines) and the rest as their C escapes, confirmed against
+/// `/usr/bin/sed`. Runs before the BRE/ERE translation, so an escaped
+/// backslash (`\\n`) is unaffected — it stays "literal backslash, then the
+/// bare letter n", never a newline. GNU sed's other escapes (`\xHH`, `\oNNN`,
+/// `\dNNN`, `\cX`) are not covered — a documented gap.
+fn expand_sed_control_escapes(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('n') => {
+                out.push('\n');
+                chars.next();
+            }
+            Some('t') => {
+                out.push('\t');
+                chars.next();
+            }
+            Some('r') => {
+                out.push('\r');
+                chars.next();
+            }
+            Some('a') => {
+                out.push('\u{7}');
+                chars.next();
+            }
+            Some('f') => {
+                out.push('\u{c}');
+                chars.next();
+            }
+            Some('v') => {
+                out.push('\u{b}');
+                chars.next();
+            }
+            Some(&other) => {
+                out.push('\\');
+                out.push(other);
+                chars.next();
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Compile a sed pattern in the caller's dialect: `-E`/`-r` is strict ERE,
+/// passed straight to the engine; the default reads GNU BRE, translated by
+/// [`gnu_bre_to_regex`] — the same translation `grep` uses without `-E`. GNU
+/// sed does not warn on a stray backslash the way GNU grep does, so the
+/// translation's warnings are discarded here.
+fn compile_sed_pattern(
+    pattern: &str,
+    extended: bool,
+    case_insensitive: bool,
+    multiline: bool,
+) -> Result<Regex, String> {
+    let pattern = expand_sed_control_escapes(pattern);
+    let engine_pattern = if extended {
+        pattern
+    } else {
+        gnu_bre_to_regex(&pattern, SED_BRE_REFUSAL_TAIL)?.pattern
+    };
+    compile_pattern(&engine_pattern, case_insensitive, multiline).map_err(|e| {
+        if extended {
+            e
+        } else {
+            format!(
+                "{e} (the pattern above is the GNU BRE translated for the regex \
+                 engine; pass -E/-r to write ERE directly)"
+            )
+        }
+    })
 }
 
 /// Compile a sed pattern as ERE (the regex crate's native dialect), turning the
@@ -1289,8 +1363,12 @@ mod tests {
 
     #[test]
     fn test_capture_groups() {
+        // Default mode is GNU BRE: bare `( )` are literal, `\( \)` group.
+        // `/usr/bin/sed` on a bare-paren version of this pattern refuses it
+        // ("invalid reference \2 on 's' command's RHS" — no group exists to
+        // reference); kaish's own version of that gap is `sed_gnu_regex_tests.rs`.
         let input = "John Smith";
-        let expr = parse_expression(r"s/(\w+) (\w+)/\2, \1/").unwrap();
+        let expr = parse_expression(r"s/\(\w\+\) \(\w\+\)/\2, \1/").unwrap();
         let output = execute_sed_sync(input, &[expr], false);
         assert_eq!(output, "Smith, John\n");
     }
@@ -1642,16 +1720,45 @@ mod tests {
 
     #[test]
     fn ere_interval_and_alternation_are_fine() {
-        // The bare ERE forms keep working — the rewrite is a superset.
-        let expr = parse_expression("s/a{2}/X/").unwrap();
+        // GNU BRE spells these operators with a backslash — bare forms are
+        // literal (`bare_ere_metas_are_literal_in_default_mode`, below).
+        let expr = parse_expression(r"s/a\{2\}/X/").unwrap();
         assert_eq!(execute_sed_sync("aa", &[expr], false), "X\n");
-        let expr = parse_expression("s/cat|dog/X/g").unwrap();
+        let expr = parse_expression(r"s/cat\|dog/X/g").unwrap();
         assert_eq!(execute_sed_sync("cat dog", &[expr], false), "X X\n");
+    }
+
+    /// The audit's headline case: a bare ERE operator is literal in GNU BRE,
+    /// matching `/usr/bin/sed` exactly — this was the bug (issue #60's
+    /// follow-up) the old BRE-superset hybrid got backwards.
+    #[test]
+    fn bare_ere_metas_are_literal_in_default_mode() {
+        assert_eq!(
+            execute_sed_sync("aa", &[parse_expression("s/a{2}/X/").unwrap()], false),
+            "aa\n",
+            "bare {{ is literal, no match",
+        );
+        assert_eq!(
+            execute_sed_sync("a{2}", &[parse_expression("s/a{2}/X/").unwrap()], false),
+            "X\n",
+            "bare {{ matches its own literal text",
+        );
+
+        assert_eq!(
+            execute_sed_sync("cat dog", &[parse_expression("s/cat|dog/X/g").unwrap()], false),
+            "cat dog\n",
+            "bare | is literal, no match",
+        );
+        assert_eq!(
+            execute_sed_sync("cat|dog", &[parse_expression("s/cat|dog/X/g").unwrap()], false),
+            "X\n",
+            "bare | matches its own literal text",
+        );
     }
 
     #[test]
     fn ere_groups_with_backref_work_normally() {
-        let expr = parse_expression(r"s/(a)(b)/\2\1/").unwrap();
+        let expr = parse_expression(r"s/\(a\)\(b\)/\2\1/").unwrap();
         assert_eq!(execute_sed_sync("ab", &[expr], false), "ba\n");
     }
 
@@ -1667,10 +1774,12 @@ mod tests {
 
     #[test]
     fn pattern_backreference_gives_sed_specific_error() {
-        // The regex crate refuses backreferences; we translate its raw parse
-        // error into a sed-flavored message that names the limitation.
+        // GNU BRE reads `\(a\)\1` as a real back-reference (this pattern's
+        // bare parens are literal in BRE, so it's `\1` after a literal
+        // "(a)"); the regex engine has none, so `gnu_bre_to_regex` refuses
+        // the pattern before it ever reaches the engine.
         let err = parse_program(r"s/(a)\1/X/").unwrap_err();
-        assert!(err.contains("backreference"), "should name backreference: {err}");
+        assert!(err.contains("back-reference"), "should name back-reference: {err}");
         assert!(
             !err.contains("regex parse error"),
             "should not leak the raw engine error: {err}"
@@ -1679,10 +1788,14 @@ mod tests {
 
     #[test]
     fn escaped_backslash_before_pipe_is_literal_backslash_then_alternation() {
-        // `a\\|b` is a literal backslash then `|` alternation in BOTH dialects:
-        // the rewrite preserves `\\` as a unit, so the trailing `|` stays bare
-        // ERE alternation and is not consumed as a BRE `\|`.
-        let expr = parse_expression(r"s/a\\|b/X/").unwrap();
+        // In GNU BRE, alternation is spelled `\|`, so the escaped-backslash
+        // unit `\\` must be consumed on its own before the translator reads
+        // the next backslash as the start of the `\|` operator — `a\\\|b`
+        // is "a" + a literal backslash, OR "b" (confirmed against
+        // `/usr/bin/sed`). A bare `|`, as in `a\\|b`, is literal in GNU BRE
+        // (see `bare_ere_metas_are_literal_in_default_mode`), so it does not
+        // alternate here.
+        let expr = parse_expression(r"s/a\\\|b/X/").unwrap();
         assert_eq!(execute_sed_sync(r"a\ b c", &[expr], false), "X b c\n");
     }
 
