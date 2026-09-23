@@ -674,10 +674,19 @@ impl AwkLexer {
                     Some('\\') => s.push('\\'),
                     Some('"') => s.push('"'),
                     Some('/') => s.push('/'),
-                    Some(c) => {
-                        s.push('\\');
-                        s.push(c);
-                    }
+                    // Any other escape drops the backslash and keeps just
+                    // the character — confirmed against gawk 5.4.1:
+                    // `"\|"` is the plain one-character string `|`, with a
+                    // "escape sequence `\|' treated as plain `|'" warning
+                    // (not replicated here). This matters most for a string
+                    // later used as a dynamic regex (`p = "cat\|dog"; $0 ~
+                    // p`): the backslash is already gone before the regex
+                    // compiler ever runs, so a bare `|` alternates, exactly
+                    // as it would in gawk. `\y \s \w` and the like are regex
+                    // escapes, not string escapes, so they drop here too,
+                    // same as gawk — `gawk_ere_to_regex` never sees them
+                    // with the backslash still on.
+                    Some(c) => s.push(c),
                     None => return Err("unterminated string".to_string()),
                 }
             } else if c == '\n' {

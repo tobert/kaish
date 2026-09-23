@@ -357,3 +357,54 @@ async fn dash_v_with_no_equals_sign_is_a_loud_error() {
     assert!(message.contains("-v"), "names the flag: {message}");
     assert!(message.contains("name=value"), "names the fix: {message}");
 }
+
+// ─── A dynamic regex from a string reads gawk's own escape rules ────────────
+//
+// `p = "cat\|dog"; $0 ~ p` used to read `p` as the literal 8-character text
+// `cat\|dog` (the backslash survived string-literal scanning), never
+// matching `"cat"` alone. Confirmed against gawk 5.4.1: an unrecognized
+// string escape drops the backslash at STRING PARSE TIME, before the value
+// is ever used as a regex (gawk: "escape sequence `\|' treated as plain
+// `|'"), so the runtime string is the two characters `cat|dog`, and used as
+// a dynamic regex that's alternation, matching "cat" alone as well as
+// "cat|dog" itself (which contains the substring "cat"). `\d` (not a regex
+// metacharacter) is a cleaner two-way discriminator: it drops to the bare
+// letter `d`, matching text with a literal `d` and nothing else.
+
+#[rstest]
+#[case(r#"BEGIN{p="cat\|dog"} $0 ~ p {print "match"}"#, "cat", "match")]
+#[case(r#"BEGIN{p="cat\|dog"} $0 ~ p {print "match"}"#, "dog", "match")]
+#[case(r#"BEGIN{p="cat\|dog"} $0 ~ p {print "match"}"#, "cat|dog", "match")]
+#[case(r#"BEGIN{p="cat\|dog"} $0 ~ p {print "match"}"#, "xyz", "")]
+#[case(r#"BEGIN{p="\d"} $0 ~ p {print "match"}"#, "ddd", "match")]
+#[case(r#"BEGIN{p="\d"} $0 ~ p {print "match"}"#, "555", "")]
+#[tokio::test]
+async fn dynamic_regex_string_drops_backslash_on_unrecognized_escape(
+    #[case] program: &str,
+    #[case] input: &str,
+    #[case] expected: &str,
+) {
+    let (out, code) = run_awk(program, input).await;
+    assert_eq!(out, expected, "program {program:?}, input {input:?}");
+    assert_eq!(code, 0, "program {program:?}, input {input:?}");
+}
+
+/// `p = "a\(b"; $0 ~ p`: `\(` was never a valid STRING escape either, so the
+/// backslash drops at string-parse time, leaving the bare, unmatched `(` —
+/// a regex compile error, not a literal-paren match. Confirmed against
+/// gawk 5.4.1: `fatal: invalid regexp: unbalanced (`.
+#[tokio::test]
+async fn dynamic_regex_from_dropped_escape_can_be_an_unbalanced_group() {
+    let kernel = kernel_at(tempdir().unwrap().path());
+    let message = match kernel
+        .execute(r#"echo 'a(b' | awk 'BEGIN{p="a\(b"} $0 ~ p {print "match"}'"#)
+        .await
+    {
+        Err(e) => e.to_string(),
+        Ok(result) => {
+            assert_ne!(result.code, 0, "must fail: {result:?}");
+            result.err.clone()
+        }
+    };
+    assert!(message.contains("invalid regex"), "{message}");
+}
