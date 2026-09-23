@@ -1633,6 +1633,47 @@ mod tests {
             .any(|i| i.code == IssueCode::PossiblyUndefinedVariable));
     }
 
+    /// Suspected bug: an unquoted heredoc body rewrites `$((expr))` to the
+    /// longer, body-local `${__ARITH:expr__}` spelling before scanning for
+    /// interpolation parts (`lexer::rewrite_body_arithmetic`), and
+    /// `parse_interpolated_string_spanned` computes every part's offset from
+    /// THAT rewritten string's own byte positions, not the original source's
+    /// — `HereDocData::content`'s own doc comment already names this as a
+    /// known drift. A `PossiblyUndefinedVariable` for a variable that comes
+    /// AFTER an arithmetic part in the same body should therefore report a
+    /// span pointing past the real variable, off by the rewrite's length
+    /// difference (here `${__ARITH:1+2__}` is 8 bytes longer than `$((1+2))`).
+    ///
+    /// Not fixed here — kaibo's review flagged this for confirmation only.
+    /// If this starts passing, the drift was fixed elsewhere; delete the
+    /// `#[ignore]` and the surrounding doc note, not just the assertion.
+    #[test]
+    #[ignore = "known bug: heredoc arithmetic-rewrite offsets shift spans of \
+                later interpolation parts in the same body — see this test's \
+                doc comment and HereDocData::content's"]
+    fn heredoc_arithmetic_rewrite_shifts_later_span() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools, &[]);
+
+        let source = "cat <<EOF\n$((1+2)) ${UNDEF}\nEOF";
+        let program = crate::parser::parse(source).expect("must parse");
+        let issues = validator.validate(&program);
+
+        let issue = issues
+            .iter()
+            .find(|i| i.code == IssueCode::PossiblyUndefinedVariable)
+            .expect("UNDEF must be flagged as possibly undefined");
+        let span = issue.span.expect("the issue must carry a span");
+        assert_eq!(
+            source.get(span.start..span.end),
+            Some("${UNDEF}"),
+            "span {:?} must cover \"${{UNDEF}}\" in the original source, not a \
+             position shifted by the arithmetic rewrite's length delta: {:?}",
+            span,
+            source.get(span.start..span.end),
+        );
+    }
+
     #[test]
     fn validates_defined_variable() {
         let (registry, user_tools) = make_validator();
