@@ -973,20 +973,14 @@ impl PipelineRunner {
             // stage, not just the foreground one).
             let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
-            // Open the stage's redirects on the child context, before any
-            // stage runs. A failure fails this stage from inside the spawned
-            // task, so the normal join/collection path reports it.
-            let opened = open_redirects(stage.redirects(), &mut stage_ctx, dispatcher).await;
-
             // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
             if i == 0 {
-                // A redirect (`read x < file | …`) has already set `stage_ctx.stdin`
-                // by this point, and leaves the session stream in `ctx` untouched —
-                // returning the *file's* leftover over it would both lose the
-                // session stream and substitute the wrong bytes for it. Capture
-                // this before the session's own stdin gets folded in below, so it
-                // reflects "a redirect provided it", not "stdin is now non-empty".
-                let redirect_set_stdin = stage_ctx.stdin.is_some();
+                // An input redirect (`read x < file | …`) sets `stage_ctx.stdin`
+                // when the stage opens its redirects, and leaves the session
+                // stream in `ctx` untouched — returning the *file's* leftover
+                // over it would both lose the session stream and substitute the
+                // wrong bytes for it.
+                let redirect_set_stdin = stage.redirects().iter().any(|redirect| is_input(&redirect.kind));
                 stage0_took_session_stdin = !redirect_set_stdin;
                 // First stage inherits the parent's stdin, but only if redirects didn't
                 // already set stdin (e.g., heredoc). Don't overwrite redirect-provided stdin.
@@ -1042,6 +1036,13 @@ impl PipelineRunner {
                 // here raced the producer's post-dispatch send and silently
                 // dropped structured data (`seq 1 3 | jq .` → text → parse error).
                 stage_ctx.stdin_data_rx = data_receiver;
+
+                // Open the stage's redirects inside its own task, after its
+                // stdin is wired, as each stage of a bash pipeline expands its
+                // redirect targets in its own subshell: a target's `$(cat)`
+                // reads this stage's stdin. A failure fails only this stage,
+                // through the normal join/collection path.
+                let opened = open_redirects(stage.redirects(), &mut stage_ctx, &*task_dispatcher).await;
 
                 // The stage's own (forked) dispatcher runs it: the borrowed
                 // `dispatcher` can't cross the spawn boundary, and
