@@ -16,7 +16,7 @@ use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, rewrite_posix_classes};
+use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, translate_strict_ere};
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
@@ -147,11 +147,13 @@ struct GrepArgs {
     pattern: Vec<String>,
 }
 
+/// Appended to every default-mode refusal: the reader may have meant ERE.
+const BRE_REFUSAL_TAIL: &str = "grep without -E reads GNU BRE; pass -E for ERE, as in `grep -E '(a|b)'`";
+
 /// The pattern the regex engine compiles for grep's three modes, and the GNU
 /// warnings to print for it. `-F` escapes every character; `-E` is strict
-/// ERE, with only its `[...]` classes rewritten (the regex engine's own
-/// `[:alpha:]` is ASCII-only); the default is GNU BRE, translated in full.
-/// The error is the whole refusal text.
+/// ERE, translated in full (classes and escapes both); the default is GNU
+/// BRE, also translated in full. The error is the whole refusal text.
 fn engine_pattern(
     pattern: &str,
     fixed: bool,
@@ -161,9 +163,14 @@ fn engine_pattern(
         return Ok((regex::escape(pattern), Vec::new()));
     }
     if extended {
-        return Ok((rewrite_posix_classes(pattern), Vec::new()));
+        // GNU grep reads a `{`/`*`/`+`/`?` with nothing before it to repeat
+        // as a literal character (confirmed against `/usr/bin/grep -E`) —
+        // `sed -E` does not share this leniency, see `translate_strict_ere`.
+        return translate_strict_ere(pattern, "", true)
+            .map(|translation| (translation.pattern, translation.warnings))
+            .map_err(|message| format!("grep: {message}"));
     }
-    gnu_bre_to_regex(pattern)
+    gnu_bre_to_regex(pattern, BRE_REFUSAL_TAIL)
         .map(|translation| (translation.pattern, translation.warnings))
         .map_err(|message| format!("grep: {message}"))
 }
