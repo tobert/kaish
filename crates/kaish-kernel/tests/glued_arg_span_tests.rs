@@ -333,9 +333,10 @@ fn flush_line_continuation_is_a_glued_word(#[case] source: &str, #[case] expecte
 /// bare word like this. The message must show the actual refused word
 /// instead.
 ///
-/// `./bin=1` pins the deliberate limit `fuse_plain_eq_run` still draws
-/// (`equals_run_word_tests.rs`): a single bare `=` with no `==`/`!=`
-/// anywhere in the run still looks like a botched assignment, and stays
+/// `./bin=1` pins the deliberate limit `fuse_plain_operator_run` still
+/// draws (`equals_run_word_tests.rs`, `bang_arg_word_tests.rs`): a single
+/// bare `=` with no `==`/`!=`/`!` anywhere in the run still looks like a
+/// botched assignment, and stays
 /// rejected rather than silently fused into the text `"./bin=1"` —
 /// `x==1` no longer belongs here since it carries a bare `==` and fuses
 /// (see `doubled_test_operator_names_the_first_run` for that shape's

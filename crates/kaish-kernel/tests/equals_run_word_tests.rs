@@ -28,6 +28,8 @@
 //! value boundary or turn a botched assignment into silent text.
 //! `glued_arg_span_tests.rs` covers those and the pinned `./bin=1`-style
 //! cases that must keep erroring.
+//!
+//! A bare `!` is the third marker; `bang_arg_word_tests.rs` covers it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -201,18 +203,12 @@ async fn not_equal_glued_to_a_trailing_word_prints_literally() {
 }
 
 #[tokio::test]
-async fn bang_glue_keeps_refusing() {
-    // `!x` is a separate, still-open decision (`Bang` glued to a bareword,
-    // no `==`/`!=` marker involved) — untouched by this fix.
-    let kernel = Kernel::new(KernelConfig::transient()).expect("kernel");
-    let err = kernel
-        .execute("echo !x")
-        .await
-        .expect_err("echo !x must keep failing to parse");
-    assert!(
-        err.to_string().contains("adjacent words with no space between them"),
-        "echo !x must keep refusing with the glued-args message: {err}"
-    );
+async fn bang_glue_now_fuses() {
+    // A follow-on decision (`bang_arg_word_tests.rs` has the full table):
+    // `Bang` glued to a bareword, with no `==`/`!=` marker, now fuses the
+    // same way this file's `==`/`!=` runs do — `!` joined the fuse's
+    // marker set instead of staying a second, parallel special case.
+    assert_eq!(run("echo !x").await, "!x\n");
 }
 
 // --- Regression pins: constructs that must keep their current meaning ---
