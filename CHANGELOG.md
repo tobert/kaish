@@ -31,6 +31,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- A bareword containing `==`, `!=`, or `!` is one literal word: `echo ===`,
+  `echo ===1.50===`, `export X==1`, and `echo !x` parse, as in a bash script.
+  A word with a single `=` (`./bin=1`) or a substitution still needs quotes.
 - Usage errors across the builtins now exit 2 instead of 1: a missing operand,
   an unknown subcommand, a flag value the builtin cannot use. The sweep and a
   follow-up review together cover 114 sites in 56 builtins. What a caller can
@@ -116,10 +119,17 @@ breaking entries are marked **BREAKING**.
 - `kaish --plan` now runs the validator. A program that parses but the kernel
   would reject reports `{"errors": [...]}` and exits 2 instead of printing a
   clean plan the caller cannot run.
-- An invalid regex names the escape that fixes it (`\[` for a literal `[`,
-  `[(]` and `[{]` where a backslash would be a BRE operator) instead of
-  linking kaish's regex crate. A pattern with two faults gets no hint rather
-  than one that still does not compile.
+- An invalid `grep -E` pattern names the escape that fixes it (`\[`, `\(`,
+  `\{` for a literal `[`, `(`, `{`) instead of linking kaish's regex crate. A
+  pattern with two faults gets no hint rather than one that still does not
+  compile.
+- `grep -w` keeps an alternation inside the word boundaries and accepts a
+  pattern that ends on punctuation (`grep -w 'KjCaller {'`), as GNU grep does.
+- `grep -o` prints only non-empty matches, as GNU grep does.
+- `[[:alpha:]]` and its eleven siblings are Unicode-aware in both `grep` and
+  `grep -E`, matching GNU grep in a UTF-8 locale: `grep -o '[[:alpha:]]'`
+  on `héllo 日本語` now prints every letter, not just the ASCII ones.
+  `[:digit:]` stays ASCII-only, as GNU's does.
 - A pattern that arrives through a variable (`p='[cast:'; grep "$p" f`) now
   exits 2 like a literal one. The validator skips a computed pattern, so the
   failure surfaced from the regex builders inside `grep` instead.
@@ -175,6 +185,8 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does — bare
+  `( ) { } | + ?` are literal (`grep 'fn consult('` works); use `grep -E '(a|b)'` for ERE.
 - **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
   `Execution { error, output }`. `output` holds what ran before the fault; a
   `KernelError::Execution(e)` pattern no longer compiles.
@@ -195,8 +207,9 @@ breaking entries are marked **BREAKING**.
   stays as a deprecated alias.
 - `exec` and `spawn` refuse with exit 127 when unwrapped commands are off,
   like PATH lookup and `env CMD`; they returned 1.
-- A `!` glued to its operand is refused: `!true` names `! true`. `! cmd &`
-  is refused with E022, which names a form that negates inside the job.
+- A `!` glued to its operand at the start of a statement or condition is
+  refused: `!true` names `! true`. `! cmd &` is refused with E022, which
+  names a form that negates inside the job.
 - `echo a\` with `b` at column 0 on the next line is refused as token
   pasting. It ran as two words; bash reads one word, `ab`.
 - **BREAKING**: `sort < f > f` (one file as input and output) exits 1 and

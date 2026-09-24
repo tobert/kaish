@@ -57,12 +57,14 @@ impl Drop for ContinuationGapsGuard {
 
 thread_local! {
     /// The full source text of the current [`parse`] call, installed
-    /// alongside [`CONTINUATION_GAPS`] by the same entry point. Read only by
-    /// `validate_glued_args`'s own success branch, to slice the exact
-    /// refused word for its error message — unlike `CONTINUATION_GAPS`,
-    /// nothing here is load-bearing for parse correctness. A missing or
-    /// stale value just means a message stays at [`GLUED_ARGS_MESSAGE`]'s
-    /// generic examples instead of naming the word, never a wrong parse.
+    /// alongside [`CONTINUATION_GAPS`] by the same entry point. `glued_args_message`
+    /// reads it to slice the exact refused word for its error message — a
+    /// missing value there just means the message falls back to
+    /// [`GLUED_ARGS_MESSAGE`]'s generic examples. But `reject_glued_args`
+    /// also reads it to decide whether a glued run FUSES (`fuse_plain_operator_run`),
+    /// which is load-bearing for parse correctness: same as
+    /// [`CONTINUATION_GAPS`], a miss here is an internal bug, not a quiet
+    /// default, and must panic rather than silently skip fusion.
     static PARSE_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -2436,6 +2438,65 @@ fn is_glue_candidate(arg: &Arg) -> bool {
     )
 }
 
+/// The exact, unprocessed source text of `arg` at `span`, when `arg` is
+/// plain enough for [`fuse_plain_operator_run`] to join losslessly: a
+/// bareword or a bare `=`/`==`/`!=`/`!` operator token (`Literal(String)`
+/// whose value IS the source text verbatim), or a numeral (`Literal(Int|Float|Bool)`,
+/// `NumericLiteral`) — for a numeral, the SOURCE SLICE is returned, never
+/// the formatted value, so `1.50` stays `1.50` and never becomes `1.5`.
+///
+/// `None` for everything else: a quoted string (its source carries quote
+/// marks the value lacks), `VarRef`, `CommandSubst`, `Arithmetic`,
+/// `GlobPattern`, and flags (`LongFlag`/`ShortFlag`) all keep the run
+/// un-fusable. A quoted prefix (`"foo"bar`) or a substitution
+/// (`/tmp/$(echo x).txt`) is exactly the case an implicit join must not
+/// hide: the value boundary there is real.
+fn plain_literal_source_text<'src>(arg: &Arg, span: Span, source: &'src str) -> Option<&'src str> {
+    let slice = source.get(span.start..span.end)?;
+    match arg {
+        Arg::Positional(Expr::Literal(Value::String(s))) => (slice == s).then_some(slice),
+        Arg::Positional(Expr::Literal(Value::Int(_) | Value::Float(_) | Value::Bool(_))) => {
+            Some(slice)
+        }
+        Arg::Positional(Expr::NumericLiteral { raw, .. }) => (slice == raw).then_some(slice),
+        _ => None,
+    }
+}
+
+/// Fuse a maximal glued run into one literal word when doing so is
+/// unambiguous: every member is plain enough to hand back its own source
+/// text ([`plain_literal_source_text`]) and at least one is bare `==`,
+/// `!=`, or `!` — the three operators `test_operator_arg_parser` reads
+/// from `Token::EqEq`/`Token::NotEq`/`Token::Bang`. None of the three can
+/// ever be part of a real `NAME=value` assignment (that needs exactly one
+/// bare `=`) or a negation (bash's `!` needs its own token boundary too —
+/// `bang_prefixed` is the guard for that, at statement/condition/`[[ ]]`
+/// position, never argument position), so finding one in an otherwise-plain
+/// run proves the lexer split one word instead of the caller pasting two —
+/// `echo ===` (`EqEq` then `Eq`), `echo ==x`, `echo a==b`, a numeral glued
+/// the same way (`echo ===1`, `echo ===2024===`), and now `echo !x`,
+/// `echo a!b`, `echo !!` all reach here and fuse. `x==1` also fuses
+/// (`Int` is not excluded), and reads as the bareword `x==1` — the same
+/// "reached the parser as one plain word" answer `x==y` already gave.
+///
+/// A run with a bare `=` but no `==`/`!=`/`!` (`./bin=1`) is left for the
+/// caller to reject exactly as before: a single bare `=` still marks a run
+/// that looks like a botched assignment, which stays an error asking for a
+/// quote.
+///
+/// Returns `None` when the run is not eligible.
+fn fuse_plain_operator_run(run: &[(Arg, Span)], source: &str) -> Option<Arg> {
+    const FUSE_MARKERS: [&str; 3] = ["==", "!=", "!"];
+    let mut text = String::new();
+    let mut has_marker = false;
+    for (arg, span) in run {
+        let slice = plain_literal_source_text(arg, *span, source)?;
+        has_marker |= FUSE_MARKERS.contains(&slice);
+        text.push_str(slice);
+    }
+    has_marker.then(|| Arg::Positional(Expr::Literal(Value::String(text))))
+}
+
 /// Reject a run of argv fragments produced by glued (zero source-gap)
 /// tokens — kaish does no token pasting, so an unquoted `/tmp/$(echo
 /// x).txt` lexes into three fragments (`/tmp/`, the substitution, `.txt`)
@@ -2452,21 +2513,53 @@ fn is_glue_candidate(arg: &Arg) -> bool {
 /// the lexer now folds a bare comma into the surrounding bareword before
 /// the parser ever sees separate fragments (see `lexer::flush_glob_run`),
 /// so a comma-bearing word no longer reaches this function as two glued
-/// `Arg`s at all. Every remaining case is genuine token pasting.
+/// `Arg`s at all.
+///
+/// A run the lexer could not fold this way — `=`, `==`, `!=`, and `!` stay
+/// their own tokens even span-adjacent to a bareword, since a lone `=` can
+/// open a `NAME=value` assignment and `!` is a reserved word at
+/// statement/condition position (both need to be diagnosed as such, by
+/// their own guards, not silently pasted) — is tried against
+/// [`fuse_plain_operator_run`] before being rejected: a run that is
+/// nothing but plain barewords and bare `=`/`==`/`!=`/`!` fuses into one
+/// literal word instead of erroring (`echo ===`, `echo ==x`, `echo a==b`,
+/// `echo !x`, `echo a!b`). This is argument position only — `!` at
+/// statement/condition/`[[ ]]` position never reaches `reject_glued_args`
+/// at all; `bang_prefixed` consumes it first and refuses a glued form
+/// there on its own. Every other remaining case is genuine token pasting.
 fn reject_glued_args<'src>(
     args: Vec<(Arg, Span)>,
 ) -> Result<Vec<Arg>, Rich<'src, Token, Span>> {
-    for pair in args.windows(2) {
-        let (prev, prev_span) = &pair[0];
-        let (next, next_span) = &pair[1];
-        if is_glue_candidate(prev)
-            && is_glue_candidate(next)
-            && gap_is_only_continuations(prev_span.end, next_span.start)
+    let source = PARSE_SOURCE.with(|s| s.borrow().clone());
+    let mut result = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let mut end = i + 1;
+        while end < args.len()
+            && is_glue_candidate(&args[end - 1].0)
+            && is_glue_candidate(&args[end].0)
+            && gap_is_only_continuations(args[end - 1].1.end, args[end].1.start)
         {
-            return Err(Rich::custom(*next_span, GLUED_ARGS_MESSAGE));
+            end += 1;
         }
+        if end - i >= 2 {
+            let Some(src) = source.as_deref() else {
+                unreachable!(
+                    "reject_glued_args ran without parse's SourceTextGuard \
+                     installed on this thread"
+                );
+            };
+            if let Some(fused) = fuse_plain_operator_run(&args[i..end], src) {
+                result.push(fused);
+                i = end;
+                continue;
+            }
+            return Err(Rich::custom(args[i + 1].1, GLUED_ARGS_MESSAGE));
+        }
+        result.push(args[i].0.clone());
+        i += 1;
     }
-    Ok(args.into_iter().map(|(arg, _)| arg).collect())
+    Ok(result)
 }
 
 /// The message `reject_glued_args` and [`validate_glued_args`] both raise —
@@ -2482,9 +2575,12 @@ const GLUED_ARGS_MESSAGE: &str = "adjacent words with no space between them are 
 ///
 /// Called ONLY from [`validate_glued_args`]'s own success branch, where the
 /// caller guarantees `span` is the full, corrected run: a bare-punctuation
-/// paste (`echo ===`) has no `/tmp/`, no `$(echo x).txt`, and no `$dir` to
-/// relate to, so the shipped examples were pointing at a shape that never
-/// occurred, and naming the actual word fixes that. `reject_glued_args`'s own
+/// paste with a single `=` and no `==`/`!=`/`!` marker (`./bin=1`, still a
+/// real paste — see [`fuse_plain_operator_run`]) has no `/tmp/`, no
+/// `$(echo x).txt`, and no `$dir` to relate to, so the shipped examples
+/// were pointing at a shape that never occurred, and naming the actual
+/// word fixes that. (`echo ===`, `x==1`, and `echo !x` are no longer a
+/// paste at all — see `fuse_plain_operator_run`.) `reject_glued_args`'s own
 /// raw span, and the "no run found" fallback that leaves the grammar's span
 /// standing (documented on `validate_glued_args`, and on `is_word_token` for
 /// the nine-keyword gap), are never a full, verified run — a wrong word FROM

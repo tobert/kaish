@@ -16,7 +16,7 @@ use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere, regex_fix_hint};
+use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, rewrite_posix_classes};
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
@@ -74,14 +74,17 @@ struct GrepArgs {
     #[arg(short = 'U', long = "multiline")]
     multiline: bool,
 
-    /// Strict ERE (POSIX -E): backslash-escaped metas match the literal
-    /// character (`\|` is a `|`). Default mode also accepts the GNU BRE
-    /// spellings (`a\|b`, `\(…\)`, `x\{2,5\}`) as operators.
+    /// Extended regex (POSIX -E): `grep -E 'foo|bar'`. Bare `( ) { } | + ?`
+    /// are operators and a backslashed one is literal (`\|` is a `|`). Without
+    /// -E, grep reads GNU BRE, as GNU grep does: `grep 'foo\|bar'`, and a bare
+    /// `(` is literal.
     #[arg(id = "extended_regexp", short = 'E', long = "extended-regexp", visible_alias = "extended_regexp")]
     _extended: bool,
 
-    /// Fixed strings (POSIX -F): treat pattern as a literal string, not a
-    /// regex. Implemented by escaping every metachar via `regex::escape`.
+    /// Fixed strings (POSIX -F): every character of the pattern is literal,
+    /// as in `grep -F 'a|b'`.
+    ///
+    /// Implemented by escaping every metachar via `regex::escape`.
     #[arg(id = "fixed_strings", short = 'F', long = "fixed-strings", visible_alias = "fixed_strings")]
     _fixed: bool,
 
@@ -139,8 +142,43 @@ struct GrepArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Pattern to search for, followed by optional file paths.
+    /// Pattern to search for, followed by optional file paths. GNU BRE by
+    /// default: `grep 'fn consult('` matches the text `fn consult(`.
     pattern: Vec<String>,
+}
+
+/// The pattern the regex engine compiles for grep's three modes, and the GNU
+/// warnings to print for it. `-F` escapes every character; `-E` is strict
+/// ERE, with only its `[...]` classes rewritten (the regex engine's own
+/// `[:alpha:]` is ASCII-only); the default is GNU BRE, translated in full.
+/// The error is the whole refusal text.
+fn engine_pattern(
+    pattern: &str,
+    fixed: bool,
+    extended: bool,
+) -> Result<(String, Vec<String>), String> {
+    if fixed {
+        return Ok((regex::escape(pattern), Vec::new()));
+    }
+    if extended {
+        return Ok((rewrite_posix_classes(pattern), Vec::new()));
+    }
+    gnu_bre_to_regex(pattern)
+        .map(|translation| (translation.pattern, translation.warnings))
+        .map_err(|message| format!("grep: {message}"))
+}
+
+/// The refusal for a pattern the regex engine rejected. In the default mode
+/// the engine saw the translated pattern, so say so.
+fn engine_error(error: &dyn std::fmt::Display, extended: bool) -> String {
+    if extended {
+        format!("grep: invalid regex pattern: {error}")
+    } else {
+        format!(
+            "grep: invalid regex pattern: {error} (the pattern above is the GNU BRE \
+             translated for the regex engine; pass -E to write ERE directly)"
+        )
+    }
 }
 
 #[async_trait]
@@ -161,7 +199,9 @@ impl Tool for Grep {
                 ("Extract matched text only", "grep -o 'https://[^\"]*' file.html"),
                 ("Show 2 lines of context around matches", "grep -C 2 error log.txt"),
                 ("Search a directory tree", "grep -r TODO src/"),
+                ("Match a literal paren", "grep -n 'fn consult(' src/lib.rs"),
                 ("Match either alternative", r"grep 'foo\|bar' file.txt"),
+                ("Use ERE operators", "grep -E '(GET|POST) /api' access.log"),
                 ("Limit a recursive search by filename", "grep -rn TODO . --include='*.rs'"),
             ],
         )
@@ -172,36 +212,65 @@ impl Tool for Grep {
 
         // Skip regex syntax check when -F is set: pattern will be escaped at runtime.
         let fixed = args.has_flag("F") || args.has_flag("fixed-strings");
-        if !fixed && let Some(pattern) = args.get_string("pattern", 0) {
-            // Validate the pattern that actually runs: rewrite GNU BRE metas to
-            // ERE first (issue #60) so `grep 'a\|b'` is checked as alternation.
-            // `-E` (strict ERE) skips the rewrite, matching execute().
+        // Don't validate if pattern looks dynamic (contains shell expansion markers)
+        if !fixed
+            && let Some(pattern) = args.get_string("pattern", 0)
+            && !pattern.contains("<dynamic>")
+        {
+            // Validate the pattern that actually runs, translated the same way
+            // execute() translates it.
             let extended = args.has_flag("E") || args.has_flag("extended-regexp");
-            let rewritten = if extended { pattern.clone() } else { bre_metas_to_ere(&pattern) };
-            let rewrote = rewritten != pattern;
-            // Don't validate if pattern looks dynamic (contains shell expansion markers)
-            if !rewritten.contains("<dynamic>")
-                && let Err(e) = regex::Regex::new(&rewritten) {
-                    issues.push(ValidationIssue::error(
-                        IssueCode::InvalidRegex,
-                        append_dialect_hint(
-                            format!("grep: invalid regex pattern: {}", e),
-                            rewrote,
-                            Some("-E"),
-                        ),
-                    )
-                    .with_suggestion(
-                        regex_fix_hint(&rewritten)
-                            .unwrap_or("escape the literal character the engine could not place"),
-                    )
-                    .with_command(self.name()));
+            match engine_pattern(&pattern, false, extended) {
+                Err(message) => issues.push(
+                    ValidationIssue::error(IssueCode::InvalidRegex, message).with_command(self.name()),
+                ),
+                Ok((engine, _)) => {
+                    if let Err(e) = regex::Regex::new(&engine) {
+                        let issue = ValidationIssue::error(
+                            IssueCode::InvalidRegex,
+                            engine_error(&e, extended),
+                        );
+                        let issue = if extended {
+                            issue.with_suggestion(
+                                regex_fix_hint(&engine)
+                                    .unwrap_or("escape the literal character the engine could not place"),
+                            )
+                        } else {
+                            issue
+                        };
+                        issues.push(issue.with_command(self.name()));
+                    }
                 }
+            }
         }
-
         issues
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        // GNU grep prints pattern warnings (`stray \ before d`) on stderr and
+        // still runs the search.
+        let mut warnings = Vec::new();
+        let mut result = self.search(args, ctx, &mut warnings).await;
+        if !warnings.is_empty() {
+            let mut err: String = warnings
+                .iter()
+                .map(|warning| format!("grep: warning: {warning}\n"))
+                .collect();
+            err.push_str(&result.err);
+            result.err = err;
+        }
+        result
+    }
+}
+
+impl Grep {
+    /// The search itself; pattern warnings collect in `warnings`.
+    async fn search(
+        &self,
+        mut args: ToolArgs,
+        ctx: &mut dyn ToolCtx,
+        warnings: &mut Vec<String>,
+    ) -> ExecResult {
         let ctx = exec_context(ctx);
         args.flagify_bool_named(&self.schema());
 
@@ -304,26 +373,20 @@ impl Tool for Grep {
             _ => BinaryDetection::quit(b'\x00'),
         };
 
-        // -F: escape regex metachars so the pattern matches literally.
-        // Default: rewrite the GNU BRE backslash-metas (`\|`, `\+`, `\(`, …) into
-        // their ERE form so agent-idiomatic `grep 'a\|b'` alternates instead of
-        // silently matching a literal `|` (issue #60). `-E` (extended) is strict
-        // ERE, where those escapes stay literal — the escape hatch for a literal
-        // `|`/`+`.
-        // -w wraps in word boundaries (regex syntax) AFTER escaping so
-        // `grep -Fw "192.168.1.1"` still anchors at word boundaries.
+        // One translation feeds every search path below: streaming stdin, the
+        // chunked single-file scanner, and the whole-buffer searcher.
         let extended = args.has_flag("E") || args.has_flag("extended-regexp");
-        let (escaped, dialect_rewrote) = if fixed_strings {
-            (regex::escape(&pattern), false)
-        } else if extended {
-            (pattern, false)
-        } else {
-            let rewritten = bre_metas_to_ere(&pattern);
-            let rewrote = rewritten != pattern;
-            (rewritten, rewrote)
+        let (escaped, pattern_warnings) = match engine_pattern(&pattern, fixed_strings, extended) {
+            Ok(translated) => translated,
+            Err(message) => return ExecResult::failure(2, message),
         };
+        warnings.extend(pattern_warnings);
+        // -w follows GNU: the match is not preceded or followed by a word
+        // character. The group keeps an alternation inside the boundaries, and
+        // the half boundaries let a pattern start or end on punctuation
+        // (`grep -w 'KjCaller {'`).
         let final_pattern = if word_regexp {
-            format!(r"\b{}\b", escaped)
+            format!(r"\b{{start-half}}(?:{escaped})\b{{end-half}}")
         } else {
             escaped
         };
@@ -338,14 +401,7 @@ impl Tool for Grep {
         {
             Ok(r) => r,
             Err(e) => {
-                return ExecResult::failure(
-                    2,
-                    append_dialect_hint(
-                        format!("grep: invalid pattern: {}", e),
-                        dialect_rewrote,
-                        Some("-E"),
-                    ),
-                )
+                return ExecResult::failure(2, engine_error(&e, extended))
             }
         };
 
@@ -357,14 +413,7 @@ impl Tool for Grep {
         {
             Ok(m) => m,
             Err(e) => {
-                return ExecResult::failure(
-                    2,
-                    append_dialect_hint(
-                        format!("grep: invalid pattern: {}", e),
-                        dialect_rewrote,
-                        Some("-E"),
-                    ),
-                )
+                return ExecResult::failure(2, engine_error(&e, extended))
             }
         };
 
@@ -1529,7 +1578,9 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                 let line_num = m.line_number.unwrap_or(0);
                 let anchor = m.line_number;
                 if opts.only_matching && !opts.invert && !m.submatches.is_empty() {
-                    for sub in &m.submatches {
+                    // GNU `-o` prints non-empty matches only: `grep -o 'a*'`
+                    // on `b` selects the line and prints nothing.
+                    for sub in m.submatches.iter().filter(|sub| !sub.text.is_empty()) {
                         output.push_str(&prefix(line_num, ':'));
                         output.push_str(&sub.text);
                         output.push('\n');
@@ -1854,7 +1905,8 @@ mod tests {
         assert_eq!(result.code, 1);
     }
 
-    /// Multiline matching with -U: pattern with `(?s).` can span newlines.
+    /// Multiline matching with -U: an ERE (`-E`) pattern with `(?s).` can
+    /// span newlines. Without -E, `(?s)` is literal text, as in GNU BRE.
     #[tokio::test]
     async fn test_grep_multiline_flag() {
         let mut ctx = make_ctx().await;
@@ -1863,6 +1915,7 @@ mod tests {
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("(?s)foo.*bar".into()));
         args.flags.insert("U".to_string());
+        args.flags.insert("E".to_string());
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(
@@ -1887,6 +1940,7 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("(?s)foo.*bar".into()));
+        args.flags.insert("E".to_string());
 
         let result = Grep.execute(args, &mut ctx).await;
         // No matches across lines → exit 1.
