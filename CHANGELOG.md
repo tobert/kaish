@@ -165,6 +165,32 @@ breaking entries are marked **BREAKING**.
 - `A=$((1/0)) cmd` names `A` in its error, like a plain assignment.
 - A `--plan` rendering re-parses to the same values: `"1"`, `"true"` and
   `"1.5"` stay quoted.
+- Output redirect targets now open, left to right, before the command runs;
+  a missing parent directory refuses the command and names the fix
+  (`mkdir -p` it first), and `cat f | sort > f` is now racy like bash.
+- A fault inside a function, `source`, or a script no longer reaches its
+  caller as a plain exit 2 that `if`, `!` and `&&`/`||` misread as false;
+  `exit` and `return` are now valueless, so a typed value survives them
+  everywhere.
+- An unquoted heredoc body's `$(...)` now finds its closing paren by walking
+  tokens instead of counting raw parentheses, so a `case` pattern's own `)`
+  inside the substitution no longer ends it early.
+- A pipeline no longer hangs when a stage stops reading before its input
+  ends: `seq 1 100000 | grep --no-such-flag x` used to never return; it now
+  exits 2, like bash.
+- A per-call timeout or an embedder's interrupt now stops a busy builtin
+  (`seq 1 50000000` under a 200ms timeout used to run to completion), and a
+  cancelled `seq 1 50000000 | wc -l` reports 130 now, not a truncated count.
+- `spawn`'s child now inherits only the kernel's exported variables, never
+  the host's, and runs in the shell's own directory, not the kaish
+  process's; `spawn`, `exec`, `which` and `env` now refuse a bare name with
+  no `PATH` in scope.
+- A background `spawn … &` now streams live to `/v/jobs/N/stdout`; `spawn
+  /bin/echo a b c` now runs all three arguments instead of just `echo a`;
+  and its stdin streams to the child instead of buffering to EOF first.
+- `exec()`'s SIGPIPE disposition is now restored after a failed underlying
+  exec (such as `exec /nonexistent`), instead of staying defaulted; a later
+  write to a closed pipe no longer kills the process outright.
 
 ### Changed
 
@@ -198,6 +224,13 @@ breaking entries are marked **BREAKING**.
   names a form that negates inside the job.
 - `echo a\` with `b` at column 0 on the next line is refused as token
   pasting. It ran as two words; bash reads one word, `ab`.
+- **BREAKING**: `sort < f > f` (one file as input and output) exits 1 and
+  names the fix: write to a temp file, then `mv` it over `f`. `f` keeps its
+  content; `kaish --plan` reports it as E023 when both paths are literal.
+- **BREAKING**: A write to a read-only mount now reports
+  `ErrorKind::ReadOnlyFilesystem` instead of `PermissionDenied`. An embedder
+  matching `PermissionDenied` on `/v/jobs`, `/v/bin`, or a read-only
+  `LocalFs` mount must also match `ReadOnlyFilesystem`.
 
 ## [0.17.2] - 2026-09-09
 
