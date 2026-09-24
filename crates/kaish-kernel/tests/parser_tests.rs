@@ -519,9 +519,9 @@ fn glued_bang_run_reports_only_the_first_pair() {
 // Forms that must keep parsing exactly as before: a properly spaced `!`
 // (statement, condition, and `[[ ]]` position — including double negation),
 // `!=` (a distinct token, not `!` followed by `=`), arithmetic's own `!` (a
-// separate sub-lexer), `!` inside quotes, and an ordinary glued ARGUMENT
-// (`echo hi!`), which keeps the pre-existing glued-argument error, unrelated
-// to this one.
+// separate sub-lexer), and `!` inside quotes. A glued `!` ARGUMENT
+// (`echo hi!`, `echo !x`) is a separate decision — see
+// `glued_bang_argument_fuses_not_refused` below and `bang_arg_word_tests.rs`.
 
 #[rstest]
 #[case("! true")]
@@ -539,18 +539,31 @@ fn unaffected_bang_forms_still_parse(#[case] input: &str) {
 }
 
 #[test]
-fn ordinary_glued_argument_keeps_its_pre_existing_error() {
-    // `echo hi!` and `echo !x` were already refused by the PRE-EXISTING
-    // glued-ARGUMENT check (`reject_glued_args`) before this work — pin
-    // that the message is still that one, not the new glued-`!` message,
-    // proving the two checks are independent.
+fn glued_bang_argument_fuses_not_refused() {
+    // `echo hi!` and `echo !x` used to be refused by the glued-ARGUMENT
+    // check (`reject_glued_args`). Amy's call: in argument position bash
+    // reads a glued `!` as ordinary text (a non-interactive script does no
+    // history expansion), so kaish now fuses it into one literal word
+    // instead — the same way it already fuses a glued `==`/`!=` run
+    // (`equals_run_word_tests.rs`). This is argument position only; a
+    // glued `!` at statement/condition/`[[ ]]` position is `bang_prefixed`'s
+    // guard and keeps refusing — see `glued_bang_is_refused` above.
     for input in ["echo hi!", "echo !x"] {
-        let errors = parse(input).expect_err("must still be refused (pre-existing behavior)");
-        assert!(
-            errors[0].message.contains("adjacent words with no space"),
-            "{input:?} must keep the pre-existing glued-argument message: {errors:?}"
-        );
+        parse(input).unwrap_or_else(|e| panic!("{input:?} must now parse (fused): {e:?}"));
     }
+}
+
+#[test]
+fn glued_bang_argument_with_a_substitution_still_refused() {
+    // A genuine paste (one side a variable or substitution) is unaffected:
+    // `fuse_plain_operator_run` only fuses a run of PLAIN literal/numeral
+    // pieces, never one carrying a `VarRef`/`CommandSubst` — this proves
+    // the fuse above and this refusal stay independent.
+    let errors = parse("echo !$x").expect_err("must still be refused");
+    assert!(
+        errors[0].message.contains("adjacent words with no space"),
+        "echo !$x must keep the pre-existing glued-argument message: {errors:?}"
+    );
 }
 
 // ── A line continuation must not evade the glued-`!` guard ─────────────────

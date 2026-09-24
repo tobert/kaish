@@ -72,7 +72,7 @@ fn grep_exits_2_for_an_unclosed_character_class() {
     let dir = fixture();
     let (code, _, err) = run_c(dir.path(), "grep -v '[cast:' lines.txt");
     assert_eq!(code, 2, "an uncompilable pattern is a usage error, not a result");
-    assert!(err.contains("unclosed character class"), "stderr was: {err}");
+    assert!(err.contains("unmatched `[`"), "stderr was: {err}");
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn plan_reports_a_validation_failure_instead_of_a_clean_plan() {
     assert_eq!(code, 2, "a program that cannot run is not a plan");
     let errors = json["errors"].as_array().expect("errors array");
     let text = errors.iter().map(|e| e["message"].as_str().unwrap_or("")).collect::<String>();
-    assert!(text.contains("unclosed character class"), "errors were: {errors:?}");
+    assert!(text.contains("unmatched `[`"), "errors were: {errors:?}");
 }
 
 #[test]

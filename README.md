@@ -235,9 +235,10 @@ an `awk` that never surprises.
   as expected.
 - **80/20** — implement the features used 80% of the time, deliberately omit the 20% that add
   complexity without proportional value. Missing features compose via pipes.
-- **ERE-first regex** — Extended Regular Expressions are the dialect everywhere; common GNU BRE
-  spellings (`\|`, `\(…\)`, `\{n,m\}`, `\+`, `\?`) are accepted too and rewrite to ERE, so existing
-  scripts keep working. `-E`/`-r` opts into strict ERE.
+- **GNU regex, exactly** — `grep` and `sed` read GNU BRE by default, exactly as GNU grep and GNU
+  sed do: `grep 'fn consult('`/`sed -n '/fn consult(/p'` match a literal paren, `grep 'a\|b'`/
+  `sed 's/a\|b/x/'` alternate, and `-E`/`-r` takes strict ERE. `awk` has no BRE — it reads gawk's
+  ERE, where the bare forms above are already the operators and `\|`/`\(…\)` are already literal.
 
 | Category | Tools |
 |----------|-------|

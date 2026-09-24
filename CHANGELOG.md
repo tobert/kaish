@@ -31,6 +31,18 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
+  digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
+  `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all
+  three.
+- `grep -E 'fn main() {'` matches: a `{` that starts no interval is literal,
+  as in GNU grep, and `{,2}` is an interval in `-E`.
+- `sed` prints a literal `&` for `\&` in a replacement and refuses `\2` past
+  the last group. `awk -v name` without `=` is refused, and a regex built from
+  a string follows gawk's escapes: `p="cat\|dog"` alternates.
+- A bareword containing `==`, `!=`, or `!` is one literal word: `echo ===`,
+  `echo ===1.50===`, `export X==1`, and `echo !x` parse, as in a bash script.
+  A word with a single `=` (`./bin=1`) or a substitution still needs quotes.
 - A quoted `~` stays `~`: `echo '~'`, `echo "~"`, and `x='~'; echo "$x"` printed
   `$HOME`. Only an unquoted `~` in the source expands, as in bash, now also in
   globs (`ls ~/src/*.rs`), redirects, `for` items, and alias bodies.
@@ -119,10 +131,17 @@ breaking entries are marked **BREAKING**.
 - `kaish --plan` now runs the validator. A program that parses but the kernel
   would reject reports `{"errors": [...]}` and exits 2 instead of printing a
   clean plan the caller cannot run.
-- An invalid regex names the escape that fixes it (`\[` for a literal `[`,
-  `[(]` and `[{]` where a backslash would be a BRE operator) instead of
-  linking kaish's regex crate. A pattern with two faults gets no hint rather
-  than one that still does not compile.
+- An invalid `grep -E` pattern names the escape that fixes it (`\[`, `\(`,
+  `\{` for a literal `[`, `(`, `{`) instead of linking kaish's regex crate. A
+  pattern with two faults gets no hint rather than one that still does not
+  compile.
+- `grep -w` keeps an alternation inside the word boundaries and accepts a
+  pattern that ends on punctuation (`grep -w 'KjCaller {'`), as GNU grep does.
+- `grep -o` prints only non-empty matches, as GNU grep does.
+- `[[:alpha:]]` and its eleven siblings are Unicode-aware in both `grep` and
+  `grep -E`, matching GNU grep in a UTF-8 locale: `grep -o '[[:alpha:]]'`
+  on `héllo 日本語` now prints every letter, not just the ASCII ones.
+  `[:digit:]` stays ASCII-only, as GNU's does.
 - A pattern that arrives through a variable (`p='[cast:'; grep "$p" f`) now
   exits 2 like a literal one. The validator skips a computed pattern, so the
   failure surfaced from the regex builders inside `grep` instead.
@@ -149,9 +168,40 @@ breaking entries are marked **BREAKING**.
 - `A=$((1/0)) cmd` names `A` in its error, like a plain assignment.
 - A `--plan` rendering re-parses to the same values: `"1"`, `"true"` and
   `"1.5"` stay quoted.
+- Output redirect targets now open, left to right, before the command runs;
+  a missing parent directory refuses the command and names the fix
+  (`mkdir -p` it first), and `cat f | sort > f` is now racy like bash.
+- A fault inside a function, `source`, or a script no longer reaches its
+  caller as a plain exit 2 that `if`, `!` and `&&`/`||` misread as false;
+  `exit` and `return` are now valueless, so a typed value survives them
+  everywhere.
+- An unquoted heredoc body's `$(...)` now finds its closing paren by walking
+  tokens instead of counting raw parentheses, so a `case` pattern's own `)`
+  inside the substitution no longer ends it early.
+- A pipeline no longer hangs when a stage stops reading before its input
+  ends: `seq 1 100000 | grep --no-such-flag x` used to never return; it now
+  exits 2, like bash.
+- A per-call timeout or an embedder's interrupt now stops a busy builtin
+  (`seq 1 50000000` under a 200ms timeout used to run to completion), and a
+  cancelled `seq 1 50000000 | wc -l` reports 130 now, not a truncated count.
+- `spawn`'s child now inherits only the kernel's exported variables, never
+  the host's, and runs in the shell's own directory, not the kaish
+  process's; `spawn`, `exec`, `which` and `env` now refuse a bare name with
+  no `PATH` in scope.
+- A background `spawn … &` now streams live to `/v/jobs/N/stdout`; `spawn
+  /bin/echo a b c` now runs all three arguments instead of just `echo a`;
+  and its stdin streams to the child instead of buffering to EOF first.
+- `exec()`'s SIGPIPE disposition is now restored after a failed underlying
+  exec (such as `exec /nonexistent`), instead of staying defaulted; a later
+  write to a closed pipe no longer kills the process outright.
 
 ### Changed
 
+- **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does — bare
+  `( ) { } | + ?` are literal (`grep 'fn consult('` works); use `grep -E '(a|b)'` for ERE.
+- **BREAKING**: `sed` without `-E`/`-r` reads GNU BRE, as GNU sed does:
+  `sed 's/fn main(/x/'` works, and `\(…\)`, `\{n\}`, `\|` are the operators.
+  `awk` reads gawk's ERE, where `\(` is a literal paren.
 - `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
   a token is literal, as it already was for globs and `$VAR`. Expand paths
   before passing them in.
@@ -175,10 +225,18 @@ breaking entries are marked **BREAKING**.
   stays as a deprecated alias.
 - `exec` and `spawn` refuse with exit 127 when unwrapped commands are off,
   like PATH lookup and `env CMD`; they returned 1.
-- A `!` glued to its operand is refused: `!true` names `! true`. `! cmd &`
-  is refused with E022, which names a form that negates inside the job.
+- A `!` glued to its operand at the start of a statement or condition is
+  refused: `!true` names `! true`. `! cmd &` is refused with E022, which
+  names a form that negates inside the job.
 - `echo a\` with `b` at column 0 on the next line is refused as token
   pasting. It ran as two words; bash reads one word, `ab`.
+- **BREAKING**: `sort < f > f` (one file as input and output) exits 1 and
+  names the fix: write to a temp file, then `mv` it over `f`. `f` keeps its
+  content; `kaish --plan` reports it as E023 when both paths are literal.
+- **BREAKING**: A write to a read-only mount now reports
+  `ErrorKind::ReadOnlyFilesystem` instead of `PermissionDenied`. An embedder
+  matching `PermissionDenied` on `/v/jobs`, `/v/bin`, or a read-only
+  `LocalFs` mount must also match `ReadOnlyFilesystem`.
 
 ## [0.17.2] - 2026-09-09
 
