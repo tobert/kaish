@@ -66,8 +66,17 @@ fn word_assign_chain_names_the_whole_word() {
 
 #[test]
 fn doubled_test_operator_names_the_first_run() {
-    // Used to point at the SECOND `===`'s `==` half.
-    assert_eq!(glued_span_text("echo === step 3 ==="), "===");
+    // Used to point at the SECOND run's `==` half. `echo === step 3 ===`,
+    // and now `echo x==1 step 3 y==2` too, no longer reproduce this — a
+    // plain `=`-family run fuses into one literal word whenever it carries
+    // a bare `==`/`!=` (`equals_run_word_tests.rs`), Int pieces included —
+    // so this keeps testing the same "first run, not a later one" span
+    // behavior with a shape that has no `==`/`!=` marker at all and so
+    // stays un-fusable on either side.
+    assert_eq!(
+        glued_span_text("echo ./bin=1 step 3 ./lib=2"),
+        "./bin=1"
+    );
 }
 
 /// A real, single-fragment paste keeps failing the same way (scope limit:
@@ -319,16 +328,26 @@ fn flush_line_continuation_is_a_glued_word(#[case] source: &str, #[case] expecte
 }
 
 /// A paste with no variable or command substitution on either side (bare
-/// punctuation) cannot be fixed by either of the generic examples — neither
-/// `/tmp/$(echo x).txt` nor `$dir/out.txt` involves a bare word like this.
-/// The message must show the actual refused word instead.
+/// punctuation and digits) cannot be fixed by either of the generic
+/// examples — neither `/tmp/$(echo x).txt` nor `$dir/out.txt` involves a
+/// bare word like this. The message must show the actual refused word
+/// instead.
+///
+/// `./bin=1` pins the deliberate limit `fuse_plain_operator_run` still
+/// draws (`equals_run_word_tests.rs`, `bang_arg_word_tests.rs`): a single
+/// bare `=` with no `==`/`!=`/`!` anywhere in the run still looks like a
+/// botched assignment, and stays
+/// rejected rather than silently fused into the text `"./bin=1"` —
+/// `x==1` no longer belongs here since it carries a bare `==` and fuses
+/// (see `doubled_test_operator_names_the_first_run` for that shape's
+/// current, un-erroring behavior).
 #[test]
 fn punctuation_only_glue_quotes_the_actual_word() {
-    let errors = parse("echo ===").expect_err("must be a parse error");
+    let errors = parse("./bin=1").expect_err("must be a parse error");
     assert_eq!(errors.len(), 1, "expected exactly one error: {errors:?}");
     let message = &errors[0].message;
     assert!(
-        message.contains(r#"quote the whole word, e.g. "===""#),
+        message.contains(r#"quote the whole word, e.g. "./bin=1""#),
         "should quote the refused word itself: {message}"
     );
     assert!(
@@ -357,10 +376,14 @@ fn variable_or_cmdsubst_glue_keeps_the_generic_examples(#[case] source: &str) {
 /// about ASCII-ness.
 #[test]
 fn multibyte_plain_glue_quotes_the_actual_word() {
-    let errors = parse("echo ===é").expect_err("must be a parse error");
+    // `é==1` no longer reproduces this — a bare `==` marker fuses the run
+    // now (`equals_run_word_tests.rs`), so `é==1` reads as the one word
+    // `é==1` instead of erroring. `café/bin=1` keeps the same single-`=`,
+    // no-marker shape `./bin=1` pins above, with a multibyte identifier.
+    let errors = parse("café/bin=1").expect_err("must be a parse error");
     let message = &errors[0].message;
     assert!(
-        message.contains("quote the whole word, e.g. \"===é\""),
+        message.contains("quote the whole word, e.g. \"café/bin=1\""),
         "a plain multi-byte word should be shown literally: {message}"
     );
 }

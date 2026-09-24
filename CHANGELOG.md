@@ -40,6 +40,9 @@ breaking entries are marked **BREAKING**.
 - `sed` prints a literal `&` for `\&` in a replacement and refuses `\2` past
   the last group. `awk -v name` without `=` is refused, and a regex built from
   a string follows gawk's escapes: `p="cat\|dog"` alternates.
+- A bareword containing `==`, `!=`, or `!` is one literal word: `echo ===`,
+  `echo ===1.50===`, `export X==1`, and `echo !x` parse, as in a bash script.
+  A word with a single `=` (`./bin=1`) or a substitution still needs quotes.
 - Usage errors across the builtins now exit 2 instead of 1: a missing operand,
   an unknown subcommand, a flag value the builtin cannot use. The sweep and a
   follow-up review together cover 114 sites in 56 builtins. What a caller can
@@ -190,8 +193,9 @@ breaking entries are marked **BREAKING**.
   stays as a deprecated alias.
 - `exec` and `spawn` refuse with exit 127 when unwrapped commands are off,
   like PATH lookup and `env CMD`; they returned 1.
-- A `!` glued to its operand is refused: `!true` names `! true`. `! cmd &`
-  is refused with E022, which names a form that negates inside the job.
+- A `!` glued to its operand at the start of a statement or condition is
+  refused: `!true` names `! true`. `! cmd &` is refused with E022, which
+  names a form that negates inside the job.
 - `echo a\` with `b` at column 0 on the next line is refused as token
   pasting. It ran as two words; bash reads one word, `ab`.
 
