@@ -319,7 +319,7 @@ The list grows when a collision appears in real prose, not in advance.
 | Term | Part of speech | Meaning |
 |---|---|---|
 | hazard | noun | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
-| override | noun | A documented, supported way past a restriction kaish enforces — `-E` out of the BRE superset, `--lines` out of JSONL rows. An override is designed and documented intentionally. |
+| override | noun | A documented, supported way past a restriction kaish enforces — `-E` out of GNU BRE, `--lines` out of JSONL rows. An override is designed and documented intentionally. |
 | fail loudly | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
 | builtin | noun | An embedded Unix-like tool that runs inside the kernel process. |
 | external command | noun | A program the kernel runs on the underlying system via execve(2) family, often via `$PATH`. |
