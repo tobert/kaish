@@ -346,6 +346,12 @@ impl<'a> Validator<'a> {
         fn literal_path(expr: &Expr) -> Option<&str> {
             match expr {
                 Expr::Literal(Value::String(path)) => Some(path),
+                // The validator has no session HOME to expand against, and
+                // doesn't need one: comparing the raw `~/f` text is enough
+                // to catch `sort < ~/f > ~/f` — two identical unexpanded
+                // spellings resolve to the same path regardless of what
+                // HOME turns out to be at runtime.
+                Expr::TildePath(path) => Some(path),
                 _ => None,
             }
         }
@@ -671,10 +677,16 @@ impl<'a> Validator<'a> {
     /// function the runtime uses, so the two cannot disagree about what
     /// counts as a number.
     fn check_numeric_literal_operand(&mut self, expr: &Expr) {
-        let Expr::Literal(value) = expr else {
-            return;
+        // A `TildePath` expands to a path at runtime, never a number, so its
+        // raw text stands in for the value the same way a plain string
+        // literal does — the check's answer doesn't depend on what HOME
+        // turns out to be.
+        let value = match expr {
+            Expr::Literal(value) => value.clone(),
+            Expr::TildePath(raw) => Value::String(raw.clone()),
+            _ => return,
         };
-        let Some(reason) = crate::interpreter::numeric_operand_refusal(value) else {
+        let Some(reason) = crate::interpreter::numeric_operand_refusal(&value) else {
             return;
         };
         self.issues.push(
@@ -694,6 +706,7 @@ impl<'a> Validator<'a> {
             Expr::Not(inner) => self.validate_expr(inner),
             Expr::Literal(_) => {}
             Expr::NumericLiteral { .. } => {}
+            Expr::TildePath(_) => {}
             Expr::VarRef(path) => self.validate_var_ref(path),
             Expr::Interpolated(parts) => {
                 for part in parts {

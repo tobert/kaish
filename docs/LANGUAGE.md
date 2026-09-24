@@ -429,6 +429,38 @@ café=au-lait;  echo $café       # au-lait
 😁=grin;       echo $😁         # grin
 ```
 
+### Tilde expansion
+
+`echo ~/src` — expands to `$HOME/src`. Tilde expansion applies only to an
+**unquoted** tilde-prefix written directly in the source: a bare word starting
+with `~` (`~`, `~/path`, `~user`, `~user/path`), including an assignment's
+value (`x=~/a`). It never applies to a quoted string, to a variable's value,
+or to a command substitution's output — those are already values, not source
+words, by the time kaish sees them.
+
+```sh
+echo ~/src                # /home/amy/src — unquoted, expands
+echo '~/src'               # ~/src — quoted, stays literal
+x='~/src'; echo "$x"       # ~/src — the value was never an unquoted word
+x=~/src; echo $x           # /home/amy/src — the assignment's OWN value was unquoted
+```
+
+`~user` reads the named user's home directory from `/etc/passwd`, which
+needs the `host` capability; without it, `~user` stays literal, the same as
+when the string doesn't match a real user. `~` alone reads the session
+`HOME` — the kernel never reads the host process's `$HOME`
+(`docs/EMBEDDING.md`, "Initial Variables and Hermetic Subprocess Env"). With
+no `HOME` in scope, `~`/`~/path` stays literal rather than expanding to
+nothing.
+
+A `~` that is not at the start of a word is never a tilde-prefix: kaish has
+no bareword-pasting rule, so an unquoted `~` glued to a preceding word
+(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
+a silently literal concatenation. A heredoc body never expands `~`, even
+when the delimiter is unquoted and the body otherwise interpolates — tilde
+expansion is a source-word operation, and a heredoc body is never split into
+words.
+
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
 them, and `echo a-b`, `ls -l`, and `my-file.txt` are unaffected — but a name

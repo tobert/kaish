@@ -232,13 +232,11 @@ fn tilde_path_keeps_at_sign_in_arguments_and_redirects() {
     let program = parse("cat ~/a@b").unwrap();
     assert_eq!(
         only_command(&program.statements).args,
-        vec![Arg::Positional(Expr::Literal(Value::String(
-            "~/a@b".into()
-        )))]
+        vec![Arg::Positional(Expr::TildePath("~/a@b".into()))]
     );
     let program = parse("cat <~/a@b").unwrap();
     assert_eq!(
         only_command(&program.statements).redirects[0].target,
-        Expr::Literal(Value::String("~/a@b".into()))
+        Expr::TildePath("~/a@b".into())
     );
 }

@@ -421,6 +421,16 @@ pub enum Expr {
     /// which this mirrors, and `docs/LANGUAGE.md`, "A bare number follows JSON
     /// rules".
     NumericLiteral { value: Value, raw: String },
+    /// An unquoted tilde-prefix word written in the source: `~`, `~/path`,
+    /// `~user`, `~user/path` — mirrors `lexer::Token::Tilde`/`TildePath`. The
+    /// string is the raw source text, expanded against the session `HOME`
+    /// (or the named user's home directory) only when this node is
+    /// evaluated. A quoted `'~'`/`"~"`, a variable, or a command
+    /// substitution never produces this variant — the lexer only emits
+    /// `Tilde`/`TildePath` outside quotes — so tilde expansion cannot reach
+    /// a quoted or computed string. See `docs/LANGUAGE.md`, "Tilde
+    /// expansion".
+    TildePath(String),
 }
 
 /// One element of a list literal.

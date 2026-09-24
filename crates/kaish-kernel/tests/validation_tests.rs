@@ -859,6 +859,24 @@ fn a_literal_operand_a_numeric_comparison_refuses_is_reported() {
     }
 }
 
+/// A bare `~`/`~/path` operand expands to a path at runtime, never a
+/// number, so its raw source text refuses a numeric comparison the same
+/// way any other non-numeric literal does — `Expr::TildePath` fell out of
+/// `check_numeric_literal_operand`'s match (`Expr::Literal` only) when the
+/// tilde-expansion fix introduced the separate AST node, silently dropping
+/// this W008 report for `[[ ~ -eq 1 ]]`.
+#[test]
+fn a_tilde_operand_a_numeric_comparison_refuses_is_reported() {
+    for source in ["[[ ~ -eq 1 ]]", "[[ 1 -eq ~/x ]]"] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        let reported: Vec<_> = issues
+            .iter()
+            .filter(|i| i.code == kaish_kernel::validator::IssueCode::NonNumericTestOperand)
+            .collect();
+        assert_eq!(reported.len(), 1, "{source}: expected one W008, got {issues:?}");
+    }
+}
+
 /// Nothing computed, and nothing outside a numeric op.
 #[test]
 fn w008_stays_quiet_where_the_value_is_not_in_the_source() {

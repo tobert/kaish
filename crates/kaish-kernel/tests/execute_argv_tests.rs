@@ -122,18 +122,22 @@ async fn argv_tokens_do_not_interpolate_variables() {
 }
 
 #[tokio::test]
-async fn tilde_expands_consistently_with_the_string_door() {
-    // A leading `~` is expanded against the session HOME by the *shared* binder,
-    // so the argv door and the string door agree (kaish expands `~` uniformly,
-    // unlike bash's quoting rules — see EMBEDDING.md). This pins consistency, not
-    // a claim that argv tokens are byte-for-byte literal w.r.t. `~`.
+async fn argv_tokens_do_not_tilde_expand() {
+    // An argv token carries no quoting, so it is treated like a quoted word:
+    // the string door only expands `~` for an *unquoted* source word (see
+    // `docs/LANGUAGE.md`, "Tilde expansion"), and `execute_argv` tokens are
+    // always literal — same as `execute("echo '~/work'")`.
     let kernel = kernel_at(tempdir().path());
     kernel.execute("HOME=/home/agent").await.unwrap();
 
     let via_argv = observe(&kernel.execute_argv("echo", &[s("~/work")]).await.unwrap());
-    let via_string = observe(&kernel.execute("echo ~/work").await.unwrap());
-    assert_eq!(via_argv, via_string);
-    assert_eq!(via_argv.0, "/home/agent/work", "tilde should expand via the shared binder");
+    assert_eq!(via_argv.0, "~/work", "argv token must not tilde-expand");
+
+    let via_bare_string = observe(&kernel.execute("echo ~/work").await.unwrap());
+    assert_eq!(via_bare_string.0, "/home/agent/work", "unquoted source ~ should still expand");
+
+    let via_quoted_string = observe(&kernel.execute("echo '~/work'").await.unwrap());
+    assert_eq!(via_argv, via_quoted_string, "argv token should agree with a quoted string, not a bare one");
 }
 
 #[tokio::test]

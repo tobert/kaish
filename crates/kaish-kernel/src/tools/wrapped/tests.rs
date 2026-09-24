@@ -803,10 +803,6 @@ impl crate::kernel::ArgValueSource for FixedSource {
     async fn expand_glob(&self, _pattern: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
-
-    async fn home(&self) -> Option<String> {
-        None
-    }
 }
 
 fn literal(word: &str) -> crate::ast::Arg {

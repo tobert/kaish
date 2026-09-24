@@ -1700,12 +1700,15 @@ impl Kernel {
     /// [`Value::Bytes`]/[`Value::Json`]. `execute_argv` skips it.
     ///
     /// **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no
-    /// command substitution, no word splitting — the "single-quoted word"
+    /// command substitution, no word splitting, and — like the string door's
+    /// own quoted words — no tilde expansion: the "single-quoted word"
     /// semantics taken to its end. `execute_argv("echo", &[Value::String("*.txt"
-    /// .into())])` emits `*.txt`; it does not glob. (One shared-binder expansion
-    /// does still apply, for consistency with the string door: a leading `~` is
-    /// expanded against the session `HOME` — kaish expands `~` uniformly, so the
-    /// two doors agree. Pass a pre-resolved path if you need it byte-literal.) A
+    /// .into())])` emits `*.txt`; it does not glob. `execute_argv("echo",
+    /// &[Value::String("~/a".into())])` emits `~/a` unexpanded — the string
+    /// door only expands `~` for an *unquoted* source word, and a token
+    /// handed to this door carries no quoting to begin with, so it is
+    /// treated the same as a quoted one. Pass an already-expanded path if
+    /// the caller wants one resolved. A
     /// non-string `Value`
     /// (`Bytes`/`Json`/`Int`) lands directly in `ToolArgs.positional`, so typed
     /// data survives without a `to_argv()` round-trip. (Caveat: the two-layer
@@ -2946,6 +2949,11 @@ impl Kernel {
                             scope.glob_enabled()
                         };
                         if glob_enabled {
+                            // Tilde expansion runs before globbing, like bash:
+                            // `for f in ~/src/*.rs` matches against $HOME, not
+                            // a literal `~` directory under cwd.
+                            let home = self.scope_home().await;
+                            let pattern = &expand_tilde(pattern, home.as_deref());
                             let (paths, cwd) = {
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
@@ -4041,6 +4049,9 @@ impl Kernel {
             Expr::Literal(Value::Null) => "null".to_string(),
             // Show the source text, not the typed value.
             Expr::NumericLiteral { raw, .. } => raw.clone(),
+            // Show the unexpanded source word, not the resolved path —
+            // this is a display of what the command WAS, not what it did.
+            Expr::TildePath(raw) => raw.clone(),
             Expr::VarRef(path) => {
                 let mut name = String::new();
                 for (i, seg) in path.segments.iter().enumerate() {
@@ -4104,7 +4115,7 @@ impl Kernel {
                 if let Some((alias_cmd, alias_args)) = parts.split_first() {
                     let mut new_args: Vec<Arg> = alias_args
                         .iter()
-                        .map(|a| Arg::Positional(Expr::Literal(Value::String(a.to_string()))))
+                        .map(|a| Arg::Positional(classify_alias_word(a)))
                         .collect();
                     new_args.extend_from_slice(args);
                     return Box::pin(self.execute_command_depth(alias_cmd, &new_args, alias_depth + 1, ctx)).await;
@@ -4493,7 +4504,6 @@ impl Kernel {
     #[cfg(feature = "subprocess")]
     async fn build_args_flat(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<Vec<String>> {
         let mut argv = Vec::new();
-        let home = self.scope_home().await;
         for arg in args {
             match arg {
                 Arg::Positional(expr) => {
@@ -4504,6 +4514,9 @@ impl Kernel {
                             scope.glob_enabled()
                         };
                         if glob_enabled {
+                            // Tilde expansion runs before globbing, like bash.
+                            let home = self.scope_home().await;
+                            let pattern = &expand_tilde(pattern, home.as_deref());
                             let (paths, cwd) = {
                                 let paths = ctx.expand_glob(pattern).await
                                     .map_err(|e| anyhow::anyhow!("glob: {}", e))?;
@@ -4542,7 +4555,6 @@ impl Kernel {
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &value) {
                         return Err(anyhow::anyhow!(msg));
                     }
-                    let value = apply_tilde_expansion(value, home.as_deref());
                     // External-command argv is a text sink: a bare `$BIN` binary
                     // word goes loud, never the `[binary: N bytes]` placeholder.
                     argv.push(value_to_text_sink(&value).map_err(|e| anyhow::anyhow!("{e}"))?);
@@ -4556,7 +4568,6 @@ impl Kernel {
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
                     }
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
                     argv.push(format!("--{key}={val_str}"));
                 }
@@ -4569,7 +4580,6 @@ impl Kernel {
                     if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
                         return Err(anyhow::anyhow!(msg));
                     }
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
                     argv.push(format!("{key}={val_str}"));
                 }
@@ -4686,6 +4696,15 @@ impl Kernel {
             // Typed evaluation only needs `value`; `raw` is for argv and
             // plan text sinks that read the `Expr` directly.
             Expr::NumericLiteral { value, .. } => Ok(value.clone()),
+            // The lexer only emits `Tilde`/`TildePath` for an unquoted
+            // source word, so this is the one place tilde expansion
+            // happens — never on a `Value` after quoting is already lost
+            // (the bug this variant replaced: `apply_tilde_expansion` used
+            // to re-expand any string starting with `~`, quoted or not).
+            Expr::TildePath(raw) => {
+                let home = self.scope_home().await;
+                Ok(Value::String(expand_tilde(raw, home.as_deref())))
+            }
             Expr::VarRef(path) => {
                 let scope = self.scope.read().await;
                 match scope.resolve_path(path) {
@@ -4898,7 +4917,15 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 Ok(Value::Int(scope.pid() as i64))
             }
-            Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
+            // Tilde expansion runs before globbing, like bash — and also
+            // applies when the pattern is never actually glob-matched (an
+            // assignment value: `x=~/src/*.rs` expands `~` but not `*`, the
+            // same split bash draws between tilde expansion and pathname
+            // expansion) or when glob expansion is disabled in this session.
+            Expr::GlobPattern(s) => {
+                let home = self.scope_home().await;
+                Ok(Value::String(expand_tilde(s, home.as_deref())))
+            }
             Expr::ListLiteral(elems) => {
                 // Spread must itself be a list — a scalar/record spread is a
                 // loud error, never silently coerced or dropped (mirrors the
@@ -4963,12 +4990,11 @@ impl Kernel {
         Box::pin(async move {
             match test_expr {
                 TestExpr::FileTest { op, path } => {
+                    // `eval_expr_async` expands `~` for an unquoted
+                    // `Expr::TildePath` operand before stat'ing — otherwise
+                    // `[[ -f ~/x ]]` would stat the literal `~/x` and always
+                    // be false.
                     let path_value = self.eval_expr_async(path, ctx).await?;
-                    // Expand `~` against the session HOME before stat'ing, the
-                    // same way argv positionals do — otherwise `[[ -f ~/x ]]`
-                    // stats the literal `~/x` and is always false.
-                    let home = self.scope_home().await;
-                    let path_value = apply_tilde_expansion(path_value, home.as_deref());
                     // A binary `[[ -f $bin ]]` operand goes loud rather than
                     // silently stat'ing a file literally named
                     // `[binary: N bytes]` (the same path-positional guard
@@ -6779,11 +6805,6 @@ pub(crate) trait ArgValueSource: Send + Sync {
     /// string) when this returns `None`. An enabled expansion that matches
     /// nothing is a genuine error, not `Ok(None)`.
     async fn expand_glob(&self, pattern: &str) -> Result<Option<Vec<String>>>;
-
-    /// Session `HOME`, for tilde expansion. `None` disables tilde expansion
-    /// — the reduced sync evaluator's existing behavior (it never expanded
-    /// `~`).
-    async fn home(&self) -> Option<String>;
 }
 
 /// The kernel's argument evaluator, bound to the context of the command whose
@@ -6807,6 +6828,10 @@ impl ArgValueSource for KernelArgSource<'_> {
         if !glob_enabled {
             return Ok(None);
         }
+        // Tilde expansion runs before globbing, like bash: `--path ~/*.rs`
+        // matches against $HOME, not a literal `~` directory under cwd.
+        let home = self.kernel.scope_home().await;
+        let pattern = &expand_tilde(pattern, home.as_deref());
         let (paths, cwd) = {
             let ctx = self.ctx.lock().await;
             let paths = ctx
@@ -6833,10 +6858,6 @@ impl ArgValueSource for KernelArgSource<'_> {
             })
             .collect();
         Ok(Some(display))
-    }
-
-    async fn home(&self) -> Option<String> {
-        self.kernel.scope_home().await
     }
 }
 
@@ -6867,7 +6888,6 @@ impl ArgValueSource for KernelArgSource<'_> {
 #[allow(clippy::too_many_arguments)]
 async fn consume_flag_positionals(
     source: &dyn ArgValueSource,
-    home: Option<&str>,
     args: &[Arg],
     flag_name: &str,
     canonical: &str,
@@ -6898,7 +6918,6 @@ async fn consume_flag_positionals(
             Some(pos_idx) => match &args[pos_idx] {
                 Arg::Positional(expr) => match source.eval(expr).await? {
                     Some(value) => {
-                        let value = apply_tilde_expansion(value, home);
                         collected.push(value);
                         consumed.insert(pos_idx);
                     }
@@ -6915,7 +6934,6 @@ async fn consume_flag_positionals(
                 // scalar value (see `positional_indices` construction).
                 Arg::WordAssign { key, value } => match source.eval(value).await? {
                     Some(val) => {
-                        let val = apply_tilde_expansion(val, home);
                         // Loud on binary (GH #116): `-v a=$BIN` must not silently
                         // reassemble the `[binary: N bytes]` placeholder into the
                         // flag's value — same text-sink boundary as the primary
@@ -7010,7 +7028,6 @@ pub(crate) async fn bind_tool_args(
     source: &dyn ArgValueSource,
 ) -> Result<ToolArgs> {
     let mut tool_args = ToolArgs::new();
-    let home = source.home().await;
 
     // A glob-passthrough tool (`glob`) consumes patterns as data: skip
     // argv glob expansion so the pattern reaches the tool as written —
@@ -7061,7 +7078,7 @@ pub(crate) async fn bind_tool_args(
                                 if let Expr::NumericLiteral { raw, .. } = expr {
                                     tool_args.words_raw.insert(words.len(), raw.clone());
                                 }
-                                words.push(apply_tilde_expansion(value, home.as_deref()));
+                                words.push(value);
                             }
                         }
                     }
@@ -7081,7 +7098,6 @@ pub(crate) async fn bind_tool_args(
                     let val = source.eval(value).await?.ok_or_else(|| {
                         anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
                     })?;
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     if lift_global_flags
                         && !past_double_dash
                         && crate::tools::is_global_output_flag(key)
@@ -7113,7 +7129,6 @@ pub(crate) async fn bind_tool_args(
                     let val = source.eval(value).await?.ok_or_else(|| {
                         anyhow::anyhow!("verbatim key=value could not be evaluated in this context")
                     })?;
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     let val_str = if let Expr::NumericLiteral { raw, .. } = value {
                         raw.clone()
                     } else {
@@ -7166,7 +7181,6 @@ pub(crate) async fn bind_tool_args(
                                         "raw-argv positional could not be evaluated in this context"
                                     )
                                 })?;
-                                let value = apply_tilde_expansion(value, home.as_deref());
                                 if let Expr::NumericLiteral { raw, .. } = expr {
                                     tool_args
                                         .positional_raw
@@ -7181,7 +7195,6 @@ pub(crate) async fn bind_tool_args(
                                 "raw-argv positional could not be evaluated in this context"
                             )
                         })?;
-                        let value = apply_tilde_expansion(value, home.as_deref());
                         // `test`'s numeric operators still get the real
                         // `value`; a text consumer gets `raw`.
                         if let Expr::NumericLiteral { raw, .. } = expr {
@@ -7202,7 +7215,6 @@ pub(crate) async fn bind_tool_args(
                     let val = source.eval(value).await?.ok_or_else(|| {
                         anyhow::anyhow!("raw-argv --key=value could not be evaluated in this context")
                     })?;
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     // Loud on binary (GH #116): `test --k=$BIN` must not
                     // silently reassemble the placeholder into the raw-argv
                     // positional stream `test` binds against. Source text
@@ -7224,7 +7236,6 @@ pub(crate) async fn bind_tool_args(
                     let val = source.eval(value).await?.ok_or_else(|| {
                         anyhow::anyhow!("raw-argv key=value could not be evaluated in this context")
                     })?;
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     // Loud on binary (GH #116): same reasoning as the Named
                     // arm above, for the bare `key=value` raw-argv form.
                     let val_str = if let Expr::NumericLiteral { raw, .. } = value {
@@ -7315,7 +7326,6 @@ pub(crate) async fn bind_tool_args(
                         }
                     }
                     if let Some(value) = source.eval(expr).await? {
-                        let value = apply_tilde_expansion(value, home.as_deref());
                         // The path `echo` reads: it takes `args.positional`
                         // directly, never the clap-parsed field, so a plain
                         // `Value::Int` here could not reproduce `-0`.
@@ -7330,7 +7340,6 @@ pub(crate) async fn bind_tool_args(
             }
             Arg::Named { key, value } => {
                 if let Some(val) = source.eval(value).await? {
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     // Past `--` this is data, not a flag: one operand spelled
                     // `--key=value`, the same collapse the `WordAssign` arm
                     // below does for `A=1` (GH #189). The value still expands.
@@ -7416,7 +7425,6 @@ pub(crate) async fn bind_tool_args(
                     continue;
                 }
                 if let Some(val) = source.eval(value).await? {
-                    let val = apply_tilde_expansion(val, home.as_deref());
                     // Past `--`, EVERY token is raw data — including for
                     // export/alias, whose `key=value` is normally a shell
                     // assignment (GH #189). `export -- A=1` must bind `A=1`
@@ -7499,7 +7507,6 @@ pub(crate) async fn bind_tool_args(
                         let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
                         consume_flag_positionals(
                             source,
-                            home.as_deref(),
                             args,
                             name,
                             canonical,
@@ -7519,7 +7526,6 @@ pub(crate) async fn bind_tool_args(
                     } else {
                         consume_flag_positionals(
                             source,
-                            home.as_deref(),
                             args,
                             name,
                             canonical,
@@ -7579,7 +7585,6 @@ pub(crate) async fn bind_tool_args(
                                     // respects `consumes`.
                                     consume_flag_positionals(
                                         source,
-                                        home.as_deref(),
                                         args,
                                         key,
                                         canonical,
@@ -7656,7 +7661,6 @@ pub(crate) async fn bind_tool_args(
                         let repeatable = lookup.map(|(_, _, _, r)| *r).unwrap_or(false);
                         consume_flag_positionals(
                             source,
-                            home.as_deref(),
                             args,
                             name,
                             canonical,
@@ -8193,17 +8197,6 @@ fn is_truthy(value: &Value) -> bool {
     }
 }
 
-/// Apply tilde expansion to a value.
-///
-/// Only string values starting with `~` are expanded. `home` is the session
-/// `HOME` from the kernel scope (the kernel is hermetic and never reads the
-/// host env); `None` leaves `~`/`~/path` unexpanded. See [`expand_tilde`].
-fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
-    match value {
-        Value::String(s) if s.starts_with('~') => Value::String(expand_tilde(&s, home)),
-        _ => value,
-    }
-}
 
 /// Classify an already-tokenized argv (`&[Value]`) into AST [`Arg`]s, mirroring
 /// how the lexer tokenizes the equivalent minimally-quoted command string —
@@ -8276,6 +8269,30 @@ fn classify_argv_token(token: &Value) -> Arg {
     }
 
     Arg::Positional(Expr::Literal(Value::String(s.clone())))
+}
+
+/// Classify one whitespace-split alias-body word for [`Self::execute_command_depth`].
+///
+/// Alias expansion is `split_whitespace` on the stored text, not a re-lex —
+/// it does not strip quotes, expand globs, or interpolate `$VAR` (a widening
+/// of alias semantics this function does not attempt). The one thing it must
+/// still do, to match bash re-parsing the alias body, is tilde-expand a bare
+/// `~`/`~/path`/`~user` word: lexing the word in isolation and requiring it
+/// collapse to exactly one `Tilde`/`TildePath` token reuses the same
+/// unquoted-word-start rule the string door uses, with no separate tilde
+/// heuristic to drift from it. A word that failed to lex at all, or that
+/// lexed to anything else — including a quoted `'~'` (the surrounding quotes
+/// survive `split_whitespace` untouched, so the word starts with `'`, not
+/// `~`) or a colon-fused `~/a:b` (one `Ident` token, not `TildePath`) — stays
+/// a plain literal, unchanged from before.
+fn classify_alias_word(word: &str) -> Expr {
+    if let Ok(tokens) = crate::lexer::tokenize(word)
+        && let [spanned] = tokens.as_slice()
+        && matches!(spanned.token, crate::lexer::Token::Tilde | crate::lexer::Token::TildePath(_))
+    {
+        return Expr::TildePath(word.to_string());
+    }
+    Expr::Literal(Value::String(word.to_string()))
 }
 
 /// A short-flag word: a leading ASCII letter, then only ASCII

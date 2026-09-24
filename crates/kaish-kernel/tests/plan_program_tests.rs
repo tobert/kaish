@@ -91,6 +91,27 @@ fn bound_names_never_read_as_free() {
     assert_eq!(plans[0].plan.bound_variables, vec!["f".to_string()]);
 }
 
+/// A bare `~`/`~/path` reads the session `HOME` to expand, the same
+/// dependency an explicit `$HOME` would name — the module doc comment
+/// claims this set is "complete by construction" ("kaish has no eval and
+/// no indirect expansion"), which was untrue for a tilde word until
+/// `collect_expr`'s `Expr::TildePath` arm listed it. An embedder that
+/// peeks `HOME` before running `cd ~` is judging the statement against the
+/// value it actually depends on.
+#[test]
+fn bare_tilde_lists_home_as_a_free_variable() {
+    let plans = plan_program("cd ~/projects").expect("parses");
+    assert_eq!(plans[0].plan.free_variables, vec!["HOME".to_string()]);
+    assert!(plans[0].plan.bound_variables.is_empty());
+}
+
+/// A quoted `'~'` is a plain literal — it names no dependency on `HOME`.
+#[test]
+fn quoted_tilde_does_not_list_home_as_a_free_variable() {
+    let plans = plan_program("cd '~/projects'").expect("parses");
+    assert!(plans[0].plan.free_variables.is_empty());
+}
+
 // ── A `$(...)` reached only through `$(( ))` still plans its own commands ──
 //
 // `--plan` promises every command a statement may run is present in
