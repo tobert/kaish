@@ -14,6 +14,7 @@ use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, PipelineStage, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, ExecResult, OutputFormat, PathError};
+use crate::tools::StdinState;
 use crate::tools::{global_flag_value_is_truthy, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
@@ -198,6 +199,9 @@ struct OpenedFile {
 #[derive(Default)]
 pub(crate) struct OpenedRedirects {
     files: Vec<OpenedFile>,
+    /// The stdin the first input redirect replaced, put back when the
+    /// command finishes so its unread input does not outlive it.
+    displaced_stdin: Option<Box<StdinState>>,
 }
 
 /// A redirect that failed to open. The command does not run.
@@ -267,19 +271,19 @@ pub(crate) async fn open_redirects(
                 let resolved = ctx.resolve_path(path);
                 match ctx.backend.read(&resolved, None).await {
                     Ok(data) => {
-                        ctx.set_stdin(data);
+                        redirect_stdin(ctx, &mut opened, data);
                         Ok(())
                     }
                     Err(e) => Err(redirect_error(path, &e)),
                 }
             }
             (RedirectKind::HereDoc(_), Some(body)) => {
-                ctx.set_stdin(body.clone());
+                redirect_stdin(ctx, &mut opened, body.clone());
                 Ok(())
             }
             // A here-string gets a trailing newline, as in bash.
             (RedirectKind::HereString, Some(word)) => {
-                ctx.set_stdin(format!("{word}\n"));
+                redirect_stdin(ctx, &mut opened, format!("{word}\n"));
                 Ok(())
             }
             (kind, Some(path)) if is_output_file(kind) => {
@@ -297,6 +301,16 @@ pub(crate) async fn open_redirects(
         return Err(RedirectOpenError { opened, failed_at, message });
     }
     Ok(opened)
+}
+
+/// Make `data` the command's stdin. The first input redirect sets the
+/// session's stdin sources aside, along with structured data and the
+/// sideband from an upstream stage: `<` wins over them, as in bash.
+fn redirect_stdin(ctx: &mut ExecContext, opened: &mut OpenedRedirects, data: impl Into<Vec<u8>>) {
+    if opened.displaced_stdin.is_none() {
+        opened.displaced_stdin = Some(Box::new(ctx.take_stdin_state()));
+    }
+    ctx.set_stdin(data);
 }
 
 /// The refusal for a file that is both `<` input and an output target.
@@ -592,13 +606,18 @@ async fn run_opened_stage(
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
     let redirects = stage.redirects();
-    let (mut result, in_effect, opened) = match opened {
+    let (mut result, in_effect, mut opened) = match opened {
         Ok(opened) => (dispatch_redirected(stage, ctx, dispatcher).await, redirects, opened),
         Err(failure) => {
             let in_effect = failure.in_effect(redirects);
             (ExecResult::failure(1, failure.message), in_effect, failure.opened)
         }
     };
+    // The redirect's input ends with the command; what it left unread is
+    // dropped and the stdin the redirect displaced comes back.
+    if let Some(displaced) = opened.displaced_stdin.take() {
+        ctx.restore_stdin_state(*displaced);
+    }
 
     // `2>&1` moves this stage's stderr into its stdout, but only once
     // `apply_redirects` runs below — capture what stdout held before
@@ -987,7 +1006,7 @@ impl PipelineRunner {
                 if !redirect_set_stdin {
                     stage_ctx.stdin = ctx.stdin.take();
                 }
-                if stage_ctx.stdin_data.is_none() {
+                if !redirect_set_stdin && stage_ctx.stdin_data.is_none() {
                     stage_ctx.stdin_data = ctx.stdin_data.take();
                 }
                 // Inherit a frontend-seeded lazy stdin pipe (non-Clone, so moved),

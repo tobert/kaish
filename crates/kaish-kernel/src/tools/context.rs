@@ -122,6 +122,15 @@ pub(crate) enum ExternalCommandOutcome {
     Unavailable(ExternalCommandsUnavailable),
 }
 
+/// The stdin sources of an [`ExecContext`], set aside while an input
+/// redirect stands in for them.
+pub(crate) struct StdinState {
+    stdin: Option<Vec<u8>>,
+    stdin_data: Option<Value>,
+    stdin_data_rx: Option<oneshot::Receiver<Option<Value>>>,
+    pipe_stdin: Option<PipeReader>,
+}
+
 /// Execution context passed to tools.
 ///
 /// Provides access to the backend (for file operations and tool dispatch),
@@ -832,6 +841,25 @@ impl ExecContext {
     pub fn set_stdin_with_data(&mut self, text: String, data: Option<Value>) {
         self.stdin = Some(text.into_bytes());
         self.stdin_data = data;
+    }
+
+    /// Move every stdin source out of the context, leaving it with none.
+    pub(crate) fn take_stdin_state(&mut self) -> StdinState {
+        StdinState {
+            stdin: self.stdin.take(),
+            stdin_data: self.stdin_data.take(),
+            stdin_data_rx: self.stdin_data_rx.take(),
+            pipe_stdin: self.pipe_stdin.take(),
+        }
+    }
+
+    /// Put back what [`Self::take_stdin_state`] took, dropping whatever
+    /// stdin the context holds now.
+    pub(crate) fn restore_stdin_state(&mut self, state: StdinState) {
+        self.stdin = state.stdin;
+        self.stdin_data = state.stdin_data;
+        self.stdin_data_rx = state.stdin_data_rx;
+        self.pipe_stdin = state.pipe_stdin;
     }
 
     /// Take structured data if available, consuming it.
