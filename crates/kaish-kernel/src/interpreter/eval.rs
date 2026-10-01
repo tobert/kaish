@@ -184,6 +184,11 @@ impl<'a> Evaluator<'a> {
             // Typed evaluation only needs `value`. `raw` is for argv and plan
             // text sinks, which read the `Expr` directly.
             Expr::NumericLiteral { value, .. } => self.eval_literal(value),
+            // The lexer only emits `Tilde`/`TildePath` outside quotes, so
+            // reaching this node means the author wrote an unquoted `~` —
+            // expand it here, against the session's own `HOME`, not the
+            // evaluated string later (see `expand_tilde`).
+            Expr::TildePath(raw) => Ok(Value::String(expand_tilde(raw, self.scope_home()))),
             Expr::VarRef(path) => self.eval_var_ref(path),
             Expr::Interpolated(parts) => self.eval_interpolated(parts),
             Expr::HereDocBody { parts, strip_tabs } => {
@@ -223,7 +228,9 @@ impl<'a> Evaluator<'a> {
             Expr::Command(cmd) => self.eval_command(cmd),
             Expr::LastExitCode => self.eval_last_exit_code(),
             Expr::CurrentPid => self.eval_current_pid(),
-            Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
+            // A tilde-prefix expands before any matching, as in the
+            // kernel's async evaluator; the glob itself is not matched here.
+            Expr::GlobPattern(s) => Ok(Value::String(expand_tilde(s, self.scope_home()))),
             Expr::ListLiteral(elems) => self.eval_list_literal(elems),
             Expr::RecordLiteral(entries) => self.eval_record_literal(entries),
         }
@@ -463,6 +470,17 @@ impl<'a> Evaluator<'a> {
     /// Evaluate a literal value.
     fn eval_literal(&mut self, value: &Value) -> EvalResult<Value> {
         Ok(value.clone())
+    }
+
+    /// The session `HOME` from scope, if set — mirrors `Kernel::scope_home`
+    /// (kernel.rs), the async twin used by the command-substitution-capable
+    /// evaluator. `None` when `HOME` is unset, so `expand_tilde` leaves `~`
+    /// unexpanded instead of reading the host env.
+    fn scope_home(&self) -> Option<&str> {
+        match self.scope.get("HOME") {
+            Some(Value::String(s)) => Some(s.as_str()),
+            _ => None,
+        }
     }
 
     /// Evaluate a variable reference.
@@ -977,17 +995,6 @@ fn expand_tilde_user(s: &str) -> String {
     s.to_string()
 }
 
-/// Convert a Value to its string representation, with tilde expansion for paths.
-///
-/// `home` is the session `HOME` from the kernel scope (see [`expand_tilde`]);
-/// `None` leaves `~`/`~/path` unexpanded rather than reading the host env.
-pub fn value_to_string_with_tilde(value: &Value, home: Option<&str>) -> String {
-    match value {
-        Value::String(s) if s.starts_with('~') => expand_tilde(s, home),
-        _ => value_to_string(value),
-    }
-}
-
 /// Format a VarPath for error messages. `pub(crate)` so the scheduler's
 /// reduced sync evaluator (`scheduler/pipeline.rs::eval_simple_expr`) can
 /// emit the same "${x[key]}: undefined variable" shape [`resolve_length`]
@@ -1370,6 +1377,19 @@ mod tests {
     // Helper to create a simple variable expression
     fn var_expr(name: &str) -> Expr {
         Expr::VarRef(VarPath::simple(name))
+    }
+
+    #[test]
+    fn eval_glob_pattern_expands_tilde_prefix_against_scope_home() {
+        let mut scope = Scope::new();
+        scope.set("HOME", Value::String("/home/fixture".into()));
+        let tilde = Expr::GlobPattern("~/src/*.rs".into());
+        assert_eq!(
+            eval_expr(&tilde, &mut scope),
+            Ok(Value::String("/home/fixture/src/*.rs".into()))
+        );
+        let plain = Expr::GlobPattern("src/*.rs".into());
+        assert_eq!(eval_expr(&plain, &mut scope), Ok(Value::String("src/*.rs".into())));
     }
 
     #[test]
@@ -1859,16 +1879,6 @@ mod tests {
         // Nonexistent user should remain unchanged
         let nonexistent = expand_tilde("~nonexistent_user_12345", None);
         assert_eq!(nonexistent, "~nonexistent_user_12345");
-    }
-
-    #[test]
-    fn value_to_string_with_tilde_expansion() {
-        // HOME comes from the session scope, not the host env.
-        let val = Value::String("~/test".into());
-        assert_eq!(
-            value_to_string_with_tilde(&val, Some("/home/session")),
-            "/home/session/test"
-        );
     }
 
     #[test]

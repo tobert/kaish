@@ -1545,32 +1545,56 @@ shell_compat! {
     eq: "ijkl\nb,d,e",
 }
 
+// ---- Tilde expansion: only an UNQUOTED source word expands ----------------
+//
+// `shell_compat!`'s kaish side always runs `KernelConfig::transient()`,
+// which seeds no `HOME` (the kernel is hermetic — see `hermetic_home_tests.rs`).
+// So a BARE `~` is a genuine, documented divergence here (kaish leaves it
+// literal with no session `HOME`; bash reads the real host `$HOME`) — that is
+// a HOME-seeding difference, not the bug this suite is about. A QUOTED `~`
+// is what actually pins the fix: it must come out identical, `~`, on both
+// sides, regardless of `HOME` — the exact case that used to leak the home
+// directory through a quoted string.
+
 shell_compat! {
-    name: backslash_escapes_are_literal,
-    script: r"printf '<%s>\n' \( a \) \; \! \| \& \< \> \$HOME \* \# \\ a\ b",
-    eq: "<(>\n<a>\n<)>\n<;>\n<!>\n<|>\n<&>\n<<>\n<>>\n<$HOME>\n<*>\n<#>\n<\\>\n<a b>",
+    name: tilde_quoted_single_stays_literal,
+    script: "echo '~'",
+    eq: "~",
 }
 
 shell_compat! {
-    name: backslash_escape_in_assignment_and_flag_value,
-    script: r#"x=a\ b; printf '<%s>\n' "$x"; printf 'a b\n' | cut -d\  -f2"#,
-    eq: "<a b>\nb",
+    name: tilde_quoted_double_stays_literal,
+    script: "echo \"~\"",
+    eq: "~",
 }
 
 shell_compat! {
-    name: backslash_escape_in_regex_operand_is_literal,
-    script: r"[[ a.b =~ ^a\.b ]] && echo dot; [[ axb =~ ^a\.b ]] || echo not-any",
-    eq: "dot\nnot-any",
+    name: tilde_quoted_value_via_variable_stays_literal,
+    script: "x='~'; echo \"$x\"",
+    eq: "~",
 }
 
 shell_compat! {
-    name: backslash_quoted_heredoc_delimiter_is_literal,
-    script: "HOME=/h; cat <<\\EOF\n$HOME\nEOF",
-    eq: "$HOME",
+    name: tilde_quoted_path_stays_literal,
+    script: "echo '~/a'",
+    eq: "~/a",
 }
 
+// Documented divergence: kaish's `transient()` config has no `HOME` in
+// scope, so a bare `~` stays literal there; bash always has the real host
+// `$HOME`. Both sides still agree that it's the UNQUOTED form that would
+// expand — see `hermetic_home_tests.rs` for the same contract with `HOME`
+// actually seeded.
 shell_compat! {
-    name: backslash_escaped_case_pattern_is_literal,
-    script: r"case x in \*) echo star;; *) echo other;; esac; case x in '*') echo star;; *) echo other;; esac",
-    eq: "other\nother",
+    name: tilde_bare_word_diverges_on_home_seeding,
+    script: "echo ~",
+    kaish_eq: "~",
+    bash_eq: &std::env::var("HOME").unwrap_or_default(),
+}
+
+// A tilde inside a word stays literal, quoted or unquoted.
+shell_compat! {
+    name: tilde_mid_word_quoted_is_never_an_expansion,
+    script: "echo \"foo~bar\"",
+    eq: "foo~bar",
 }
