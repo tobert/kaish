@@ -91,6 +91,10 @@ impl Tool for Base64Tool {
             Err(e) => return ExecResult::failure(1, format!("base64: {}", e)),
         };
 
+        if let Some(refusal) = super::extra_operand_error("base64", &paths) {
+            return refusal;
+        }
+
         // Read input as raw bytes — base64 is fundamentally a binary codec, so
         // never decode the input as UTF-8 (that would reject/mangle binary files).
         let data: Vec<u8> = match paths.first() {

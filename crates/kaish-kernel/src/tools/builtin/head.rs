@@ -110,7 +110,7 @@ impl Tool for Head {
 
         // Multiple files: show each with header
         if paths.len() > 1 {
-            return self.head_files(ctx, &args, &paths).await;
+            return self.head_files(ctx, &args, &paths, bytes).await;
         }
 
         // Streaming path: read from pipe_stdin line by line, stop after N lines
@@ -224,7 +224,13 @@ impl Tool for Head {
 
 impl Head {
     /// Head for multiple files: show each with `==> filename <==` header.
-    async fn head_files(&self, ctx: &mut ExecContext, args: &ToolArgs, paths: &[String]) -> ExecResult {
+    async fn head_files(
+        &self,
+        ctx: &mut ExecContext,
+        args: &ToolArgs,
+        paths: &[String],
+        bytes: Option<usize>,
+    ) -> ExecResult {
         let (count, all_but_last) = Self::line_spec(args);
         let mut output = String::new();
         let multi = paths.len() > 1;
@@ -241,6 +247,18 @@ impl Head {
                             if printed_header { output.push('\n'); }
                             printed_header = true;
                             output.push_str(&format!("==> {} <==\n", path));
+                        }
+                        if let Some(byte_count) = bytes {
+                            // `-c N` applies to each file; GNU adds no newline.
+                            let end = byte_count.min(content.len());
+                            match content.get(..end) {
+                                Some(part) => output.push_str(part),
+                                None => errors.push_str(&format!(
+                                    "head: {}: -c {} cuts a multibyte character; run `head -c {} {}` on its own for exact bytes\n",
+                                    path, byte_count, byte_count, path
+                                )),
+                            }
+                            continue;
                         }
                         let mut file_lines: Vec<&str> = Vec::new();
                         for line in content.lines() {
@@ -264,7 +282,8 @@ impl Head {
             }
         }
 
-        let trimmed = output.trim_end().to_string();
+        // Byte mode keeps the bytes it was asked for, newline or not.
+        let trimmed = if bytes.is_some() { output } else { output.trim_end().to_string() };
         super::with_operand_errors(ExecResult::with_output(OutputData::text(trimmed)), errors)
     }
 

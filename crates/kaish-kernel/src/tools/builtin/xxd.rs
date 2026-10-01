@@ -103,6 +103,10 @@ impl Tool for Xxd {
             Err(e) => return ExecResult::failure(1, format!("xxd: {}", e)),
         };
 
+        if let Some(refusal) = super::extra_operand_error("xxd", &paths) {
+            return refusal;
+        }
+
         // Read raw bytes — a hex dump of binary must see the real bytes, never
         // a lossy-decoded approximation.
         let data: Vec<u8> = match paths.first() {
