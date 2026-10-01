@@ -3256,6 +3256,105 @@ impl Kernel {
                 self.update_last_result(&result).await;
                 Ok(ControlFlow::ok(result))
             }
+            Stmt::Group(body) => {
+                // Runs like an `if` branch: in the current shell, and a
+                // signal from a statement leaves the group for the enclosing
+                // script, function, or loop. No errexit check of its own: a
+                // failing command inside already made that decision, as bash
+                // does (`set -e; { false && true; }` continues).
+                let mut result = ExecResult::success("");
+                for stmt in body {
+                    let flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
+                        Ok(flow) => flow,
+                        Err(error) => {
+                            self.drain_stderr_into(&mut result, ctx).await;
+                            return Err(with_prior_output(result, error));
+                        }
+                    };
+                    self.drain_stderr_into(&mut result, ctx).await;
+                    match flow {
+                        ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
+                        mut other => {
+                            fold_block_output_into_flow(std::mem::take(&mut result), &mut other);
+                            return Ok(other);
+                        }
+                    }
+                }
+                // An empty group writes `$?` too — see the `Stmt::If` arm.
+                self.update_last_result(&result).await;
+                Ok(ControlFlow::ok(result))
+            }
+            Stmt::Redirected { body, redirects } => {
+                use crate::scheduler::pipeline::{finish_redirects, mask_redirected_streams, open_redirects};
+                // Not through the pipeline runner: a stage boundary would
+                // stop `exit` and `return` here. The redirects open, the body
+                // runs, and the result its flow carries goes through them,
+                // whatever kind of flow it is.
+                //
+                // The validator refuses these first; this holds when it is
+                // skipped.
+                if let Some(refusal) = crate::ast::plan::compound_redirect_refusal(body, redirects) {
+                    return Ok(self.status_flow(ExecResult::failure(2, refusal.message())).await);
+                }
+                let opened = match open_redirects(redirects, &mut *ctx, self).await {
+                    Ok(opened) => opened,
+                    Err(failure) => {
+                        // The body does not run; the open error is the
+                        // statement's status, and trips `set -e` as in bash.
+                        let (result, in_effect, opened) = failure.into_parts(redirects);
+                        let result = finish_redirects(result, in_effect, opened, ctx).await;
+                        return Ok(self.status_flow(result).await);
+                    }
+                };
+                // A `$(…)` in a target wrote its stderr to the stream, and so
+                // may an enclosing `if` condition. That belongs to this
+                // statement, not the body: take it before the body's first
+                // drain puts it behind the redirect.
+                let mut ahead = String::new();
+                let mut ahead_published_len = 0;
+                self.drain_stderr_onto(&mut ahead, &mut ahead_published_len, ctx, false).await;
+                let masked = mask_redirected_streams(redirects, ctx);
+                let flow = self.execute_stmt_flow_dispatch(body, &mut *ctx).await;
+                masked.restore(ctx);
+                match flow {
+                    Ok(mut flow) => {
+                        let carried = flow.result_mut();
+                        let body_ok = carried.ok();
+                        let mut finished = finish_redirects(std::mem::take(carried), redirects, opened, ctx).await;
+                        join_drained_stderr(&ahead, ahead_published_len, &mut finished);
+                        *carried = finished;
+                        match flow {
+                            // A target that opened but could not be written.
+                            ControlFlow::Normal(result) if body_ok && !result.ok() => {
+                                Ok(self.status_flow(result).await)
+                            }
+                            ControlFlow::Normal(result) => {
+                                self.update_last_result(&result).await;
+                                Ok(ControlFlow::ok(result))
+                            }
+                            signal => Ok(signal),
+                        }
+                    }
+                    Err(mut error) => {
+                        // A fault still aborts. What the body printed before
+                        // it goes through the redirects; the fault's own
+                        // message renders where it always does.
+                        let prior = error
+                            .downcast_mut::<crate::error::FaultWithOutput>()
+                            .map(|carrier| std::mem::take(&mut carrier.output))
+                            .unwrap_or_default();
+                        let mut finished = finish_redirects(prior, redirects, opened, ctx).await;
+                        join_drained_stderr(&ahead, ahead_published_len, &mut finished);
+                        match error.downcast_mut::<crate::error::FaultWithOutput>() {
+                            Some(carrier) => {
+                                carrier.output = finished;
+                                Err(error)
+                            }
+                            None => Err(with_prior_output(finished, error)),
+                        }
+                    }
+                }
+            }
             Stmt::Break(levels) => {
                 Ok(ControlFlow::break_n(levels.unwrap_or(1)))
             }
@@ -5272,6 +5371,17 @@ impl Kernel {
     async fn update_last_result(&self, result: &ExecResult) {
         let mut scope = self.scope.write().await;
         scope.set_last_result(result.clone());
+    }
+
+    /// A statement's own status: written to `$?`, and an exit under
+    /// `set -e` when it failed.
+    async fn status_flow(&self, result: ExecResult) -> ControlFlow {
+        self.update_last_result(&result).await;
+        if !result.ok() && self.scope.read().await.error_exit_enabled() {
+            let code = result.code;
+            return ControlFlow::Exit { code, result };
+        }
+        ControlFlow::ok(result)
     }
 
     /// Drain accumulated pipeline stderr into a result.

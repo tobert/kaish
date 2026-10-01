@@ -36,6 +36,17 @@ pub fn format_stmt(stmt: &Stmt) -> String {
         Stmt::For(for_loop) => format_for(for_loop),
         Stmt::While(while_loop) => format_while(while_loop),
         Stmt::Case(case_stmt) => format_case(case_stmt),
+        Stmt::Group(body) => {
+            let inner: Vec<String> = std::iter::once("(group".to_string())
+                .chain(body.iter().map(format_stmt))
+                .collect();
+            format!("{})", inner.join(" "))
+        }
+        Stmt::Redirected { body, redirects } => {
+            let mut parts = vec![format!("(redirected {}", format_stmt(body))];
+            parts.extend(redirects.iter().map(format_redirect));
+            format!("{})", parts.join(" "))
+        }
         Stmt::Break(n) => match n {
             Some(level) => format!("(break {})", level),
             None => "(break)".to_string(),
