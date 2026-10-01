@@ -949,6 +949,38 @@ fn is_special_command(name: &str) -> bool {
     matches!(name, "true" | "false" | "readonly" | "local")
 }
 
+/// Bind `args` as plain words in source order over placeholders, mirroring
+/// the runtime binder's raw words (`kernel::bind_raw_words`).
+///
+/// No `past_double_dash` tracking: `--` stays a literal word and the tool
+/// decides what it means, which is what the runtime does too.
+fn push_raw_words_for_validation(args: &[Arg], tool_args: &mut ToolArgs) {
+    for arg in args {
+        match arg {
+            Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
+            Arg::ShortFlag(name) => {
+                tool_args.positional.push(Value::String(format!("-{name}")))
+            }
+            Arg::LongFlag(name) => {
+                tool_args.positional.push(Value::String(format!("--{name}")))
+            }
+            Arg::Named { key, value } => tool_args.positional.push(Value::String(format!(
+                "--{key}={}",
+                crate::interpreter::value_to_string(&expr_to_placeholder(value))
+            ))),
+            Arg::WordAssign { key, value } => tool_args.positional.push(Value::String(
+                format!(
+                    "{key}={}",
+                    crate::interpreter::value_to_string(&expr_to_placeholder(value))
+                ),
+            )),
+            Arg::DoubleDash => {
+                tool_args.positional.push(Value::String("--".to_string()));
+            }
+        }
+    }
+}
+
 /// Build ToolArgs from AST Args for validation purposes.
 ///
 /// This is a simplified version that doesn't evaluate expressions -
@@ -965,34 +997,20 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
     // no `Tool::validate` could tell them apart. The verbatim arm below was
     // added for exactly this reason; raw_argv had gone without one until now.
     if schema.is_some_and(|s| s.raw_argv) {
-        // No `past_double_dash` tracking: raw_argv keeps `--` as a literal
-        // word and lets the tool decide what it means, which is what the
-        // runtime arm does too.
-        for arg in args {
-            match arg {
-                Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
-                Arg::ShortFlag(name) => {
-                    tool_args.positional.push(Value::String(format!("-{name}")))
-                }
-                Arg::LongFlag(name) => {
-                    tool_args.positional.push(Value::String(format!("--{name}")))
-                }
-                Arg::Named { key, value } => tool_args.positional.push(Value::String(format!(
-                    "--{key}={}",
-                    crate::interpreter::value_to_string(&expr_to_placeholder(value))
-                ))),
-                Arg::WordAssign { key, value } => tool_args.positional.push(Value::String(
-                    format!(
-                        "{key}={}",
-                        crate::interpreter::value_to_string(&expr_to_placeholder(value))
-                    ),
-                )),
-                Arg::DoubleDash => {
-                    tool_args.positional.push(Value::String("--".to_string()));
-                }
-            }
-        }
+        push_raw_words_for_validation(args, &mut tool_args);
         return tool_args;
+    }
+
+    // A wrapped-command tool: its own options end at the first operand and
+    // the command's words follow as plain positionals, as at runtime.
+    if let Some(wrapper) = schema.filter(|s| s.options_end_at_operand) {
+        if let Some(boundary) = crate::scheduler::operand_boundary(args, wrapper) {
+            let mut options_schema = wrapper.clone();
+            options_schema.options_end_at_operand = false;
+            let mut tool_args = build_tool_args_for_validation(&args[..boundary], Some(&options_schema));
+            push_raw_words_for_validation(&args[boundary..], &mut tool_args);
+            return tool_args;
+        }
     }
 
     // Validation binds the way execution does — placeholders in source order,

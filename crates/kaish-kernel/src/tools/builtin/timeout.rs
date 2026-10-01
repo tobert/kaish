@@ -28,15 +28,17 @@ pub struct Timeout;
 /// clap-derived argv layer for timeout.
 ///
 /// `timeout` wraps a command — its positionals are `DURATION COMMAND ARGS...`.
-/// The inner command tokens may themselves look like flags (e.g. `timeout 5
-/// echo -n hello`), so the sink accepts arbitrary hyphenated values.
+/// The schema sets `options_end_at_operand`, so the binder keeps every word
+/// after the duration (flags included) in `positional`, and clap only sees
+/// them behind the `--` that `to_argv` writes.
 #[derive(Parser, Debug)]
 #[command(name = "timeout", about = "Run a command with a time limit; kills the child on elapsed")]
 struct TimeoutArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Duration (e.g. `5`, `5s`, `2m`) followed by the command and its arguments.
+    /// Duration (`5`, `5s`, `2m`), then the command and its arguments, passed
+    /// on as written: `timeout 5 sh -c 'exit 3'`. Options go before the duration.
     duration_and_command: Vec<String>,
 }
 
@@ -55,8 +57,10 @@ impl Tool for Timeout {
                 ("With seconds", "timeout 5 sleep 10"),
                 ("With duration suffix", "timeout 500ms curl example.com"),
                 ("Minutes", "timeout 2m cargo build"),
+                ("Flags belong to the command", "timeout 10 python3 -c 'print(1)'"),
             ],
         )
+        .with_options_end_at_operand()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -73,14 +77,21 @@ impl Tool for Timeout {
         };
         parsed.global.apply(ctx);
 
-        if args.positional.len() < 2 {
+        // `timeout 5 -- cmd` has always run `cmd`. GNU reads that `--` as the
+        // command's name and fails; kaish skips it.
+        let mut positional = args.positional.clone();
+        if matches!(positional.get(1), Some(Value::String(s)) if s == "--") {
+            positional.remove(1);
+        }
+
+        if positional.len() < 2 {
             return ExecResult::failure(
                 2,
                 "timeout: usage: timeout DURATION COMMAND [ARGS...]",
             );
         }
 
-        let duration_str = match &args.positional[0] {
+        let duration_str = match &positional[0] {
             Value::String(s) => s.clone(),
             Value::Int(i) => i.to_string(),
             Value::Float(f) => f.to_string(),
@@ -105,7 +116,7 @@ impl Tool for Timeout {
             }
         };
 
-        let cmd_name = match &args.positional[1] {
+        let cmd_name = match &positional[1] {
             Value::String(s) => s.clone(),
             other => {
                 return ExecResult::failure(
@@ -115,10 +126,7 @@ impl Tool for Timeout {
             }
         };
 
-        let inner_args: Vec<Arg> = args.positional[2..]
-            .iter()
-            .map(|v| Arg::Positional(Expr::Literal(v.clone())))
-            .collect();
+        let inner_args = words_to_args(&positional[2..]);
 
         let inner_cmd = Command {
             name: cmd_name,
@@ -195,6 +203,47 @@ impl Tool for Timeout {
             Err(e) => crate::scheduler::pipeline::fault_result(e.context("timeout")),
         }
     }
+}
+
+/// Rebuild the command's `Arg`s from the words the binder kept as written, so
+/// a builtin run under `timeout` reads `-n`, `--key=value`, and `--` as flags
+/// again. A word that starts with `-` is a flag whether or not it was quoted;
+/// everything else, and every word after `--`, stays a positional.
+fn words_to_args(words: &[Value]) -> Vec<Arg> {
+    let mut past_double_dash = false;
+    words
+        .iter()
+        .map(|word| {
+            let Value::String(text) = word else {
+                return Arg::Positional(Expr::Literal(word.clone()));
+            };
+            if past_double_dash {
+                return Arg::Positional(Expr::Literal(word.clone()));
+            }
+            if text == "--" {
+                past_double_dash = true;
+                return Arg::DoubleDash;
+            }
+            let flag_char = |c: char| c.is_ascii_alphanumeric() || c == '-';
+            if let Some(long) = text.strip_prefix("--") {
+                if let Some((key, value)) = long.split_once('=') {
+                    if !key.is_empty() && key.chars().all(flag_char) {
+                        return Arg::Named {
+                            key: key.to_string(),
+                            value: Expr::Literal(Value::String(value.to_string())),
+                        };
+                    }
+                } else if !long.is_empty() && long.chars().all(flag_char) {
+                    return Arg::LongFlag(long.to_string());
+                }
+            } else if let Some(short) = text.strip_prefix('-') {
+                if !short.is_empty() && short.chars().all(flag_char) {
+                    return Arg::ShortFlag(short.to_string());
+                }
+            }
+            Arg::Positional(Expr::Literal(word.clone()))
+        })
+        .collect()
 }
 
 #[cfg(test)]

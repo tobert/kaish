@@ -1329,6 +1329,59 @@ pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, 
     map
 }
 
+/// Index of the first operand in `args`, for a tool whose schema sets
+/// [`ToolSchema::options_end_at_operand`]; `None` when every word is an option
+/// or an option's value.
+///
+/// The operand is the first positional or `key=value` word that is not the
+/// value of a value-taking option. The tool's own options sit before it and
+/// the wrapped command starts at it. The runtime and validation binders both
+/// call this, so they cannot disagree about where the command begins.
+pub fn operand_boundary(args: &[Arg], schema: &ToolSchema) -> Option<usize> {
+    let lookup = schema_param_lookup(schema);
+    // Positionals still owed to the last value-taking option.
+    let mut owed = 0usize;
+    for (index, arg) in args.iter().enumerate() {
+        match arg {
+            Arg::Positional(_) | Arg::WordAssign { .. } => {
+                if owed == 0 {
+                    return Some(index);
+                }
+                owed -= 1;
+            }
+            Arg::DoubleDash => owed = 0,
+            Arg::Named { .. } => {}
+            Arg::ShortFlag(name) => owed = short_flag_values_owed(name, &lookup),
+            Arg::LongFlag(name) => {
+                owed = match lookup.get(name.as_str()) {
+                    Some(&(_, kind, consumes, _)) if !is_bool_type(kind) => consumes.max(1),
+                    _ => 0,
+                };
+            }
+        }
+    }
+    None
+}
+
+/// How many following words a short-flag token takes as values, by the rules
+/// the binders use: a whole-name match, else the first value-taking letter,
+/// which takes the rest of the token (glued) or, as the last letter, the next
+/// word.
+fn short_flag_values_owed(name: &str, lookup: &HashMap<String, (&str, &str, usize, bool)>) -> usize {
+    if let Some(&(_, kind, consumes, _)) = lookup.get(name) {
+        return if is_bool_type(kind) { 0 } else { consumes.max(1) };
+    }
+    let letters: Vec<char> = name.chars().collect();
+    for (position, letter) in letters.iter().enumerate() {
+        if let Some(&(_, kind, consumes, _)) = lookup.get(letter.to_string().as_str()) {
+            if !is_bool_type(kind) {
+                return if position + 1 == letters.len() { consumes.max(1) } else { 0 };
+            }
+        }
+    }
+    0
+}
+
 /// Check if a type is considered boolean.
 pub fn is_bool_type(param_type: &str) -> bool {
     matches!(param_type.to_lowercase().as_str(), "bool" | "boolean")

@@ -935,6 +935,16 @@ Distinct from `.with_raw_argv()`, which also keeps source order but binds into
 position-sensitive POSIX command (`test`, `kill`); verbatim serves a tool with
 its own parser.
 
+### Tools that run another command
+
+`.with_options_end_at_operand()` marks a tool that wraps a command, as POSIX
+`timeout`, `env`, and `exec` do. The binder reads the tool's own options
+(typed, as for any tool) up to the first operand, then binds every word from
+that operand on as `positional`, in source order, flags included. `timeout 5
+sh -c 'exit 3'` binds `5`, `sh`, `-c`, `exit 3`. An option's value is not an
+operand (`env -u NAME cmd`), and `--` before the first operand ends the
+options. The validation binder follows the same rule.
+
 ### Wrapped commands: an external program as a tool
 
 `allow_unwrapped_commands` is a single switch. It allows any program that is

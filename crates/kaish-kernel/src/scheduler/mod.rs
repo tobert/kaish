@@ -62,7 +62,7 @@ pub(crate) use stream::drain_to_stream_teed_until;
 pub use stream::{
     drain_to_stream, drain_to_stream_teed, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE,
 };
-pub use pipeline::{build_tool_args, is_bool_type, schema_param_lookup, select_leaf, PipelineRunner};
+pub use pipeline::{build_tool_args, is_bool_type, operand_boundary, schema_param_lookup, select_leaf, PipelineRunner};
 pub use scatter::{
     extract_items, parse_gather_options, parse_scatter_options, GatherOptions,
     ScatterGatherRunner, ScatterOptions, ScatterResult,

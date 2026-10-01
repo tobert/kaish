@@ -297,6 +297,15 @@ pub struct ToolSchema {
     /// See [`ToolSchema::with_glob_passthrough`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub glob_passthrough: bool,
+    /// The tool wraps another command: the binder reads the tool's own
+    /// options up to the first operand and binds everything from that word on
+    /// as plain `positional` words, in source order.
+    ///
+    /// `timeout 5 sh -c 'exit 3'` binds `5`, `sh`, `-c`, `exit 3`; `-c`
+    /// belongs to `sh`. Default false: every flag-shaped word is the tool's own.
+    /// See [`ToolSchema::with_options_end_at_operand`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub options_end_at_operand: bool,
     /// Dotted effect ids this tool declares (`fs.remove`, `fs.overwrite`,
     /// …) — what an embedder reads off `tools --json` to learn a tool's
     /// destructive effects instead of recognizing tool names. Empty for a
@@ -324,6 +333,7 @@ impl ToolSchema {
             raw_argv: false,
             arg_binding: ArgBinding::Typed,
             glob_passthrough: false,
+            options_end_at_operand: false,
             typed_substitution: false,
             operations: Vec::new(),
         }
@@ -391,6 +401,14 @@ impl ToolSchema {
     /// See [`ToolSchema::glob_passthrough`].
     pub fn with_glob_passthrough(mut self) -> Self {
         self.glob_passthrough = true;
+        self
+    }
+
+    /// Declare that this tool wraps another command (`timeout`, `env`, `exec`):
+    /// the tool's own options end at the first operand, as POSIX utilities
+    /// that run a command read them. See [`ToolSchema::options_end_at_operand`].
+    pub fn with_options_end_at_operand(mut self) -> Self {
+        self.options_end_at_operand = true;
         self
     }
 

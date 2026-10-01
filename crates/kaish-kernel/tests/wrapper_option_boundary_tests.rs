@@ -51,6 +51,15 @@ async fn timeout_double_dash_before_the_duration_still_works() {
     assert_eq!((out.as_str(), code), ("x", 0), "stderr: {err}");
 }
 
+/// GNU reads this `--` as the command's name and fails; kaish has always
+/// skipped it, and keeps skipping it.
+#[tokio::test]
+async fn timeout_double_dash_after_the_duration_is_skipped() {
+    let kernel = isolated();
+    let (out, code, err) = run(&kernel, "timeout 5 -- echo -n x").await;
+    assert_eq!((out.as_str(), code), ("x", 0), "stderr: {err}");
+}
+
 #[tokio::test]
 async fn timeout_json_before_the_duration_is_the_kernels() {
     let kernel = isolated();
@@ -138,6 +147,13 @@ mod external {
     }
 
     #[tokio::test]
+    async fn env_double_dash_after_the_assignments_is_skipped() {
+        let kernel = repl_kernel();
+        let (out, code, err) = run(&kernel, "env A=1 -- sh -c 'echo \"$A\"'").await;
+        assert_eq!((out.trim(), code), ("1", 0), "stderr: {err}");
+    }
+
+    #[tokio::test]
     async fn env_option_after_an_assignment_is_the_command() {
         // GNU: `env FOO=1 -i echo hi` runs a command named `-i`.
         let kernel = repl_kernel();
@@ -161,10 +177,17 @@ mod external {
     }
 
     #[tokio::test]
+    async fn spawn_passes_a_numeral_as_written() {
+        let kernel = repl_kernel();
+        let (out, code, err) = run(&kernel, "spawn sh -c 'echo \"$0\"' -0").await;
+        assert_eq!((out.trim(), code), ("-0", 0), "stderr: {err}");
+    }
+
+    #[tokio::test]
     async fn spawn_command_flag_then_double_dash_passes_dash_words() {
         let kernel = repl_kernel();
-        let (out, code, err) = run(&kernel, "spawn --command echo -- -n hi").await;
-        assert_eq!((out.trim(), code), ("-n hi", 0), "stderr: {err}");
+        let (out, code, err) = run(&kernel, "spawn --command sh -- -c 'echo \"$0\"' -i").await;
+        assert_eq!((out.trim(), code), ("-i", 0), "stderr: {err}");
     }
 
     /// `exec` replaces the process, so run it on the binder only: the words
