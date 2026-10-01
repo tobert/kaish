@@ -79,7 +79,7 @@ impl Tool for File {
                 Err(e) => return ExecResult::failure(1, format!("file: {e}")),
             };
             let id = Identity::of(&bytes);
-            let text = render_line("-", &id.describe(parsed.mime), parsed.brief);
+            let text = render_line("-", &id.describe(parsed.mime), parsed.brief) + "\n";
             return ExecResult::with_output_and_text(
                 OutputData::table(headers(), vec![OutputNode::new("-").with_cells(id.cells())]),
                 text,
@@ -118,7 +118,7 @@ impl Tool for File {
         super::with_operand_errors(
             ExecResult::with_output_and_text(
                 OutputData::table(headers(), nodes),
-                lines.join("\n"),
+                lines.iter().map(|line| format!("{line}\n")).collect::<String>(),
             ),
             errors,
         )
@@ -260,7 +260,7 @@ mod tests {
         let mut ctx = ctx_with(&[("notes", b"just some plain prose, no magic\n")]).await;
         let result = File.execute(arg("/notes"), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out(), "/notes: text (text/plain)");
+        assert_eq!(result.text_out(), "/notes: text (text/plain)\n");
     }
 
     #[tokio::test]
@@ -269,7 +269,7 @@ mod tests {
         let mut ctx = ctx_with(&[("blob", b"\x00\x01\x02\xff\xfe not utf8 \x80")]).await;
         let result = File.execute(arg("/blob"), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out(), "/blob: data");
+        assert_eq!(result.text_out(), "/blob: data\n");
     }
 
     #[tokio::test]
@@ -278,12 +278,12 @@ mod tests {
         let mut ctx = ctx_with(&[("nothing", b"")]).await;
         let result = File.execute(arg("/nothing"), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.text_out(), "/nothing: empty");
+        assert_eq!(result.text_out(), "/nothing: empty\n");
 
         let mut a = arg("/nothing");
         a.flags.insert("mime".into());
         let result = File.execute(a, &mut ctx).await;
-        assert_eq!(result.text_out(), "/nothing: inode/x-empty");
+        assert_eq!(result.text_out(), "/nothing: inode/x-empty\n");
     }
 
     #[tokio::test]
@@ -292,7 +292,7 @@ mod tests {
         let mut a = arg("/photo");
         a.flags.insert("mime".into());
         let result = File.execute(a, &mut ctx).await;
-        assert_eq!(result.text_out(), "/photo: image/png");
+        assert_eq!(result.text_out(), "/photo: image/png\n");
     }
 
     #[tokio::test]
@@ -301,7 +301,7 @@ mod tests {
         let mut a = arg("/photo");
         a.flags.insert("brief".into());
         let result = File.execute(a, &mut ctx).await;
-        assert_eq!(result.text_out(), "image (image/png)");
+        assert_eq!(result.text_out(), "image (image/png)\n");
     }
 
     #[tokio::test]

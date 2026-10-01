@@ -122,3 +122,14 @@ async fn json_output_is_unchanged() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 3, "{out}");
 }
+
+#[tokio::test]
+async fn next_statement_output_starts_on_its_own_line() {
+    for script in ["ls d", "find d -name a", "glob 'd/a'", "stat f"] {
+        let (out, _) = run(&format!("{script}; echo NEXT")).await;
+        assert!(out.ends_with("\nNEXT\n"), "{script}: {out:?}");
+    }
+    // Control: builtins that already end their last line.
+    let (out, _) = run("seq 1 2; echo NEXT").await;
+    assert_eq!(out, "1\n2\nNEXT\n");
+}

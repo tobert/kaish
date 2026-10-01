@@ -57,7 +57,14 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
 pub fn format_output_data(output: &OutputData, context: OutputContext) -> String {
     // Non-interactive contexts use canonical string
     if !matches!(context, OutputContext::Interactive) {
-        return output.to_canonical_string();
+        // The canonical form ends its last line with a newline; the caller
+        // adds one when printing, so a list or table drops it here.
+        let canonical = output.to_canonical_string();
+        return if output.as_text().is_some() {
+            canonical
+        } else {
+            canonical.trim_end_matches('\n').to_string()
+        };
     }
 
     // Simple text output
