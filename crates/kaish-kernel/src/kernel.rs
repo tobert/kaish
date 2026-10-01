@@ -3996,77 +3996,14 @@ impl Kernel {
                         return crate::ast::plan::render_stmt(stmt)
                     }
                 };
+                // Arguments only: a job's command string leaves redirects
+                // out, and a heredoc body would not fit on one line.
                 let mut parts = vec![cmd.name.clone()];
-                for arg in &cmd.args {
-                    match arg {
-                        Arg::Positional(expr) => {
-                            parts.push(self.format_expr(expr));
-                        }
-                        Arg::Named { key, value } => {
-                            parts.push(format!("--{}={}", key, self.format_expr(value)));
-                        }
-                        Arg::WordAssign { key, value } => {
-                            parts.push(format!("{}={}", key, self.format_expr(value)));
-                        }
-                        Arg::ShortFlag(name) => {
-                            parts.push(format!("-{}", name));
-                        }
-                        Arg::LongFlag(name) => {
-                            parts.push(format!("--{}", name));
-                        }
-                        Arg::DoubleDash => {
-                            parts.push("--".to_string());
-                        }
-                    }
-                }
+                parts.extend(cmd.args.iter().map(crate::ast::plan::render_arg));
                 parts.join(" ")
             })
             .collect::<Vec<_>>()
             .join(" | ")
-    }
-
-    /// Format an expression as a string for display.
-    fn format_expr(&self, expr: &Expr) -> String {
-        match expr {
-            Expr::Literal(Value::String(s)) => {
-                if s.contains(' ') || s.contains('"') {
-                    format!("'{}'", s.replace('\'', "\\'"))
-                } else {
-                    s.clone()
-                }
-            }
-            Expr::Literal(Value::Int(i)) => i.to_string(),
-            Expr::Literal(Value::Float(f)) => f.to_string(),
-            Expr::Literal(Value::Bool(b)) => b.to_string(),
-            Expr::Literal(Value::Null) => "null".to_string(),
-            // Show the source text, not the typed value.
-            Expr::NumericLiteral { raw, .. } => raw.clone(),
-            Expr::VarRef(path) => {
-                let mut name = String::new();
-                for (i, seg) in path.segments.iter().enumerate() {
-                    match seg {
-                        crate::ast::VarSegment::Field(f) => {
-                            if i > 0 {
-                                name.push('.');
-                            }
-                            name.push_str(f);
-                        }
-                        crate::ast::VarSegment::Index(idx) => name.push_str(&format!("[{idx}]")),
-                        crate::ast::VarSegment::Key(k) => name.push_str(&format!("[{k}]")),
-                        crate::ast::VarSegment::Dynamic(v) => name.push_str(&format!("[${v}]")),
-                        crate::ast::VarSegment::Slice(a, b) => name.push_str(&format!(
-                            "[{}:{}]",
-                            a.map(|n| n.to_string()).unwrap_or_default(),
-                            b.map(|n| n.to_string()).unwrap_or_default()
-                        )),
-                    }
-                }
-                format!("${{{}}}", name)
-            }
-            Expr::Interpolated(_) => "\"...\"".to_string(),
-            Expr::HereDocBody { .. } => "<<heredoc".to_string(),
-            _ => "...".to_string(),
-        }
     }
 
     /// Execute a single command.

@@ -672,6 +672,13 @@ pub(crate) fn render_command(cmd: &Command) -> String {
     parts.join(" ")
 }
 
+/// One argument rendered back to shell text, unexpanded: the same text a
+/// plan shows for it. A job's command string uses this too, so a command
+/// reads one way everywhere.
+pub(crate) fn render_arg(arg: &Arg) -> String {
+    plan_arg(arg).0
+}
+
 /// Plan one argument: its flat text (for [`render_command`]) and its
 /// [`PlannedValue`] (for [`PlannedCommand::args`]), derived together so the
 /// two representations cannot disagree about what this argument was.
