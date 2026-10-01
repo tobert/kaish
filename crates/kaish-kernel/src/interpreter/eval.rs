@@ -1378,6 +1378,19 @@ mod tests {
     }
 
     #[test]
+    fn eval_glob_pattern_expands_tilde_prefix_against_scope_home() {
+        let mut scope = Scope::new();
+        scope.set("HOME", Value::String("/home/fixture".into()));
+        let tilde = Expr::GlobPattern("~/src/*.rs".into());
+        assert_eq!(
+            eval_expr(&tilde, &mut scope),
+            Ok(Value::String("/home/fixture/src/*.rs".into()))
+        );
+        let plain = Expr::GlobPattern("src/*.rs".into());
+        assert_eq!(eval_expr(&plain, &mut scope), Ok(Value::String("src/*.rs".into())));
+    }
+
+    #[test]
     fn eval_literal_int() {
         let mut scope = Scope::new();
         let expr = Expr::Literal(Value::Int(42));

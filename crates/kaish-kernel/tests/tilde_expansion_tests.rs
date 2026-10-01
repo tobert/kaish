@@ -477,6 +477,61 @@ async fn quoted_glob_word_with_tilde_prefix_never_expands() {
     assert_eq!(out.text_out(), "~/src/*.rs\n");
 }
 
+// A list element is a source word like any other: the tilde expands, the
+// glob does not (bash: `p=(~/src/*.rs)` globs, but kaish list literals never
+// pathname-expand — same split as an assignment value).
+#[tokio::test]
+async fn list_element_glob_word_with_tilde_prefix_expands_tilde_but_not_glob() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("p = [~/src/*.rs]; echo ${p[0]}").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/src/*.rs\n"));
+}
+
+// `glob` consumes its pattern as data but still receives a tilde-prefix
+// expanded, as bash would pass it to any command.
+#[tokio::test]
+async fn glob_builtin_receives_tilde_prefix_expanded() {
+    let kernel = kernel_with_src_files().await;
+    let out = kernel.execute("glob ~/src/*.rs").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    assert_eq!(out.text_out(), format!("{HOME}/src/a.rs\n{HOME}/src/b.rs\n"));
+}
+
+// bash expands `~+` to $PWD and `~-` to $OLDPWD; kaish does not. This pins
+// the current behavior so a change is deliberate (docs/LANGUAGE.md, "Tilde
+// expansion").
+#[tokio::test]
+async fn tilde_plus_and_tilde_minus_are_not_expanded() {
+    let kernel = kernel();
+    let out = kernel.execute("echo ~+; echo ~-").await.unwrap();
+    assert_eq!(out.text_out(), "~+\n~-\n", "{out:?}");
+}
+
+// The external-command argv glob site expands the tilde before matching.
+#[cfg(all(unix, feature = "subprocess", feature = "localfs"))]
+#[tokio::test]
+async fn external_command_glob_word_with_tilde_prefix_expands_before_matching() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().canonicalize().expect("canonicalize");
+    std::fs::create_dir_all(home.join("src")).unwrap();
+    std::fs::write(home.join("src/a.rs"), "").unwrap();
+    std::fs::write(home.join("src/b.rs"), "").unwrap();
+    let mut vars = HashMap::new();
+    vars.insert("HOME".to_string(), Value::String(home.to_string_lossy().into_owned()));
+    vars.insert("PATH".to_string(), Value::String(std::env::var("PATH").unwrap_or_default()));
+    let kernel = Kernel::new(
+        KernelConfig::agent_with_root(home.clone())
+            .with_allow_unwrapped_commands(true)
+            .with_initial_vars(vars),
+    )
+    .expect("kernel");
+    let out = kernel.execute("/usr/bin/printf '<%s>\\n' ~/src/*.rs").await.unwrap();
+    assert!(out.ok(), "{out:?}");
+    let h = home.display();
+    assert_eq!(out.text_out(), format!("<{h}/src/a.rs>\n<{h}/src/b.rs>\n"));
+}
+
 // --- background job command display: show the source word, not "..." -----
 //
 // `Kernel::format_pipeline`/`format_expr` render `/v/jobs/N/command` — a

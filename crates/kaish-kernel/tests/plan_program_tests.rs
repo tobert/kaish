@@ -105,6 +105,21 @@ fn bare_tilde_lists_home_as_a_free_variable() {
     assert!(plans[0].plan.bound_variables.is_empty());
 }
 
+/// A tilde-prefixed glob word (`~/src/*.rs`) is a different AST node from
+/// `~/src` but reads `HOME` the same way.
+#[test]
+fn tilde_prefixed_glob_word_lists_home_as_a_free_variable() {
+    let plans = plan_program("ls ~/src/*.rs").expect("parses");
+    assert_eq!(plans[0].plan.free_variables, vec!["HOME".to_string()]);
+}
+
+/// A glob word without a tilde-prefix names no dependency on `HOME`.
+#[test]
+fn plain_glob_word_does_not_list_home_as_a_free_variable() {
+    let plans = plan_program("ls src/*.rs").expect("parses");
+    assert!(plans[0].plan.free_variables.is_empty());
+}
+
 /// A quoted `'~'` is a plain literal — it names no dependency on `HOME`.
 #[test]
 fn quoted_tilde_does_not_list_home_as_a_free_variable() {
