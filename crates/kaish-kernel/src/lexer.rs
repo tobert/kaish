@@ -693,18 +693,19 @@ pub enum Token {
     #[regex(r"[0-9]+(\.[0-9]+)*\.?[a-zA-Z_+@^~\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*|[0-9]+(\.[0-9]+){2,}[a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
-    /// Numeric word containing an embedded hyphen run, or a minus-led numeric
-    /// word with a non-numeric suffix. These are single contiguous shell words
-    /// the user typed — ISO dates (`2024-01-02`), `N-M` ranges (`10-20`,
-    /// `cut -f 1-3`, `tr -d 0-9`), float-dash forms (`1.5-2`), and `find`
-    /// predicate values like `-1k` (smaller than 1k). Without this token they
-    /// fragment into adjacent `Int`/`Float`/flag tokens and trip the
-    /// no-token-pasting guard. The raw slice is preserved verbatim (so leading
-    /// zeros survive). A plain `2024`/`1.5`/`-1` stays `Int`/`Float` — the
-    /// digit-hyphen form requires a `-segment`, and the minus-led form requires
-    /// an alpha after the digits.
-    #[regex(r"[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._\u{80}-\u{10FFFF}]+)+", lex_slice_word, priority = 3)]
-    #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
+    /// Numeric word containing a hyphen, or a minus-led numeric word with a
+    /// non-numeric suffix. These are single contiguous shell words the user
+    /// typed — ISO dates (`2024-01-02`), `N-M` ranges (`10-20`, `cut -f 1-3`,
+    /// `tr -d 0-9`), open ranges and field lists (`cut -c 9-`, the `5-` of
+    /// `1-3,5-`), float-dash forms (`1.5-2`), and `find` predicate values like
+    /// `-1k` (smaller than 1k). Without this token they fragment into adjacent
+    /// `Int`/`Float`/flag tokens and trip the no-token-pasting guard, and `1--`
+    /// would lose its tail to the `--` end-of-options marker. The raw slice is
+    /// preserved verbatim (so leading zeros survive). A plain `2024`/`1.5`/`-1`
+    /// stays `Int`/`Float` — the digit-hyphen form requires a `-` after the
+    /// digits, and the minus-led form requires a second `-` or an alpha.
+    #[regex(r"-?[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._@+#^~\u{80}-\u{10FFFF}]*)+", lex_slice_word, priority = 3)]
+    #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._@+#^~\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     DashNumWord(String),
 
     /// Leading-`@` bareword: `@scope/pkg` (scoped package), `@0` (epoch in
