@@ -610,6 +610,7 @@ tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
+tool 1>&2                       # merge stdout into stderr
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -660,6 +661,12 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > fails with `no such file or directory` when it opens. When both targets
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
+>
+> **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
+> join captured stdout first, then stderr. kaish does not preserve the
+> command's interleaved write order. If stderr has already reached a
+> background job stream, `1>&2` keeps those bytes first and appends
+> captured stdout; each byte reaches the stream once.
 >
 > **Known differences from bash.** bash evaluates and opens each target in
 > turn; kaish evaluates all of them before opening any, so the same-file

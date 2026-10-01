@@ -515,7 +515,16 @@ pub(crate) async fn apply_redirects(
         };
         match stdout_sink {
             // `1>&2` over a text result: the bytes are valid UTF-8.
-            Sink::Stderr => result.err.push_str(&String::from_utf8_lossy(&stdout)),
+            Sink::Stderr => {
+                let text = String::from_utf8_lossy(&stdout);
+                if result.stderr_published_len == 0 {
+                    // Stdout first, as `2>&1` and a shared file do.
+                    result.err.insert_str(0, &text);
+                } else {
+                    // Published stderr cannot move; stdout follows it.
+                    result.err.push_str(&text);
+                }
+            }
             Sink::File(index) => data[index].extend_from_slice(&stdout),
             Sink::Stdout => unreachable!("handled by the enclosing branch"),
         }
@@ -2269,6 +2278,23 @@ mod tests {
     /// dispatcher suffices to satisfy the signature.
     fn test_dispatcher() -> BackendDispatcher {
         BackendDispatcher::new(Arc::new(ToolRegistry::new()))
+    }
+
+    #[tokio::test]
+    async fn stdout_merge_preserves_published_stderr_prefix() {
+        let ctx = make_minimal_ctx();
+        let mut result = ExecResult::success("out\n");
+        result.err = "sent\npending\n".into();
+        result.stderr_published_len = "sent\n".len();
+        let redirects = [Redirect {
+            kind: RedirectKind::MergeStdout,
+            target: Expr::Literal(Value::Int(2)),
+        }];
+        let result = apply_redirects(result, &redirects, &OpenedRedirects::default(), &ctx).await;
+        assert_eq!(result.err, "sent\npending\nout\n");
+        assert_eq!(result.stderr_published_len, "sent\n".len());
+        assert_eq!(&result.err[result.stderr_published_len..], "pending\nout\n");
+        assert_eq!(result.text_out(), "");
     }
 
     /// Open `redirects`, then apply them to `result`, as the runner does
