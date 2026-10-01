@@ -221,7 +221,12 @@ impl RedirectOpenError {
 
     /// The failed command's result, with the error sent where stderr
     /// pointed when the open failed.
-    pub(crate) async fn into_result(self, redirects: &[Redirect], ctx: &ExecContext) -> ExecResult {
+    pub(crate) async fn into_result(mut self, redirects: &[Redirect], ctx: &mut ExecContext) -> ExecResult {
+        // The command never ran; the stdin its input redirect displaced
+        // goes back so the failure leaves the session's stdin alone.
+        if let Some(displaced) = self.opened.displaced_stdin.take() {
+            ctx.restore_stdin_state(*displaced);
+        }
         let in_effect = self.in_effect(redirects);
         apply_redirects(ExecResult::failure(1, self.message), in_effect, &self.opened, ctx).await
     }

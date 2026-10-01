@@ -255,11 +255,16 @@ impl ScatterGatherRunner {
             ctx.publish_job_stdout(&gathered).await;
             gathered
         } else {
+            // The rows are the post-gather commands' input and nothing else:
+            // the session's stdin state waits aside and comes back after.
+            let session_stdin = ctx.take_stdin_state();
             ctx.set_stdin_with_data(
                 gathered.text_out().into_owned(),
                 gathered.data.clone(),
             );
-            runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await
+            let result = runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await;
+            ctx.restore_stdin_state(session_stdin);
+            result
         }
     }
 
