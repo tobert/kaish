@@ -5434,8 +5434,8 @@ impl Kernel {
 
     /// Run a `$(...)` body and restore the session state it may have changed:
     /// scope, the function table, cwd, prev_cwd, aliases, ignore config, and
-    /// output limit. Only the result escapes. Restores on every exit path,
-    /// including an error, because the result is captured without `?`.
+    /// output limit. Restores when execution returns, including an error.
+    /// Dropping the execution future bypasses this cleanup.
     async fn run_substitution_isolated(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<ExecResult> {
         // Boxed: the scope snapshot is held across the nested `$(…)`
         // recursion await below, so inlining it grows every
@@ -5760,7 +5760,7 @@ impl Kernel {
     }
 
     /// Run a `$(...)` operand inside `$(( ))`. Mirrors `Expr::CommandSubst`'s
-    /// isolation (scope/cwd/config snapshot-and-restore, stderr forwarded to
+    /// isolation (session state and function table restored, stderr forwarded to
     /// the enclosing statement) — the same substitution mechanism, just
     /// coerced to an integer instead of spliced in as text.
     async fn run_arith_command_subst(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<i64> {
@@ -7705,8 +7705,7 @@ impl CommandDispatcher for Kernel {
 
     /// Evaluate a redirect operand through the kernel's async chain,
     /// including command substitution. Delegates to `eval_expr_async`, which
-    /// snapshots the kernel's scope/cwd and restores them after any `$(...)`
-    /// runs, so only command output escapes.
+    /// restores session state and functions after `$(...)` returns.
     ///
     /// The caller's `ctx` is the context to run on. A root context built here
     /// instead would carry the kernel's cancel token, and `timeout 1 cat <<<

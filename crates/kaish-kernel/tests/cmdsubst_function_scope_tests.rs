@@ -2,8 +2,8 @@
 //! reach the session: `x=$(f() { echo hi; }); f` is "command not found"
 //! (exit 127), as in bash. `$(...)` already restores variables, cwd, aliases,
 //! ignore config, and output limit; the function table is the same kind of
-//! session state. Each test mutates inside `$(...)` and reads the table back
-//! from a LATER `kernel.execute()` call.
+//! session state. Check later statements, later execute calls, and the
+//! pipeline stage that owns the substitution before its fork is discarded.
 
 #![cfg(feature = "localfs")]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
@@ -83,9 +83,17 @@ async fn cmd_subst_sees_its_own_definition_while_running() {
 #[tokio::test]
 async fn cmd_subst_in_pipeline_stage_function_definition_does_not_leak() {
     let k = kernel();
-    run(&k, r#"echo "$(leaked() { echo hi; }; echo x)" | cat"#).await;
+    let (out, code) = run(
+        &k,
+        r#"echo "$(leaked() { echo hi; }; echo x)$(leaked 2>/dev/null || echo missing)" | cat"#,
+    ).await;
+    assert_eq!((out.trim(), code), ("xmissing", 0));
     assert_not_defined(&k, "leaked").await;
-    run(&k, r#"echo a | cat | echo "$(leaked2() { echo hi; }; echo x)""#).await;
+    let (out, code) = run(
+        &k,
+        r#"echo a | cat | echo "$(leaked2() { echo hi; }; echo x)$(leaked2 2>/dev/null || echo missing)""#,
+    ).await;
+    assert_eq!((out.trim(), code), ("xmissing", 0));
     assert_not_defined(&k, "leaked2").await;
 }
 
@@ -130,4 +138,12 @@ async fn function_defined_outside_survives_cmd_subst() {
     run(&k, "keep() { echo kept; }; x=$(keep)").await;
     let (out, code) = run(&k, "keep").await;
     assert_eq!((out.trim(), code), ("kept", 0));
+}
+
+#[tokio::test]
+async fn cmd_subst_definition_is_gone_before_next_statement() {
+    let k = kernel();
+    let (_, code) = run(&k, "x=$(leaked() { echo hi; }); leaked").await;
+    assert_eq!(code, 127);
+    assert_not_defined(&k, "leaked").await;
 }
