@@ -51,6 +51,11 @@ struct JqArgs {
     #[arg(short = 'c', long = "compact")]
     compact: bool,
 
+    /// Raw input (-R): each input line is one string. With -s, the whole
+    /// input is one string. Not supported with -n.
+    #[arg(short = 'R', long = "raw-input")]
+    raw_input: bool,
+
     /// Use null as input instead of reading stdin (-n).
     #[arg(short = 'n', long = "null-input", visible_alias = "null_input")]
     null_input: bool,
@@ -535,6 +540,18 @@ impl Tool for JqNative {
             None => return ExecResult::failure(2, "jq: filter expression required"),
         };
 
+        // Refused before compiling: a filter using `input`/`inputs` would
+        // otherwise fail as "undefined filter".
+        if (parsed.raw_input || args.has_flag("raw-input") || args.has_flag("R"))
+            && (parsed.null_input || args.has_flag("null-input") || args.has_flag("n"))
+        {
+            return ExecResult::failure(
+                2,
+                "jq: -n with -R needs input/inputs, which kaish jq lacks — \
+                 use `jq -R .` for one result per line, or `jq -R -s .` for the whole input as one string",
+            );
+        }
+
         // Collect `--arg NAME VALUE` (string) and `--argjson NAME VALUE` (JSON)
         // bindings in declaration order. jaq needs the names at compile time
         // and the values at run time — same order on both sides.
@@ -559,6 +576,52 @@ impl Tool for JqNative {
         let null_input =
             parsed.null_input || args.has_flag("null-input") || args.has_flag("n");
         let slurp = parsed.slurp || args.has_flag("slurp") || args.has_flag("s");
+
+        let raw_input =
+            parsed.raw_input || args.has_flag("raw-input") || args.has_flag("R");
+
+        if raw_input {
+            let text = match get_path_string(&args, "path", 1) {
+                Ok(Some(path)) if !path.is_empty() => {
+                    let resolved = ctx.resolve_path(&path);
+                    match ctx.backend.read(Path::new(&resolved), None).await {
+                        Ok(bytes) => match String::from_utf8(bytes) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                return ExecResult::failure(1, format!("jq: {}: invalid UTF-8", path))
+                            }
+                        },
+                        Err(e) => {
+                            return ExecResult::failure(1, format!("jq: failed to read {}: {}", path, e))
+                        }
+                    }
+                }
+                Ok(_) => match ctx.resolve_stdin().await {
+                    Ok((_, text)) => text,
+                    Err(e) => return ExecResult::failure(1, format!("jq: {e}")),
+                },
+                Err(e) => return ExecResult::failure(1, format!("jq: {e}")),
+            };
+            let inputs: Vec<serde_json::Value> = if slurp {
+                vec![serde_json::Value::String(text)]
+            } else {
+                text.split_terminator('\n')
+                    .map(|line| serde_json::Value::String(line.to_string()))
+                    .collect()
+            };
+            // One filter run per line, outputs concatenated in order.
+            let mut combined = JqRun { text: String::new(), values: Vec::new() };
+            for input in inputs {
+                match execute_filter_json(&filter, input, raw_output, compact, global_var_values.clone()) {
+                    Ok(run) => {
+                        combined.text.push_str(&run.text);
+                        combined.values.extend(run.values);
+                    }
+                    Err(e) => return ExecResult::failure(1, e),
+                }
+            }
+            return build_exec_result(combined);
+        }
 
         // Get input JSON. `-n` / `--null-input` skips stdin entirely and feeds
         // `null` to the filter — same as real jq. Otherwise: fast path through
