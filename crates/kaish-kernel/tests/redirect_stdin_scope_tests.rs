@@ -312,3 +312,97 @@ async fn gather_then_redirect_then_session_stdin() {
         .unwrap();
     assert_eq!(r.text_out(), "5\nS1\nS2\n", "{r:?}");
 }
+
+#[tokio::test]
+async fn nested_pipeline_receives_typed_upstream_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("f() { jq -c . | cat; }; seq 1 3 | f").await.unwrap();
+    assert_eq!(result.code, 0, "{result:?}");
+    assert_eq!(result.text_out().trim(), "[1,2,3]", "{result:?}");
+}
+
+#[tokio::test]
+async fn nested_scatter_receives_typed_upstream_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute("f() { scatter | echo x | gather | jq -c '.[0].item | type'; }; seq 1 3 | f").await.unwrap();
+    assert_eq!(result.code, 0, "{result:?}");
+    assert_eq!(result.text_out().trim(), "\"number\"", "{result:?}");
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn first_stage_redirect_target_reads_session_stdin(#[case] live: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "g", "file contents\n");
+    let kernel = kernel_at(dir.path());
+    let script = "cat < $(cat) | cat";
+    let result = if live {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = pipe_stream_default();
+        writer.write_all(b"g\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+        kernel.execute_with_pipe_stdin(script, ExecuteOptions::new(), reader).await.unwrap()
+    } else {
+        kernel.execute_with_options(script, ExecuteOptions::new().with_stdin(b"g\n".to_vec())).await.unwrap()
+    };
+    assert_eq!(result.code, 0, "{result:?}");
+    assert_eq!(result.text_out(), "file contents\n", "{result:?}");
+}
+
+#[rstest::rstest]
+#[case("read x <<'EOF'\na\nb\nEOF\ncat", "S1\nS2\n")]
+#[case("cat < g > nodir/x | cat; cat", "S1\nS2\n")]
+#[case("cat < g | cat; cat", "a\nb\nc\nS1\nS2\n")]
+#[tokio::test]
+async fn redirected_input_restores_buffered_session_stdin(#[case] script: &str, #[case] expected: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "g", "a\nb\nc\n");
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute_with_options(script, ExecuteOptions::new().with_stdin(b"S1\nS2\n".to_vec())).await.unwrap();
+    assert_eq!(result.text_out(), expected, "{result:?}");
+}
+
+#[tokio::test]
+async fn gather_rows_do_not_replace_next_statement_typed_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute_with_options(
+        "seq 1 3 | scatter | echo x | gather | echo done; jq -c .",
+        ExecuteOptions::new().with_stdin(b"[9]\n".to_vec()),
+    ).await.unwrap();
+    assert_eq!(result.code, 0, "{result:?}");
+    assert_eq!(result.text_out(), "done\n[9]\n", "{result:?}");
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn first_stage_returns_partially_consumed_session_input(#[case] live: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let script = "read x | cat; cat";
+    let result = if live {
+        kernel.execute_with_pipe_stdin(script, ExecuteOptions::new(), session_pipe().await).await.unwrap()
+    } else {
+        kernel.execute_with_options(script, ExecuteOptions::new().with_stdin(b"S1\nS2\n".to_vec())).await.unwrap()
+    };
+    assert_eq!(result.code, 0, "{result:?}");
+    assert_eq!(result.text_out(), "S2\n", "{result:?}");
+}
+
+#[tokio::test]
+async fn nested_pipeline_drains_input_larger_than_the_pipe_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        kernel.execute("f() { cat | cat; }; seq 1 20000 | f | wc -l"),
+    ).await.expect("nested pipeline must drain under backpressure").unwrap();
+    assert_eq!(result.code, 0, "{result:?}");
+    assert_eq!(result.text_out().trim(), "20000", "{result:?}");
+}

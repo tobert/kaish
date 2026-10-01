@@ -977,16 +977,6 @@ impl PipelineRunner {
         // below, and the `fork_attached` cancellation cascade owns the
         // teardown on the one path that skips the join.
         let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
-        // Set when stage 0 receives the session's stdin rather than a redirect's.
-        // Only then may its remainder be returned at the join.
-        let mut stage0_took_session_stdin = false;
-        // Set only when stage 0 actually takes the session's live pipe reader
-        // out of `ctx` (see the `redirect_set_stdin` wiring below — a session-
-        // seeded buffer rides along with its pipe, a redirect's doesn't).
-        // Without this flag the join below would overwrite `ctx.pipe_stdin`
-        // with a stage that never got it, silently dropping the live reader.
-        let mut stage0_took_session_pipe_stdin = false;
-
         for (i, stage) in stages.iter().enumerate() {
             let mut stage_ctx = ctx.child_for_pipeline();
             let stage = stage.clone();
@@ -997,39 +987,13 @@ impl PipelineRunner {
             // stage, not just the foreground one).
             let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
-            // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
+            // Redirect targets expand against the stage's original input.
+            // open_redirects sets it aside only after the target is evaluated.
             if i == 0 {
-                // An input redirect (`read x < file | …`) sets `stage_ctx.stdin`
-                // when the stage opens its redirects, and leaves the session
-                // stream in `ctx` untouched — returning the *file's* leftover
-                // over it would both lose the session stream and substitute the
-                // wrong bytes for it.
-                let redirect_set_stdin = stage.redirects().iter().any(|redirect| is_input(&redirect.kind));
-                stage0_took_session_stdin = !redirect_set_stdin;
-                // First stage inherits the parent's stdin, but only if redirects didn't
-                // already set stdin (e.g., heredoc). Don't overwrite redirect-provided stdin.
-                if !redirect_set_stdin {
-                    stage_ctx.stdin = ctx.stdin.take();
-                }
-                if !redirect_set_stdin && stage_ctx.stdin_data.is_none() {
-                    stage_ctx.stdin_data = ctx.stdin_data.take();
-                }
-                // Inherit a frontend-seeded lazy stdin pipe (non-Clone, so moved),
-                // unless a redirect already provided stdin — `read_stdin_*` prefers
-                // `pipe_stdin`, and `set_stdin` clears it, so `< file` still wins.
-                // Gated on `redirect_set_stdin`, not `stage_ctx.stdin.is_none()`: the
-                // session's own buffered `stdin` and its `pipe_stdin` are one stream
-                // (a peeked prefix plus the live remainder, see
-                // `ExecContext::read_stdin_to_bytes`), so a session-seeded buffer must
-                // not block the matching pipe reader from riding along to stage 0.
-                if !redirect_set_stdin && stage_ctx.pipe_stdin.is_none() {
-                    stage_ctx.pipe_stdin = ctx.pipe_stdin.take();
-                    stage0_took_session_pipe_stdin = true;
-                }
+                stage_ctx.restore_stdin_state(ctx.take_stdin_state());
             } else {
-                // Intermediate/last stages read from pipe
                 stage_ctx.pipe_stdin = pipe_readers[i - 1].take();
-                // Structured data received via oneshot (resolved at start of execution)
+                stage_ctx.stdin_data_rx = data_receivers[i - 1].take();
             }
 
             // Wire pipe_stdout: last stage writes to ExecResult, others write to pipe
@@ -1045,22 +1009,14 @@ impl PipelineRunner {
             };
 
             let data_sender = if i < last_idx { data_senders[i].take() } else { None };
-            let data_receiver = if i > 0 { data_receivers[i - 1].take() } else { None };
             let reads_from_pipe = i > 0;
 
             // Propagate the embedder's trace context across the spawn boundary
             // so each concurrent stage's spans stay in the same trace.
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
                 tokio::spawn(crate::telemetry::bind_current_context(async move {
-                // Hand the structured-data sideband receiver to the stage; do
-                // NOT pre-read it. A consuming builtin resolves it via
-                // `ctx.resolve_stdin()`, which drains the pipe first (so a
-                // streaming upstream can't deadlock) and only then awaits this —
-                // by which point the producer has sent it. The old `try_recv`
-                // here raced the producer's post-dispatch send and silently
-                // dropped structured data (`seq 1 3 | jq .` → text → parse error).
-                stage_ctx.stdin_data_rx = data_receiver;
-
+                // A consumer resolves the sideband after draining its pipe;
+                // awaiting it before dispatch could block a streaming producer.
                 // Open the stage's redirects inside its own task, after its
                 // stdin is wired, as each stage of a bash pipeline expands its
                 // redirect targets in its own subshell: a target's `$(cat)`
@@ -1167,21 +1123,10 @@ impl PipelineRunner {
             match handle.await {
                 Ok((result, mut stage_ctx)) => {
                     codes[i] = result.code;
-                    // Stage 0 was handed the session's stdin. Whatever it did
-                    // not consume comes back, or it dies here — `seq 1 2 | cat`
-                    // never reads stdin at all, yet the stream it was handed
-                    // would vanish and the next statement would see nothing.
-                    // bash leaves it for the next reader; so do we.
-                    //
-                    // Only when the stage got the *session's* stdin: with a
-                    // redirect (`read x < file | …`) the session stream is
-                    // still sitting in `ctx`, and writing the file's leftover
-                    // over it would lose the stream and substitute wrong bytes.
-                    if i == 0 && stage0_took_session_stdin {
-                        ctx.stdin = stage_ctx.stdin.take();
-                    }
-                    if i == 0 && stage0_took_session_pipe_stdin {
-                        ctx.pipe_stdin = stage_ctx.pipe_stdin.take();
+                    // Redirect cleanup already restored the stage's original
+                    // input. Return every unread source to its caller.
+                    if i == 0 {
+                        ctx.restore_stdin_state(stage_ctx.take_stdin_state());
                     }
                     if i == last_idx {
                         last_result = result;
