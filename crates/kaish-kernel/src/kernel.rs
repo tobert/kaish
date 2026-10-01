@@ -11522,6 +11522,68 @@ AFTER="yes"'"#)
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
     }
 
+    /// The runtime binder and the validation binder must bind a wrapper's
+    /// words identically: head options typed, the command's words in source
+    /// order. Compares the whole `ToolArgs`, so a field one binder fills and
+    /// the other forgets fails here.
+    async fn assert_binders_agree(script: &str) {
+        let kernel = Kernel::transient().expect("kernel");
+        let program = crate::parser::parse(script).expect("parse");
+        let Some(crate::ast::Stmt::Command(cmd)) = program.statements.first() else {
+            panic!("{script}: not a command");
+        };
+        let schema = kernel
+            .tool_schemas()
+            .into_iter()
+            .find(|s| s.name == cmd.name)
+            .unwrap_or_else(|| panic!("{script}: no schema for {}", cmd.name));
+        let runtime = kernel
+            .build_args_async(&cmd.args, Some(&schema), &mut root_ctx(&kernel).await)
+            .await
+            .unwrap_or_else(|e| panic!("{script}: runtime bind: {e}"));
+        let validation = crate::validator::build_tool_args_for_validation(&cmd.args, Some(&schema));
+        // `flags` is a set; compare it sorted.
+        let sorted = |args: &ToolArgs| {
+            let mut value = serde_json::to_value(args).expect("serialize");
+            if let Some(flags) = value.get_mut("flags").and_then(|f| f.as_array_mut()) {
+                flags.sort_by_key(|f| f.to_string());
+            }
+            value
+        };
+        assert_eq!(sorted(&runtime), sorted(&validation), "{script}: the binders disagree");
+    }
+
+    #[tokio::test]
+    async fn binders_agree_for_a_wrapper_with_a_head() {
+        assert_binders_agree("timeout 5 sh -c body").await;
+        assert_binders_agree("timeout --json 5 sh -c body").await;
+        assert_binders_agree("timeout -- 5 sh -c body").await;
+        assert_binders_agree("env sh -c body").await;
+        assert_binders_agree("env -u NAME sh -c body").await;
+        assert_binders_agree("env -i -u NAME -u OTHER A=1 sh -c body").await;
+        assert_binders_agree("env -u -x sh -c body").await;
+        assert_binders_agree("env -u -- sh -c body").await;
+        assert_binders_agree("env --json A=1 sh -c --key=value -- -n").await;
+    }
+
+    #[cfg(feature = "subprocess")]
+    #[tokio::test]
+    async fn binders_agree_for_a_wrapper_with_a_head_external() {
+        assert_binders_agree("exec sh -c body").await;
+        assert_binders_agree("spawn sh -c body").await;
+        assert_binders_agree("spawn --timeout 1000 sh -c body").await;
+        assert_binders_agree("spawn --timeout 1000 --env '{}' sh -c body").await;
+    }
+
+    /// `--flag=true` on a bool param: the runtime binder turns it into the
+    /// flag; the validation binder kept it in `named`.
+    #[tokio::test]
+    async fn binders_agree_on_a_bool_flag_with_a_literal() {
+        assert_binders_agree("env --i=true sh -c body").await;
+        assert_binders_agree("env --i=false sh -c body").await;
+        assert_binders_agree("env --i=true --u=NAME").await;
+    }
+
     #[tokio::test]
     async fn build_args_undeclared_bool_flag_at_end_is_ok() {
         let kernel = Kernel::transient().expect("kernel");

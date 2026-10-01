@@ -60,6 +60,53 @@ async fn timeout_double_dash_after_the_duration_is_skipped() {
     assert_eq!((out.as_str(), code), ("x", 0), "stderr: {err}");
 }
 
+/// The inner builtin receives exactly what it receives when called directly:
+/// same stdout, same exit code.
+async fn assert_same_as_direct(kernel: &std::sync::Arc<Kernel>, setup: &str, command: &str) {
+    let direct = run(kernel, &format!("{setup}{command}")).await;
+    let wrapped = run(kernel, &format!("{setup}timeout 5 {command}")).await;
+    assert_eq!(
+        (&wrapped.0, wrapped.1),
+        (&direct.0, direct.1),
+        "`timeout 5 {command}` differs from the direct call (stderr: {})",
+        wrapped.2
+    );
+}
+
+#[tokio::test]
+async fn timeout_keeps_numerals_as_written() {
+    let kernel = isolated();
+    for numeral in ["-0", "0.10", "1.0", "-0.0", "007"] {
+        assert_same_as_direct(&kernel, "", &format!("echo {numeral}")).await;
+    }
+    let (out, _, _) = run(&kernel, "timeout 5 echo -0").await;
+    assert_eq!(out.trim(), "-0");
+}
+
+#[tokio::test]
+async fn timeout_keeps_a_quoted_dash_word_as_data() {
+    let kernel = isolated();
+    for command in [
+        "echo \"-n\" hi",
+        "echo \"--key=value\" hi",
+        "echo \"--json\" hi",
+        "echo -- -n",
+        "echo --key=value hi",
+        "echo --k=5 hi",
+    ] {
+        assert_same_as_direct(&kernel, "", command).await;
+    }
+    let (out, _, _) = run(&kernel, "timeout 5 echo \"--key=value\" hi").await;
+    assert_eq!(out.trim(), "--key=value hi");
+}
+
+#[tokio::test]
+async fn timeout_keeps_a_variable_that_holds_a_dash_word() {
+    let kernel = isolated();
+    assert_same_as_direct(&kernel, "x=\"--\"; ", "echo $x hi").await;
+    assert_same_as_direct(&kernel, "x=\"-n\"; ", "echo $x hi").await;
+}
+
 #[tokio::test]
 async fn timeout_json_before_the_duration_is_the_kernels() {
     let kernel = isolated();
@@ -80,7 +127,7 @@ async fn timeout_unknown_option_before_the_duration_is_refused_by_name() {
 }
 
 #[tokio::test]
-async fn timeout_still_kills_a_builtin_after_a_flag_is_passed() {
+async fn timeout_still_kills_a_builtin_that_outlasts_it() {
     let kernel = isolated();
     let (_, code, err) = run(&kernel, "timeout 100ms sleep 10").await;
     assert_eq!(code, 124, "stderr: {err}");
@@ -137,6 +184,22 @@ mod external {
 
         let (out, _, err) = run(&kernel, "export GONE=1; env -u GONE /bin/sh -c 'echo \"[${GONE}]\"'").await;
         assert_eq!(out.trim(), "[]", "stderr: {err}");
+    }
+
+    #[tokio::test]
+    async fn env_unset_takes_a_flag_shaped_word_as_its_name() {
+        // GNU: `env -u -x cmd` unsets a variable named `-x`, then runs cmd.
+        let kernel = repl_kernel();
+        let (out, code, err) = run(&kernel, "env -u -x sh -c 'echo ok'").await;
+        assert_eq!((out.trim(), code), ("ok", 0), "stderr: {err}");
+    }
+
+    #[tokio::test]
+    async fn env_unset_takes_a_double_dash_as_its_name() {
+        // GNU: `env -u -- cmd` unsets a variable named `--`, then runs cmd.
+        let kernel = repl_kernel();
+        let (out, code, err) = run(&kernel, "env -u -- sh -c 'echo ok'").await;
+        assert_eq!((out.trim(), code), ("ok", 0), "stderr: {err}");
     }
 
     #[tokio::test]
