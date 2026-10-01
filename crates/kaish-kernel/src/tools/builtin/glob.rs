@@ -76,9 +76,9 @@ impl Tool for Glob {
     }
 
     fn schema(&self) -> ToolSchema {
-        // glob_passthrough: the argv binder hands bare patterns through
-        // unmatched (a leading `~` is expanded, as in bash) — without it, `glob **/*.rs` (as every example here spells
-        // it) would bind the first *matching path* as the pattern.
+        // glob_passthrough expands unquoted tilde prefixes but leaves
+        // patterns unmatched. Otherwise `glob **/*.rs` would receive
+        // matching paths instead of a pattern.
         schema_from_clap(
             &GlobArgs::command(),
             "glob",
