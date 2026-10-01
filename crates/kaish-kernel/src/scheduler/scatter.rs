@@ -207,6 +207,23 @@ impl ScatterGatherRunner {
             if !result.ok() {
                 return result;
             }
+            // A lone stage's stderr stays on its result, where a multi-stage
+            // pre_scatter has already sent it to the statement's stderr. Send
+            // it the same way, so the one path and the other agree.
+            ctx.publish_job_stderr(&mut result).await;
+            match &ctx.stderr {
+                Some(stderr) => {
+                    stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
+                    result.err.clear();
+                    result.stderr_published_len = 0;
+                }
+                // Only a hand-built context lacks the stream; the kernel
+                // always seeds one.
+                None if !result.err.is_empty() => {
+                    tracing::warn!("pre_scatter stderr dropped: no stderr stream");
+                }
+                None => {}
+            }
             (result.text_out().into_owned(), result.data)
         };
 
