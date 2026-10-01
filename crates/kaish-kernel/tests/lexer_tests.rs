@@ -259,6 +259,24 @@ fn lexer_number_idents(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// `^` is an ordinary word character, as in bash: `HEAD^`, `a^b`, `^foo`.
+// `$(( ))` and `${…}` never reach these word classes.
+#[rstest]
+#[case::caret_alone("^", &["IDENT(^)"])]
+#[case::caret_infix("a^b", &["IDENT(a^b)"])]
+#[case::caret_git_parent("HEAD^", &["IDENT(HEAD^)"])]
+#[case::caret_git_second_parent("HEAD^2", &["IDENT(HEAD^2)"])]
+#[case::caret_leading("^foo", &["IDENT(^foo)"])]
+#[case::caret_digit_leading("1^2", &["NUMIDENT(1^2)"])]
+#[case::caret_path("/a^b", &["PATH(/a^b)"])]
+#[case::caret_relative_path("a^/b", &["RELPATH(a^/b)"])]
+#[case::caret_dotted(".a^b", &["DOTIDENT(.a^b)"])]
+#[case::caret_tilde_path("~/a^b", &["TILDEPATH(~/a^b)"])]
+#[case::caret_at_word("@a^b", &["ATWORD(@a^b)"])]
+fn lexer_caret_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
 // lex as a single token, not Dot + Ident, so they are not misparsed as the
 // POSIX `.` (source) command followed by an argument.

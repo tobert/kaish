@@ -1498,3 +1498,24 @@ shell_compat! {
     kaish_eq: "rc=1\nb\na",
     bash_eq: "rc=0",
 }
+
+// ---- Word characters ------------------------------------------------------
+// A word bash reads as plain text is plain text in kaish too.
+
+shell_compat! {
+    name: caret_words_are_literal,
+    script: "printf '<%s>\\n' ^ a^b HEAD^ HEAD^^ HEAD^2 ^foo 1^2 /tmp/a^b",
+    eq: "<^>\n<a^b>\n<HEAD^>\n<HEAD^^>\n<HEAD^2>\n<^foo>\n<1^2>\n</tmp/a^b>",
+}
+
+shell_compat! {
+    name: caret_is_xor_in_arithmetic,
+    script: "echo $(( 6 ^ 3 ))",
+    eq: "5",
+}
+
+shell_compat! {
+    name: caret_anchors_an_unquoted_regex,
+    script: "[[ abc =~ ^ab ]] && echo yes; [[ xabc =~ ^ab ]] || echo no",
+    eq: "yes\nno",
+}
