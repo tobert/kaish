@@ -317,6 +317,41 @@ fn lexer_digit_leading_dash_words(#[case] input: &str, #[case] expected: &[&str]
     run_lexer_test(input, expected);
 }
 
+// A backslash outside quotes makes the next character literal. The escaped
+// character and its plain neighbors fold into one quoted word; a flag, its
+// `=`, and an assignment key stay structure.
+#[rstest]
+#[case::escape_alone(r"\(", &["SINGLESTRING(()"])]
+#[case::escape_space(r"a\ b", &["SINGLESTRING(a b)"])]
+#[case::escape_backslash(r"\\", &[r"SINGLESTRING(\)"])]
+#[case::escape_dollar(r"\$HOME", &["SINGLESTRING($HOME)"])]
+#[case::escape_star(r"\*.txt", &["SINGLESTRING(*.txt)"])]
+#[case::escape_hash_run(r"\##", &["SINGLESTRING(##)"])]
+#[case::escape_then_comment(r"a\ #b", &["SINGLESTRING(a #b)"])]
+#[case::escape_separate_words(r"\( a \)", &["SINGLESTRING(()", "IDENT(a)", "SINGLESTRING())"])]
+#[case::escape_long_flag_value(r"--opt=a\ b", &["LONGFLAG(opt)", "EQ", "SINGLESTRING(a b)"])]
+#[case::escape_short_flag_value(r"-F\;", &["SHORTFLAG(F)", "SINGLESTRING(;)"])]
+#[case::escape_assignment_value(r"x=a\ b", &["IDENT(x)", "EQ", "SINGLESTRING(a b)"])]
+#[case::escape_in_assignment_key(r"a\=b", &["SINGLESTRING(a=b)"])]
+#[case::escape_tilde_path(r"~/a\ b", &["TILDEPATH(~/a b)"])]
+#[case::escape_tilde_prefix(r"~\ b", &["SINGLESTRING(~ b)"])]
+#[case::escape_then_continuation_untouched("a \\\nb", &["IDENT(a)", "IDENT(b)"])]
+fn lexer_backslash_escapes(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+#[rstest]
+#[case::star(r"a\ *.txt")]
+#[case::question(r"a\ ?")]
+#[case::bracket_pair(r"a\ [bc]")]
+fn lexer_backslash_escape_with_glob_is_refused(#[case] input: &str) {
+    run_lexer_error_matching(
+        input,
+        |e| e.to_string().contains("backslash escape"),
+        "a refusal naming the backslash escape",
+    );
+}
+
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
 // lex as a single token, not Dot + Ident, so they are not misparsed as the
 // POSIX `.` (source) command followed by an argument.
