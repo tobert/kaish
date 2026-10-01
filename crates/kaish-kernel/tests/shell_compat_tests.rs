@@ -1498,3 +1498,167 @@ shell_compat! {
     kaish_eq: "rc=1\nb\na",
     bash_eq: "rc=0",
 }
+
+// ---- brace groups ----------------------------------------------------------
+// `{ list; }` runs in the current shell: exit, return, break, and continue
+// inside it act on the enclosing script, function, or loop.
+
+shell_compat! {
+    name: group_or_fallback_exits,
+    script: "false || { echo no; exit 1; }; echo after",
+    eq: "no",
+    exit: 1,
+}
+
+shell_compat! {
+    name: group_or_fallback_skipped,
+    script: "true || { echo no; exit 1; }; echo after",
+    eq: "after",
+}
+
+shell_compat! {
+    name: group_feeds_a_pipe,
+    script: "{ echo b; echo a; } | sort",
+    eq: "a\nb",
+}
+
+shell_compat! {
+    name: group_reads_a_pipe,
+    script: "echo x | { read a; echo \"got $a\"; }",
+    eq: "got x",
+}
+
+shell_compat! {
+    name: group_status_is_the_last_command,
+    script: "{ true; false; }; echo $?",
+    eq: "1",
+}
+
+shell_compat! {
+    name: negated_group,
+    script: "! { false; }; echo $?",
+    eq: "0",
+}
+
+shell_compat! {
+    name: group_errexit_on_a_failing_command,
+    script: "set -e; { false; echo in; }; echo after",
+    eq: "",
+    exit: 1,
+}
+
+shell_compat! {
+    name: group_errexit_ignores_an_and_list,
+    script: "set -e; { false && true; }; echo after",
+    eq: "after",
+}
+
+shell_compat! {
+    name: group_keeps_the_cwd,
+    script: "{ cd /; }; pwd",
+    eq: "/",
+}
+
+// kaish keeps the last stage's session state for every compound; bash runs
+// each stage in a subshell.
+shell_compat! {
+    name: group_as_the_last_stage_keeps_its_variable,
+    script: "echo ab | { read v; }; echo \"v=$v\"",
+    kaish_eq: "v=ab",
+    bash_eq: "v=",
+}
+
+// ---- redirects on compound statements ----------------------------------------
+// A redirect after `}`, `fi`, `done`, or `esac` applies to everything the
+// body writes. It opens before the body runs and does not stop `exit` or
+// `return` from leaving the enclosing script or function.
+
+shell_compat! {
+    name: group_to_a_file,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; { echo a; echo b; } > \"$d-g1\"; cat \"$d-g1\"",
+    eq: "a\nb",
+}
+
+shell_compat! {
+    name: if_to_a_file,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; if true; then echo yes; fi > \"$d-log\"; cat \"$d-log\"",
+    eq: "yes",
+}
+
+shell_compat! {
+    name: case_to_a_file,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; case a in a) echo A ;; esac > \"$d-c\"; cat \"$d-c\"",
+    eq: "A",
+}
+
+shell_compat! {
+    name: while_reads_a_file_line_by_line,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; printf 'a\\nb\\n' > \"$d-w\"; while read l; do echo \"L:$l\"; done < \"$d-w\"",
+    eq: "L:a\nL:b",
+}
+
+shell_compat! {
+    name: loop_stderr_merged_into_a_pipe,
+    script: "for i in 1 2; do echo out$i; echo err$i >&2; done 2>&1 | wc -l",
+    eq: "4",
+}
+
+// kaish collects a compound's stdout and stderr separately, so `2>&1` puts
+// all of stderr after all of stdout; bash interleaves them. Same as `f 2>&1`.
+shell_compat! {
+    name: loop_merged_stderr_order,
+    script: "for i in 1 2; do echo out$i; echo err$i >&2; done 2>&1 | cat",
+    kaish_eq: "out1\nout2\nerr1\nerr2",
+    bash_eq: "out1\nerr1\nout2\nerr2",
+}
+
+shell_compat! {
+    name: exit_in_a_redirected_group_exits,
+    script: "f() { { exit 4; } > /dev/null; echo after; }; f",
+    eq: "",
+    exit: 4,
+}
+
+shell_compat! {
+    name: exit_in_a_redirected_if_exits,
+    script: "if false; then exit 1; fi > /dev/null; echo after; if true; then exit 3; fi > /dev/null; echo notreached",
+    eq: "after",
+    exit: 3,
+}
+
+shell_compat! {
+    name: return_in_a_redirected_group_returns,
+    script: "f() { { return 5; echo no; } > /dev/null; echo no2; }; f; echo \"rc=$?\"",
+    eq: "rc=5",
+}
+
+shell_compat! {
+    name: break_in_a_redirected_group_leaves_the_loop,
+    script: "for i in 1 2 3; do { [[ $i == 2 ]] && break; echo $i; } > /dev/null; echo \"i$i\"; done",
+    eq: "i1",
+}
+
+shell_compat! {
+    name: compound_redirect_open_failure_trips_errexit,
+    script: "set -e; { echo hi; } > /kaish-compat-nodir/x; echo after",
+    eq: "",
+    exit: 1,
+}
+
+shell_compat! {
+    name: compound_redirects_apply_left_to_right,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; { echo a; } > \"$d-o1\" > \"$d-o2\"; echo \"o1:$(cat \"$d-o1\") o2:$(cat \"$d-o2\")\"",
+    eq: "o1: o2:a",
+}
+
+shell_compat! {
+    name: inner_redirect_applies_before_the_compound_one,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; { echo a > \"$d-i1\"; } > \"$d-i2\"; echo \"i1:$(cat \"$d-i1\") i2:$(cat \"$d-i2\")\"",
+    eq: "i1:a i2:",
+}
+
+shell_compat! {
+    name: compound_target_truncates_before_the_body_reads,
+    script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; echo data > \"$d-s\"; { cat \"$d-s\"; } > \"$d-s\"; echo \"size:$(wc -c < \"$d-s\")\"",
+    eq: "size:0",
+}
