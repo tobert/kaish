@@ -142,3 +142,78 @@ async fn tilde_at_a_word_start_still_expands(#[case] source: &str, #[case] expec
     assert_eq!(code, 0, "{source:?}: {err}");
     assert_eq!(out, expected);
 }
+
+// ── A digit-leading word that is not a number is one string word ───────
+//
+// `cut -c 9-`, `cut -f 1-3,5-`, and `cut -d, -f 2,4-` are field lists, not
+// arithmetic. Numbers, redirects, and `$(( ))` keep their meaning.
+
+#[rstest]
+#[case::open_range("9-", "<9->\n")]
+#[case::open_range_from_zero("0-", "<0->\n")]
+#[case::open_range_leading_zero("007-", "<007->\n")]
+#[case::range_then_dash("1-3-", "<1-3->\n")]
+#[case::field_list("1-3,5-", "<1-3,5->\n")]
+#[case::field_list_short("2,4-", "<2,4->\n")]
+#[case::field_list_pair("1,3-", "<1,3->\n")]
+#[case::comma_led(",5-", "<,5->\n")]
+#[case::float_then_dash("1.5-", "<1.5->\n")]
+#[case::date_prefix("2024-01-", "<2024-01->\n")]
+#[case::colon_then_range("1:2-", "<1:2->\n")]
+#[case::range_then_colon("1-:", "<1-:>\n")]
+#[case::minus_led_open("-5-", "<-5->\n")]
+#[case::minus_led_range("-1-3", "<-1-3>\n")]
+#[case::segment_with_at("1-a@b", "<1-a@b>\n")]
+#[case::segment_with_plus("1-a+b", "<1-a+b>\n")]
+#[case::segment_with_tilde("2024-01-02~1", "<2024-01-02~1>\n")]
+#[case::segment_with_caret("9-^", "<9-^>\n")]
+#[tokio::test]
+async fn digit_leading_text_is_one_word(#[case] words: &str, #[case] expected: &str) {
+    assert_eq!(printf_words(words).await, expected);
+}
+
+/// `1--` used to split into `1` and the `--` end-of-options marker, so the
+/// command silently lost a word.
+#[tokio::test]
+async fn digit_then_double_dash_is_one_word() {
+    assert_eq!(printf_words("x 1--").await, "<x>\n<1-->\n");
+}
+
+#[rstest]
+#[case::cut_open_range("printf 'abcdefghijkl\\n' | cut -c 9-", "ijkl\n")]
+#[case::cut_field_list("printf 'a\\tb\\tc\\td\\te\\tf\\n' | cut -f 1-3,5-", "a\tb\tc\te\tf\n")]
+#[case::cut_delimited_list("printf 'a,b,c,d,e\\n' | cut -d, -f 2,4-", "b,d,e\n")]
+#[case::glob_class_trailing_dash("case 7 in [0-9-]) echo digit;; *) echo other;; esac", "digit\n")]
+#[tokio::test]
+async fn digit_leading_field_lists_reach_the_tool(#[case] source: &str, #[case] expected: &str) {
+    let (out, err, code) = run(source).await;
+    assert_eq!(code, 0, "{source:?}: {err}");
+    assert_eq!(out, expected);
+}
+
+/// Numbers, ranges that already worked, redirects, and arithmetic are
+/// unchanged.
+#[rstest]
+#[case::numbers("printf '<%s>\\n' 5 -5 1.5 -1.5", "<5>\n<-5>\n<1.5>\n<-1.5>\n")]
+#[case::closed_ranges("printf '<%s>\\n' 1-3 2024-01-02 -1k", "<1-3>\n<2024-01-02>\n<-1k>\n")]
+#[case::stderr_merge("printf '<%s>\\n' a 2>&1", "<a>\n")]
+#[case::arithmetic("echo $(( 9 - 3 )); (( 9-3 == 6 )) && echo six", "6\nsix\n")]
+#[case::assignment_value("x=9-; printf '<%s>\\n' \"$x\"", "<9->\n")]
+#[tokio::test]
+async fn numbers_redirects_and_arithmetic_are_unchanged(#[case] source: &str, #[case] expected: &str) {
+    let (out, err, code) = run(source).await;
+    assert_eq!(code, 0, "{source:?}: {err}");
+    assert_eq!(out, expected);
+}
+
+/// A trailing `.` after digits is the float rule's refusal, not a field
+/// list; these stay errors on purpose.
+#[rstest]
+#[case::trailing_dot("printf '<%s>\\n' 1.")]
+#[case::double_dot("printf '<%s>\\n' 1..5")]
+#[case::version_trailing_dot("printf '<%s>\\n' 1.2.")]
+#[tokio::test]
+async fn trailing_dot_numerals_stay_refused(#[case] source: &str) {
+    let (_, _, code) = run(source).await;
+    assert_ne!(code, 0, "{source:?} must stay refused");
+}

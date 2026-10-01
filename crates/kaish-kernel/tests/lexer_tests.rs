@@ -297,6 +297,26 @@ fn lexer_tilde_inside_words(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// A digit-leading word with a dash is text, including a trailing dash: the
+// `cut -c 9-` and `cut -f 1-3,5-` field lists. A plain numeral stays a number.
+#[rstest]
+#[case::dashnum_open_range("9-", &["DASHNUM(9-)"])]
+#[case::dashnum_double_dash("1--", &["DASHNUM(1--)"])]
+#[case::dashnum_range_then_dash("1-3-", &["DASHNUM(1-3-)"])]
+#[case::dashnum_float_then_dash("1.5-", &["DASHNUM(1.5-)"])]
+#[case::dashnum_minus_led_open("-5-", &["DASHNUM(-5-)"])]
+#[case::dashnum_minus_led_range("-1-3", &["DASHNUM(-1-3)"])]
+#[case::dashnum_field_list("1-3,5-", &["IDENT(1-3,5-)"])]
+#[case::dashnum_field_list_short("2,4-", &["IDENT(2,4-)"])]
+#[case::dashnum_segment_punctuation("1-a@b+c", &["DASHNUM(1-a@b+c)"])]
+#[case::dashnum_glob_class("[0-9-]*", &["GLOB([0-9-]*)"])]
+#[case::dashnum_int_unchanged("5", &["INT(5)"])]
+#[case::dashnum_negative_unchanged("-5", &["INT(-5)"])]
+#[case::dashnum_range_unchanged("1-3", &["DASHNUM(1-3)"])]
+fn lexer_digit_leading_dash_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
 // lex as a single token, not Dot + Ident, so they are not misparsed as the
 // POSIX `.` (source) command followed by an argument.
