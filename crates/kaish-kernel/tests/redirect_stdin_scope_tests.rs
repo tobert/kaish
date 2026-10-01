@@ -202,3 +202,113 @@ async fn redirect_still_feeds_its_own_command() {
     let r = kernel.execute("read x < g; echo $x").await.unwrap();
     assert_eq!(r.text_out(), "a\n", "{r:?}");
 }
+
+// Failed opens, live session pipes, and the commands after `gather`.
+
+/// A lazy session stdin holding `S1\nS2\n`, already closed by the writer.
+async fn session_pipe() -> kaish_kernel::PipeReader {
+    use tokio::io::AsyncWriteExt;
+    let (mut writer, reader) = pipe_stream_default();
+    writer.write_all(b"S1\nS2\n").await.unwrap();
+    writer.shutdown().await.unwrap();
+    reader
+}
+
+/// bash, stdin `S1\nS2\n`: `cat < g > nodir/x; cat` fails the first command
+/// and the second prints S1 and S2.
+#[tokio::test]
+async fn failed_redirect_open_leaves_session_stdin_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "g", "a\nb\nc\n");
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute_with_options(
+            "cat < g > nodir/x; cat",
+            ExecuteOptions::new().with_stdin(b"S1\nS2\n".to_vec()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text_out(), "S1\nS2\n", "{r:?}");
+}
+
+/// bash, stdin `S1\nS2\n`: `cat < g | cat; cat` prints a, b, c, S1, S2.
+#[tokio::test]
+async fn first_stage_input_redirect_leaves_session_pipe_stdin_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "g", "a\nb\nc\n");
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute_with_pipe_stdin("cat < g | cat; cat", ExecuteOptions::new(), session_pipe().await)
+        .await
+        .unwrap();
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.text_out(), "a\nb\nc\nS1\nS2\n", "{r:?}");
+}
+
+/// bash, stdin `S1\nS2\n`: the commands after `gather` read gather's rows,
+/// and the next statement reads the session's stdin.
+#[tokio::test]
+async fn gather_aftermath_leaves_session_stdin_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute_with_options(
+            "seq 1 3 | scatter | echo x | gather | echo done; cat",
+            ExecuteOptions::new().with_stdin(b"S1\nS2\n".to_vec()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text_out(), "done\nS1\nS2\n", "{r:?}");
+}
+
+#[tokio::test]
+async fn gather_aftermath_leaves_session_pipe_stdin_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute_with_pipe_stdin(
+            "seq 1 3 | scatter | echo x | gather | echo done; cat",
+            ExecuteOptions::new(),
+            session_pipe().await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text_out(), "done\nS1\nS2\n", "{r:?}");
+}
+
+/// The post-gather command reads the gathered rows, not the live session pipe.
+#[tokio::test]
+async fn post_gather_reader_gets_rows_not_the_session_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute_with_pipe_stdin(
+            "seq 1 3 | scatter | echo x | gather --lines | wc -c; cat",
+            ExecuteOptions::new(),
+            session_pipe().await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text_out(), "5\nS1\nS2\n", "{r:?}");
+}
+
+#[tokio::test]
+async fn gather_then_redirect_then_session_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "data.json", "[1,2,3,4,5]\n");
+    let kernel = kernel_at(dir.path());
+
+    let r = kernel
+        .execute_with_options(
+            "seq 1 3 | scatter | echo x | gather | jq -c length < data.json; cat",
+            ExecuteOptions::new().with_stdin(b"S1\nS2\n".to_vec()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text_out(), "5\nS1\nS2\n", "{r:?}");
+}
