@@ -436,7 +436,9 @@ pub enum Token {
     Dot,
 
     /// Tilde path: `~/foo`, `~user/bar` - value includes the full string.
-    #[regex(r"~[a-zA-Z0-9_./@+#^\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
+    /// Only a word that STARTS with `~` is one: every word class carries `~`
+    /// after its first character, so `HEAD~1` is one `Ident`.
+    #[regex(r"~[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
     TildePath(String),
 
     /// Bare tilde: `~` alone (expands to $HOME)
@@ -445,12 +447,12 @@ pub enum Token {
 
     /// Slash-containing relative word: `.git/HEAD`, `2026/report`, `../`.
     /// A slash makes the whole word text, including a numeric first component.
-    #[regex(r"[a-zA-Z0-9_.^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./@+#^\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
+    #[regex(r"[a-zA-Z0-9_.^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
     RelativePath(String),
 
     /// Dot-slash path: `./`, `./foo`, `./script.sh`.
     /// Wins ties with RelativePath to retain the existing token category.
-    #[regex(r"\./[a-zA-Z0-9_./@+#^\-\u{80}-\u{10FFFF}]*", lex_dot_slash_path, priority = 4)]
+    #[regex(r"\./[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_dot_slash_path, priority = 4)]
     DotSlashPath(String),
 
     /// Dot-prefixed bareword: `.parent`, `.gitignore`, `.foo.bar`.
@@ -458,8 +460,8 @@ pub enum Token {
     /// (the POSIX `.` source alias) which only matches a bare `.` — the source
     /// alias requires whitespace before its file argument (`. script`), so
     /// `.parent` (no space) is unambiguously a single bareword.
-    #[regex(r"\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
-    #[regex(r"\.[0-9]+\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[0-9]+\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     DottedIdent(String),
 
     #[token("{")]
@@ -688,7 +690,7 @@ pub enum Token {
     /// strings and numeric filenames (`123.txt`, `1.2.3`). A nonnumeric
     /// suffix or multiple dot-separated numeric components makes the whole
     /// word text. Complete scalar numerals retain their numeric rules.
-    #[regex(r"[0-9]+(\.[0-9]+)*\.?[a-zA-Z_+@^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^\-\u{80}-\u{10FFFF}]*|[0-9]+(\.[0-9]+){2,}[a-zA-Z0-9_.@+#^\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
+    #[regex(r"[0-9]+(\.[0-9]+)*\.?[a-zA-Z_+@^~\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*|[0-9]+(\.[0-9]+){2,}[a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
     /// Numeric word containing an embedded hyphen run, or a minus-led numeric
@@ -709,7 +711,7 @@ pub enum Token {
     /// `date -d @0`), or bare `@`. Mid-word `@` (`user@host`) is handled by
     /// `Ident`; this covers the leading-`@` cases that would otherwise be an
     /// "unexpected character" lexer error.
-    #[regex(r"@[a-zA-Z0-9_./@+#^\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
+    #[regex(r"@[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     AtWord(String),
 
     /// Invalid: float without leading digit (like .5)
@@ -726,7 +728,7 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Absolute path: `/tmp/out`, `/etc/hosts`, `/tmp/日本語`, etc.
-    #[regex(r"/[a-zA-Z0-9_./@+#^\-\u{80}-\u{10FFFF}]*", lex_path)]
+    #[regex(r"/[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_path)]
     Path(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -740,8 +742,10 @@ pub enum Token {
     /// leading class excludes digits — `NumberIdent`/`Int` own digit-leading
     /// words — and the ASCII operator/whitespace set. `^` is a word character
     /// anywhere in a word (`HEAD^2`, `^foo`): its meanings live inside
-    /// `$(( ))` and `${…}`, which never reach the word classes.
-    #[regex(r"[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^\-\u{80}-\u{10FFFF}]*", lex_ident)]
+    /// `$(( ))` and `${…}`, which never reach the word classes. `~` is a word
+    /// character after the first one (`HEAD~1`, `f.txt~`); a word that starts
+    /// with `~` is a `TildePath`.
+    #[regex(r"[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
