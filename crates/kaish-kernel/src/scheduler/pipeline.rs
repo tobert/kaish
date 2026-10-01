@@ -1075,6 +1075,9 @@ impl PipelineRunner {
                         stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
                         result.err.clear();
                         result.stderr_published_len = 0;
+                    } else {
+                        // Only a hand-built context lacks the stream.
+                        tracing::warn!("pipeline stage stderr dropped: no stderr stream");
                     }
                 }
 
