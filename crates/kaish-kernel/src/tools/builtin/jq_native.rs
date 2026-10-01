@@ -60,10 +60,9 @@ struct JqArgs {
     #[arg(short = 'n', long = "null-input", visible_alias = "null_input")]
     null_input: bool,
 
-    /// Slurp mode (-s): read the input as a document stream and wrap it in
-    /// one array — always, even for a single document, matching real jq. A
-    /// value arriving on `.data` is one document, so `-s` wraps it in a
-    /// one-element array.
+    /// Read JSON input as a document stream and wrap it in one array.
+    /// With -R, read the whole input as one string.
+    /// A structured input value is one document.
     #[arg(short = 's', long = "slurp")]
     slurp: bool,
 
@@ -475,6 +474,14 @@ impl Tool for JqNative {
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
         let mut issues = validate_against_schema(args, &self.schema());
 
+        // Runtime refuses this combination with supported input forms.
+        // Keep schema errors, but do not obscure that fix with filter compilation.
+        if (args.has_flag("raw-input") || args.has_flag("R"))
+            && (args.has_flag("null-input") || args.has_flag("n"))
+        {
+            return issues;
+        }
+
         // Get the filter positional (index 0). If it is the `<dynamic>` marker
         // (variable, `$(cmd)`, or glob), we cannot inspect it statically — skip.
         let filter_str = match args.get_string("filter", 0) {
@@ -602,25 +609,39 @@ impl Tool for JqNative {
                 },
                 Err(e) => return ExecResult::failure(1, format!("jq: {e}")),
             };
-            let inputs: Vec<serde_json::Value> = if slurp {
-                vec![serde_json::Value::String(text)]
+            let inputs: Box<dyn Iterator<Item = serde_json::Value> + Send + '_> = if slurp {
+                Box::new(std::iter::once(serde_json::Value::String(text)))
             } else {
-                text.split_terminator('\n')
-                    .map(|line| serde_json::Value::String(line.to_string()))
-                    .collect()
+                Box::new(text.split_terminator('\n')
+                    .map(|line| serde_json::Value::String(line.to_string())))
             };
             // One filter run per line, outputs concatenated in order.
             let mut combined = JqRun { text: String::new(), values: Vec::new() };
-            for input in inputs {
+            let mut errors = String::new();
+            for (index, input) in inputs.enumerate() {
+                if ctx.checkpoint().await.is_err() {
+                    return kaish_tool_api::Interrupted.result("jq");
+                }
                 match execute_filter_json(&filter, input, raw_output, compact, global_var_values.clone()) {
                     Ok(run) => {
                         combined.text.push_str(&run.text);
                         combined.values.extend(run.values);
                     }
-                    Err(e) => return ExecResult::failure(1, e),
+                    Err(error) => {
+                        if slurp {
+                            errors.push_str(&format!("raw input: {error}\n"));
+                        } else {
+                            errors.push_str(&format!("raw input line {}: {error}\n", index + 1));
+                        }
+                    }
                 }
             }
-            return build_exec_result(combined);
+            let mut result = build_exec_result(combined);
+            if !errors.is_empty() {
+                result.err.push_str(&errors);
+                result.code = 1;
+            }
+            return result;
         }
 
         // Get input JSON. `-n` / `--null-input` skips stdin entirely and feeds

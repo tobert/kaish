@@ -29,7 +29,7 @@ struct Base64Args {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Input file; reads stdin when omitted.
+    /// One input file; reads stdin when omitted. Use a redirect for output.
     paths: Vec<String>,
 }
 

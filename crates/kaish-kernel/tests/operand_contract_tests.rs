@@ -8,6 +8,7 @@ mod common;
 
 use common::kernel_at;
 use std::fs;
+use rstest::rstest;
 
 async fn run_with_good(script: &str) -> (String, String, i64) {
     let tmp = tempfile::tempdir().unwrap();
@@ -63,4 +64,28 @@ async fn sort_missing_operand_exits_two_with_no_output() {
     assert_eq!(out, "");
     assert!(err.contains("sort: nosuch"), "{err}");
     assert_eq!(code, 2);
+}
+
+#[rstest]
+#[case::multibyte_boundary("éclair".as_bytes(), 1)]
+#[case::binary_prefix(b"\xff\xfeabc", 2)]
+#[case::binary_after_prefix(b"abc\xff\xfe", 3)]
+#[tokio::test]
+async fn head_bytes_preserves_exact_prefixes_for_multiple_files(
+    #[case] content: &[u8],
+    #[case] count: usize,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("left"), content).unwrap();
+    fs::write(tmp.path().join("right"), b"uvwxyz").unwrap();
+    let kernel = kernel_at(tmp.path());
+    let result = kernel.execute(&format!("head -c {count} left right > out")).await.unwrap();
+    assert_eq!(result.code, 0, "{}", result.err);
+    let reference = std::process::Command::new("head")
+        .args(["-c", &count.to_string(), "left", "right"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert_eq!(fs::read(tmp.path().join("out")).unwrap(), reference.stdout);
 }

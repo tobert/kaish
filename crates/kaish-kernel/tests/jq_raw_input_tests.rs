@@ -8,7 +8,7 @@ use std::sync::Arc;
 use kaish_kernel::{Kernel, KernelConfig};
 
 async fn setup() -> Arc<Kernel> {
-    Kernel::new(KernelConfig::isolated().with_skip_validation(true))
+    Kernel::new(KernelConfig::isolated())
         .expect("failed to create kernel")
         .into_arc()
 }
@@ -67,4 +67,29 @@ async fn raw_input_with_null_input_is_refused_with_the_alternative() {
     assert_eq!(out, "", "no silent output");
     assert_ne!(code, 0);
     assert!(err.contains("-R -s") || err.contains("--raw-input --slurp"), "names the alternative: {err}");
+}
+
+#[tokio::test]
+async fn published_slurp_help_names_the_raw_input_exception() {
+    let kernel = setup().await;
+    let schemas = kernel.tool_schemas();
+    let jq = schemas.iter().find(|schema| schema.name == "jq").expect("jq schema");
+    let slurp = jq.params.iter().find(|param| param.name == "slurp").expect("slurp");
+    assert!(slurp.description.contains("-R"), "{}", slurp.description);
+    assert!(slurp.description.contains("string"), "{}", slurp.description);
+}
+
+#[tokio::test]
+async fn raw_input_keeps_good_lines_and_reports_filter_errors() {
+    let (output, error, code) = run(r"printf '1\nbad\n2\n' | jq -R tonumber").await;
+    assert_eq!(output, "1\n2\n");
+    assert_eq!(code, 1);
+    assert!(error.contains("raw input line 2"), "{error}");
+}
+
+#[tokio::test]
+async fn raw_input_keeps_carriage_returns_like_jq() {
+    let (output, error, code) = run(r"printf 'a\r\nb\r\n' | jq -R -c .").await;
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(output, "\"a\\r\"\n\"b\\r\"\n");
 }

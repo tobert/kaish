@@ -34,7 +34,7 @@ struct XxdArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// File to read; reads stdin when omitted.
+    /// One input file; reads stdin when omitted. Use a redirect for output.
     paths: Vec<String>,
 }
 

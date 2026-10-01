@@ -201,6 +201,34 @@ async fn literal_same_file_is_a_validation_error() {
     assert_eq!(std::fs::read_to_string(dir.path().join("P")).unwrap(), "b\na\n");
 }
 
+/// The same bare `~`-prefixed word on both sides is caught too. The
+/// validator has no session HOME to resolve `~/f` against and doesn't need
+/// one: two identical unquoted tilde words resolve to the same path
+/// whatever HOME turns out to be at runtime. `Expr::TildePath`'s raw text
+/// fell out of `literal_path`'s match (`Expr::Literal` only) when the
+/// tilde-expansion fix introduced the separate AST node, silently dropping
+/// this E023 report.
+#[tokio::test]
+async fn literal_same_tilde_path_is_a_validation_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let err = kernel.execute("sort < ~/f > ~/f").await.expect_err("must be rejected");
+    let KernelError::Validation { issues, .. } = err else {
+        panic!("must be KernelError::Validation, not {err:?}");
+    };
+    let issue = issues
+        .iter()
+        .find(|i| i.code == IssueCode::RedirectInputIsOutput)
+        .unwrap_or_else(|| panic!("expected RedirectInputIsOutput: {issues:?}"));
+    assert_eq!(issue.code.code(), "E023");
+    assert_eq!(
+        issue.message,
+        "redirect: ~/f is both input and output (> empties it before it is read); \
+         write to a temp file, then mv it over ~/f",
+    );
+}
+
 /// Different files on `<` and `>` are fine.
 #[tokio::test]
 async fn different_input_and_output_files_run() {

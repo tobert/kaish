@@ -20,7 +20,7 @@ struct HeadArgs {
     #[arg(short = 'n', long = "lines")]
     lines: Option<i64>,
 
-    /// Number of bytes to output (-c), overrides lines
+    /// Number of bytes per file (-c); overrides lines. Binary bytes are kept.
     #[arg(short = 'c', long = "bytes")]
     bytes: Option<i64>,
 
@@ -231,6 +231,9 @@ impl Head {
         paths: &[String],
         bytes: Option<usize>,
     ) -> ExecResult {
+        if let Some(byte_count) = bytes {
+            return Self::head_files_bytes(ctx, paths, byte_count).await;
+        }
         let (count, all_but_last) = Self::line_spec(args);
         let mut output = String::new();
         let multi = paths.len() > 1;
@@ -247,18 +250,6 @@ impl Head {
                             if printed_header { output.push('\n'); }
                             printed_header = true;
                             output.push_str(&format!("==> {} <==\n", path));
-                        }
-                        if let Some(byte_count) = bytes {
-                            // `-c N` applies to each file; GNU adds no newline.
-                            let end = byte_count.min(content.len());
-                            match content.get(..end) {
-                                Some(part) => output.push_str(part),
-                                None => errors.push_str(&format!(
-                                    "head: {}: -c {} cuts a multibyte character; run `head -c {} {}` on its own for exact bytes\n",
-                                    path, byte_count, byte_count, path
-                                )),
-                            }
-                            continue;
                         }
                         let mut file_lines: Vec<&str> = Vec::new();
                         for line in content.lines() {
@@ -282,9 +273,33 @@ impl Head {
             }
         }
 
-        // Byte mode keeps the bytes it was asked for, newline or not.
-        let trimmed = if bytes.is_some() { output } else { output.trim_end().to_string() };
+        let trimmed = output.trim_end().to_string();
         super::with_operand_errors(ExecResult::with_output(OutputData::text(trimmed)), errors)
+    }
+
+    async fn head_files_bytes(ctx: &mut ExecContext, paths: &[String], byte_count: usize) -> ExecResult {
+        let mut output = Vec::new();
+        let mut errors = String::new();
+        let mut printed_header = false;
+        for path in paths {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("head");
+            }
+            let resolved = ctx.resolve_path(path);
+            let range = Some(ReadRange::bytes(0, byte_count as u64));
+            match ctx.backend.read(Path::new(&resolved), range).await {
+                Ok(data) => {
+                    if printed_header {
+                        output.push(b'\n');
+                    }
+                    printed_header = true;
+                    output.extend_from_slice(format!("==> {path} <==\n").as_bytes());
+                    output.extend_from_slice(&data);
+                }
+                Err(error) => errors.push_str(&format!("head: {path}: {error}\n")),
+            }
+        }
+        super::with_operand_errors(ExecResult::success_text_or_bytes(output), errors)
     }
 
     /// Parse the `-n` line spec into `(count, all_but_last)`. A negative value

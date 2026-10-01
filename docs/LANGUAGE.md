@@ -429,6 +429,40 @@ café=au-lait;  echo $café       # au-lait
 😁=grin;       echo $😁         # grin
 ```
 
+### Tilde expansion
+
+`echo ~/src` — expands to `$HOME/src`. Tilde expansion applies only to an
+**unquoted** tilde-prefix written directly in the source: a bare word starting
+with `~` (`~`, `~/path`, `~user`, `~user/path`), including an assignment's
+value (`x=~/a`). It never applies to a quoted string, to a variable's value,
+or to a command substitution's output — those are already values, not source
+words, by the time kaish sees them.
+
+```sh
+echo ~/src                # /home/amy/src — unquoted, expands
+echo '~/src'               # ~/src — quoted, stays literal
+x='~/src'; echo "$x"       # ~/src — the value was never an unquoted word
+x=~/src; echo $x           # /home/amy/src — the assignment's OWN value was unquoted
+```
+
+`~user` reads the named user's home directory from `/etc/passwd`, which
+needs the `host` capability; without it, `~user` stays literal, the same as
+when the string doesn't match a real user. `~` alone reads the session
+`HOME` — the kernel never reads the host process's `$HOME`
+(`docs/EMBEDDING.md`, "Initial Variables and Hermetic Subprocess Env"). With
+no `HOME` in scope, `~`/`~/path` stays literal rather than expanding to
+nothing.
+
+`~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
+
+A `~` that is not at the start of a word is never a tilde-prefix: kaish has
+no bareword-pasting rule, so an unquoted `~` glued to a preceding word
+(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
+a silently literal concatenation. A heredoc body never expands `~`, even
+when the delimiter is unquoted and the body otherwise interpolates — tilde
+expansion is a source-word operation, and a heredoc body is never split into
+words.
+
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
 them, and `echo a-b`, `ls -l`, and `my-file.txt` are unaffected — but a name
@@ -610,6 +644,7 @@ tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
+tool 1>&2                       # merge stdout into stderr
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -661,6 +696,12 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
+> **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
+> join captured stdout first, then stderr. kaish does not preserve the
+> command's interleaved write order. If stderr has already reached a
+> background job stream, `1>&2` keeps those bytes first and appends
+> captured stdout; each byte reaches the stream once.
+>
 > **Known differences from bash.** bash evaluates and opens each target in
 > turn; kaish evaluates all of them before opening any, so the same-file
 > check sees every target. As a result:
@@ -681,6 +722,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
 > combining two of them on the same command is a parse error (rather than
 > silently taking the last one, as bash does).
+
+> **A redirect's input belongs to its command.** `seq 1 3 | jq -c length < f`
+> reads `f`, not the pipe. When the command ends, what it left unread of `f`
+> is dropped, and the session's stdin is what it was before: `read x < f; cat`
+> prints the session's stdin, not the rest of `f`.
 
 > **jq is built-in.** kaish ships a native jq (jaq) in-process — no external
 > binary required. The `$VAR → jq <<<` idiom replaces bash's
@@ -704,6 +750,24 @@ jq -n --arg a one --arg b two -r '$a + "-" + $b'
 
 Both flags are repeatable. `--argjson` errors loudly on malformed JSON
 (matching real jq).
+
+### Read raw text with jq
+
+```sh
+printf 'a\nb\n' | jq -R .       # one JSON string per line
+printf 'a\nb\n' | jq -R -s .    # one string: "a\nb\n"
+jq -R length notes.txt          # file input uses the same rules
+```
+
+`-R` / `--raw-input` reads text instead of JSON. A final unterminated
+line still counts; a final newline adds no empty input line. Only LF separates
+lines; CR stays in the string. With `-s`,
+the whole input is one string, including its newlines; empty input is
+`""`. Without `-s`, empty input produces no results.
+
+A runtime filter failure exits 1. Without `-s`, the error names its input
+line; other lines still run, and their output stays. `-n -R` is refused with exit 2 because
+kaish jq does not provide `input`/`inputs`; use `jq -R .` or `jq -R -s .`.
 
 ### The text boundary — one document vs. many (JSONL)
 
@@ -752,6 +816,17 @@ f() { ! cmd; }; f &             # negate inside the job, then background the cal
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.
+
+Builtin lists, tables, and trees end their last text line with a newline,
+so `ls dir | wc -l` counts every row. Text output keeps its written bytes.
+Command substitution strips final newlines; JSON output keeps its structure.
+
+`cat`, `head`, `tail`, `tac`, `cut`, and `file` continue after an unreadable
+file, print the other files in order, name each failure on stderr, and exit
+1. `sort` stops at an unreadable file with exit 2. `uniq`, `base64`, and
+`xxd` accept one input file; extra file operands are refused with exit 1.
+Use a redirect for output: `uniq input > output`. `head -c N a b` reads
+at most N bytes from each file, including binary prefixes.
 
 > **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
 > its flipped status — see "Shell Options" → "`!` and `set -e`" below for the
@@ -947,8 +1022,15 @@ A `$(...)` body accepts the **full statement grammar**: pipelines, `&&`/`||`
 chains, `;` sequences, multi-line bodies, `#` comments, and control structures
 (`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
 way. Output accumulates across the statements (no separator inserted, like
-`;`), and the body's side effects (`cd`, assignments) stay contained — only the
-captured stdout becomes the value.
+`;`), and the body's session changes stay contained — variables, `cd`, `alias`,
+function definitions (`f() { ...; }`, `source`), `kaish-ignore`, and
+`kaish-output-limit` all revert when the body ends. Only the captured stdout
+becomes the value:
+
+```sh
+x=$(f() { echo hi; }; f)   # x is "hi"
+f                          # command not found, exit 127
+```
 
 **stderr is not captured.** A substitution's stderr joins the enclosing
 statement's stderr, so a command that fails inside `$(...)` still reports why:

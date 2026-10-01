@@ -39,7 +39,7 @@ fn bash(script: &str) -> String {
 }
 
 async fn assert_counts_lines(script: &str, expected: u32) {
-    let (out, code) = run(&format!("{script} | wc -l")).await;
+    let (out, code) = run(&format!("set -o pipefail; {script} | wc -l")).await;
     assert_eq!(code, 0, "{script}: {out:?}");
     assert_eq!(out.trim().parse::<u32>().unwrap(), expected, "{script}: {out:?}");
 }
@@ -87,7 +87,8 @@ async fn wc_lines_match_gnu() {
 
 #[tokio::test]
 async fn checksum_lines_match_gnu() {
-    assert_counts_lines("sha256sum d/a d/b d/c", 3).await;
+    assert_counts_lines("checksum d/a d/b d/c", 3).await;
+    assert_eq!(bash("sha256sum d/a d/b d/c | wc -l").trim(), "3");
 }
 
 #[tokio::test]
