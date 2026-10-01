@@ -184,6 +184,19 @@ pub(crate) fn read_repeatable_strings(
     }
 }
 
+/// Attach the failures of a multi-operand reader to its result: one stderr
+/// line per failed operand, exit code 1. The good operands' output stays.
+pub(crate) fn with_operand_errors(
+    mut result: crate::interpreter::ExecResult,
+    errors: String,
+) -> crate::interpreter::ExecResult {
+    if !errors.is_empty() {
+        result.err.push_str(&errors);
+        result.code = 1;
+    }
+    result
+}
+
 /// Read a path-typed positional/named arg as a string, going LOUD on a
 /// `Value::Bytes` operand rather than `ToolArgs::get_string`'s silent `None`
 /// (that method lives in the `kaish-types` leaf crate, which has no

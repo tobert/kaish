@@ -93,6 +93,7 @@ impl Tool for File {
 
         let mut nodes = Vec::new();
         let mut lines = Vec::new();
+        let mut errors = String::new();
         for path in &paths {
             let resolved = ctx.resolve_path(path);
             // Sniffing needs only a bounded prefix — never materialize the whole
@@ -104,16 +105,22 @@ impl Tool for File {
                 .await
             {
                 Ok(b) => b,
-                Err(e) => return ExecResult::failure(1, format!("file: {}: {}", path, e)),
+                Err(e) => {
+                    errors.push_str(&format!("file: {}: {}\n", path, e));
+                    continue;
+                }
             };
             let id = Identity::of(&head);
             nodes.push(OutputNode::new(path).with_cells(id.cells()));
             lines.push(render_line(path, &id.describe(parsed.mime), parsed.brief));
         }
 
-        ExecResult::with_output_and_text(
-            OutputData::table(headers(), nodes),
-            lines.join("\n"),
+        super::with_operand_errors(
+            ExecResult::with_output_and_text(
+                OutputData::table(headers(), nodes),
+                lines.join("\n"),
+            ),
+            errors,
         )
     }
 }

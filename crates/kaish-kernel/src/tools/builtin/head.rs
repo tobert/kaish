@@ -228,15 +228,18 @@ impl Head {
         let (count, all_but_last) = Self::line_spec(args);
         let mut output = String::new();
         let multi = paths.len() > 1;
+        let mut errors = String::new();
+        let mut printed_header = false;
 
-        for (i, path) in paths.iter().enumerate() {
+        for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
 
             match ctx.backend.read(std::path::Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if multi {
-                            if i > 0 { output.push('\n'); }
+                            if printed_header { output.push('\n'); }
+                            printed_header = true;
                             output.push_str(&format!("==> {} <==\n", path));
                         }
                         let mut file_lines: Vec<&str> = Vec::new();
@@ -255,14 +258,14 @@ impl Head {
                         output.push_str(&head.join("\n"));
                         output.push('\n');
                     }
-                    Err(_) => return ExecResult::failure(1, format!("head: {}: invalid UTF-8", path)),
+                    Err(_) => errors.push_str(&format!("head: {}: invalid UTF-8\n", path)),
                 },
-                Err(e) => return ExecResult::failure(1, format!("head: {}: {}", path, e)),
+                Err(e) => errors.push_str(&format!("head: {}: {}\n", path, e)),
             }
         }
 
         let trimmed = output.trim_end().to_string();
-        ExecResult::with_output(OutputData::text(trimmed))
+        super::with_operand_errors(ExecResult::with_output(OutputData::text(trimmed)), errors)
     }
 
     /// Parse the `-n` line spec into `(count, all_but_last)`. A negative value
