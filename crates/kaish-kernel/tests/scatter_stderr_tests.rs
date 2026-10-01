@@ -40,6 +40,7 @@ fn cases() -> Vec<(String, &'static str, i64)> {
         (format!("src | {WORKERS} | cat"), "pre-warning", 0),
         // A failing stage returns before scatter runs; its stderr arrives once.
         (format!("src_fail | {WORKERS}"), "pre-warning", 1),
+        (format!("echo item | src_fail | {WORKERS}"), "pre-warning", 1),
         (format!("cat /pre-missing-file | {WORKERS}"), "pre-missing-file", 1),
     ]
 }
@@ -99,7 +100,11 @@ async fn pre_scatter_stderr_reaches_a_whole_program_jobs_stream_once() {
 /// when the whole pipeline does.
 #[tokio::test]
 async fn pre_scatter_stderr_is_live_while_the_workers_run() {
-    for (pre, marker) in [("grep '\\d' <<< \"d\"", "stray"), ("src", "pre-warning")] {
+    for (pre, marker) in [
+        ("grep '\\d' <<< \"d\"", "stray"),
+        ("src", "pre-warning"),
+        ("sh -c 'echo item; echo pre-warning >&2'", "pre-warning"),
+    ] {
         let kernel = kernel();
         let program = format!("{SOURCE}{pre} | scatter | sh -c 'sleep 3; echo got' | gather --lines &");
         kernel.execute(&program).await.expect("spawn");
@@ -120,5 +125,23 @@ async fn pre_scatter_stderr_is_live_while_the_workers_run() {
         let (_, stderr, result) = streams(&kernel, id).await;
         assert_eq!(result.code, 0);
         assert_eq!(stderr.matches(marker).count(), 1, "{pre}: {stderr:?}");
+    }
+}
+
+#[tokio::test]
+async fn redirected_pre_scatter_stderr_stays_out_of_statement_and_job_streams() {
+    for producer in ["src", "sh -c 'echo item; echo pre-warning >&2'"] {
+        let pipeline = format!("{producer} 2>/dev/null | {WORKERS}");
+        let k = kernel();
+        let result = k.execute(&format!("{SOURCE}{pipeline}")).await.expect("execute");
+        assert_eq!(result.code, 0);
+        assert_eq!(result.text_out().trim(), "got");
+        assert!(result.err.is_empty(), "{pipeline}: {:?}", result.err);
+        k.execute(&format!("{pipeline} &")).await.expect("spawn");
+        let (stdout, stderr, result) = streams(&k, JobId(1)).await;
+        assert_eq!(result.code, 0);
+        assert_eq!(stdout.trim(), "got");
+        assert!(stderr.is_empty(), "{pipeline}: {stderr:?}");
+        assert!(result.err.is_empty(), "{pipeline}: {:?}", result.err);
     }
 }
