@@ -676,18 +676,68 @@ pub(crate) fn render_command(cmd: &Command) -> String {
 /// [`PlannedValue`] (for [`PlannedCommand::args`]), derived together so the
 /// two representations cannot disagree about what this argument was.
 fn plan_arg(arg: &Arg) -> (String, PlannedValue) {
-    let text = match arg {
-        Arg::Positional(e) => render_expr(e),
-        Arg::Named { key, value } => format!("--{key}={}", render_expr(value)),
-        Arg::WordAssign { key, value } => format!("{key}={}", render_expr(value)),
-        Arg::ShortFlag(f) => format!("-{f}"),
-        Arg::LongFlag(f) => format!("--{f}"),
-        Arg::DoubleDash => "--".to_string(),
+    let (text, value) = match arg {
+        Arg::Positional(e) => (render_expr(e), literal_word(e)),
+        Arg::Named { key, value } => (
+            format!("--{key}={}", render_expr(value)),
+            literal_word(value).map(|word| format!("--{key}={word}")),
+        ),
+        Arg::WordAssign { key, value } => (
+            format!("{key}={}", render_expr(value)),
+            literal_word(value).map(|word| format!("{key}={word}")),
+        ),
+        Arg::ShortFlag(f) => (format!("-{f}"), Some(format!("-{f}"))),
+        Arg::LongFlag(f) => (format!("--{f}"), Some(format!("--{f}"))),
+        Arg::DoubleDash => ("--".to_string(), Some("--".to_string())),
     };
-    (text.clone(), PlannedValue::Plain(text))
+    let planned = match value {
+        Some(value) => PlannedValue::literal(text.clone(), value),
+        None => PlannedValue::Plain(text.clone()),
+    };
+    (text, planned)
 }
 
-/// Plan one redirect's target: rendered unexpanded, always plain.
+/// The word a command receives for `expr`, when no expansion can change it.
+///
+/// Mirrors the argv build in `Kernel::build_args_flat`: a numeral with
+/// source text passes `raw`, other scalars pass their `value_to_string`
+/// form, and a string beginning with `~` is expanded at runtime, so it has
+/// no known word. Lists, records, bytes, and JSON values are not words.
+fn literal_word(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(Value::String(s)) => literal_string(s),
+        Expr::Literal(
+            scalar @ (Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null),
+        ) => Some(crate::interpreter::value_to_string(scalar)),
+        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+        Expr::Interpolated(parts) => {
+            let mut word = String::new();
+            for part in parts {
+                match part {
+                    StringPart::Literal(s) => word.push_str(s),
+                    _ => return None,
+                }
+            }
+            literal_string(&word)
+        }
+        _ => None,
+    }
+}
+
+fn literal_string(s: &str) -> Option<String> {
+    if s.starts_with('~') {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Plan one redirect's target: rendered unexpanded.
+///
+/// A file target (`>`, `>>`, `<`, `2>`, `&>`) with no expansion in it is a
+/// [`PlannedValue::Literal`] path. A merge, a here-string, and a heredoc
+/// target stay plain: a merge target is a placeholder, a here-string target
+/// is stdin text rather than a path, and a heredoc target is a delimiter.
 ///
 /// A heredoc's target is its delimiter word, which is what stands after `<<`
 /// in the source. Rendering the *body* here would repeat what
@@ -701,6 +751,17 @@ fn plan_redirect_target(redirect: &Redirect) -> PlannedValue {
         RedirectKind::HereDoc(meta) => {
             let quote = if meta.literal { "'" } else { "" };
             PlannedValue::Plain(format!("{quote}{}{quote}", meta.delimiter))
+        }
+        RedirectKind::StdoutOverwrite
+        | RedirectKind::StdoutAppend
+        | RedirectKind::Stdin
+        | RedirectKind::Stderr
+        | RedirectKind::Both => {
+            let text = render_expr(&redirect.target);
+            match literal_word(&redirect.target) {
+                Some(path) => PlannedValue::literal(text, path),
+                None => PlannedValue::Plain(text),
+            }
         }
         _ => PlannedValue::Plain(render_expr(&redirect.target)),
     }
@@ -1064,7 +1125,7 @@ mod tests {
         assert_eq!(kinds, vec![">", "2>", "<"]);
         assert_eq!(
             plan.commands[0].redirects[0].target,
-            PlannedValue::Plain("out.txt".to_string())
+            PlannedValue::literal("out.txt", "out.txt")
         );
         assert!(plan.rendered.contains("> out.txt"), "got: {}", plan.rendered);
     }
@@ -1095,12 +1156,12 @@ mod tests {
         assert_eq!(
             args,
             &vec![
-                PlannedValue::Plain("-v".to_string()),
-                PlannedValue::Plain("--force".to_string()),
-                PlannedValue::Plain("--key=value".to_string()),
-                PlannedValue::Plain("word".to_string()),
-                PlannedValue::Plain("--".to_string()),
-                PlannedValue::Plain("--after".to_string()),
+                PlannedValue::literal("-v", "-v"),
+                PlannedValue::literal("--force", "--force"),
+                PlannedValue::literal("--key=value", "--key=value"),
+                PlannedValue::literal("word", "word"),
+                PlannedValue::literal("--", "--"),
+                PlannedValue::literal("--after", "--after"),
             ]
         );
     }
@@ -1189,8 +1250,8 @@ mod tests {
         assert_eq!(
             plan.commands[0].args,
             vec![
-                PlannedValue::Plain("--confirm=deadbeef".to_string()),
-                PlannedValue::Plain("target.txt".to_string()),
+                PlannedValue::literal("--confirm=deadbeef", "--confirm=deadbeef"),
+                PlannedValue::literal("target.txt", "target.txt"),
             ]
         );
     }
