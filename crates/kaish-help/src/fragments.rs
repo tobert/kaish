@@ -452,6 +452,11 @@ push services[web][tags] canary   # bracket-path target
 ~/src/project             # tilde expands to $HOME
 cd                        # bare cd goes to $HOME
 cd -                      # previous directory
+
+# Tilde expansion applies only to an unquoted ~ at the start of a word —
+# a quoted "~" or '~' is a literal path, never $HOME:
+echo ~/x                  # /home/amy/x
+echo '~/x'                # ~/x
 ```"#,
     ),
     syntax_section(
