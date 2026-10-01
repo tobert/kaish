@@ -947,8 +947,15 @@ A `$(...)` body accepts the **full statement grammar**: pipelines, `&&`/`||`
 chains, `;` sequences, multi-line bodies, `#` comments, and control structures
 (`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
 way. Output accumulates across the statements (no separator inserted, like
-`;`), and the body's side effects (`cd`, assignments) stay contained — only the
-captured stdout becomes the value.
+`;`), and the body's session changes stay contained — variables, `cd`, `alias`,
+function definitions (`f() { ...; }`, `source`), `kaish-ignore`, and
+`kaish-output-limit` all revert when the body ends. Only the captured stdout
+becomes the value:
+
+```sh
+x=$(f() { echo hi; }; f)   # x is "hi"
+f                          # command not found, exit 127
+```
 
 **stderr is not captured.** A substitution's stderr joins the enclosing
 statement's stderr, so a command that fails inside `$(...)` still reports why:
