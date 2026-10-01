@@ -1,5 +1,5 @@
-//! `1>&2` joins a command's stdout and stderr as two blocks, stdout first,
-//! the order `2>&1` already uses. Neither follows write order inside one
+//! Captured `1>&2` joins stdout and stderr as two blocks, stdout first,
+//! the order `2>&1` already uses. Already-published stderr stays first. Neither follows write order inside one
 //! command; `docs/LANGUAGE.md`, "Pipes & Redirects" states the limit.
 
 #![cfg(all(feature = "localfs", feature = "subprocess"))]
@@ -51,4 +51,44 @@ async fn job_stream_holds_stdout_before_stderr_under_1_to_2() {
     let stream = String::from_utf8_lossy(&kernel.jobs().read_stderr(id).await.unwrap()).into_owned();
     assert!(stream.starts_with("good"), "stdout block first: {stream:?}");
     assert_eq!(stream.matches("nosuch").count(), 1, "{stream:?}");
+}
+
+#[tokio::test]
+async fn external_job_captured_merge_reaches_stderr_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let variables = std::collections::HashMap::from([
+        ("PATH".to_string(), kaish_kernel::ast::Value::String(std::env::var("PATH").expect("PATH"))),
+    ]);
+    let kernel = kaish_kernel::Kernel::new(
+        kaish_kernel::KernelConfig::repl().with_cwd(dir.path().to_path_buf()).with_initial_vars(variables),
+    ).unwrap();
+    kernel.execute("sh -c 'echo out; echo err >&2' 1>&2 &").await.unwrap();
+    let id = kaish_kernel::scheduler::JobId(1);
+    let result = kernel.jobs().wait(id).await.unwrap();
+    assert_eq!(result.code, 0);
+    assert_eq!(result.err, "out\nerr\n");
+    let stderr = String::from_utf8(kernel.jobs().read_stderr(id).await.unwrap()).unwrap();
+    assert_eq!(stderr, "out\nerr\n");
+    assert!(kernel.jobs().read_stdout(id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn merge_into_stderr_leaves_pipeline_stdout_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute(&format!("{BOTH}both 1>&2 | cat")).await.unwrap();
+    assert_eq!(result.code, 0);
+    assert_eq!(result.text_out(), "");
+    assert_eq!(result.err, "out\nout2\nerr\nerr2\n");
+}
+
+#[tokio::test]
+async fn copying_stderr_before_redirecting_it_keeps_distinct_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute(&format!("{BOTH}both 1>&2 2> errors")).await.unwrap();
+    assert_eq!(result.code, 0);
+    assert_eq!(result.text_out(), "");
+    assert_eq!(result.err, "out\nout2\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("errors")).unwrap(), "err\nerr2\n");
 }

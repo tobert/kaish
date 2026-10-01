@@ -2308,6 +2308,23 @@ mod tests {
         BackendDispatcher::new(Arc::new(ToolRegistry::new()))
     }
 
+    #[tokio::test]
+    async fn stdout_merge_preserves_published_stderr_prefix() {
+        let ctx = make_minimal_ctx();
+        let mut result = ExecResult::success("out\n");
+        result.err = "sent\npending\n".into();
+        result.stderr_published_len = "sent\n".len();
+        let redirects = [Redirect {
+            kind: RedirectKind::MergeStdout,
+            target: Expr::Literal(Value::Int(2)),
+        }];
+        let result = apply_redirects(result, &redirects, &OpenedRedirects::default(), &ctx).await;
+        assert_eq!(result.err, "sent\npending\nout\n");
+        assert_eq!(result.stderr_published_len, "sent\n".len());
+        assert_eq!(&result.err[result.stderr_published_len..], "pending\nout\n");
+        assert_eq!(result.text_out(), "");
+    }
+
     /// Open `redirects`, then apply them to `result`, as the runner does
     /// around a command.
     async fn open_and_apply(result: ExecResult, redirects: &[Redirect], ctx: &mut ExecContext) -> ExecResult {
