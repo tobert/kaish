@@ -682,6 +682,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > combining two of them on the same command is a parse error (rather than
 > silently taking the last one, as bash does).
 
+> **A redirect's input belongs to its command.** `seq 1 3 | jq -c length < f`
+> reads `f`, not the pipe. When the command ends, what it left unread of `f`
+> is dropped, and the session's stdin is what it was before: `read x < f; cat`
+> prints the session's stdin, not the rest of `f`.
+
 > **jq is built-in.** kaish ships a native jq (jaq) in-process — no external
 > binary required. The `$VAR → jq <<<` idiom replaces bash's
 > `echo "$VAR" | jq` without spawning a subprocess. For structured data,

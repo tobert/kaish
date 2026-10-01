@@ -175,14 +175,11 @@ impl ScatterGatherRunner {
         // Run pre-scatter commands to get input.
         // Uses run_sequential to avoid async recursion (scatter → run → scatter).
         let (text, data) = if pre_scatter.is_empty() {
-            // Use existing stdin — structured data, a buffered byte vector, or
-            // a lazy `pipe_stdin` (a frontend-seeded process-stdin pipe).
-            // `take_stdin` alone would miss the pipe; `read_stdin_to_text`
-            // prefers it.
-            let data = ctx.take_stdin_data();
-            let text = match ctx.read_stdin_to_text().await {
-                Ok(s) => s.unwrap_or_default(),
-                Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+            // Resolve the upstream sideband after draining its pipe, as a
+            // standalone scatter does. Numeric items must keep their type.
+            let (data, text) = match ctx.resolve_stdin().await {
+                Ok(input) => input,
+                Err(error) => return ExecResult::failure(2, format!("scatter: {error}")),
             };
             (text, data)
         } else {
@@ -255,11 +252,16 @@ impl ScatterGatherRunner {
             ctx.publish_job_stdout(&gathered).await;
             gathered
         } else {
+            // The rows are the post-gather commands' input and nothing else:
+            // the session's stdin state waits aside and comes back after.
+            let session_stdin = ctx.take_stdin_state();
             ctx.set_stdin_with_data(
                 gathered.text_out().into_owned(),
                 gathered.data.clone(),
             );
-            runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await
+            let result = runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await;
+            ctx.restore_stdin_state(session_stdin);
+            result
         }
     }
 
