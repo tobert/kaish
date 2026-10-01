@@ -999,4 +999,39 @@ mod tests {
         let data = OutputData::text("");
         assert_eq!(data.into_text(), Ok("".to_string()));
     }
+
+    #[test]
+    fn json_failure_keeps_partial_text_under_output() {
+        let mut result = ExecResult::from_output(1, "partial\n", "boom\n");
+        result.set_output(None);
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"code": 1, "error": "boom", "output": "partial\n"})
+        );
+        assert_eq!(formatted.err, "boom\n", "stderr keeps its message");
+    }
+
+    #[test]
+    fn json_failure_keeps_structured_output_under_data() {
+        let mut result = ExecResult::from_output(2, "", "bad\n");
+        result.set_output(Some(OutputData::text("kept")));
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 2, "error": "bad", "data": "kept"}));
+    }
+
+    #[test]
+    fn json_failure_without_message_has_empty_error() {
+        let formatted = apply_output_format(ExecResult::failure(1, ""), OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
+    }
+
+    #[test]
+    fn json_success_with_no_output_stays_empty() {
+        let formatted = apply_output_format(ExecResult::success(""), OutputFormat::Json);
+        assert_eq!(formatted.text_out(), "");
+    }
 }

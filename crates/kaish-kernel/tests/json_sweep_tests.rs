@@ -108,7 +108,7 @@ const CASES: &[Case] = &[
     Case { name: "echo", setup: &[], cmd: "echo hi --json", expect: Expect::String },
     Case { name: "env", setup: &["export FOO=bar"], cmd: "env --json", expect: Expect::String },
     Case { name: "export", setup: &[], cmd: "export FOO=bar --json", expect: Expect::Empty },
-    Case { name: "false", setup: &[], cmd: "false --json", expect: Expect::FailsClean(1) },
+    Case { name: "false", setup: &[], cmd: "false --json", expect: Expect::FailsEnvelope(1) },
     Case { name: "file", setup: &[], cmd: "file tmp/data.json --json", expect: Expect::Array },
     Case { name: "find", setup: &[], cmd: "find src -name '*.rs' --json", expect: Expect::Array },
     Case { name: "fromjson", setup: &[], cmd: r#"fromjson '{"a":1}' --json"#, expect: Expect::Object },
