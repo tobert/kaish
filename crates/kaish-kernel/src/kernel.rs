@@ -4756,47 +4756,13 @@ impl Kernel {
                 }
             },
             Expr::CommandSubst(stmts) => {
-                // Snapshot scope, cwd, and session config before running —
+                // Snapshot session state before running (`run_substitution_isolated`) —
                 // only output escapes, not side effects like `cd`, variable
-                // assignments, or config mutations (`kaish-ignore`,
+                // assignments, function definitions, or config mutations (`kaish-ignore`,
                 // `kaish-output-limit`, `alias`/`unalias`) — matching how
                 // every other execution context (background forks, scatter
                 // workers) already isolates mutations (GH #139).
-                // Boxed: this ~470 B scope snapshot is held across the nested
-                // `$(…)` recursion await below, so inlining it grows every
-                // command-substitution level's future (GH #48, item 4).
-                let saved_scope = Box::new(self.scope.read().await.clone());
-                // A substitution's session changes do not escape into the enclosing
-                // statement. Saved off the threaded ctx: the run's truth lives there
-                // now, and the slot is only written when the statement finishes.
-                let saved_ec = (
-                    ctx.cwd.clone(),
-                    ctx.prev_cwd.clone(),
-                    ctx.aliases.clone(),
-                    ctx.ignore_config.clone(),
-                    ctx.output_limit.clone(),
-                );
-
-                // Capture result without `?` — restore state unconditionally
-                let run_result = self.execute_block_capturing(stmts, &mut *ctx).await;
-
-                // Restore scope and cwd regardless of success/failure
-                {
-                    let mut scope = self.scope.write().await;
-                    *scope = *saved_scope;
-                    if let Ok(ref r) = run_result {
-                        scope.set_last_result(r.clone());
-                        scope.note_cmdsubst_code(r.code);
-                    }
-                }
-                {
-                    let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-                    ctx.cwd = cwd;
-                    ctx.prev_cwd = prev_cwd;
-                    ctx.aliases = aliases;
-                    ctx.ignore_config = ignore_config;
-                    ctx.output_limit = output_limit;
-                }
+                let run_result = self.run_substitution_isolated(stmts, &mut *ctx).await;
 
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
@@ -5208,41 +5174,7 @@ impl Kernel {
                 // ignore config) — matching how every other execution
                 // context (background forks, scatter workers) already
                 // isolates mutations (GH #139).
-                // Boxed: this ~470 B scope snapshot is held across the nested
-                // `$(…)` recursion await below, so inlining it grows every
-                // command-substitution level's future (GH #48, item 4).
-                let saved_scope = Box::new(self.scope.read().await.clone());
-                // A substitution's session changes do not escape into the enclosing
-                // statement. Saved off the threaded ctx: the run's truth lives there
-                // now, and the slot is only written when the statement finishes.
-                let saved_ec = (
-                    ctx.cwd.clone(),
-                    ctx.prev_cwd.clone(),
-                    ctx.aliases.clone(),
-                    ctx.ignore_config.clone(),
-                    ctx.output_limit.clone(),
-                );
-
-                // Capture result without `?` — restore state unconditionally
-                let run_result = self.execute_block_capturing(stmts, ctx).await;
-
-                // Restore scope and cwd regardless of success/failure
-                {
-                    let mut scope = self.scope.write().await;
-                    *scope = *saved_scope;
-                    if let Ok(ref r) = run_result {
-                        scope.set_last_result(r.clone());
-                        scope.note_cmdsubst_code(r.code);
-                    }
-                }
-                {
-                    let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-                    ctx.cwd = cwd;
-                    ctx.prev_cwd = prev_cwd;
-                    ctx.aliases = aliases;
-                    ctx.ignore_config = ignore_config;
-                    ctx.output_limit = output_limit;
-                }
+                let run_result = self.run_substitution_isolated(stmts, &mut *ctx).await;
 
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
@@ -5524,6 +5456,48 @@ impl Kernel {
             // shell over it.
             None => tracing::warn!("command substitution stderr dropped: no stderr stream"),
         }
+    }
+
+    /// Run a `$(...)` body and restore the session state it may have changed:
+    /// scope, the function table, cwd, prev_cwd, aliases, ignore config, and
+    /// output limit. Restores when execution returns, including an error.
+    /// Dropping the execution future bypasses this cleanup.
+    async fn run_substitution_isolated(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<ExecResult> {
+        // Boxed: the scope snapshot is held across the nested `$(…)`
+        // recursion await below, so inlining it grows every
+        // command-substitution level's future (GH #48, item 4).
+        let saved_scope = Box::new(self.scope.read().await.clone());
+        let saved_user_tools = Box::new(self.user_tools.read().await.clone());
+        // The run's truth lives on the threaded ctx; the slot is only
+        // written when the statement finishes.
+        let saved_ec = (
+            ctx.cwd.clone(),
+            ctx.prev_cwd.clone(),
+            ctx.aliases.clone(),
+            ctx.ignore_config.clone(),
+            ctx.output_limit.clone(),
+        );
+
+        let run_result = self.execute_block_capturing(stmts, ctx).await;
+
+        {
+            let mut scope = self.scope.write().await;
+            *scope = *saved_scope;
+            if let Ok(ref r) = run_result {
+                scope.set_last_result(r.clone());
+                scope.note_cmdsubst_code(r.code);
+            }
+        }
+        *self.user_tools.write().await = *saved_user_tools;
+        {
+            let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+            ctx.cwd = cwd;
+            ctx.prev_cwd = prev_cwd;
+            ctx.aliases = aliases;
+            ctx.ignore_config = ignore_config;
+            ctx.output_limit = output_limit;
+        }
+        run_result
     }
 
     async fn execute_block_capturing(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<ExecResult> {
@@ -5812,7 +5786,7 @@ impl Kernel {
     }
 
     /// Run a `$(...)` operand inside `$(( ))`. Mirrors `Expr::CommandSubst`'s
-    /// isolation (scope/cwd/config snapshot-and-restore, stderr forwarded to
+    /// isolation (session state and function table restored, stderr forwarded to
     /// the enclosing statement) — the same substitution mechanism, just
     /// coerced to an integer instead of spliced in as text.
     async fn run_arith_command_subst(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<i64> {
@@ -5826,36 +5800,7 @@ impl Kernel {
     /// integer) and the `base#$(...)` case (the text is read as digits in a
     /// base, never coerced first — see `crate::arithmetic::based_value`).
     async fn run_arith_command_subst_text(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<String> {
-        let saved_scope = Box::new(self.scope.read().await.clone());
-        // A substitution's session changes do not escape into the enclosing
-        // statement. Saved off the threaded ctx: the run's truth lives there
-        // now, and the slot is only written when the statement finishes.
-        let saved_ec = (
-            ctx.cwd.clone(),
-            ctx.prev_cwd.clone(),
-            ctx.aliases.clone(),
-            ctx.ignore_config.clone(),
-            ctx.output_limit.clone(),
-        );
-
-        let run_result = self.execute_block_capturing(stmts, ctx).await;
-
-        {
-            let mut scope = self.scope.write().await;
-            *scope = *saved_scope;
-            if let Ok(ref r) = run_result {
-                scope.set_last_result(r.clone());
-                scope.note_cmdsubst_code(r.code);
-            }
-        }
-        {
-            let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
-            ctx.cwd = cwd;
-            ctx.prev_cwd = prev_cwd;
-            ctx.aliases = aliases;
-            ctx.ignore_config = ignore_config;
-            ctx.output_limit = output_limit;
-        }
+        let run_result = self.run_substitution_isolated(stmts, ctx).await;
 
         if let Ok(ref r) = run_result {
             self.emit_cmdsubst_stderr(r, ctx).await;
@@ -7762,8 +7707,7 @@ impl CommandDispatcher for Kernel {
 
     /// Evaluate a redirect operand through the kernel's async chain,
     /// including command substitution. Delegates to `eval_expr_async`, which
-    /// snapshots the kernel's scope/cwd and restores them after any `$(...)`
-    /// runs, so only command output escapes.
+    /// restores session state and functions after `$(...)` returns.
     ///
     /// The caller's `ctx` is the context to run on. A root context built here
     /// instead would carry the kernel's cancel token, and `timeout 1 cat <<<

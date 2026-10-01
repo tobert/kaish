@@ -644,6 +644,7 @@ tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
+tool 1>&2                       # merge stdout into stderr
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -695,6 +696,12 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
+> **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
+> join captured stdout first, then stderr. kaish does not preserve the
+> command's interleaved write order. If stderr has already reached a
+> background job stream, `1>&2` keeps those bytes first and appends
+> captured stdout; each byte reaches the stream once.
+>
 > **Known differences from bash.** bash evaluates and opens each target in
 > turn; kaish evaluates all of them before opening any, so the same-file
 > check sees every target. As a result:
@@ -715,6 +722,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
 > combining two of them on the same command is a parse error (rather than
 > silently taking the last one, as bash does).
+
+> **A redirect's input belongs to its command.** `seq 1 3 | jq -c length < f`
+> reads `f`, not the pipe. When the command ends, what it left unread of `f`
+> is dropped, and the session's stdin is what it was before: `read x < f; cat`
+> prints the session's stdin, not the rest of `f`.
 
 > **jq is built-in.** kaish ships a native jq (jaq) in-process — no external
 > binary required. The `$VAR → jq <<<` idiom replaces bash's
@@ -981,8 +993,15 @@ A `$(...)` body accepts the **full statement grammar**: pipelines, `&&`/`||`
 chains, `;` sequences, multi-line bodies, `#` comments, and control structures
 (`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
 way. Output accumulates across the statements (no separator inserted, like
-`;`), and the body's side effects (`cd`, assignments) stay contained — only the
-captured stdout becomes the value.
+`;`), and the body's session changes stay contained — variables, `cd`, `alias`,
+function definitions (`f() { ...; }`, `source`), `kaish-ignore`, and
+`kaish-output-limit` all revert when the body ends. Only the captured stdout
+becomes the value:
+
+```sh
+x=$(f() { echo hi; }; f)   # x is "hi"
+f                          # command not found, exit 127
+```
 
 **stderr is not captured.** A substitution's stderr joins the enclosing
 statement's stderr, so a command that fails inside `$(...)` still reports why:
