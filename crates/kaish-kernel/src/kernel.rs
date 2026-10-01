@@ -4297,8 +4297,26 @@ impl Kernel {
                 let bare = flag.trim_start_matches('-');
                 schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
             };
+            // A verbatim or raw_argv tool keeps `--help` among its words
+            // instead of its flags, so look there too: any word before `--`
+            // for verbatim, the first word for raw_argv (`test x = --help`
+            // compares strings).
+            let is_help_word = |v: &Value| matches!(v, Value::String(s) if s == "--help");
+            let help_word = if matches!(schema.arg_binding, crate::tools::ArgBinding::Verbatim) {
+                tool_args.words.as_deref().is_some_and(|words| {
+                    words
+                        .iter()
+                        .take_while(|v| !matches!(v, Value::String(s) if s == "--"))
+                        .any(is_help_word)
+                })
+            } else if schema.raw_argv {
+                tool_args.positional.first().is_some_and(is_help_word)
+            } else {
+                false
+            };
             let wants_help = !schema.owns_output
-                && ((tool_args.flags.contains("help") && !schema_claims("help"))
+                && (help_word
+                    || (tool_args.flags.contains("help") && !schema_claims("help"))
                     || (tool_args.flags.contains("h") && !schema_claims("-h")));
 
             (tool_args, wants_help, schema.owns_output, schema.raw_argv, schema.typed_substitution)
@@ -4384,6 +4402,11 @@ impl Kernel {
             None => 0,
         };
         let mut result = tool.execute(tool_args, &mut *ctx).await;
+        if result.code == 2
+            && let Some(refusal) = unknown_flag_refusal(name, &result.err)
+        {
+            result.err = refusal;
+        }
         // A command substitution binds `.data` only when it is the result's
         // VALUE. `--json` and the pipeline sideband read `.data` either way,
         // so this marks the ONE consumer whose answer is a matter of taste.
@@ -8700,6 +8723,28 @@ mod argv_classify_tests {
     }
 }
 
+/// Rewrite a builtin's clap "unexpected argument" error for a flag-shaped
+/// word as `ls: -Z is not supported (see `help ls`)`.
+///
+/// clap's text adds a usage block and a tip about passing the word as a
+/// value; for a word the binder already read as a flag, that tip misleads.
+/// Every clap-parsed builtin formats its parse error as `NAME: {clap error}`,
+/// so one rewrite after dispatch covers them all. `None` leaves any other
+/// error, and a stray operand that is not flag-shaped, as the tool wrote it.
+fn unknown_flag_refusal(name: &str, err: &str) -> Option<String> {
+    let rest = err.strip_prefix(name)?.strip_prefix(": error: unexpected argument '")?;
+    let (word, tail) = rest.split_once('\'')?;
+    if !word.starts_with('-') {
+        return None;
+    }
+    let similar = tail
+        .split_once("a similar argument exists: '")
+        .and_then(|(_, after)| after.split_once('\''))
+        .map(|(flag, _)| format!(" (similar: {flag})"))
+        .unwrap_or_default();
+    Some(format!("{name}: {word} is not supported{similar} (see `help {name}`)"))
+}
+
 #[cfg(all(test, feature = "subprocess"))]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -12137,5 +12182,26 @@ AFTER="yes"'"#)
             Some(job_id),
             "a pipeline stage under a background job lost the job id",
         );
+    }
+
+    #[test]
+    fn unknown_flag_refusal_rewrites_clap_text() {
+        let clap = "ls: error: unexpected argument '-Z' found\n\n  tip: to pass '-Z' as a value, use '-- -Z'\n\nUsage: ls [OPTIONS] [PATHS]...\n";
+        assert_eq!(
+            unknown_flag_refusal("ls", clap).as_deref(),
+            Some("ls: -Z is not supported (see `help ls`)")
+        );
+        let similar = "ls: error: unexpected argument '--lon' found\n\n  tip: a similar argument exists: '--long'\n";
+        assert_eq!(
+            unknown_flag_refusal("ls", similar).as_deref(),
+            Some("ls: --lon is not supported (similar: --long) (see `help ls`)")
+        );
+    }
+
+    #[test]
+    fn unknown_flag_refusal_leaves_other_errors_alone() {
+        assert_eq!(unknown_flag_refusal("ls", "ls: error: unexpected argument 'extra' found\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "cat: error: unexpected argument '-Z' found\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "ls: cannot access 'x'\n"), None);
     }
 }

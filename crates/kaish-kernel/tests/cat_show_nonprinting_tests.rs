@@ -14,9 +14,16 @@ use tempfile::tempdir;
 /// Tab, ^A, UTF-8 e-acute, DEL, 0xFF, CRLF, an empty line, no final newline.
 const BYTES: &[u8] = b"a\tb\n\x01c\xc3\xa9 \x7f \xff\r\n\nend";
 
+/// The same without 0xFF, so -E and -T output is valid UTF-8 text.
+const TEXT_BYTES: &[u8] = b"a\tb\n\x01c\xc3\xa9 \x7f\r\n\nend";
+
 async fn cat(args: &str) -> (String, String, i64) {
+    cat_bytes(args, BYTES).await
+}
+
+async fn cat_bytes(args: &str, bytes: &[u8]) -> (String, String, i64) {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("f"), BYTES).unwrap();
+    fs::write(dir.path().join("f"), bytes).unwrap();
     let kernel = kernel_at(dir.path());
     let result = kernel.execute(&format!("cat {args} f")).await.unwrap();
     (result.text_out().to_string(), result.err.clone(), result.code)
@@ -38,16 +45,16 @@ async fn cat_v_shows_nonprinting_but_not_tabs_or_ends() {
 
 #[tokio::test]
 async fn cat_e_upper_marks_line_ends_only() {
-    let (out, err, code) = cat("-E").await;
+    let (out, err, code) = cat_bytes("-E", TEXT_BYTES).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out.as_bytes(), b"a\tb$\n\x01c\xc3\xa9 \x7f \xff^M$\n$\nend");
+    assert_eq!(out.as_bytes(), b"a\tb$\n\x01c\xc3\xa9 \x7f^M$\n$\nend");
 }
 
 #[tokio::test]
 async fn cat_t_upper_marks_tabs_only() {
-    let (out, err, code) = cat("-T").await;
+    let (out, err, code) = cat_bytes("-T", TEXT_BYTES).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out.as_bytes(), b"a^Ib\n\x01c\xc3\xa9 \x7f \xff\r\n\nend");
+    assert_eq!(out.as_bytes(), b"a^Ib\n\x01c\xc3\xa9 \x7f\r\n\nend");
 }
 
 #[tokio::test]

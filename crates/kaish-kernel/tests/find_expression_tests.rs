@@ -183,3 +183,18 @@ async fn find_unsupported_predicate_says_not_supported() {
     assert!(err.contains("find: -delete is not supported"), "stderr: {err}");
     assert!(!err.contains("--"), "no clap hint: {err}");
 }
+
+#[tokio::test]
+async fn find_maxdepth_one_stops_at_direct_children() {
+    // GNU depth: ./b.rs is 1, ./sub/e.rs is 2.
+    let (out, err, code) = find("find . -maxdepth 1 -name '*.rs'").await;
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out, expect(&["./b.rs"]));
+}
+
+#[tokio::test]
+async fn find_maxdepth_two_reaches_grandchildren() {
+    let (out, err, code) = find("find . -maxdepth 2 -name '*.rs'").await;
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out, expect(&["./b.rs", "./sub/e.rs"]));
+}

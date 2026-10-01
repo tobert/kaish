@@ -53,6 +53,10 @@ struct LsArgs {
     #[arg(short = 'R', long = "recursive")]
     recursive: bool,
 
+    /// List each directory itself, not its contents. Overrides -R.
+    #[arg(short = 'd', long = "directory")]
+    directory: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -147,6 +151,8 @@ impl Tool for Ls {
         }
 
         let result = match paths.as_slice() {
+            // `-d`: every operand is listed by name, a directory included.
+            many if parsed.directory => self.list_names_as_given(ctx, many, &opts).await,
             // Single target keeps the rich behavior: glob expansion,
             // file-shown-as-name, directory contents, and recursion.
             [path] => self.list_one(ctx, path, &opts, recursive).await,
@@ -212,21 +218,7 @@ impl Tool for Ls {
             // directories are shown by name, not expanded — matching the
             // predictable structured-output model. Any glob that reached here
             // unexpanded (e.g. globbing disabled) is still expanded.
-            many => {
-                let mut names: Vec<String> = Vec::new();
-                for path in many {
-                    if contains_glob(path) {
-                        match ctx.expand_paths(&[Value::String(path.clone())]).await {
-                            Ok(expanded) => names.extend(expanded),
-                            Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
-                        }
-                    } else {
-                        names.push(path.clone());
-                    }
-                }
-                // Explicit operands: an inaccessible one is reported, not dropped.
-                self.render_names(ctx, names, &opts, true).await
-            }
+            many => self.list_names_as_given(ctx, many, &opts).await,
         };
 
         // Text is the default here; `--json` serializes each name as its own
@@ -347,6 +339,30 @@ impl Ls {
         } else {
             self.list_single(ctx, path, &resolved, opts).await
         }
+    }
+
+    /// One node per operand, a directory shown by name and not expanded.
+    /// Any glob that reached here unexpanded (e.g. globbing disabled) is
+    /// still expanded.
+    async fn list_names_as_given(
+        &self,
+        ctx: &mut ExecContext,
+        operands: &[String],
+        opts: &ListOptions,
+    ) -> ExecResult {
+        let mut names: Vec<String> = Vec::new();
+        for path in operands {
+            if contains_glob(path) {
+                match ctx.expand_paths(&[Value::String(path.clone())]).await {
+                    Ok(expanded) => names.extend(expanded),
+                    Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
+                }
+            } else {
+                names.push(path.clone());
+            }
+        }
+        // Explicit operands: an inaccessible one is reported, not dropped.
+        self.render_names(ctx, names, opts, true).await
     }
 
     /// Stat each named path, sort, and render one node per name. Shared by

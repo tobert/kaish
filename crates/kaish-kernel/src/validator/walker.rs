@@ -325,8 +325,27 @@ impl<'a> Validator<'a> {
                 cmd.name, schema.name
             );
             let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
-            let tool_issues = tool.validate(&tool_args);
-            self.issues.extend(tool_issues);
+            // `cmd --help` prints help and never runs, so the tool's own
+            // operand checks (`diff` wants two files) must not refuse it.
+            let schema_claims_help = schema
+                .params
+                .iter()
+                .any(|p| p.matches_flag("--help") || p.matches_flag("help"));
+            let asks_for_help = !schema.owns_output
+                && !schema_claims_help
+                && (tool_args.flags.contains("help")
+                    || tool_args.words.as_deref().is_some_and(|words| {
+                        words.iter().any(|w| matches!(w, Value::String(s) if s == "--help"))
+                    })
+                    || (schema.raw_argv
+                        && tool_args
+                            .positional
+                            .first()
+                            .is_some_and(|w| matches!(w, Value::String(s) if s == "--help"))));
+            if !asks_for_help {
+                let tool_issues = tool.validate(&tool_args);
+                self.issues.extend(tool_issues);
+            }
         } else if let Some(user_tool) = self.user_tools.get(&cmd.name) {
             // Validate against user-defined tool parameters
             self.validate_user_tool_args(user_tool, &cmd.args);
