@@ -578,10 +578,15 @@ pub enum OutputFormat {
 
 /// Transform an ExecResult into the requested output format.
 ///
-/// Serializes regardless of exit code — commands like `diff` (exit 1 = files differ)
-/// and `grep` (exit 1 = no matches) use non-zero exits for semantic meaning,
-/// not errors. The `--json` contract must hold for all exit codes.
+/// Success prints the data unwrapped. Any non-zero exit prints the envelope
+/// `{"code":N,"error":"..."}` instead, including exits that are answers rather
+/// than mistakes (`grep` no-match, `diff` differs). `error` is the stderr text,
+/// empty when the command wrote none. Partial results ride along under `data`
+/// (structured) or `output` (text). Apps check the exit code, then `error`.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    if !result.ok() {
+        return failure_envelope(result, format);
+    }
     // Binary results serialize as the self-describing base64 envelope, never a
     // lossy-decoded JSON string. See docs/binary-data.md.
     if result.is_bytes() {
@@ -598,34 +603,7 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         return result;
     }
     if !result.has_output() && result.text_out().is_empty() {
-        // No stdout to format. A failure that carries a diagnostic message must
-        // still honor --json — otherwise the message leaks out as plain text
-        // even though structured output was requested. Emit a JSON error object
-        // so the contract holds on the error path. A clean non-zero exit with no
-        // message (e.g. `grep` no-match, exit 1) is not an error and stays empty.
-        if !result.ok() && !result.err.is_empty() {
-            match format {
-                OutputFormat::Json => {
-                    // The line terminator is a text-rendering contract (#363);
-                    // the JSON envelope carries the message as written.
-                    let mut obj = serde_json::json!({
-                        "error": result.err.trim_end_matches('\n'),
-                        "code": result.code,
-                    });
-                    // A tool that attached structured data to an error result
-                    // must keep it reachable under --json — nest it under `data`
-                    // so the envelope holds the diagnostic *and* the structured
-                    // truth instead of clobbering one with the other.
-                    if let Some(data) = &result.data {
-                        obj["data"] = crate::result::value_to_json(data);
-                    }
-                    let out =
-                        serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
-                    result.set_out(out);
-                    result.data = Some(crate::result::json_to_value(obj));
-                }
-            }
-        }
+        // Empty success: nothing to format.
         return result;
     }
     match format {
@@ -653,6 +631,38 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                 result.set_out(json_out);
             }
             // Clear sentinel — format already applied, prevents double-encoding
+            result.set_output(None);
+            result
+        }
+    }
+}
+
+/// Replace a failed result's stdout with the `{"code","error"}` envelope.
+fn failure_envelope(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    match format {
+        OutputFormat::Json => {
+            // The line terminator is a text-rendering contract (#363); the
+            // envelope carries the message as written.
+            let mut obj = serde_json::json!({
+                "code": result.code,
+                "error": result.err.trim_end_matches('\n'),
+            });
+            if result.is_bytes() {
+                obj["data"] =
+                    crate::bytes::bytes_to_envelope(result.out_bytes().unwrap_or(&[]));
+            } else if let Some(output) = result.output() {
+                obj["data"] = output.to_json();
+            } else if let Some(data) = &result.data {
+                obj["data"] = crate::result::value_to_json(data);
+            } else {
+                let text = result.text_out();
+                if !text.is_empty() {
+                    obj["output"] = serde_json::Value::String(text.into_owned());
+                }
+            }
+            let out = serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
+            result.set_out(out);
+            result.data = Some(crate::result::json_to_value(obj));
             result.set_output(None);
             result
         }

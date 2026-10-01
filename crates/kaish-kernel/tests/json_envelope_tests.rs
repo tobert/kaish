@@ -52,12 +52,14 @@ async fn failure_without_message_has_empty_error() {
     assert_eq!(err, "");
 }
 
+/// `true`/`false` are special forms and take no flags, so `--json` does not
+/// reach them: the exit code is the whole answer.
 #[tokio::test]
-async fn false_builtin_is_an_envelope_too() {
+async fn false_special_form_ignores_json() {
     let (_dir, kernel) = fixture();
-    let (json, code, _) = envelope(&kernel, "false --json").await;
-    assert_eq!(code, 1);
-    assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
+    let result = kernel.execute("false --json").await.expect("execute");
+    assert_eq!(result.code, 1);
+    assert_eq!(result.text_out(), "");
 }
 
 #[tokio::test]
