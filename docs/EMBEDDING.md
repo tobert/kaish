@@ -1126,9 +1126,12 @@ match arg {
 ```
 
 `Literal` means no variable, `$(...)`, `$((...))`, glob, or leading `~`
-appears anywhere in the word. Its `value` is the word the command receives,
-with every quote removed. `text` is the display rendering and may quote the
-word (`'0'`), so never strip quotes from it. A flag or `--` is `Literal` with
+appears anywhere in the word. Its `value` is the source word with its quoting
+removed, which is the argument an external command receives. A builtin may
+bind that word as a typed value. A redirect target's `value` is a path as
+written, resolved against the working directory and mounts, so it is not an
+absolute path. `text` is the display rendering and may quote the word (`'0'`),
+so never strip quotes from it. A flag or `--` is `Literal` with
 `value == text`. `--tail="5"` and `KEY=1` are `Literal` with the whole joined
 word as `value` (`--tail=5`, `KEY=1`). `--tail "5"` is two arguments, the
 flag and `5`. `arg.literal_value()` returns `Some(value)` for `Literal` and
