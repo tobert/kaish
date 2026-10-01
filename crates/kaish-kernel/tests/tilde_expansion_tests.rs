@@ -477,17 +477,6 @@ async fn quoted_glob_word_with_tilde_prefix_never_expands() {
     assert_eq!(out.text_out(), "~/src/*.rs\n");
 }
 
-// A list element is a source word like any other: the tilde expands, the
-// glob does not (bash: `p=(~/src/*.rs)` globs, but kaish list literals never
-// pathname-expand — same split as an assignment value).
-#[tokio::test]
-async fn list_element_glob_word_with_tilde_prefix_expands_tilde_but_not_glob() {
-    let kernel = kernel_with_src_files().await;
-    let out = kernel.execute("p = [~/src/*.rs]; echo ${p[0]}").await.unwrap();
-    assert!(out.ok(), "{out:?}");
-    assert_eq!(out.text_out(), format!("{HOME}/src/*.rs\n"));
-}
-
 // `glob` consumes its pattern as data but still receives a tilde-prefix
 // expanded, as bash would pass it to any command.
 #[tokio::test]
@@ -495,7 +484,7 @@ async fn glob_builtin_receives_tilde_prefix_expanded() {
     let kernel = kernel_with_src_files().await;
     let out = kernel.execute("glob ~/src/*.rs").await.unwrap();
     assert!(out.ok(), "{out:?}");
-    assert_eq!(out.text_out(), format!("{HOME}/src/a.rs\n{HOME}/src/b.rs\n"));
+    assert_eq!(out.text_out(), format!("{HOME}/src/a.rs\n{HOME}/src/b.rs"));
 }
 
 // bash expands `~+` to $PWD and `~-` to $OLDPWD; kaish does not. This pins

@@ -7030,10 +7030,11 @@ pub(crate) async fn bind_tool_args(
     let mut tool_args = ToolArgs::new();
 
     // A glob-passthrough tool (`glob`) consumes patterns as data: skip
-    // argv glob expansion so the pattern reaches the tool as written —
+    // argv glob expansion so the pattern reaches the tool unmatched —
     // otherwise `glob **/*.rs` binds the first *matching path* as its
-    // pattern. The eval fallback turns `Expr::GlobPattern` into its
-    // literal string.
+    // pattern. The eval fallback turns `Expr::GlobPattern` into its string
+    // with a leading tilde-prefix expanded (`~/src/*.rs` arrives as
+    // `$HOME/src/*.rs`), as bash passes it.
     let glob_passthrough = schema.is_some_and(|s| s.glob_passthrough);
 
     // Verbatim: the tool owns its grammar, so it gets every word in source

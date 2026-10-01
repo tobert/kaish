@@ -563,8 +563,14 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
         | Expr::AllArgs
         | Expr::ArgCount
         | Expr::LastExitCode
-        | Expr::CurrentPid
-        | Expr::GlobPattern(_) => {}
+        | Expr::CurrentPid => {}
+        // A glob word with a tilde-prefix (`~/src/*.rs`) expands `~` before
+        // matching, so it reads `HOME` like `Expr::TildePath` does.
+        Expr::GlobPattern(pattern) => {
+            if pattern.starts_with('~') {
+                out.reads.insert("HOME".to_string());
+            }
+        }
     }
 }
 

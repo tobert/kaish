@@ -453,6 +453,8 @@ when the string doesn't match a real user. `~` alone reads the session
 no `HOME` in scope, `~`/`~/path` stays literal rather than expanding to
 nothing.
 
+`~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
+
 A `~` that is not at the start of a word is never a tilde-prefix: kaish has
 no bareword-pasting rule, so an unquoted `~` glued to a preceding word
 (`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than

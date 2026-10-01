@@ -76,8 +76,8 @@ impl Tool for Glob {
     }
 
     fn schema(&self) -> ToolSchema {
-        // glob_passthrough: the argv binder hands bare patterns through as
-        // written — without it, `glob **/*.rs` (as every example here spells
+        // glob_passthrough: the argv binder hands bare patterns through
+        // unmatched (a leading `~` is expanded, as in bash) — without it, `glob **/*.rs` (as every example here spells
         // it) would bind the first *matching path* as the pattern.
         schema_from_clap(
             &GlobArgs::command(),
@@ -142,7 +142,7 @@ impl Tool for Glob {
         };
 
         // Every positional is a pattern. The argv binder hands bare patterns
-        // through as written (ToolSchema::glob_passthrough), so this is the
+        // through unmatched (ToolSchema::glob_passthrough), so this is the
         // whole pattern list; Value-typed positionals are read off
         // `args.positional`, not the clap struct (to_argv is lossy).
         let patterns: Vec<String> = args

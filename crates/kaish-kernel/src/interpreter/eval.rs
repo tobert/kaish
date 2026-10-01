@@ -228,7 +228,9 @@ impl<'a> Evaluator<'a> {
             Expr::Command(cmd) => self.eval_command(cmd),
             Expr::LastExitCode => self.eval_last_exit_code(),
             Expr::CurrentPid => self.eval_current_pid(),
-            Expr::GlobPattern(s) => Ok(Value::String(s.clone())),
+            // A tilde-prefix expands before any matching, as in the
+            // kernel's async evaluator; the glob itself is not matched here.
+            Expr::GlobPattern(s) => Ok(Value::String(expand_tilde(s, self.scope_home()))),
             Expr::ListLiteral(elems) => self.eval_list_literal(elems),
             Expr::RecordLiteral(entries) => self.eval_record_literal(entries),
         }
