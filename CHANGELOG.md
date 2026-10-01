@@ -12,6 +12,11 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- Backslash quoting outside strings: `a\ b` is one literal word and
+  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped
+  characters match literally in `case` and `[[ =~ ]]` patterns. Ordinary
+  arguments mixing escapes and unquoted globs fail with a quoted fix.
+
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the

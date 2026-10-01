@@ -34,6 +34,10 @@
 //! - **Identifiers**: command names, variable names, parameter names
 
 use logos::{Logos, Span};
+mod escaped_words;
+pub use escaped_words::EscapedWord;
+pub(crate) use escaped_words::literal_glob_pattern;
+use escaped_words::{scan_word, ScannedWord};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
@@ -87,6 +91,8 @@ pub enum LexerError {
     UnterminatedString,
     UnterminatedVarRef,
     InvalidEscape,
+    TrailingBackslash,
+    EscapedCombinedFlag,
     InvalidNumber,
     /// An integer numeral parsed but did not fit in `i64`. The regex behind
     /// `lex_int`/`parse_int` admits only `-?[0-9]+`, so overflow is the only
@@ -154,6 +160,8 @@ impl fmt::Display for LexerError {
                 write!(f, "unterminated command substitution: missing `)`")
             }
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
+            LexerError::TrailingBackslash => write!(f, "backslash at the end of a word; quote the whole word to keep a literal backslash"),
+            LexerError::EscapedCombinedFlag => write!(f, "backslash quoting after a combined flag is not supported; write the flag and its quoted value separately"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
             LexerError::IntegerOutOfRange => write!(f, "{INTEGER_OUT_OF_RANGE}"),
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
@@ -659,6 +667,9 @@ pub enum Token {
     /// Contains the full content of the here-doc (without the delimiter lines).
     HereDoc(HereDocData),
 
+    /// Synthesized literal word with quoting retained for pattern contexts.
+    EscapedWord(EscapedWord),
+
     /// Integer literal - value is the parsed i64
     #[regex(r"-?[0-9]+", lex_int, priority = 2)]
     Int(i64),
@@ -874,7 +885,7 @@ impl Token {
             | Token::StdoutToStderr2 => TokenCategory::Operator,
 
             // Strings
-            Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) => TokenCategory::String,
+            Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) | Token::EscapedWord(_) => TokenCategory::String,
 
             // Numbers
             Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) | Token::NumericLiteral(_) => {
@@ -1338,6 +1349,7 @@ impl fmt::Display for Token {
             Token::Bang => write!(f, "!"),
             Token::Question => write!(f, "?"),
             Token::GlobWord(s) => write!(f, "GLOB({})", s),
+            Token::EscapedWord(word) => write!(f, "ESCAPED({})", word.literal),
             Token::Arithmetic(s) => write!(f, "ARITHMETIC({})", s),
             Token::ArithCond(s) => write!(f, "((ARITHCOND({})))", s),
             Token::CmdSubstStart => write!(f, "$("),
@@ -1494,6 +1506,7 @@ struct Replacement {
 
 #[derive(Debug, Clone, PartialEq)]
 enum ReplacementKind {
+    EscapedWord(usize),
     /// `$((expr))` → arithmetic marker; index into `ScanOutput::arithmetics`.
     Arith(usize),
     /// Heredoc delimiter word → heredoc marker; index into `ScanOutput::heredocs`.
@@ -1567,6 +1580,7 @@ struct PendingHeredoc {
 /// markers and correct spans.
 struct ScanOutput {
     text: String,
+    escaped_words: Vec<EscapedWord>,
     /// (marker, expression, is_condition) triples, indexed by
     /// `ReplacementKind::Arith`. `is_condition` is set only for a bare
     /// `(( expr ))` at the top level — `$((expr))` is always `false`, and a
@@ -1594,6 +1608,7 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
     };
 
     let mut out = String::with_capacity(source.len());
+    let mut escaped_words = Vec::new();
     let mut arithmetics: Vec<(String, String, bool)> = Vec::new();
     let mut heredocs: Vec<HeredocExtract> = Vec::new();
     let mut replacements: Vec<Replacement> = Vec::new();
@@ -1605,6 +1620,45 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
 
     while i < n {
         let (pos, ch) = chars[i];
+
+        // Match SimpleVarRef's complete name before scanning a quoted suffix.
+        if ch == '$' && i + 1 < n
+            && (chars[i + 1].1.is_ascii_alphabetic() || chars[i + 1].1 == '_' || !chars[i + 1].1.is_ascii())
+        {
+            let mut end = i + 2;
+            while end < n && (chars[end].1.is_ascii_alphanumeric() || chars[end].1 == '_' || !chars[end].1.is_ascii()) {
+                end += 1;
+            }
+            out.push_str(&source[pos..byte_at(end)]);
+            i = end;
+            continue;
+        }
+
+        // A quoted suffix remains separate for the parser's no-pasting guard.
+        if (ch == '\\' || i == 0 || chars[i - 1].1 != '$')
+            && let Some(word) = scan_word(source, &chars, i)?
+        {
+            match word {
+                ScannedWord::Plain(end) => {
+                    out.push_str(&source[pos..byte_at(end)]);
+                    i = end;
+                }
+                ScannedWord::Escaped { end, word } => {
+                    let marker = format!("__KAISH_WORD_{}__", escaped_words.len());
+                    replacements.push(Replacement {
+                        orig_start: pos,
+                        orig_len: byte_at(end) - pos,
+                        new_start: out.len(),
+                        new_len: marker.len(),
+                        kind: ReplacementKind::EscapedWord(escaped_words.len()),
+                    });
+                    escaped_words.push(word);
+                    out.push_str(&marker);
+                    i = end;
+                }
+            }
+            continue;
+        }
 
         // Backslash escape: copy both characters verbatim. This also
         // covers line continuations (`\` + newline) — the escaped newline
@@ -1868,6 +1922,7 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
 
     Ok(ScanOutput {
         text: out,
+        escaped_words,
         arithmetics,
         heredocs,
         replacements,
@@ -2132,6 +2187,12 @@ fn scan_heredoc_introducer(
     while *i < n {
         let c = chars[*i].1;
         match c {
+            '\\' if chars.get(*i + 1).is_some_and(|&(_, next)| !matches!(next, '\n' | '\r')) => {
+                literal = true;
+                *i += 1;
+                delimiter.push(chars[*i].1);
+                *i += 1;
+            }
             '\'' | '"' => {
                 literal = true;
                 let quote = c;
@@ -2499,6 +2560,16 @@ fn resolve_markers(
         }
 
         match (&spanned.token, contained.as_slice()) {
+            (Token::Ident(_), [marker])
+                if matches!(marker.kind, ReplacementKind::EscapedWord(_))
+                    && marker.new_start == span.start
+                    && marker.new_start + marker.new_len == span.end =>
+            {
+                let ReplacementKind::EscapedWord(index) = marker.kind else {
+                    unreachable!("guarded by escaped-word marker kind")
+                };
+                result.push(Spanned::new(Token::EscapedWord(scan.escaped_words[index].clone()), span));
+            }
             // Exact cover by a single arithmetic marker → Arithmetic token,
             // or ArithCond for a bare `((expr))` condition.
             (Token::Ident(_), [m])
@@ -2581,6 +2652,12 @@ fn resolve_markers(
                         )?;
                     }
                     match m.kind {
+                        ReplacementKind::EscapedWord(index) => {
+                            result.push(Spanned::new(
+                                Token::EscapedWord(scan.escaped_words[index].clone()),
+                                m.new_start..m.new_start + m.new_len,
+                            ));
+                        }
                         ReplacementKind::Arith(idx) => {
                             let (_, expr, is_condition) = &scan.arithmetics[idx];
                             let token = if *is_condition {

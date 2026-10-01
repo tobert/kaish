@@ -1462,9 +1462,19 @@ fn parse_tokens(
             return specific;
         }
         errs.into_iter()
-            .map(|e| ParseError {
-                span: *e.span(),
-                message: e.to_string(),
+            .map(|e| {
+                // Recover only the rejected word at this error's position;
+                // escaped patterns in earlier valid clauses remain valid.
+                let message = tokens.iter().find_map(|(token, span)| {
+                    if span != e.span() {
+                        return None;
+                    }
+                    match token {
+                        Token::EscapedWord(word) if word.has_unquoted_glob => Some(word.glob_error()),
+                        _ => None,
+                    }
+                }).unwrap_or_else(|| e.to_string());
+                ParseError { span: *e.span(), message }
             })
             .collect::<Vec<_>>()
     })?;
@@ -2131,8 +2141,11 @@ where
         select! { Token::DashNumWord(s) => s },
         select! { Token::AtWord(s) => s },
         select! { Token::DottedIdent(s) => s },
-        select! { Token::String(s) => s },
-        select! { Token::SingleString(s) => s },
+        select! {
+            Token::String(s) => lexer::literal_glob_pattern(&s),
+            Token::SingleString(s) => lexer::literal_glob_pattern(&s),
+        },
+        select! { Token::EscapedWord(word) => word.glob_pattern },
         select! { Token::Int(n) => n.to_string() },
         select! { Token::Star => "*".to_string() },
         select! { Token::Question => "?".to_string() },
@@ -2295,6 +2308,16 @@ where
     let command_name = choice((
         ident_parser().map(|name| (name, true)),
         path_parser().map(|name| (name, false)),
+        select! { Token::EscapedWord(word) => word }.validate(|word, extra, emitter| {
+            if word.has_unquoted_glob {
+                emitter.emit(Rich::custom(extra.span(), word.glob_error()));
+            }
+            if word.expands_tilde {
+                emitter.emit(Rich::custom(extra.span(), "home-relative command paths are not supported; write an absolute path"));
+            }
+            // Emitted errors reject the program before execution.
+            (word.literal, false)
+        }),
         select! { Token::DotSlashPath(s) => (s, false) },
         select! { Token::RelativePath(s) => (s, false) },
         just(Token::True).to(("true".to_string(), false)),
@@ -3143,14 +3166,45 @@ where
             value: Box::new(value),
         });
 
-    // Comparison: $X == "value" or $NUM -gt 5
+    #[derive(Clone)]
+    enum ComparisonOperand {
+        Expression(Expr),
+        Escaped(lexer::EscapedWord),
+    }
+    let right_operand = choice((
+        select! { Token::EscapedWord(word) => ComparisonOperand::Escaped(word) },
+        primary_expr_parser().map(ComparisonOperand::Expression),
+    )).map_with(|operand, extra| -> (ComparisonOperand, Span) { (operand, extra.span()) });
     let comparison = primary_expr_parser()
         .then(cmp_op)
-        .then(primary_expr_parser())
-        .map(|((left, op), right)| TestExpr::Comparison {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
+        .then(right_operand)
+        .validate(|((left, op), (right, right_span)), _extra, emitter| {
+            let right = match right {
+                ComparisonOperand::Expression(expression) => expression,
+                ComparisonOperand::Escaped(word) if matches!(op, TestCmpOp::Match | TestCmpOp::NotMatch) => {
+                    if word.expands_tilde {
+                        Expr::TildePath(word.regex_pattern)
+                    } else {
+                        Expr::Literal(Value::String(word.regex_pattern))
+                    }
+                }
+                ComparisonOperand::Escaped(word) => {
+                    if word.has_unquoted_glob {
+                        emitter.emit(Rich::custom(right_span, word.glob_error()));
+                    }
+                    // Emitted errors reject the program before execution.
+                    if word.expands_tilde {
+                        Expr::TildePath(word.literal)
+                    } else {
+                        Expr::Literal(Value::String(word.literal))
+                    }
+                }
+            };
+            TestExpr::Comparison {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            }
         });
 
     // Collection membership: `e in $coll` / `e not in $coll` (element-in-list,
@@ -4019,7 +4073,7 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::GlobWord(_) | Token::Arithmetic(_) | Token::LongFlag(_)
         | Token::DoubleDashBare(_) | Token::PlusBare(_) | Token::MinusBare(_)
         | Token::JobSpec(_) | Token::MinusAlone | Token::String(_)
-        | Token::SingleString(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
+        | Token::SingleString(_) | Token::EscapedWord(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
         | Token::Positional(_) | Token::AllArgs | Token::ArgCount | Token::LastExitCode
         | Token::CurrentPid | Token::VarLength(_) | Token::Int(_) | Token::Float(_)
         | Token::NumericLiteral(_)
@@ -4327,6 +4381,17 @@ where
         .labelled("command substitution")
 }
 
+fn escaped_word_expression(word: lexer::EscapedWord) -> Result<Expr, String> {
+    if word.has_unquoted_glob {
+        return Err(word.glob_error());
+    }
+    if word.expands_tilde {
+        Ok(Expr::TildePath(word.literal))
+    } else {
+        Ok(Expr::Literal(Value::String(word.literal)))
+    }
+}
+
 /// String parser - handles double-quoted strings (with interpolation) and single-quoted (literal).
 fn interpolated_string_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -4359,7 +4424,10 @@ where
         Token::SingleString(s) => Expr::Literal(Value::String(s)),
     };
 
-    choice((single_quoted, double_quoted)).labelled("string")
+    let escaped = select! { Token::EscapedWord(word) => word }
+        .try_map(|word, span| escaped_word_expression(word)
+            .map_err(|message| Rich::custom(span, message)));
+    choice((single_quoted, double_quoted, escaped)).labelled("string")
 }
 
 /// Literal value parser (excluding strings, which are handled by interpolated_string_parser).

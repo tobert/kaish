@@ -90,14 +90,12 @@ pub fn expand_braces(pattern: &str) -> Vec<String> {
         return vec![pattern.to_string()];
     }
 
-    let chars: Vec<char> = pattern.chars().collect();
-
     // Find the first top-level brace group
     let mut depth = 0;
     let mut brace_start = None;
     let mut brace_end = None;
 
-    for (i, &c) in chars.iter().enumerate() {
+    for (i, c) in pattern_operators(pattern) {
         match c {
             '{' => {
                 if depth == 0 {
@@ -105,7 +103,7 @@ pub fn expand_braces(pattern: &str) -> Vec<String> {
                 }
                 depth += 1;
             }
-            '}' => {
+            '}' if depth > 0 => {
                 depth -= 1;
                 if depth == 0 && brace_start.is_some() {
                     brace_end = Some(i);
@@ -123,12 +121,12 @@ pub fn expand_braces(pattern: &str) -> Vec<String> {
     };
 
     // Extract prefix, alternatives, and suffix
-    let prefix: String = chars[..start].iter().collect();
-    let suffix: String = chars[end + 1..].iter().collect();
-    let brace_content: String = chars[start + 1..end].iter().collect();
+    let prefix = &pattern[..start];
+    let suffix = &pattern[end + 1..];
+    let brace_content = &pattern[start + 1..end];
 
     // Split alternatives (respecting nested braces)
-    let alternatives = split_brace_alternatives(&brace_content);
+    let alternatives = split_brace_alternatives(brace_content);
 
     // Recursively expand each alternative combined with prefix/suffix
     let mut results = Vec::new();
@@ -144,31 +142,51 @@ pub fn expand_braces(pattern: &str) -> Vec<String> {
 /// Split brace content by commas, respecting nested braces.
 fn split_brace_alternatives(content: &str) -> Vec<String> {
     let mut alternatives = Vec::new();
-    let mut current = String::new();
+    let mut start = 0;
     let mut depth = 0;
 
-    for c in content.chars() {
+    for (position, c) in pattern_operators(content) {
         match c {
-            '{' => {
-                depth += 1;
-                current.push(c);
-            }
-            '}' => {
-                depth -= 1;
-                current.push(c);
-            }
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
             ',' if depth == 0 => {
-                alternatives.push(current);
-                current = String::new();
+                alternatives.push(content[start..position].to_string());
+                start = position + 1;
             }
-            _ => current.push(c),
+            _ => {},
         }
     }
 
-    // Don't forget the last alternative
-    alternatives.push(current);
+    alternatives.push(content[start..].to_string());
 
     alternatives
+}
+
+/// Yield characters outside backslash quoting and bracket classes.
+fn pattern_operators(pattern: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    let mut escaped = false;
+    let mut bracket_class = false;
+    pattern.char_indices().filter(move |&(_, character)| {
+        if escaped {
+            escaped = false;
+            return false;
+        }
+        if character == '\\' {
+            escaped = true;
+            return false;
+        }
+        if bracket_class {
+            if character == ']' {
+                bracket_class = false;
+            }
+            return false;
+        }
+        if character == '[' {
+            bracket_class = true;
+            return false;
+        }
+        true
+    })
 }
 
 /// Work-bounded recursive matching with backtracking for `*`.
@@ -692,6 +710,18 @@ mod tests {
         let mut result = expand_braces("{a,b}{1,2}");
         result.sort();
         assert_eq!(result, vec!["a1", "a2", "b1", "b2"]);
+    }
+
+    #[test]
+    fn brace_expansion_preserves_quoted_characters() {
+        assert_eq!(expand_braces(r"\{a\,b\}"), vec![r"\{a\,b\}"]);
+        assert!(glob_match(r"\{a\,b\}", "{a,b}"));
+        assert!(!glob_match(r"\{a\,b\}", "a"));
+        assert_eq!(expand_braces(r"{a\,b,c}"), vec![r"a\,b", "c"]);
+        assert!(glob_match(r"src/{a\,b,c}", "src/a,b"));
+        assert_eq!(expand_braces("[{,}]{a,b}"), vec!["[{,}]a", "[{,}]b"]);
+        assert!(glob_match("[{,}]a", "{a"));
+        assert_eq!(expand_braces("}x{a,b}"), vec!["}xa", "}xb"]);
     }
 
     #[test]

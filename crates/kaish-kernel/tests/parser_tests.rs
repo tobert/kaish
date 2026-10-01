@@ -1091,7 +1091,7 @@ fn parser_case_multiple_branches() {
 
 #[test]
 fn parser_case_with_patterns() {
-    parse_and_snapshot("case_with_patterns", "case \"test.rs\" in\n    \"*.py\") echo \"Python\" ;;\n    \"*.rs\") echo \"Rust\" ;;\nesac");
+    parse_and_snapshot("case_with_patterns", "case \"test.rs\" in\n    *.py) echo \"Python\" ;;\n    *.rs) echo \"Rust\" ;;\nesac");
 }
 
 #[test]
@@ -1101,7 +1101,7 @@ fn parser_case_multiple_patterns() {
 
 #[test]
 fn parser_case_with_default() {
-    parse_and_snapshot("case_with_default", "case \"x\" in\n    \"*\") echo \"default\" ;;\nesac");
+    parse_and_snapshot("case_with_default", "case \"x\" in\n    *) echo \"default\" ;;\nesac");
 }
 
 #[test]
