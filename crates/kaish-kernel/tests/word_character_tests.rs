@@ -95,3 +95,50 @@ async fn caret_anchors_an_unquoted_regex(#[case] source: &str, #[case] expected:
     let (_, err, code) = run(source).await;
     assert_eq!(code, expected, "{source:?}: {err}");
 }
+
+// ── `~` that does not start a word is an ordinary character ────────────
+//
+// Tilde expansion keeps its two places: a word that starts with `~`, and a
+// `~` right after an assignment's `=`. Every other `~` is part of the word.
+
+#[rstest]
+#[case::infix("a~b", "<a~b>\n")]
+#[case::suffix("x~", "<x~>\n")]
+#[case::git_ancestor("HEAD~1", "<HEAD~1>\n")]
+#[case::git_ancestor_bare("HEAD~", "<HEAD~>\n")]
+#[case::git_ancestor_then_parent("HEAD~1^2", "<HEAD~1^2>\n")]
+#[case::git_range("HEAD~3..HEAD", "<HEAD~3..HEAD>\n")]
+#[case::digit_leading("1~2", "<1~2>\n")]
+#[case::backup_file("f.txt~", "<f.txt~>\n")]
+#[case::absolute_path("/tmp/f~", "</tmp/f~>\n")]
+#[case::relative_path("a/b~c", "<a/b~c>\n")]
+#[case::slash_after_tilde("a~/b", "<a~/b>\n")]
+#[case::dot_slash("./a~b", "<./a~b>\n")]
+#[case::dotted(".a~b", "<.a~b>\n")]
+#[case::at_word("@a~b", "<@a~b>\n")]
+#[case::colon_then_tilde("a:~/b", "<a:~/b>\n")]
+#[case::quoted("\"HEAD~1\"", "<HEAD~1>\n")]
+#[tokio::test]
+async fn tilde_inside_a_word_is_a_character(#[case] words: &str, #[case] expected: &str) {
+    assert_eq!(printf_words(words).await, expected);
+}
+
+/// A long flag's value keeps its `~`: past `--` the pair is one operand.
+#[tokio::test]
+async fn tilde_inside_a_flag_value_is_a_character() {
+    assert_eq!(printf_words("-- --from=HEAD~1").await, "<--from=HEAD~1>\n");
+}
+
+/// A word that starts with `~` still expands, and so does a `~` after an
+/// assignment's `=`.
+#[rstest]
+#[case::bare_tilde("HOME=/home/t; printf '<%s>\\n' ~", "</home/t>\n")]
+#[case::tilde_path("HOME=/home/t; printf '<%s>\\n' ~/x", "</home/t/x>\n")]
+#[case::tilde_path_with_inner_tilde("HOME=/home/t; printf '<%s>\\n' ~/a~b", "</home/t/a~b>\n")]
+#[case::assignment("HOME=/home/t; p=~/x; printf '<%s>\\n' \"$p\"", "</home/t/x>\n")]
+#[tokio::test]
+async fn tilde_at_a_word_start_still_expands(#[case] source: &str, #[case] expected: &str) {
+    let (out, err, code) = run(source).await;
+    assert_eq!(code, 0, "{source:?}: {err}");
+    assert_eq!(out, expected);
+}

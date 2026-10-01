@@ -277,6 +277,26 @@ fn lexer_caret_words(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// A `~` that does not start a word is an ordinary character: `HEAD~1`,
+// `a~b`, `f.txt~`. A word that starts with `~` is still a tilde path.
+#[rstest]
+#[case::tilde_infix("a~b", &["IDENT(a~b)"])]
+#[case::tilde_suffix("x~", &["IDENT(x~)"])]
+#[case::tilde_git_ancestor("HEAD~1", &["IDENT(HEAD~1)"])]
+#[case::tilde_git_mixed("HEAD~1^2", &["IDENT(HEAD~1^2)"])]
+#[case::tilde_digit_leading("1~2", &["NUMIDENT(1~2)"])]
+#[case::tilde_path_word("/tmp/f~", &["PATH(/tmp/f~)"])]
+#[case::tilde_relative_path("a/b~c", &["RELPATH(a/b~c)"])]
+#[case::tilde_dotted(".a~b", &["DOTIDENT(.a~b)"])]
+#[case::tilde_at_word("@a~b", &["ATWORD(@a~b)"])]
+#[case::tilde_inner_tilde("~/a~b", &["TILDEPATH(~/a~b)"])]
+#[case::tilde_long_flag_value("--from=HEAD~1", &["LONGFLAG(from)", "EQ", "IDENT(HEAD~1)"])]
+#[case::tilde_leading_unchanged("~/x", &["TILDEPATH(~/x)"])]
+#[case::tilde_alone_unchanged("~", &["TILDE"])]
+fn lexer_tilde_inside_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
 // lex as a single token, not Dot + Ident, so they are not misparsed as the
 // POSIX `.` (source) command followed by an argument.

@@ -1519,3 +1519,15 @@ shell_compat! {
     script: "[[ abc =~ ^ab ]] && echo yes; [[ xabc =~ ^ab ]] || echo no",
     eq: "yes\nno",
 }
+
+shell_compat! {
+    name: tilde_inside_words_is_literal,
+    script: "printf '<%s>\\n' a~b x~ HEAD~1 HEAD~1^2 f.txt~ /tmp/f~ a:~/b",
+    eq: "<a~b>\n<x~>\n<HEAD~1>\n<HEAD~1^2>\n<f.txt~>\n</tmp/f~>\n<a:~/b>",
+}
+
+shell_compat! {
+    name: tilde_at_word_start_still_expands,
+    script: "HOME=/home/t; printf '<%s>\\n' ~ ~/x ~/a~b",
+    eq: "</home/t>\n</home/t/x>\n</home/t/a~b>",
+}
