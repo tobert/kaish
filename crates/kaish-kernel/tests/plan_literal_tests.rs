@@ -135,11 +135,8 @@ fn the_serialized_form_is_snake_case() {
     assert_eq!(json, r#"{"literal":{"text":"'0'","value":"0"}}"#);
 }
 
-/// The plan's `value` for each literal argument is the argv element an
-/// external process really receives.
 #[cfg(feature = "subprocess")]
-#[tokio::test]
-async fn literal_values_match_the_argv_an_external_command_receives() {
+fn external_kernel(cwd: Option<&std::path::Path>) -> kaish_kernel::Kernel {
     use std::collections::HashMap;
 
     let mut vars = HashMap::new();
@@ -147,22 +144,104 @@ async fn literal_values_match_the_argv_an_external_command_receives() {
         "PATH".to_string(),
         kaish_kernel::ast::Value::String(std::env::var("PATH").unwrap_or_default()),
     );
-    let kernel = kaish_kernel::Kernel::new(
-        kaish_kernel::KernelConfig::repl().with_initial_vars(vars),
-    )
-    .expect("kernel");
+    let mut config = kaish_kernel::KernelConfig::repl().with_initial_vars(vars);
+    if let Some(cwd) = cwd {
+        config = config.with_cwd(cwd.to_path_buf()).with_trash(false);
+    }
+    kaish_kernel::Kernel::new(config).expect("kernel")
+}
 
-    let source = r#"/usr/bin/printf '%s\n' x 'a b' "0" 5 1.5 0.10 -0 true -n --force --tail="5" --name=a KEY=1 KEY="a b""#;
-    let plans = kernel.plan_program(source).expect("parses");
+/// The plan's `value` for each literal argument is the argv element an
+/// external process really receives. The shell script prints every argument
+/// after `sh` with a NUL terminator, so a value holding a newline survives.
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn literal_values_match_the_argv_an_external_command_receives() {
+    let kernel = external_kernel(None);
+
+    let words = [
+        r#"'%s\0'"#,
+        "x",
+        "'a b'",
+        r#""0""#,
+        "5",
+        "1.5",
+        "0.10",
+        "-0",
+        "true",
+        "false",
+        "007",
+        "0x10",
+        "1e3",
+        r#""""#,
+        "héllo→",
+        r#""a\"b""#,
+        r#""\\""#,
+        r#""\$x""#,
+        "'*.rs'",
+        "'$x'",
+        "'a\nb'",
+        "-n",
+        "--force",
+        "--",
+        "--tail=\"5\"",
+        "--name=a",
+        "--key=",
+        "KEY=1",
+        "KEY=\"a b\"",
+    ];
+    let source = format!(
+        "/bin/sh -c 'for a; do printf \"%s\\0\" \"$a\"; done' sh {}",
+        words.join(" ")
+    );
+    let plans = kernel.plan_program(&source).expect("parses");
     let planned: Vec<String> = plans[0].plan.commands[0]
         .args
         .iter()
-        .skip(1)
+        .skip(3)
         .map(|arg| arg.literal_value().expect("every argument is literal").to_string())
         .collect();
+    assert_eq!(planned.len(), words.len());
 
-    let result = kernel.execute(source).await.expect("runs");
-    assert!(result.ok(), "printf failed: {result:?}");
-    let received: Vec<String> = result.text_out().lines().map(str::to_string).collect();
+    let result = kernel.execute(&source).await.expect("runs");
+    assert!(result.ok(), "sh failed: {result:?}");
+    let out = result.text_out();
+    let received: Vec<String> = out
+        .strip_suffix('\0')
+        .expect("every word ends in NUL")
+        .split('\0')
+        .map(str::to_string)
+        .collect();
     assert_eq!(planned, received);
+}
+
+/// A literal redirect target names the file the redirect creates, relative
+/// to the working directory.
+#[cfg(feature = "subprocess")]
+#[rstest::rstest]
+#[case::quoted_glob("'*.txt'", "*.txt")]
+#[case::negative_zero("-0", "-0")]
+#[case::trailing_zero("0.10", "0.10")]
+#[case::quoted_space("\"out 1\"", "out 1")]
+#[tokio::test]
+async fn a_literal_redirect_target_is_the_file_created(#[case] word: &str, #[case] expected: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("plan-literal-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("tempdir");
+    let kernel = external_kernel(Some(dir.path()));
+    let source = format!("echo hi > {word}");
+    let plans = kernel.plan_program(&source).expect("parses");
+    assert_eq!(
+        plans[0].plan.commands[0].redirects[0].target.literal_value(),
+        Some(expected)
+    );
+
+    let result = kernel.execute(&source).await.expect("runs");
+    assert!(result.ok(), "redirect failed: {result:?}");
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("readdir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec![expected.to_string()]);
 }
