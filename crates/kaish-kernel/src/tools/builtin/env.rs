@@ -55,7 +55,7 @@ struct EnvArgs {
     /// back out). The actual collection uses `collect_unset_vars(&args)` which
     /// reads from the raw ToolArgs — same pattern as sed's `collect_expressions`.
     /// This field is a validation sink only.
-    #[arg(short = 'u', long = "u", action = clap::ArgAction::Append)]
+    #[arg(short = 'u', long = "u", action = clap::ArgAction::Append, allow_hyphen_values = true)]
     u: Vec<String>,
 
     #[command(flatten)]

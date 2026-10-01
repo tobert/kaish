@@ -79,12 +79,10 @@ impl Tool for Timeout {
 
         // `timeout 5 -- cmd` has always run `cmd`. GNU reads that `--` as the
         // command's name and fails; kaish skips it.
-        let mut positional = args.positional.clone();
-        if matches!(positional.get(1), Some(Value::String(s)) if s == "--") {
-            positional.remove(1);
-        }
+        let command_index = if matches!(args.positional.get(1), Some(Value::String(s)) if s == "--") { 2 } else { 1 };
+        let positional = &args.positional;
 
-        if positional.len() < 2 {
+        if positional.len() <= command_index {
             return ExecResult::failure(
                 2,
                 "timeout: usage: timeout DURATION COMMAND [ARGS...]",
@@ -116,7 +114,7 @@ impl Tool for Timeout {
             }
         };
 
-        let cmd_name = match &positional[1] {
+        let cmd_name = match &positional[command_index] {
             Value::String(s) => s.clone(),
             other => {
                 return ExecResult::failure(
@@ -126,7 +124,7 @@ impl Tool for Timeout {
             }
         };
 
-        let inner_args = words_to_args(&positional[2..]);
+        let inner_args = words_to_args(&args, command_index + 1);
 
         let inner_cmd = Command {
             name: cmd_name,
@@ -205,43 +203,34 @@ impl Tool for Timeout {
     }
 }
 
-/// Rebuild the command's `Arg`s from the words the binder kept as written, so
-/// a builtin run under `timeout` reads `-n`, `--key=value`, and `--` as flags
-/// again. A word that starts with `-` is a flag whether or not it was quoted;
-/// everything else, and every word after `--`, stays a positional.
-fn words_to_args(words: &[Value]) -> Vec<Arg> {
-    let mut past_double_dash = false;
-    words
+/// Forward evaluated words using their original operator kinds and numeral text.
+fn words_to_args(args: &ToolArgs, start: usize) -> Vec<Arg> {
+    use kaish_types::ArgumentSyntax;
+    let expression = |value: &Value, raw: Option<&String>| match raw {
+        Some(raw) => Expr::NumericLiteral {
+            raw: raw.clone(),
+            value: value.clone(),
+        },
+        None => Expr::Literal(value.clone()),
+    };
+    args.positional
         .iter()
-        .map(|word| {
-            let Value::String(text) = word else {
-                return Arg::Positional(Expr::Literal(word.clone()));
-            };
-            if past_double_dash {
-                return Arg::Positional(Expr::Literal(word.clone()));
-            }
-            if text == "--" {
-                past_double_dash = true;
-                return Arg::DoubleDash;
-            }
-            let flag_char = |c: char| c.is_ascii_alphanumeric() || c == '-';
-            if let Some(long) = text.strip_prefix("--") {
-                if let Some((key, value)) = long.split_once('=') {
-                    if !key.is_empty() && key.chars().all(flag_char) {
-                        return Arg::Named {
-                            key: key.to_string(),
-                            value: Expr::Literal(Value::String(value.to_string())),
-                        };
-                    }
-                } else if !long.is_empty() && long.chars().all(flag_char) {
-                    return Arg::LongFlag(long.to_string());
-                }
-            } else if let Some(short) = text.strip_prefix('-') {
-                if !short.is_empty() && short.chars().all(flag_char) {
-                    return Arg::ShortFlag(short.to_string());
-                }
-            }
-            Arg::Positional(Expr::Literal(word.clone()))
+        .enumerate()
+        .skip(start)
+        .map(|(index, value)| match args.positional_syntax.get(&index) {
+            Some(ArgumentSyntax::ShortFlag(name)) => Arg::ShortFlag(name.clone()),
+            Some(ArgumentSyntax::LongFlag(name)) => Arg::LongFlag(name.clone()),
+            Some(ArgumentSyntax::Named { key, value, raw }) => Arg::Named {
+                key: key.clone(),
+                value: expression(value, raw.as_ref()),
+            },
+            Some(ArgumentSyntax::WordAssign { key, value, raw }) => Arg::WordAssign {
+                key: key.clone(),
+                value: expression(value, raw.as_ref()),
+            },
+            Some(ArgumentSyntax::DoubleDash) => Arg::DoubleDash,
+            Some(_) => panic!("unsupported forwarded argument syntax"),
+            None => Arg::Positional(expression(value, args.positional_raw.get(&index))),
         })
         .collect()
 }

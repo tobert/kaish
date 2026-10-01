@@ -1338,18 +1338,24 @@ pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, 
 /// the wrapped command starts at it. The runtime and validation binders both
 /// call this, so they cannot disagree about where the command begins.
 pub fn operand_boundary(args: &[Arg], schema: &ToolSchema) -> Option<usize> {
+    wrapper_option_layout(args, schema).0
+}
+
+/// Return the first operand and the words consumed by preceding options.
+/// Every word shape can be an option value; an unconsumed `--` ends options.
+pub(crate) fn wrapper_option_layout(args: &[Arg], schema: &ToolSchema) -> (Option<usize>, Vec<usize>) {
     let lookup = schema_param_lookup(schema);
-    // Positionals still owed to the last value-taking option.
     let mut owed = 0usize;
+    let mut values = Vec::new();
     for (index, arg) in args.iter().enumerate() {
+        if owed > 0 {
+            values.push(index);
+            owed -= 1;
+            continue;
+        }
         match arg {
-            Arg::Positional(_) | Arg::WordAssign { .. } => {
-                if owed == 0 {
-                    return Some(index);
-                }
-                owed -= 1;
-            }
-            Arg::DoubleDash => owed = 0,
+            Arg::Positional(_) | Arg::WordAssign { .. } => return (Some(index), values),
+            Arg::DoubleDash => return ((index + 1 < args.len()).then_some(index + 1), values),
             Arg::Named { .. } => {}
             Arg::ShortFlag(name) => owed = short_flag_values_owed(name, &lookup),
             Arg::LongFlag(name) => {
@@ -1360,7 +1366,7 @@ pub fn operand_boundary(args: &[Arg], schema: &ToolSchema) -> Option<usize> {
             }
         }
     }
-    None
+    (None, values)
 }
 
 /// How many following words a short-flag token takes as values, by the rules

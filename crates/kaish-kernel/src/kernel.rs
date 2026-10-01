@@ -6997,6 +6997,7 @@ async fn bind_raw_words(
     home: Option<&str>,
     glob_passthrough: bool,
     tool_args: &mut ToolArgs,
+    preserve_syntax: bool,
 ) -> Result<()> {
     for arg in args {
         match arg {
@@ -7015,47 +7016,67 @@ async fn bind_raw_words(
                         }
                         None => {
                             let value = source.eval(expr).await?.ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "raw-argv positional could not be evaluated in this context"
-                                )
+                                anyhow::anyhow!("raw-argv positional could not be evaluated in this context")
                             })?;
                             let value = apply_tilde_expansion(value, home);
                             if let Expr::NumericLiteral { raw, .. } = expr {
-                                tool_args
-                                    .positional_raw
-                                    .insert(tool_args.positional.len(), raw.clone());
+                                tool_args.positional_raw.insert(tool_args.positional.len(), raw.clone());
                             }
                             tool_args.positional.push(value);
                         }
                     }
                 } else {
-                    let value = source.eval(expr).await?.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "raw-argv positional could not be evaluated in this context"
-                        )
-                    })?;
+                    let value = source
+                        .eval(expr)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("raw-argv positional could not be evaluated in this context"))?;
                     let value = apply_tilde_expansion(value, home);
                     // `test`'s numeric operators still get the real
                     // `value`; a text consumer gets `raw`.
                     if let Expr::NumericLiteral { raw, .. } = expr {
-                        tool_args
-                            .positional_raw
-                            .insert(tool_args.positional.len(), raw.clone());
+                        tool_args.positional_raw.insert(tool_args.positional.len(), raw.clone());
                     }
                     tool_args.positional.push(value);
                 }
             }
             Arg::ShortFlag(name) => {
+                if preserve_syntax {
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::ShortFlag(name.clone()),
+                    );
+                }
                 tool_args.positional.push(Value::String(format!("-{name}")));
             }
             Arg::LongFlag(name) => {
+                if preserve_syntax {
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::LongFlag(name.clone()),
+                    );
+                }
                 tool_args.positional.push(Value::String(format!("--{name}")));
             }
             Arg::Named { key, value } => {
-                let val = source.eval(value).await?.ok_or_else(|| {
-                    anyhow::anyhow!("raw-argv --key=value could not be evaluated in this context")
-                })?;
+                let val = source
+                    .eval(value)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("raw-argv --key=value could not be evaluated in this context"))?;
                 let val = apply_tilde_expansion(val, home);
+                if preserve_syntax {
+                    let raw = match value {
+                        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+                        _ => None,
+                    };
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::Named {
+                            key: key.clone(),
+                            value: val.clone(),
+                            raw,
+                        },
+                    );
+                }
                 // Loud on binary (GH #116): `test --k=$BIN` must not
                 // silently reassemble the placeholder into the raw-argv
                 // positional stream `test` binds against. Source text
@@ -7063,37 +7084,47 @@ async fn bind_raw_words(
                 let val_str = if let Expr::NumericLiteral { raw, .. } = value {
                     raw.clone()
                 } else {
-                    crate::interpreter::value_to_text_sink_named(
-                        &val,
-                        "a --key=value argument",
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    crate::interpreter::value_to_text_sink_named(&val, "a --key=value argument")
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
                 };
-                tool_args
-                    .positional
-                    .push(Value::String(format!("--{key}={val_str}")));
+                tool_args.positional.push(Value::String(format!("--{key}={val_str}")));
             }
             Arg::WordAssign { key, value } => {
-                let val = source.eval(value).await?.ok_or_else(|| {
-                    anyhow::anyhow!("raw-argv key=value could not be evaluated in this context")
-                })?;
+                let val = source
+                    .eval(value)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("raw-argv key=value could not be evaluated in this context"))?;
                 let val = apply_tilde_expansion(val, home);
+                if preserve_syntax {
+                    let raw = match value {
+                        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+                        _ => None,
+                    };
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::WordAssign {
+                            key: key.clone(),
+                            value: val.clone(),
+                            raw,
+                        },
+                    );
+                }
                 // Loud on binary (GH #116): same reasoning as the Named
                 // arm above, for the bare `key=value` raw-argv form.
                 let val_str = if let Expr::NumericLiteral { raw, .. } = value {
                     raw.clone()
                 } else {
-                    crate::interpreter::value_to_text_sink_named(
-                        &val,
-                        "a key=value argument",
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    crate::interpreter::value_to_text_sink_named(&val, "a key=value argument")
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
                 };
-                tool_args
-                    .positional
-                    .push(Value::String(format!("{key}={val_str}")));
+                tool_args.positional.push(Value::String(format!("{key}={val_str}")));
             }
             Arg::DoubleDash => {
+                if preserve_syntax {
+                    tool_args
+                        .positional_syntax
+                        .insert(tool_args.positional.len(), kaish_types::ArgumentSyntax::DoubleDash);
+                }
                 tool_args.positional.push(Value::String("--".to_string()));
             }
         }
@@ -7260,7 +7291,7 @@ pub(crate) async fn bind_tool_args(
     // binding — so `test -f *.rs` errors on too many args, not a literal
     // pattern stat.
     if schema.is_some_and(|s| s.raw_argv) {
-        bind_raw_words(args, source, home.as_deref(), glob_passthrough, &mut tool_args).await?;
+        bind_raw_words(args, source, home.as_deref(), glob_passthrough, &mut tool_args, false).await?;
         return Ok(tool_args);
     }
 
@@ -7269,15 +7300,22 @@ pub(crate) async fn bind_tool_args(
     // included — follow as plain positionals in source order. The options
     // before it bind the usual typed way.
     if let Some(wrapper) = schema.filter(|s| s.options_end_at_operand) {
-        if let Some(boundary) = crate::scheduler::operand_boundary(args, wrapper) {
-            let mut options_schema = wrapper.clone();
-            options_schema.options_end_at_operand = false;
-            let mut tool_args =
-                Box::pin(bind_tool_args(&args[..boundary], Some(&options_schema), source)).await?;
-            bind_raw_words(&args[boundary..], source, home.as_deref(), glob_passthrough, &mut tool_args)
-                .await?;
-            return Ok(tool_args);
+        let (boundary, values) = crate::scheduler::pipeline::wrapper_option_layout(args, wrapper);
+        let boundary = boundary.unwrap_or(args.len());
+        let mut options = args[..boundary].to_vec();
+        for index in values {
+            if !matches!(args[index], Arg::Positional(_)) {
+                let mut word = ToolArgs::new();
+                bind_raw_words(&args[index..index + 1], source, home.as_deref(), glob_passthrough, &mut word, false).await?;
+                assert_eq!(word.positional.len(), 1, "one wrapper option value word");
+                options[index] = Arg::Positional(Expr::Literal(word.positional.remove(0)));
+            }
         }
+        let mut options_schema = wrapper.clone();
+        options_schema.options_end_at_operand = false;
+        let mut tool_args = Box::pin(bind_tool_args(&options, Some(&options_schema), source)).await?;
+        bind_raw_words(&args[boundary..], source, home.as_deref(), glob_passthrough, &mut tool_args, true).await?;
+        return Ok(tool_args);
     }
 
     // Subcommand-aware tools (e.g. `kj context list`) expose a tree of
@@ -7330,6 +7368,7 @@ pub(crate) async fn bind_tool_args(
     while i < args.len() {
         match &args[i] {
             Arg::DoubleDash => {
+                if past_double_dash { tool_args.positional.push(Value::String("--".into())); }
                 past_double_dash = true;
             }
             Arg::Positional(expr) => {

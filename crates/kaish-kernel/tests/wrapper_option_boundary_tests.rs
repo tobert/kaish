@@ -1,5 +1,5 @@
 //! A builtin that runs another command stops reading its own options where
-//! the wrapped command begins, as POSIX `timeout`, `env`, and `exec` do:
+//! its first operand, as `timeout`, `env`, and `exec` do:
 //! `timeout 5 python3 -c "..."` hands `-c` to python3.
 //!
 //! Every case runs through `Kernel::execute`, so the validator, the argument
@@ -299,4 +299,150 @@ mod external {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn timeout_preserves_user_function_arguments() {
+    let kernel = isolated();
+    for command in ["f \"-n\"", "f -0", "f 0.10", "f -- -n"] {
+        assert_same_as_direct(&kernel, "f() { echo \"[$1]\"; }; ", command).await;
+    }
+}
+
+#[tokio::test]
+async fn nested_timeout_preserves_literal_and_flag_arguments() {
+    let kernel = isolated();
+    for command in ["echo -n hi", "echo \"-n\" hi", "echo -0", "echo 0.10"] {
+        let direct = run(&kernel, command).await;
+        let wrapped = run(&kernel, &format!("timeout 5 timeout 5 {command}")).await;
+        assert_eq!(
+            (&wrapped.0, wrapped.1),
+            (&direct.0, direct.1),
+            "{command}: {}",
+            wrapped.2
+        );
+    }
+}
+
+#[tokio::test]
+async fn binders_agree_on_combined_wrapper_and_verbatim_modes() {
+    use kaish_kernel::ast::Stmt;
+    use kaish_kernel::tools::{ExecContext, ToolSchema};
+    use kaish_kernel::vfs::{MemoryFs, VfsRouter};
+    let mut router = VfsRouter::new();
+    router.mount("/", MemoryFs::new());
+    let context = ExecContext::new(std::sync::Arc::new(router));
+    let program = kaish_kernel::parser::parse("fixture --json 5 echo -n").unwrap();
+    let Stmt::Command(command) = &program.statements[0] else {
+        panic!("command");
+    };
+    for raw in [false, true] {
+        let mut schema = ToolSchema::new("fixture", "fixture")
+            .with_verbatim_argv()
+            .with_options_end_at_operand();
+        schema.raw_argv = raw;
+        let runtime = kaish_kernel::scheduler::build_tool_args(&command.args, &context, Some(&schema))
+            .await
+            .unwrap();
+        let validation = kaish_kernel::validator::build_tool_args_for_validation(&command.args, Some(&schema));
+        assert_eq!(runtime.words, validation.words);
+        assert_eq!(runtime.positional, validation.positional);
+        assert_eq!(runtime.flags, validation.flags);
+    }
+}
+
+#[tokio::test]
+async fn wrapper_option_values_consume_flag_and_assignment_words() {
+    use kaish_kernel::ast::{Stmt, Value};
+    use kaish_kernel::tools::{ExecContext, ParamSchema, ToolSchema};
+    use kaish_kernel::vfs::{MemoryFs, VfsRouter};
+    let mut router = VfsRouter::new();
+    router.mount("/", MemoryFs::new());
+    let context = ExecContext::new(std::sync::Arc::new(router));
+    let schema = ToolSchema::new("fixture", "fixture")
+        .param(ParamSchema::optional("label", "string", Value::String(String::new()), "label").with_aliases(["-l"]))
+        .with_options_end_at_operand();
+    for word in ["-x", "--", "--other=1", "--json=1", "name=value"] {
+        let program = kaish_kernel::parser::parse(&format!("fixture -l {word} echo -n")).unwrap();
+        let Stmt::Command(command) = &program.statements[0] else {
+            panic!("command");
+        };
+        let runtime = kaish_kernel::scheduler::build_tool_args(&command.args, &context, Some(&schema))
+            .await
+            .unwrap();
+        let validation = kaish_kernel::validator::build_tool_args_for_validation(&command.args, Some(&schema));
+        assert_eq!(runtime.named.get("label"), Some(&Value::String(word.into())), "{word}");
+        assert_eq!(
+            runtime.positional,
+            [Value::String("echo".into()), Value::String("-n".into())]
+        );
+        assert_eq!(runtime.named, validation.named, "{word}");
+        assert_eq!(runtime.positional, validation.positional, "{word}");
+        assert_eq!(runtime.flags, validation.flags, "{word}");
+    }
+}
+
+#[tokio::test]
+async fn wrapper_end_of_options_keeps_child_quoting_and_markers() {
+    let kernel = isolated();
+    for prefix in ["timeout -- 5", "timeout 5 --"] {
+        for command in ["echo -n hi", "echo \"-n\" hi", "echo -- -n", "echo -- -- -n"] {
+            let direct = run(&kernel, command).await;
+            let wrapped = run(&kernel, &format!("{prefix} {command}")).await;
+            assert_eq!(
+                (&wrapped.0, wrapped.1),
+                (&direct.0, direct.1),
+                "{prefix} {command}: {}",
+                wrapped.2
+            );
+        }
+    }
+    let (out, code, _) = run(&kernel, "echo -- -- -n --json").await;
+    assert_eq!((out.as_str(), code), ("-- -n --json\n", 0));
+}
+
+struct InspectArguments;
+
+#[async_trait::async_trait]
+impl kaish_kernel::tools::Tool for InspectArguments {
+    fn name(&self) -> &str {
+        "inspect-arguments"
+    }
+    fn schema(&self) -> kaish_kernel::tools::ToolSchema {
+        kaish_kernel::tools::ToolSchema::new(self.name(), "test fixture").param(
+            kaish_kernel::tools::ParamSchema::optional("payload", "any", kaish_kernel::ast::Value::Null, "payload"),
+        )
+    }
+    async fn execute(
+        &self,
+        args: kaish_kernel::tools::ToolArgs,
+        _: &mut dyn kaish_kernel::tools::ToolCtx,
+    ) -> kaish_kernel::interpreter::ExecResult {
+        kaish_kernel::interpreter::ExecResult::success(serde_json::to_string(&args).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn timeout_preserves_custom_tool_named_types_and_evaluates_once() {
+    use kaish_kernel::backend::LocalBackend;
+    use kaish_kernel::vfs::{MemoryFs, VfsRouter};
+    let mut router = VfsRouter::new();
+    router.mount("/", MemoryFs::new());
+    let backend = std::sync::Arc::new(LocalBackend::new(std::sync::Arc::new(router)));
+    let kernel = Kernel::with_backend(
+        backend,
+        KernelConfig::isolated().with_cwd("/".into()),
+        |_| {},
+        |tools| {
+            tools.register(InspectArguments);
+        },
+    )
+    .unwrap()
+    .into_arc();
+    let (out, code, err) = run(&kernel, r#"payload() { echo hit >> calls; fromjson '{"answer":1}'; }; timeout 5 inspect-arguments --payload=$(payload)"#).await;
+    assert_eq!(code, 0, "{err}");
+    let arguments: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(arguments["named"]["payload"], serde_json::json!({"answer": 1}));
+    let (calls, code, _) = run(&kernel, "cat calls").await;
+    assert_eq!((calls.as_str(), code), ("hit\n", 0));
 }
