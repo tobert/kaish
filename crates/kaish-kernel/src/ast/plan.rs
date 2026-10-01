@@ -545,6 +545,16 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
         Expr::VarRef(path) | Expr::VarLength(path) => out.read_path(path),
         Expr::Arithmetic(e) => out.read_arithmetic(e, background),
         Expr::Arith(e) => out.read_arithmetic(e, background),
+        // An unquoted `~`/`~/path` reads the session HOME to expand, the
+        // same as an explicit `$HOME` would — an embedder that peeks `HOME`
+        // before running `cd ~`/`echo ~/x` is judging the statement against
+        // the value it actually depends on. (`~user` reads `/etc/passwd`
+        // instead, not `HOME`, but that's not a session variable an
+        // embedder can peek either way, so listing `HOME` here is a safe
+        // over-approximation rather than a special case per tilde form.)
+        Expr::TildePath(_) => {
+            out.reads.insert("HOME".to_string());
+        }
         // Special forms ($1, $@, $#, $?, $$) are not session variables; an
         // embedder cannot peek them with `get_var`, so they are not listed.
         Expr::Literal(_)
@@ -553,8 +563,14 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
         | Expr::AllArgs
         | Expr::ArgCount
         | Expr::LastExitCode
-        | Expr::CurrentPid
-        | Expr::GlobPattern(_) => {}
+        | Expr::CurrentPid => {}
+        // A glob word with a tilde-prefix (`~/src/*.rs`) expands `~` before
+        // matching, so it reads `HOME` like `Expr::TildePath` does.
+        Expr::GlobPattern(pattern) => {
+            if pattern.starts_with('~') {
+                out.reads.insert("HOME".to_string());
+            }
+        }
     }
 }
 
@@ -843,6 +859,9 @@ pub(crate) fn render_expr(expr: &Expr) -> String {
         // Render the source text, not `value`'s canonical form — that is what
         // this variant is for.
         Expr::NumericLiteral { raw, .. } => raw.clone(),
+        // Unexpanded: the raw `~`/`~user/path` text, same as the author
+        // typed it — matches this function's contract.
+        Expr::TildePath(raw) => raw.clone(),
         Expr::Command(cmd) => render_command(cmd),
         Expr::LastExitCode => "$?".to_string(),
         Expr::CurrentPid => "$$".to_string(),
