@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -78,24 +77,32 @@ impl Tool for Xxd {
 
         let plain = parsed.plain;
         let reverse = parsed.reverse;
-        let length = parsed.length.map(|n| n as usize).or_else(|| {
-            args.get("length", usize::MAX).and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-        });
-        let seek = parsed
-            .seek
-            .map(|n| n as usize)
-            .or_else(|| {
-                args.get("seek", usize::MAX).and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-            })
-            .unwrap_or(0);
+        let length = match parsed.length {
+            Some(n) => Some(
+                match super::non_negative_count(
+                    "xxd",
+                    "-l",
+                    n,
+                    "length must be 0 or more; write `-l 0` to dump nothing",
+                ) {
+                    Ok(n) => n,
+                    Err(message) => return ExecResult::failure(2, message),
+                },
+            ),
+            None => None,
+        };
+        let seek = match parsed.seek {
+            Some(n) => match super::non_negative_count(
+                "xxd",
+                "-s",
+                n,
+                "seeking from the end is not supported; write a seek of 0 or more, such as `-s 4`",
+            ) {
+                Ok(n) => n,
+                Err(message) => return ExecResult::failure(2, message),
+            },
+            None => 0,
+        };
 
         // Read raw input from file(s) or stdin, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {
@@ -312,6 +319,7 @@ async fn reverse_hex(input: &str, plain: bool, ctx: &mut ExecContext) -> ExecRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::tools::ExecContext;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;

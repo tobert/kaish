@@ -115,6 +115,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `xxd -l N`, `xxd -s N`, and `base64 -w N` refuse a negative value, exit 2,
+  and name the fix. A negative count wrapped to a huge one, so `xxd -l -1`
+  dumped the whole input. `xxd -s` does not seek from the end.
 - `exit` inside a function or a sourced file ends the script, as in bash;
   it returned to the caller. `return` still stops at the function, `$( )`
   absorbs the exit, and a pipeline stage ends only itself.
