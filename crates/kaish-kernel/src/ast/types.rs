@@ -271,6 +271,10 @@ pub enum Arg {
     /// stringified to a positional `"key=value"`. This matches bash:
     /// `cat foo=bar` opens a file named `foo=bar`, not a magical key=value.
     WordAssign { key: String, value: Expr },
+    /// Short flag with attached value: `-key=value`. The value is evaluated
+    /// as `Named`'s is, but the argument never binds a flag: every command
+    /// receives the one word `-key=value`.
+    ShortNamed { key: String, value: Expr },
     /// Short flag: `-l`, `-v` (boolean flag)
     ShortFlag(String),
     /// Long flag: `--force`, `--verbose` (boolean flag)

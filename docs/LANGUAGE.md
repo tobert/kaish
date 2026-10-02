@@ -638,6 +638,9 @@ git commit -m "message"         # short flag with value
 git push --force                # long flag
 curl --header "Content-Type: json"  # long flag with value
 curl --header="Content-Type: json"  # long flag with value (equals form)
+gcc -std=c11 -Wl,-rpath,/opt/lib x.c  # one word each: -std=c11, -Wl,-rpath,/opt/lib
+sort -t, -k2,2n data.csv        # glued comma lists: -t is `,`, -k is `2,2n`
+chmod +x run.sh                 # +x is a word
 
 # Bareword key=value — accepted only by shell-assignment builtins
 # (`export FOO=bar`, `alias greet='echo hi'`, `unalias`). For every
@@ -658,8 +661,27 @@ grep -- -pattern file.txt       # search for a pattern starting with `-`
 
 Everything after `--` is an operand, including a word shaped like a flag and
 including `--json`. The value still expands: `echo -- --greeting=$USER`
-prints `--greeting=` followed by the variable. A short flag with a value
-(`-n=1`) is not a word on either side of `--`; quote it (`echo "-n=1"`).
+prints `--greeting=` followed by the variable.
+
+### One-word flag shapes
+
+`-name=value` is one word when nothing separates the `=` from either side:
+`pdflatex -interaction=nonstopmode`, `java -Dkey='a b'`,
+`gcc -Wl,-rpath=$dir`, `-I=~/include`. The value takes what `--name=`'s
+value takes — `$var`, `${var}`, `$(cmd)`, `$(( ))`, `~`, a quoted string —
+and text glued after it is refused, as for `--name=`: write
+`"-Dout=$dir.txt"`, not `-Dout=$dir.txt`. The command receives the one word
+`-name=value`; a builtin reads it as an operand, not as the `-n` flag. With
+a space, `-a = b` and `--a = b` are three words.
+
+A `:` or `,` glued to a short flag continues the word to the next space:
+`awk -F:`, `-F:a`, `-Wl,-rpath,/opt/lib`, and `-Wl,-rpath=/x` are one word
+each. A builtin reads `cut -d, -f1,3` as `-d ,` and `-f 1,3`, and refuses
+`ls -l,a`, where no flag before the `,` takes a value. An expansion inside
+the list is refused; quote the whole word (`"-Wl,-rpath,$dir"`).
+
+`+x` and `...` are literal words: `chmod +x run.sh`, `echo ...`. Spread
+(`[...$xs]`) exists only inside a list literal.
 
 ### Builtin flags and expressions
 

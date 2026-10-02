@@ -421,7 +421,7 @@ impl<'a> Validator<'a> {
     fn validate_arg(&mut self, arg: &Arg) {
         match arg {
             Arg::Positional(expr) => self.validate_expr(expr),
-            Arg::Named { value, .. } => self.validate_expr(value),
+            Arg::Named { value, .. } | Arg::ShortNamed { value, .. } => self.validate_expr(value),
             Arg::WordAssign { value, .. } => self.validate_expr(value),
             Arg::ShortFlag(_) | Arg::LongFlag(_) | Arg::DoubleDash => {}
         }
@@ -871,7 +871,7 @@ impl<'a> Validator<'a> {
     fn validate_user_tool_args(&mut self, tool_def: &ToolDef, args: &[Arg]) {
         let positional_count = args
             .iter()
-            .filter(|a| matches!(a, Arg::Positional(_) | Arg::WordAssign { .. }))
+            .filter(|a| matches!(a, Arg::Positional(_) | Arg::ShortNamed { .. } | Arg::WordAssign { .. }))
             .count();
 
         let required_count = tool_def
@@ -1024,7 +1024,7 @@ fn push_raw_words_for_validation(args: &[Arg], tool_args: &mut ToolArgs, preserv
                     })
                 }
                 Arg::DoubleDash => Some(kaish_types::ArgumentSyntax::DoubleDash),
-                Arg::Positional(_) => None,
+                Arg::Positional(_) | Arg::ShortNamed { .. } => None,
             };
             if let Some(syntax) = syntax {
                 tool_args.positional_syntax.insert(index, syntax);
@@ -1034,12 +1034,16 @@ fn push_raw_words_for_validation(args: &[Arg], tool_args: &mut ToolArgs, preserv
             Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
             Arg::ShortFlag(name) => tool_args.positional.push(Value::String(format!("-{name}"))),
             Arg::LongFlag(name) => tool_args.positional.push(Value::String(format!("--{name}"))),
-            Arg::Named { key, value } | Arg::WordAssign { key, value } => {
+            Arg::Named { key, value } | Arg::ShortNamed { key, value } | Arg::WordAssign { key, value } => {
                 let text = match value {
                     Expr::NumericLiteral { raw, .. } => raw.clone(),
                     _ => crate::interpreter::value_to_string(&expr_to_placeholder(value)),
                 };
-                let prefix = if matches!(arg, Arg::Named { .. }) { "--" } else { "" };
+                let prefix = match arg {
+                    Arg::Named { .. } => "--",
+                    Arg::ShortNamed { .. } => "-",
+                    _ => "",
+                };
                 tool_args
                     .positional
                     .push(Value::String(format!("{prefix}{key}={text}")));
@@ -1098,6 +1102,9 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     } else {
                         words.push(Value::String(format!("--{key}=<value>")));
                     }
+                }
+                Arg::ShortNamed { key, .. } => {
+                    words.push(Value::String(format!("-{key}=<value>")));
                 }
                 Arg::WordAssign { key, .. } => {
                     words.push(Value::String(format!("{key}=<value>")));
@@ -1197,6 +1204,12 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     }
                 }
             }
+            Arg::ShortNamed { key, value } => {
+                if !consumed.contains(&i) {
+                    let text = crate::interpreter::value_to_string(&expr_to_placeholder(value));
+                    tool_args.positional.push(Value::String(format!("-{key}={text}")));
+                }
+            }
             Arg::WordAssign { key, value } => {
                 // Validation walker doesn't know which command is receiving;
                 // route into named like the legacy behavior so checks stay
@@ -1286,10 +1299,12 @@ fn bind_short_flag_for_validation(
     let bytes = name.as_bytes();
     let mut p = 0;
     while p < bytes.len() {
-        let key = &name[p..p + 1];
+        // A comma list (`-l,é`) can carry non-ASCII text after the flag letters.
+        let width = name[p..].chars().next().map_or(1, char::len_utf8);
+        let key = &name[p..p + width];
         match param_lookup.get(key) {
             Some(&(canonical, typ, consumes, repeatable)) if !is_bool_type(typ) => {
-                let glued = name[p + 1..].to_string();
+                let glued = name[p + width..].to_string();
                 if glued.is_empty() {
                     bind_value_or_flag(
                         tool_args, key, canonical, consumes, repeatable, args, i, consumed,
@@ -1303,7 +1318,7 @@ fn bind_short_flag_for_validation(
             }
             _ => {
                 tool_args.flags.insert(key.to_string());
-                p += 1;
+                p += width;
             }
         }
     }
@@ -1338,6 +1353,10 @@ fn bind_value_or_flag(
             }
             match a {
                 Arg::Positional(expr) => Some((idx, expr_to_placeholder(expr))),
+                Arg::ShortNamed { key, value } => {
+                    let s = crate::interpreter::value_to_string(&expr_to_placeholder(value));
+                    Some((idx, Value::String(format!("-{key}={s}"))))
+                }
                 Arg::WordAssign { key, value } if allow_word_assign => {
                     let s = crate::interpreter::value_to_string(&expr_to_placeholder(value));
                     Some((idx, Value::String(format!("{key}={s}"))))
