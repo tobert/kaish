@@ -34,6 +34,10 @@
 //! - **Identifiers**: command names, variable names, parameter names
 
 use logos::{Logos, Span};
+mod escaped_words;
+pub use escaped_words::EscapedWord;
+pub(crate) use escaped_words::literal_glob_pattern;
+use escaped_words::{scan_word, ScannedWord};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
@@ -87,6 +91,8 @@ pub enum LexerError {
     UnterminatedString,
     UnterminatedVarRef,
     InvalidEscape,
+    TrailingBackslash,
+    EscapedCombinedFlag,
     InvalidNumber,
     /// An integer numeral parsed but did not fit in `i64`. The regex behind
     /// `lex_int`/`parse_int` admits only `-?[0-9]+`, so overflow is the only
@@ -154,6 +160,8 @@ impl fmt::Display for LexerError {
                 write!(f, "unterminated command substitution: missing `)`")
             }
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
+            LexerError::TrailingBackslash => write!(f, "backslash at the end of a word; quote the whole word to keep a literal backslash"),
+            LexerError::EscapedCombinedFlag => write!(f, "backslash quoting after a combined flag is not supported; write the flag and its quoted value separately"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
             LexerError::IntegerOutOfRange => write!(f, "{INTEGER_OUT_OF_RANGE}"),
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
@@ -436,7 +444,9 @@ pub enum Token {
     Dot,
 
     /// Tilde path: `~/foo`, `~user/bar` - value includes the full string.
-    #[regex(r"~[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
+    /// Only a word that STARTS with `~` is one: every word class carries `~`
+    /// after its first character, so `HEAD~1` is one `Ident`.
+    #[regex(r"~[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]+", lex_tilde_path, priority = 3)]
     TildePath(String),
 
     /// Bare tilde: `~` alone (expands to $HOME)
@@ -445,12 +455,12 @@ pub enum Token {
 
     /// Slash-containing relative word: `.git/HEAD`, `2026/report`, `../`.
     /// A slash makes the whole word text, including a numeric first component.
-    #[regex(r"[a-zA-Z0-9_.\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
+    #[regex(r"[a-zA-Z0-9_.^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*/[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_relative_path, priority = 3)]
     RelativePath(String),
 
     /// Dot-slash path: `./`, `./foo`, `./script.sh`.
     /// Wins ties with RelativePath to retain the existing token category.
-    #[regex(r"\./[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_dot_slash_path, priority = 4)]
+    #[regex(r"\./[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_dot_slash_path, priority = 4)]
     DotSlashPath(String),
 
     /// Dot-prefixed bareword: `.parent`, `.gitignore`, `.foo.bar`.
@@ -458,8 +468,8 @@ pub enum Token {
     /// (the POSIX `.` source alias) which only matches a bare `.` — the source
     /// alias requires whitespace before its file argument (`. script`), so
     /// `.parent` (no space) is unambiguously a single bareword.
-    #[regex(r"\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
-    #[regex(r"\.[0-9]+\.[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
+    #[regex(r"\.[0-9]+\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     DottedIdent(String),
 
     #[token("{")]
@@ -657,6 +667,9 @@ pub enum Token {
     /// Contains the full content of the here-doc (without the delimiter lines).
     HereDoc(HereDocData),
 
+    /// Synthesized literal word with quoting retained for pattern contexts.
+    EscapedWord(EscapedWord),
+
     /// Integer literal - value is the parsed i64
     #[regex(r"-?[0-9]+", lex_int, priority = 2)]
     Int(i64),
@@ -688,28 +701,27 @@ pub enum Token {
     /// strings and numeric filenames (`123.txt`, `1.2.3`). A nonnumeric
     /// suffix or multiple dot-separated numeric components makes the whole
     /// word text. Complete scalar numerals retain their numeric rules.
-    #[regex(r"[0-9]+(\.[0-9]+)*\.?[a-zA-Z_+@\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*|[0-9]+(\.[0-9]+){2,}[a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
+    #[regex(r"[0-9]+(\.[0-9]+)*\.?[a-zA-Z_+@^~\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*|[0-9]+(\.[0-9]+){2,}[a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_number_ident, priority = 3)]
     NumberIdent(String),
 
-    /// Numeric word containing an embedded hyphen run, or a minus-led numeric
-    /// word with a non-numeric suffix. These are single contiguous shell words
-    /// the user typed — ISO dates (`2024-01-02`), `N-M` ranges (`10-20`,
-    /// `cut -f 1-3`, `tr -d 0-9`), float-dash forms (`1.5-2`), and `find`
-    /// predicate values like `-1k` (smaller than 1k). Without this token they
-    /// fragment into adjacent `Int`/`Float`/flag tokens and trip the
-    /// no-token-pasting guard. The raw slice is preserved verbatim (so leading
-    /// zeros survive). A plain `2024`/`1.5`/`-1` stays `Int`/`Float` — the
-    /// digit-hyphen form requires a `-segment`, and the minus-led form requires
-    /// an alpha after the digits.
-    #[regex(r"[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._\u{80}-\u{10FFFF}]+)+", lex_slice_word, priority = 3)]
-    #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
+    /// Numeric word containing a hyphen, or a minus-led numeric word with a
+    /// non-numeric suffix: dates (`2024-01-02`), ranges (`10-20`, `cut -f 1-3`),
+    /// open ranges (`cut -c 9-`, the `5-` of `1-3,5-`), `1.5-2`, and `find`
+    /// values like `-1k`. Without this token they split into adjacent
+    /// `Int`/`Float`/flag tokens and trip the no-token-pasting guard, and `1--`
+    /// loses its tail to the `--` end-of-options marker. The raw slice is kept
+    /// verbatim, so leading zeros survive. A plain `2024`, `1.5` or `-1` stays
+    /// `Int`/`Float`: the digit form needs a `-` after the digits, and the
+    /// minus-led form needs a second `-` or a letter.
+    #[regex(r"-?[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._@+#^~\u{80}-\u{10FFFF}]*)+", lex_slice_word, priority = 3)]
+    #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._@+#^~\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     DashNumWord(String),
 
     /// Leading-`@` bareword: `@scope/pkg` (scoped package), `@0` (epoch in
     /// `date -d @0`), or bare `@`. Mid-word `@` (`user@host`) is handled by
     /// `Ident`; this covers the leading-`@` cases that would otherwise be an
     /// "unexpected character" lexer error.
-    #[regex(r"@[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
+    #[regex(r"@[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     AtWord(String),
 
     /// Invalid: float without leading digit (like .5)
@@ -726,7 +738,7 @@ pub enum Token {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Absolute path: `/tmp/out`, `/etc/hosts`, `/tmp/日本語`, etc.
-    #[regex(r"/[a-zA-Z0-9_./@+#\-\u{80}-\u{10FFFF}]*", lex_path)]
+    #[regex(r"/[a-zA-Z0-9_./@+#^~\-\u{80}-\u{10FFFF}]*", lex_path)]
     Path(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -738,8 +750,12 @@ pub enum Token {
     /// Allows dots for filenames like `script.kai` and `@` for `user@host`,
     /// `a@b.com` (bare `@` is an ordinary word character, as in bash). The
     /// leading class excludes digits — `NumberIdent`/`Int` own digit-leading
-    /// words — and the ASCII operator/whitespace set.
-    #[regex(r"[a-zA-Z_\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#\-\u{80}-\u{10FFFF}]*", lex_ident)]
+    /// words — and the ASCII operator/whitespace set. `^` is a word character
+    /// anywhere in a word (`HEAD^2`, `^foo`): its meanings live inside
+    /// `$(( ))` and `${…}`, which never reach the word classes. `~` is a word
+    /// character after the first one (`HEAD~1`, `f.txt~`); a word that starts
+    /// with `~` is a `TildePath`.
+    #[regex(r"[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~\-\u{80}-\u{10FFFF}]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -867,7 +883,7 @@ impl Token {
             | Token::StdoutToStderr2 => TokenCategory::Operator,
 
             // Strings
-            Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) => TokenCategory::String,
+            Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) | Token::EscapedWord(_) => TokenCategory::String,
 
             // Numbers
             Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) | Token::NumericLiteral(_) => {
@@ -1331,6 +1347,7 @@ impl fmt::Display for Token {
             Token::Bang => write!(f, "!"),
             Token::Question => write!(f, "?"),
             Token::GlobWord(s) => write!(f, "GLOB({})", s),
+            Token::EscapedWord(word) => write!(f, "ESCAPED({})", word.literal),
             Token::Arithmetic(s) => write!(f, "ARITHMETIC({})", s),
             Token::ArithCond(s) => write!(f, "((ARITHCOND({})))", s),
             Token::CmdSubstStart => write!(f, "$("),
@@ -1487,6 +1504,7 @@ struct Replacement {
 
 #[derive(Debug, Clone, PartialEq)]
 enum ReplacementKind {
+    EscapedWord(usize),
     /// `$((expr))` → arithmetic marker; index into `ScanOutput::arithmetics`.
     Arith(usize),
     /// Heredoc delimiter word → heredoc marker; index into `ScanOutput::heredocs`.
@@ -1560,6 +1578,7 @@ struct PendingHeredoc {
 /// markers and correct spans.
 struct ScanOutput {
     text: String,
+    escaped_words: Vec<EscapedWord>,
     /// (marker, expression, is_condition) triples, indexed by
     /// `ReplacementKind::Arith`. `is_condition` is set only for a bare
     /// `(( expr ))` at the top level — `$((expr))` is always `false`, and a
@@ -1587,6 +1606,7 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
     };
 
     let mut out = String::with_capacity(source.len());
+    let mut escaped_words = Vec::new();
     let mut arithmetics: Vec<(String, String, bool)> = Vec::new();
     let mut heredocs: Vec<HeredocExtract> = Vec::new();
     let mut replacements: Vec<Replacement> = Vec::new();
@@ -1598,6 +1618,45 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
 
     while i < n {
         let (pos, ch) = chars[i];
+
+        // Match SimpleVarRef's complete name before scanning a quoted suffix.
+        if ch == '$' && i + 1 < n
+            && (chars[i + 1].1.is_ascii_alphabetic() || chars[i + 1].1 == '_' || !chars[i + 1].1.is_ascii())
+        {
+            let mut end = i + 2;
+            while end < n && (chars[end].1.is_ascii_alphanumeric() || chars[end].1 == '_' || !chars[end].1.is_ascii()) {
+                end += 1;
+            }
+            out.push_str(&source[pos..byte_at(end)]);
+            i = end;
+            continue;
+        }
+
+        // A quoted suffix remains separate for the parser's no-pasting guard.
+        if (ch == '\\' || i == 0 || chars[i - 1].1 != '$')
+            && let Some(word) = scan_word(source, &chars, i)?
+        {
+            match word {
+                ScannedWord::Plain(end) => {
+                    out.push_str(&source[pos..byte_at(end)]);
+                    i = end;
+                }
+                ScannedWord::Escaped { end, word } => {
+                    let marker = format!("__KAISH_WORD_{}__", escaped_words.len());
+                    replacements.push(Replacement {
+                        orig_start: pos,
+                        orig_len: byte_at(end) - pos,
+                        new_start: out.len(),
+                        new_len: marker.len(),
+                        kind: ReplacementKind::EscapedWord(escaped_words.len()),
+                    });
+                    escaped_words.push(word);
+                    out.push_str(&marker);
+                    i = end;
+                }
+            }
+            continue;
+        }
 
         // Backslash escape: copy both characters verbatim. This also
         // covers line continuations (`\` + newline) — the escaped newline
@@ -1861,6 +1920,7 @@ fn scan(source: &str) -> Result<ScanOutput, Spanned<LexerError>> {
 
     Ok(ScanOutput {
         text: out,
+        escaped_words,
         arithmetics,
         heredocs,
         replacements,
@@ -2125,6 +2185,12 @@ fn scan_heredoc_introducer(
     while *i < n {
         let c = chars[*i].1;
         match c {
+            '\\' if chars.get(*i + 1).is_some_and(|&(_, next)| !matches!(next, '\n' | '\r')) => {
+                literal = true;
+                *i += 1;
+                delimiter.push(chars[*i].1);
+                *i += 1;
+            }
             '\'' | '"' => {
                 literal = true;
                 let quote = c;
@@ -2492,6 +2558,16 @@ fn resolve_markers(
         }
 
         match (&spanned.token, contained.as_slice()) {
+            (Token::Ident(_), [marker])
+                if matches!(marker.kind, ReplacementKind::EscapedWord(_))
+                    && marker.new_start == span.start
+                    && marker.new_start + marker.new_len == span.end =>
+            {
+                let ReplacementKind::EscapedWord(index) = marker.kind else {
+                    unreachable!("guarded by escaped-word marker kind")
+                };
+                result.push(Spanned::new(Token::EscapedWord(scan.escaped_words[index].clone()), span));
+            }
             // Exact cover by a single arithmetic marker → Arithmetic token,
             // or ArithCond for a bare `((expr))` condition.
             (Token::Ident(_), [m])
@@ -2574,6 +2650,12 @@ fn resolve_markers(
                         )?;
                     }
                     match m.kind {
+                        ReplacementKind::EscapedWord(index) => {
+                            result.push(Spanned::new(
+                                Token::EscapedWord(scan.escaped_words[index].clone()),
+                                m.new_start..m.new_start + m.new_len,
+                            ));
+                        }
                         ReplacementKind::Arith(idx) => {
                             let (_, expr, is_condition) = &scan.arithmetics[idx];
                             let token = if *is_condition {

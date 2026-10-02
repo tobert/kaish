@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     if result.code != 0 {
         eprintln!("script failed: {}", result.err);
     }
-    println!("{}", result.text_out());
+    print!("{}", result.text_out());
 
     Ok(())
 }
@@ -43,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
 `ExecResult` exposes stdout via the `text_out()` accessor (it materializes
 structured output when a builtin returned a table or tree); `code`, `err`,
 and `data` are public fields.
+
+Print stdout verbatim. Lists, tables, and trees end their last text row with
+a newline; text nodes keep their written bytes, including an absent final
+newline. JSON output keeps its structure.
 
 ## The result contract
 
@@ -938,6 +942,27 @@ Distinct from `.with_raw_argv()`, which also keeps source order but binds into
 position-sensitive POSIX command (`test`, `kill`); verbatim serves a tool with
 its own parser.
 
+### Tools that run another command
+
+`.with_options_end_at_operand()` marks a tool that wraps a command, such as
+`timeout`, `env`, and `exec`. The binder reads the tool's own options
+(typed, as for any tool) up to the first operand, then binds every word from
+that operand on as `positional`, in source order, flags included. `timeout 5
+sh -c 'exit 3'` binds `5`, `sh`, `-c`, `exit 3`. An option's value is not an
+operand (`env -u NAME cmd`), and `--` before the first operand ends the
+options. An option consumes its next word even when that word looks like a
+flag or `--`. The validation binder follows the same rule. Verbatim binding
+and `raw_argv` take precedence over this setting.
+
+`ToolArgs::positional_syntax` records the original operator kind for each
+unquoted flag, assignment, or `--` word in the tail. Quoted and computed
+positionals have no entry. Named and assignment values in `ArgumentSyntax`
+are already evaluated. `positional_raw` retains literal numeral spellings.
+A wrapper that dispatches through the kernel must use these fields to keep
+argument kinds and types; reconstructing flags from text would change
+`timeout 5 echo "-n"` into a flag. Forward evaluated values rather than
+original expressions, so substitutions run once.
+
 ### Wrapped commands: an external program as a tool
 
 `allow_unwrapped_commands` is a single switch. It allows any program that is
@@ -1111,6 +1136,37 @@ for planned in plan_program(src).map_err(|_errors| /* parse errors */ ())? {
     // Decide however your policy needs, keyed by planned.index.
 }
 ```
+
+#### Arguments: `Literal` and `Plain`
+
+Each entry in `cmd.args`, and each redirect target, is a `PlannedValue`:
+
+```rust
+use kaish_types::plan::PlannedValue;
+
+match arg {
+    // `kj wait --timeout "0"`: text is `'0'`, value is `0`.
+    PlannedValue::Literal { text, value } => { /* classify on value */ }
+    // `${LIMIT}`, `$(date)`, `*.rs`, `~/x`, `"a$x"`: known only at run time.
+    PlannedValue::Plain(text) => { /* contains an expansion */ }
+    _ => { /* a variant added later: treat as unclassified, never as safe */ }
+}
+```
+
+`Literal` means no variable, `$(...)`, `$((...))`, glob, or unquoted leading
+`~` expands anywhere in the word. Quoted tilde words such as `'~/x'` are
+literal. Its `value` is the source word after quotes and literal escapes are
+decoded, which is the argument an external command receives. A builtin may
+bind that word as a typed value. A redirect target's `value` is a path as
+written; execution resolves it against the working directory and mounts, so
+it is not necessarily absolute. `text` is the display rendering and may quote
+the word (`'0'`); never strip quotes from it. A flag or `--` is `Literal`
+with `value == text`. `--tail="5"` and `KEY=1` are `Literal` with the whole
+joined word as `value` (`--tail=5`, `KEY=1`). `--tail "5"` is two arguments,
+the flag and `5`. `arg.literal_value()` returns `Some(value)` for `Literal`
+and `None` for `Plain`; `arg.display()` returns the text for both. A file
+redirect target (`> "out 1"`) follows the same rule. Heredoc delimiters,
+here-string targets, and merges (`2>&1`) stay `Plain`.
 
 `Kernel::plan_program(source)` is the same read as a method on a kernel.
 

@@ -227,6 +227,8 @@ impl Tool for Cat {
         // restore it after `.lines()` strips it (`.lines()` is newline-agnostic
         // and silently drops the trailing newline — we must add it back).
         let mut last_had_trailing_newline = false;
+        // A failing operand is reported and skipped; the rest still print.
+        let mut errors = String::new();
 
         for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
@@ -261,9 +263,9 @@ impl Tool for Cat {
                             all_content.push_str(&content);
                         }
                     }
-                    Err(_) => return ExecResult::failure(1, format!("cat: {}: invalid UTF-8", path)),
+                    Err(_) => errors.push_str(&format!("cat: {}: invalid UTF-8\n", path)),
                 },
-                Err(e) => return ExecResult::failure(1, format!("cat: {}: {}", path, e)),
+                Err(e) => errors.push_str(&format!("cat: {}: {}\n", path, e)),
             }
         }
 
@@ -277,9 +279,12 @@ impl Tool for Cat {
             // Both forms: the text is byte-identical to GNU `cat -n`, and the
             // table carries the anchor for `--json`.
             let table = OutputData::table(vec!["TEXT".to_string()], rows);
-            return ExecResult::with_output_and_text(table, all_content);
+            return super::with_operand_errors(
+                ExecResult::with_output_and_text(table, all_content),
+                errors,
+            );
         }
-        ExecResult::with_output(OutputData::text(all_content))
+        super::with_operand_errors(ExecResult::with_output(OutputData::text(all_content)), errors)
     }
 }
 

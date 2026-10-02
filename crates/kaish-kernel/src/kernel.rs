@@ -4004,80 +4004,14 @@ impl Kernel {
                         return crate::ast::plan::render_stmt(stmt)
                     }
                 };
+                // Arguments only: a job's command string leaves redirects
+                // out, and a heredoc body would not fit on one line.
                 let mut parts = vec![cmd.name.clone()];
-                for arg in &cmd.args {
-                    match arg {
-                        Arg::Positional(expr) => {
-                            parts.push(self.format_expr(expr));
-                        }
-                        Arg::Named { key, value } => {
-                            parts.push(format!("--{}={}", key, self.format_expr(value)));
-                        }
-                        Arg::WordAssign { key, value } => {
-                            parts.push(format!("{}={}", key, self.format_expr(value)));
-                        }
-                        Arg::ShortFlag(name) => {
-                            parts.push(format!("-{}", name));
-                        }
-                        Arg::LongFlag(name) => {
-                            parts.push(format!("--{}", name));
-                        }
-                        Arg::DoubleDash => {
-                            parts.push("--".to_string());
-                        }
-                    }
-                }
+                parts.extend(cmd.args.iter().map(crate::ast::plan::render_arg));
                 parts.join(" ")
             })
             .collect::<Vec<_>>()
             .join(" | ")
-    }
-
-    /// Format an expression as a string for display.
-    fn format_expr(&self, expr: &Expr) -> String {
-        match expr {
-            Expr::Literal(Value::String(s)) => {
-                if s.contains(' ') || s.contains('"') {
-                    format!("'{}'", s.replace('\'', "\\'"))
-                } else {
-                    s.clone()
-                }
-            }
-            Expr::Literal(Value::Int(i)) => i.to_string(),
-            Expr::Literal(Value::Float(f)) => f.to_string(),
-            Expr::Literal(Value::Bool(b)) => b.to_string(),
-            Expr::Literal(Value::Null) => "null".to_string(),
-            // Show the source text, not the typed value.
-            Expr::NumericLiteral { raw, .. } => raw.clone(),
-            // Show the unexpanded source word, not the resolved path —
-            // this is a display of what the command WAS, not what it did.
-            Expr::TildePath(raw) => raw.clone(),
-            Expr::VarRef(path) => {
-                let mut name = String::new();
-                for (i, seg) in path.segments.iter().enumerate() {
-                    match seg {
-                        crate::ast::VarSegment::Field(f) => {
-                            if i > 0 {
-                                name.push('.');
-                            }
-                            name.push_str(f);
-                        }
-                        crate::ast::VarSegment::Index(idx) => name.push_str(&format!("[{idx}]")),
-                        crate::ast::VarSegment::Key(k) => name.push_str(&format!("[{k}]")),
-                        crate::ast::VarSegment::Dynamic(v) => name.push_str(&format!("[${v}]")),
-                        crate::ast::VarSegment::Slice(a, b) => name.push_str(&format!(
-                            "[{}:{}]",
-                            a.map(|n| n.to_string()).unwrap_or_default(),
-                            b.map(|n| n.to_string()).unwrap_or_default()
-                        )),
-                    }
-                }
-                format!("${{{}}}", name)
-            }
-            Expr::Interpolated(_) => "\"...\"".to_string(),
-            Expr::HereDocBody { .. } => "<<heredoc".to_string(),
-            _ => "...".to_string(),
-        }
     }
 
     /// Execute a single command.
@@ -6948,6 +6882,147 @@ async fn consume_flag_positionals(
     Ok(())
 }
 
+/// Bind `args` as plain words in source order, types preserved: operators
+/// (`-f`, `=`, `!`, `--`) as strings, operands keeping their `Value`. Globs
+/// still expand and `~` still resolves, as for any positional. Shared by the
+/// `raw_argv` tools and the wrapped-command tail of an
+/// `options_end_at_operand` tool.
+async fn bind_raw_words(
+    args: &[Arg],
+    source: &dyn ArgValueSource,
+    glob_passthrough: bool,
+    tool_args: &mut ToolArgs,
+    preserve_syntax: bool,
+) -> Result<()> {
+    for arg in args {
+        match arg {
+            Arg::Positional(expr) => {
+                let glob = if let Expr::GlobPattern(p) = expr {
+                    (!glob_passthrough).then(|| p.clone())
+                } else {
+                    None
+                };
+                if let Some(pattern) = glob {
+                    match source.expand_glob(&pattern).await? {
+                        Some(paths) => {
+                            for path in paths {
+                                tool_args.positional.push(Value::String(path));
+                            }
+                        }
+                        None => {
+                            let value = source.eval(expr).await?.ok_or_else(|| {
+                                anyhow::anyhow!("raw-argv positional could not be evaluated in this context")
+                            })?;
+                            if let Expr::NumericLiteral { raw, .. } = expr {
+                                tool_args.positional_raw.insert(tool_args.positional.len(), raw.clone());
+                            }
+                            tool_args.positional.push(value);
+                        }
+                    }
+                } else {
+                    let value = source
+                        .eval(expr)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("raw-argv positional could not be evaluated in this context"))?;
+                    // `test`'s numeric operators still get the real
+                    // `value`; a text consumer gets `raw`.
+                    if let Expr::NumericLiteral { raw, .. } = expr {
+                        tool_args.positional_raw.insert(tool_args.positional.len(), raw.clone());
+                    }
+                    tool_args.positional.push(value);
+                }
+            }
+            Arg::ShortFlag(name) => {
+                if preserve_syntax {
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::ShortFlag(name.clone()),
+                    );
+                }
+                tool_args.positional.push(Value::String(format!("-{name}")));
+            }
+            Arg::LongFlag(name) => {
+                if preserve_syntax {
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::LongFlag(name.clone()),
+                    );
+                }
+                tool_args.positional.push(Value::String(format!("--{name}")));
+            }
+            Arg::Named { key, value } => {
+                let val = source
+                    .eval(value)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("raw-argv --key=value could not be evaluated in this context"))?;
+                if preserve_syntax {
+                    let raw = match value {
+                        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+                        _ => None,
+                    };
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::Named {
+                            key: key.clone(),
+                            value: val.clone(),
+                            raw,
+                        },
+                    );
+                }
+                // Loud on binary (GH #116): `test --k=$BIN` must not
+                // silently reassemble the placeholder into the raw-argv
+                // positional stream `test` binds against. Source text
+                // wins, as in the Verbatim binder's `Arg::Named` arm.
+                let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                    raw.clone()
+                } else {
+                    crate::interpreter::value_to_text_sink_named(&val, "a --key=value argument")
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                };
+                tool_args.positional.push(Value::String(format!("--{key}={val_str}")));
+            }
+            Arg::WordAssign { key, value } => {
+                let val = source
+                    .eval(value)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("raw-argv key=value could not be evaluated in this context"))?;
+                if preserve_syntax {
+                    let raw = match value {
+                        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+                        _ => None,
+                    };
+                    tool_args.positional_syntax.insert(
+                        tool_args.positional.len(),
+                        kaish_types::ArgumentSyntax::WordAssign {
+                            key: key.clone(),
+                            value: val.clone(),
+                            raw,
+                        },
+                    );
+                }
+                // Loud on binary (GH #116): same reasoning as the Named
+                // arm above, for the bare `key=value` raw-argv form.
+                let val_str = if let Expr::NumericLiteral { raw, .. } = value {
+                    raw.clone()
+                } else {
+                    crate::interpreter::value_to_text_sink_named(&val, "a key=value argument")
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                };
+                tool_args.positional.push(Value::String(format!("{key}={val_str}")));
+            }
+            Arg::DoubleDash => {
+                if preserve_syntax {
+                    tool_args
+                        .positional_syntax
+                        .insert(tool_args.positional.len(), kaish_types::ArgumentSyntax::DoubleDash);
+                }
+                tool_args.positional.push(Value::String("--".to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build `ToolArgs` from AST `Arg`s — the single arg-binding implementation
 /// (GH #188) shared by `Kernel::build_args_async` (production) and the
 /// reduced sync path (`scheduler::pipeline::build_tool_args`, used by
@@ -7112,102 +7187,30 @@ pub(crate) async fn bind_tool_args(
     // binding — so `test -f *.rs` errors on too many args, not a literal
     // pattern stat.
     if schema.is_some_and(|s| s.raw_argv) {
-        for arg in args {
-            match arg {
-                Arg::Positional(expr) => {
-                    let glob = if let Expr::GlobPattern(p) = expr {
-                        (!glob_passthrough).then(|| p.clone())
-                    } else {
-                        None
-                    };
-                    if let Some(pattern) = glob {
-                        match source.expand_glob(&pattern).await? {
-                            Some(paths) => {
-                                for path in paths {
-                                    tool_args.positional.push(Value::String(path));
-                                }
-                            }
-                            None => {
-                                let value = source.eval(expr).await?.ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "raw-argv positional could not be evaluated in this context"
-                                    )
-                                })?;
-                                if let Expr::NumericLiteral { raw, .. } = expr {
-                                    tool_args
-                                        .positional_raw
-                                        .insert(tool_args.positional.len(), raw.clone());
-                                }
-                                tool_args.positional.push(value);
-                            }
-                        }
-                    } else {
-                        let value = source.eval(expr).await?.ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "raw-argv positional could not be evaluated in this context"
-                            )
-                        })?;
-                        // `test`'s numeric operators still get the real
-                        // `value`; a text consumer gets `raw`.
-                        if let Expr::NumericLiteral { raw, .. } = expr {
-                            tool_args
-                                .positional_raw
-                                .insert(tool_args.positional.len(), raw.clone());
-                        }
-                        tool_args.positional.push(value);
-                    }
-                }
-                Arg::ShortFlag(name) => {
-                    tool_args.positional.push(Value::String(format!("-{name}")));
-                }
-                Arg::LongFlag(name) => {
-                    tool_args.positional.push(Value::String(format!("--{name}")));
-                }
-                Arg::Named { key, value } => {
-                    let val = source.eval(value).await?.ok_or_else(|| {
-                        anyhow::anyhow!("raw-argv --key=value could not be evaluated in this context")
-                    })?;
-                    // Loud on binary (GH #116): `test --k=$BIN` must not
-                    // silently reassemble the placeholder into the raw-argv
-                    // positional stream `test` binds against. Source text
-                    // wins, as in the Verbatim binder's `Arg::Named` arm.
-                    let val_str = if let Expr::NumericLiteral { raw, .. } = value {
-                        raw.clone()
-                    } else {
-                        crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a --key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?
-                    };
-                    tool_args
-                        .positional
-                        .push(Value::String(format!("--{key}={val_str}")));
-                }
-                Arg::WordAssign { key, value } => {
-                    let val = source.eval(value).await?.ok_or_else(|| {
-                        anyhow::anyhow!("raw-argv key=value could not be evaluated in this context")
-                    })?;
-                    // Loud on binary (GH #116): same reasoning as the Named
-                    // arm above, for the bare `key=value` raw-argv form.
-                    let val_str = if let Expr::NumericLiteral { raw, .. } = value {
-                        raw.clone()
-                    } else {
-                        crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?
-                    };
-                    tool_args
-                        .positional
-                        .push(Value::String(format!("{key}={val_str}")));
-                }
-                Arg::DoubleDash => {
-                    tool_args.positional.push(Value::String("--".to_string()));
-                }
+        bind_raw_words(args, source, glob_passthrough, &mut tool_args, false).await?;
+        return Ok(tool_args);
+    }
+
+    // Wrapped-command tool (`timeout`, `env`, `exec`): the tool's own options
+    // end at the first operand, and the wrapped command's words — flags
+    // included — follow as plain positionals in source order. The options
+    // before it bind the usual typed way.
+    if let Some(wrapper) = schema.filter(|s| s.options_end_at_operand) {
+        let (boundary, values) = crate::scheduler::pipeline::wrapper_option_layout(args, wrapper);
+        let boundary = boundary.unwrap_or(args.len());
+        let mut options = args[..boundary].to_vec();
+        for index in values {
+            if !matches!(args[index], Arg::Positional(_)) {
+                let mut word = ToolArgs::new();
+                bind_raw_words(&args[index..index + 1], source, glob_passthrough, &mut word, false).await?;
+                assert_eq!(word.positional.len(), 1, "one wrapper option value word");
+                options[index] = Arg::Positional(Expr::Literal(word.positional.remove(0)));
             }
         }
+        let mut options_schema = wrapper.clone();
+        options_schema.options_end_at_operand = false;
+        let mut tool_args = Box::pin(bind_tool_args(&options, Some(&options_schema), source)).await?;
+        bind_raw_words(&args[boundary..], source, glob_passthrough, &mut tool_args, true).await?;
         return Ok(tool_args);
     }
 
@@ -7261,6 +7264,7 @@ pub(crate) async fn bind_tool_args(
     while i < args.len() {
         match &args[i] {
             Arg::DoubleDash => {
+                if past_double_dash { tool_args.positional.push(Value::String("--".into())); }
                 past_double_dash = true;
             }
             Arg::Positional(expr) => {
@@ -11478,6 +11482,79 @@ AFTER="yes"'"#)
         ];
         let built = kernel.build_args_async(&args, Some(&schema), &mut root_ctx(&kernel).await).await.unwrap();
         assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
+    }
+
+    /// The runtime binder and the validation binder must bind a wrapper's
+    /// words identically: head options typed, the command's words in source
+    /// order. Compares the whole `ToolArgs`, so a field one binder fills and
+    /// the other forgets fails here.
+    async fn assert_binders_agree(script: &str) {
+        let kernel = Kernel::transient().expect("kernel");
+        let program = crate::parser::parse(script).expect("parse");
+        let Some(crate::ast::Stmt::Command(cmd)) = program.statements.first() else {
+            panic!("{script}: not a command");
+        };
+        let schema = kernel
+            .tool_schemas()
+            .into_iter()
+            .find(|s| s.name == cmd.name)
+            .unwrap_or_else(|| panic!("{script}: no schema for {}", cmd.name));
+        let runtime = kernel
+            .build_args_async(&cmd.args, Some(&schema), &mut root_ctx(&kernel).await)
+            .await
+            .unwrap_or_else(|e| panic!("{script}: runtime bind: {e}"));
+        let validation = crate::validator::build_tool_args_for_validation(&cmd.args, Some(&schema));
+        // `flags` is a set; compare it sorted.
+        let sorted = |args: &ToolArgs| {
+            let mut value = serde_json::to_value(args).expect("serialize");
+            if let Some(flags) = value.get_mut("flags").and_then(|f| f.as_array_mut()) {
+                flags.sort_by_key(|f| f.to_string());
+            }
+            value
+        };
+        assert_eq!(sorted(&runtime), sorted(&validation), "{script}: the binders disagree");
+    }
+
+    #[tokio::test]
+    async fn binders_agree_on_raw_numeric_words() {
+        assert_binders_agree("test 0.10 = 0.1").await;
+    }
+
+    #[tokio::test]
+    async fn binders_agree_on_wrapper_numeric_option_values() {
+        assert_binders_agree("env -u 0.10 echo").await;
+        assert_binders_agree("env --u=0.10 echo").await;
+    }
+
+    #[tokio::test]
+    async fn binders_agree_for_a_wrapper_with_a_head() {
+        assert_binders_agree("timeout 5 sh -c body").await;
+        assert_binders_agree("timeout --json 5 sh -c body").await;
+        assert_binders_agree("timeout -- 5 sh -c body").await;
+        assert_binders_agree("env sh -c body").await;
+        assert_binders_agree("env -u NAME sh -c body").await;
+        assert_binders_agree("env -i -u NAME -u OTHER A=1 sh -c body").await;
+        assert_binders_agree("env -u -x sh -c body").await;
+        assert_binders_agree("env -u -- sh -c body").await;
+        assert_binders_agree("env --json A=1 sh -c --key=value -- -n").await;
+    }
+
+    #[cfg(feature = "subprocess")]
+    #[tokio::test]
+    async fn binders_agree_for_a_wrapper_with_a_head_external() {
+        assert_binders_agree("exec sh -c body").await;
+        assert_binders_agree("spawn sh -c body").await;
+        assert_binders_agree("spawn --timeout 1000 sh -c body").await;
+        assert_binders_agree("spawn --timeout 1000 --env '{}' sh -c body").await;
+    }
+
+    /// `--flag=true` on a bool param: the runtime binder turns it into the
+    /// flag; the validation binder kept it in `named`.
+    #[tokio::test]
+    async fn binders_agree_on_a_bool_flag_with_a_literal() {
+        assert_binders_agree("env --i=true sh -c body").await;
+        assert_binders_agree("env --i=false sh -c body").await;
+        assert_binders_agree("env --i=true --u=NAME").await;
     }
 
     #[tokio::test]

@@ -12,6 +12,13 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- Backslash quoting outside strings: `a\ b` is one literal word and
+  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
+  match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
+  escapes with unquoted globs is an error that names the quoted form.
+- `jq -R` reads each text line as a string; `-R -s` reads the whole input
+  as one string. A failing input line is reported with exit 1 while other
+  lines still run. `-n -R` is refused with an alternative.
 - Builtin `find` supports AND, OR, negation, quoted parenthesis groups, and ordered `-print` actions. Expressions are limited to 256 nodes and 64 nested groups or negations.
 - Builtin `cat` supports `-A`, `-v`, `-E`, and `-T`; `ls -d` lists directories themselves, and `grep -x` matches whole lines.
 - **`Kernel::execute_background_with_options`** — run a whole program as a
@@ -31,8 +38,24 @@ breaking entries are marked **BREAKING**.
 - **`grep -m` is a short alias for `--max-count`**, matching GNU grep; models
   wrote `grep -m 5 PATTERN file` from habit and got a usage error.
 
+### Changed
+
+- **BREAKING**: Plans report a fully literal argument or file redirect
+  target as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the
+  argument or unresolved path, `text` for display. Expanding words stay
+  `plain`. Job command strings use the plan's renderer.
+
 ### Fixed
 
+- `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
+  an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
+  refuse extra operands. `head -c` reads a byte prefix of each file.
+- Lists, tables, and trees end their last text line with a newline, so
+  `ls dir | wc -l` counts every row.
+- Recursive `grep` skips devices, FIFOs, sockets, and discovered symlinks
+  under `-r`; `-R` reads file symlinks but does not enter linked
+  directories. Errors keep readable matches and exit 2. Recursive and
+  multi-file searches read bounded chunks; `-q`, `-l`, and `-m` stop early.
 - `NAME --help` exits 0 across builtin argument binders, including `scatter` and `gather`. Declared option values shaped like `--help` or `--json` stay data. Unsupported builtin flags return a short refusal naming the supported help topic.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,

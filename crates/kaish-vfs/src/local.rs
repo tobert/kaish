@@ -160,14 +160,12 @@ impl LocalFs {
         };
         let file_type = metadata.file_type();
 
-        let (kind, symlink_target) = if file_type.is_symlink() {
+        let kind = kind_of(file_type);
+        let symlink_target = if file_type.is_symlink() {
             // The link's own target, best-effort — a dangling link still lists.
-            (DirEntryKind::Symlink, fs::read_link(path).await.ok())
-        } else if file_type.is_dir() {
-            (DirEntryKind::Directory, None)
+            fs::read_link(path).await.ok()
         } else {
-            // Special files (sockets, pipes, devices) → File. See stat().
-            (DirEntryKind::File, None)
+            None
         };
 
         Ok(Some(DirEntry {
@@ -182,6 +180,35 @@ impl LocalFs {
             symlink_target,
         }))
     }
+}
+
+/// The entry kind for a host file type. Devices, FIFOs, and sockets keep their
+/// own kinds so a recursive reader can skip them: opening a FIFO blocks, and a
+/// device such as `/dev/zero` never ends.
+fn kind_of(file_type: std::fs::FileType) -> DirEntryKind {
+    if file_type.is_symlink() {
+        return DirEntryKind::Symlink;
+    }
+    if file_type.is_dir() {
+        return DirEntryKind::Directory;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if file_type.is_fifo() {
+            return DirEntryKind::Fifo;
+        }
+        if file_type.is_socket() {
+            return DirEntryKind::Socket;
+        }
+        if file_type.is_char_device() {
+            return DirEntryKind::CharDevice;
+        }
+        if file_type.is_block_device() {
+            return DirEntryKind::BlockDevice;
+        }
+    }
+    DirEntryKind::File
 }
 
 #[async_trait]
@@ -325,14 +352,7 @@ impl Filesystem for LocalFs {
         // stat follows symlinks
         let meta = fs::metadata(&full_path).await?;
 
-        let kind = if meta.is_dir() {
-            DirEntryKind::Directory
-        } else {
-            // Unix special files (sockets, pipes, block/char devices) are classified
-            // as File. kaish doesn't operate on special files, and adding a variant
-            // would force match-arm changes everywhere for no practical benefit.
-            DirEntryKind::File
-        };
+        let kind = kind_of(meta.file_type());
 
         let name = path
             .file_name()
@@ -357,14 +377,7 @@ impl Filesystem for LocalFs {
         let meta = fs::symlink_metadata(&full_path).await?;
 
         let file_type = meta.file_type();
-        let kind = if file_type.is_symlink() {
-            DirEntryKind::Symlink
-        } else if meta.is_dir() {
-            DirEntryKind::Directory
-        } else {
-            // Special files (sockets, pipes, devices) → File. See stat() comment.
-            DirEntryKind::File
-        };
+        let kind = kind_of(file_type);
 
         let symlink_target = if file_type.is_symlink() {
             fs::read_link(&full_path).await.ok()
@@ -1045,6 +1058,38 @@ mod tests {
             .symlink(Path::new("target.txt"), Path::new("rel_link"))
             .await;
         assert!(result.is_ok());
+
+        cleanup(&dir).await;
+    }
+
+    // A FIFO, a socket, and a device keep their own kinds through `list`,
+    // `stat`, and `lstat`, so a recursive reader can skip them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn special_files_keep_their_kinds() {
+        let (fs, dir) = setup().await;
+        let status = std::process::Command::new("mkfifo")
+            .arg(dir.join("pipe"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let _listener = std::os::unix::net::UnixListener::bind(dir.join("sock")).unwrap();
+        std::os::unix::fs::symlink("pipe", dir.join("pipe-link")).unwrap();
+
+        let entries = fs.list(Path::new("")).await.unwrap();
+        let kind = |name: &str| entries.iter().find(|e| e.name == name).unwrap().kind;
+        assert_eq!(kind("pipe"), DirEntryKind::Fifo);
+        assert_eq!(kind("sock"), DirEntryKind::Socket);
+        assert_eq!(kind("pipe-link"), DirEntryKind::Symlink);
+
+        assert_eq!(fs.stat(Path::new("pipe-link")).await.unwrap().kind, DirEntryKind::Fifo);
+        assert_eq!(fs.lstat(Path::new("pipe")).await.unwrap().kind, DirEntryKind::Fifo);
+        assert!(fs.stat(Path::new("sock")).await.unwrap().is_special());
+
+        let host = LocalFs::read_only("/");
+        let null = host.stat(Path::new("dev/null")).await.unwrap();
+        assert_eq!(null.kind, DirEntryKind::CharDevice);
+        assert!(!null.is_file(), "a device is not a regular file");
 
         cleanup(&dir).await;
     }

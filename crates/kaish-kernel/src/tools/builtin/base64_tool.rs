@@ -29,7 +29,7 @@ struct Base64Args {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Input file; reads stdin when omitted.
+    /// One input file; reads stdin when omitted. Use a redirect for output.
     paths: Vec<String>,
 }
 
@@ -90,6 +90,10 @@ impl Tool for Base64Tool {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("base64: {}", e)),
         };
+
+        if let Some(refusal) = super::extra_operand_error("base64", &paths) {
+            return refusal;
+        }
 
         // Read input as raw bytes — base64 is fundamentally a binary codec, so
         // never decode the input as UTF-8 (that would reject/mangle binary files).

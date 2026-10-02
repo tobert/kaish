@@ -34,7 +34,7 @@ struct XxdArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// File to read; reads stdin when omitted.
+    /// One input file; reads stdin when omitted. Use a redirect for output.
     paths: Vec<String>,
 }
 
@@ -102,6 +102,10 @@ impl Tool for Xxd {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("xxd: {}", e)),
         };
+
+        if let Some(refusal) = super::extra_operand_error("xxd", &paths) {
+            return refusal;
+        }
 
         // Read raw bytes — a hex dump of binary must see the real bytes, never
         // a lossy-decoded approximation.

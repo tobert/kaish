@@ -311,23 +311,13 @@ async fn hermetic_kernel_leaves_bare_tilde_unexpanded() {
     assert_eq!(out.text_out().trim(), "~/a");
 }
 
-// --- `~` not at the start of a word: kaish refuses the ambiguous paste -----
-//
-// bash concatenates `foo~bar` into one literal word (no expansion, since the
-// tilde-prefix must start the word). kaish's lexer has no bareword+tilde
-// pasting rule at all — `foo~bar` is two adjacent tokens with no space
-// between them, which kaish's own "no token pasting" grammar refuses as a
-// parse error rather than silently gluing them (see
-// `keyword_literal_words_tests.rs` for the general rule). Either way, the
-// bug this suite is about — over-expansion — cannot happen here: there is
-// no path from `foo~bar`/`a/~` to `Expr::TildePath`.
-#[test]
-fn tilde_not_at_word_start_is_never_a_tilde_expansion() {
-    use kaish_kernel::parser::parse;
-    assert!(parse("echo foo~bar").is_err(), "adjacent unquoted words must not paste into one arg");
-    assert!(parse("echo a/~").is_err(), "adjacent unquoted words must not paste into one arg");
-    // Quoting sidesteps the pasting question entirely and is never expanded.
-    parse("echo \"foo~bar\"").unwrap();
+// A tilde inside a word remains literal even when HOME is set.
+#[tokio::test]
+async fn tilde_not_at_word_start_is_never_a_tilde_expansion() {
+    let kernel = kernel();
+    let result = kernel.execute("echo foo~bar a/~ \"foo~bar\"").await.unwrap();
+    assert!(result.ok(), "{result:?}");
+    assert_eq!(result.text_out(), "foo~bar a/~ foo~bar\n");
 }
 
 // --- known, pre-existing gap: kaish never supported the `x=a:~/b` form -----
