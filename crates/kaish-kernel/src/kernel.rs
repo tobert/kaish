@@ -1776,7 +1776,8 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone())
             };
-            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await;
+            // The embedder door runs one command: there is no script for an `exit` to end.
+            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await.map(ControlFlow::into_absorbed_result);
             // The door runs one command the same way a statement does, so a
             // `cd` or an `alias` through it outlives the call. Published
             // before the error is propagated, because a command that faults
@@ -2850,7 +2851,15 @@ impl Kernel {
                     stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
                     background: false,
                 };
-                let result = Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await?;
+                let result = match Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await? {
+                    ControlFlow::Exit { code, result } => {
+                        // A function or `source` ran `exit`: end the statement
+                        // list, keeping the output written before it.
+                        self.update_last_result(&result).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                    flow => flow.into_absorbed_result(),
+                };
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2869,7 +2878,15 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await?;
+                let result = match Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await? {
+                    ControlFlow::Exit { code, result } => {
+                        // A function or `source` ran `exit`: end the statement
+                        // list, keeping the output written before it.
+                        self.update_last_result(&result).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                    flow => flow.into_absorbed_result(),
+                };
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2893,10 +2910,17 @@ impl Kernel {
                 // see `eval_condition_async`. (An `elif` is a nested `Stmt::If`
                 // in `else_branch`, so it takes this same path.)
                 let mut result = ExecResult::success("");
-                let cond_value = self
+                let cond_value = match self
                     .eval_condition_async(&if_stmt.condition, &mut result, &mut *ctx)
                     .await
-                    .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
+                    .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?
+                {
+                    Condition::Value(value) => value,
+                    Condition::Exit(code) => {
+                        self.drain_stderr_into(&mut result, ctx).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                };
 
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
@@ -3141,10 +3165,17 @@ impl Kernel {
 
                     // Per iteration, so the condition's stdout interleaves with
                     // the body's rather than arriving in one block up front.
-                    let cond_value = self
+                    let cond_value = match self
                         .eval_condition_async(&while_loop.condition, &mut result, &mut *ctx)
                         .await
-                        .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
+                        .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?
+                    {
+                        Condition::Value(value) => value,
+                        Condition::Exit(code) => {
+                            self.drain_stderr_into(&mut result, ctx).await;
+                            return Ok(ControlFlow::Exit { code, result });
+                        }
+                    };
 
                     if !is_truthy(&cond_value) {
                         break;
@@ -3850,14 +3881,15 @@ impl Kernel {
     }
 
     /// Execute a pipeline.
-    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ControlFlow> {
         if pipeline.stages.is_empty() {
-            return Ok(ExecResult::success(""));
+            return Ok(ControlFlow::Normal(ExecResult::success("")));
         }
 
-        // Handle background execution (`&` operator)
+        // Handle background execution (`&` operator). A job is its own
+        // subshell: an `exit` in it ends the job, not the script.
         if pipeline.background {
-            return self.execute_background(pipeline, caller).await;
+            return Ok(ControlFlow::Normal(self.execute_background(pipeline, caller).await?));
         }
 
         // All commands go through the runner with the Kernel as dispatcher.
@@ -3905,7 +3937,8 @@ impl Kernel {
         ctx.pipe_stdout = caller.pipe_stdout.take();
         ctx.stdin_data_rx = caller.stdin_data_rx.take();
 
-        let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
+        let mut flow = self.runner.run_flow(&pipeline.stages, &mut ctx, self).await;
+        let result = flow.result_mut();
 
         // `set -o pipefail`: the pipeline answers with the RIGHTMOST non-zero
         // stage, not the first. bash's `set -o pipefail; (exit 3) | (exit 4) |
@@ -3930,7 +3963,11 @@ impl Kernel {
         // flipped `did_spill` even when the limit itself is disabled, GH
         // #191). This is the shared contract every execution surface must
         // apply — see `apply_spill_contract`'s doc comment (GH #212).
-        crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
+        crate::output_limit::apply_spill_contract(result, &ctx.output_limit).await;
+        // An exit's code is the finished result's: the spill remap to 3 may have changed it.
+        if let ControlFlow::Exit { code, result } = &mut flow {
+            *code = result.code;
+        }
 
         // Session changes go back to the CALLER, not the slot: a `cd` or a
         // `kaish-ignore` inside this pipeline belongs to the enclosing run,
@@ -3958,7 +3995,7 @@ impl Kernel {
         caller.pipe_stdout = ctx.pipe_stdout.take();
         caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
-        Ok(result)
+        Ok(flow)
     }
 
     /// Execute a pipeline in the background.
@@ -4114,11 +4151,11 @@ impl Kernel {
     }
 
     /// Execute a single command.
-    async fn execute_command(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_command(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ControlFlow> {
         self.execute_command_depth(name, args, 0, ctx).await
     }
 
-    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8, ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8, ctx: &mut ExecContext) -> Result<ControlFlow> {
         // Dispatch breadcrumb instead of an `#[instrument]` span: this is the
         // most-recursed function on the ring, so wrapping its future in
         // `Instrumented<Span>` (plus the `err` recorder) cost native stack at
@@ -4148,7 +4185,7 @@ impl Kernel {
                     } else {
                         ExecResult::failure(1, "")
                     };
-                    Ok(finalize_output(result, format, false))
+                    Ok(ControlFlow::Normal(finalize_output(result, format, false)))
                 }
                 crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args, ctx)).await,
             };
@@ -4175,7 +4212,7 @@ impl Kernel {
         if let Some(builtin_name) = name.strip_prefix("/v/bin/") {
             return match self.tools.get(builtin_name) {
                 Some(_) => Box::pin(self.execute_command_depth(builtin_name, args, alias_depth, ctx)).await,
-                None => Ok(ExecResult::failure(127, format!("command not found: {}", name))),
+                None => Ok(ControlFlow::Normal(ExecResult::failure(127, format!("command not found: {}", name)))),
             };
         }
 
@@ -4194,8 +4231,9 @@ impl Kernel {
             Some(t) => t,
             None => {
                 // Try executing as .kai script from PATH
+                // A `.kai` script is its own program: its `exit` ends the script, not the caller.
                 if let Some(result) = Box::pin(self.try_execute_script(name, args, ctx)).await? {
-                    return Ok(result);
+                    return Ok(ControlFlow::Normal(result));
                 }
                 // Try executing as external command from PATH — boxed because its
                 // future is the heaviest branch here (holds a `tokio::process::Command`,
@@ -4211,7 +4249,7 @@ impl Kernel {
                 // fallthrough re-deriving the wrong "command not found".
                 let mut unavailable = None;
                 match Box::pin(self.try_execute_external(name, args, &mut *ctx)).await? {
-                    ExternalCommandOutcome::Ran(result) => return Ok(*result),
+                    ExternalCommandOutcome::Ran(result) => return Ok(ControlFlow::Normal(*result)),
                     ExternalCommandOutcome::NotFound => {}
                     ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
                 }
@@ -4293,7 +4331,7 @@ impl Kernel {
                         // No builtin or external command produced this output,
                         // so nothing else publishes it to a background job.
                         ctx.publish_job_stdout(&result).await;
-                        return Ok(result);
+                        return Ok(ControlFlow::Normal(result));
                     }
                     Err(BackendError::ToolNotFound(_)) => {
                         // The backend confirms no such tool exists — fall
@@ -4304,14 +4342,14 @@ impl Kernel {
                         // execution) but running it failed — a genuine
                         // execution error, not "command not found". Surface
                         // it loudly instead of masking it as exit-127.
-                        return Ok(ExecResult::failure(1, format!("{}: {}", name, e)));
+                        return Ok(ControlFlow::Normal(ExecResult::failure(1, format!("{}: {}", name, e))));
                     }
                 }
 
-                return Ok(match unavailable {
+                return Ok(ControlFlow::Normal(match unavailable {
                     Some(reason) => external_commands_unavailable_error(name, reason),
                     None => ExecResult::failure(127, format!("command not found: {}", name)),
-                });
+                }));
             }
         };
 
@@ -4364,7 +4402,7 @@ impl Kernel {
             let result = ExecResult::with_output(crate::interpreter::OutputData::text(content));
             // The tool never runs, so no builtin publish reaches a background job.
             ctx.publish_job_stdout(&result).await;
-            return Ok(result);
+            return Ok(ControlFlow::Normal(result));
         }
 
         // Snapshot exec_ctx into a local context and release the lock before
@@ -4436,7 +4474,14 @@ impl Kernel {
             Some(stdout) => stdout.stats().await.total_written,
             None => 0,
         };
-        let mut result = tool.execute(tool_args, &mut *ctx).await;
+        let flow = tool.execute_flow(tool_args, &mut *ctx).await;
+        let (mut result, exited) = match flow {
+            kaish_types::ToolFlow::Normal(result) => (result, false),
+            kaish_types::ToolFlow::Exit(result) => (result, true),
+            other => panic!(
+                "tool `{name}` returned a ToolFlow variant this kernel does not know: {other:?}"
+            ),
+        };
         if result.code == 2
             && let Some(refusal) = unknown_flag_refusal(name, &result.err)
         {
@@ -4506,7 +4551,11 @@ impl Kernel {
             }
         }
 
-        Ok(result)
+        // The tool ended the script; its result's code is the exit status.
+        if exited {
+            return Ok(ControlFlow::Exit { code: result.code, result });
+        }
+        Ok(ControlFlow::Normal(result))
     }
 
     /// The session `HOME` from the kernel scope, if set. Tilde expansion reads
@@ -4685,11 +4734,13 @@ impl Kernel {
         expr: &'a Expr,
         out: &'a mut ExecResult,
         ctx: &'a mut ExecContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Condition>> + Send + 'a>> {
         Box::pin(async move {
             match expr {
                 Expr::Command(cmd) => {
-                    let mut result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                    let flow = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                    let exited = matches!(flow, ControlFlow::Exit { .. });
+                    let mut result = flow.into_absorbed_result();
                     // Truthiness comes from the command's OWN code, read before
                     // the spill contract can remap it. A capped `if seq 1
                     // 100000` succeeded; only its output was too big to keep,
@@ -4716,19 +4767,26 @@ impl Kernel {
                     let limit = ctx.output_limit.clone();
                     crate::output_limit::apply_spill_contract(&mut result, &limit).await;
                     push_stdout_of(out, &result);
-                    Ok(Value::Bool(truthy))
+                    // A function in the condition ran `exit`: the statement ends.
+                    if exited {
+                        return Ok(Condition::Exit(result.code));
+                    }
+                    Ok(Condition::Value(Value::Bool(truthy)))
                 }
                 // Short-circuits exactly as the `eval_expr_async` arm does, and
                 // yields the operand's own value rather than a coerced bool. A
                 // side that short-circuits never runs, so it prints nothing.
                 Expr::BinaryOp { left, op, right } => {
-                    let left_val = self.eval_condition_async(left, &mut *out, &mut *ctx).await?;
+                    let left_val = match self.eval_condition_async(left, &mut *out, &mut *ctx).await? {
+                        Condition::Value(value) => value,
+                        exit @ Condition::Exit(_) => return Ok(exit),
+                    };
                     let short_circuits = match op {
                         BinaryOp::And => !is_truthy(&left_val),
                         BinaryOp::Or => is_truthy(&left_val),
                     };
                     if short_circuits {
-                        return Ok(left_val);
+                        return Ok(Condition::Value(left_val));
                     }
                     self.eval_condition_async(right, out, ctx).await
                 }
@@ -4736,10 +4794,12 @@ impl Kernel {
                 // statement exactly as an un-negated one's does. Routing this
                 // through `eval_expr_async` would drop it.
                 Expr::Not(inner) => {
-                    let value = self.eval_condition_async(inner, out, ctx).await?;
-                    Ok(Value::Bool(!is_truthy(&value)))
+                    match self.eval_condition_async(inner, out, ctx).await? {
+                        Condition::Value(value) => Ok(Condition::Value(Value::Bool(!is_truthy(&value)))),
+                        exit @ Condition::Exit(_) => Ok(exit),
+                    }
                 }
-                other => self.eval_expr_async(other, ctx).await,
+                other => Ok(Condition::Value(self.eval_expr_async(other, ctx).await?)),
             }
         })
     }
@@ -4930,7 +4990,15 @@ impl Kernel {
                 // a substitution's stderr. Dropping the `ExecResult` here made
                 // `if cat /nonexistent; then …` print nothing at all, so every
                 // condition that failed for a reason failed silently.
-                let result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                let flow = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                // The parser makes `Expr::Command` only as a condition, and
+                // conditions run through `eval_condition_async`, which raises
+                // an `exit`. A value cannot carry one, so refuse rather than
+                // swallow it.
+                if matches!(flow, ControlFlow::Exit { .. }) {
+                    anyhow::bail!("{}: `exit` is not supported where only a value is wanted", cmd.name);
+                }
+                let result = flow.into_absorbed_result();
                 self.emit_cmdsubst_stderr(&result, ctx).await;
                 Ok(Value::Bool(result.code == 0))
             }
@@ -5373,7 +5441,7 @@ impl Kernel {
     /// Functions push a new scope frame for local variables. Variables declared
     /// with `local` are scoped to the function; other assignments modify outer
     /// scopes (or create in root if new).
-    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg], ctx: &mut ExecContext) -> Result<ControlFlow> {
         let _depth = self.enter_recursion("a shell function")?;
 
         // 1. Build function args from AST args (async to support command substitution)
@@ -5413,6 +5481,7 @@ impl Kernel {
         let mut accumulated = StatementAccumulator::new();
         // Held until the scope is restored, then propagated.
         let mut exec_error: Option<anyhow::Error> = None;
+        let mut exited = false;
 
         for stmt in &def.body {
             match self.execute_stmt_flow(stmt, &mut *ctx).await {
@@ -5433,6 +5502,7 @@ impl Kernel {
                         ControlFlow::Exit { code, result: r } => {
                             accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
+                            exited = true;
                             break;
                         }
                     }
@@ -5455,7 +5525,13 @@ impl Kernel {
         if let Some(e) = exec_error {
             return Err(with_prior_output(accumulated.into_prior_output(), e));
         }
-        Ok(accumulated.finish())
+        let result = accumulated.finish();
+        // `return` stopped at this function; `exit` is not a function boundary
+        // and goes on to end the script.
+        if exited {
+            return Ok(ControlFlow::Exit { code: result.code, result });
+        }
+        Ok(ControlFlow::Normal(result))
     }
 
     fn enter_recursion(&self, what: &str) -> Result<RecursionGuard<'_>> {
@@ -5889,7 +5965,7 @@ impl Kernel {
     ///
     /// Unlike regular tool execution, `source` executes in the CURRENT scope,
     /// allowing the sourced script to set variables and modify shell state.
-    async fn execute_source(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_source(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<ControlFlow> {
         // `source`/`.` is the fourth dynamic re-entry point: it runs the
         // sourced file's statements inline via `execute_stmt_flow`, so a file
         // that sources itself recurses unbounded just like a runaway function
@@ -5903,7 +5979,7 @@ impl Kernel {
             Some(Value::String(s)) => s.clone(),
             Some(v) => value_to_string(v),
             None => {
-                return Ok(ExecResult::failure(1, "source: missing filename"));
+                return Ok(ControlFlow::Normal(ExecResult::failure(1, "source: missing filename")));
             }
         };
 
@@ -5928,10 +6004,10 @@ impl Kernel {
                     })?
                 }
                 Err(e) => {
-                    return Ok(ExecResult::failure(
+                    return Ok(ControlFlow::Normal(ExecResult::failure(
                         1,
                         format!("source: {}: {}", path, e),
-                    ));
+                    )));
                 }
             }
         };
@@ -5945,7 +6021,7 @@ impl Kernel {
                     .map(|e| format!("{}:{}: {}", path, e.span.start, e.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Ok(ExecResult::failure(1, format!("source: {}", msg)));
+                return Ok(ControlFlow::Normal(ExecResult::failure(1, format!("source: {}", msg))));
             }
         };
 
@@ -5977,12 +6053,14 @@ impl Kernel {
                         }
                         ControlFlow::Return { value } => {
                             accumulated.add_signal(value);
-                            return Ok(accumulated.finish());
+                            return Ok(ControlFlow::Normal(accumulated.finish()));
                         }
                         ControlFlow::Exit { code, result: r } => {
                             accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
-                            return Ok(accumulated.finish());
+                            // `exit` in a sourced file ends the shell, as in bash.
+                            let result = accumulated.finish();
+                            return Ok(ControlFlow::Exit { code: result.code, result });
                         }
                     }
                 }
@@ -5993,7 +6071,7 @@ impl Kernel {
             }
         }
 
-        Ok(accumulated.finish())
+        Ok(ControlFlow::Normal(accumulated.finish()))
     }
 
     /// Try to execute a script from PATH directories.
@@ -6751,7 +6829,7 @@ impl Kernel {
     /// the context. Everything per-invocation — the stdin family, the cancel
     /// token, the watchdog, the session fields — travels on `ctx` and never
     /// touches the slot here.
-    async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
         // Ensure nested dispatch (e.g. the `timeout` builtin re-dispatching
         // its inner command via ctx.dispatcher) routes through THIS kernel,
         // not a stale parent. Critical for forks: the fork's builtins must
@@ -7895,6 +7973,14 @@ impl CommandDispatcher for Kernel {
     /// the pipeline runner. It provides the full dispatch chain:
     /// user tools → builtins → .kai scripts → external commands → backend tools.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+        // The caller of `dispatch` has no way to end a script, so an `exit`
+        // stops at this call: its code becomes the result's.
+        Ok(self.dispatch_command(cmd, ctx).await?.into_absorbed_result())
+    }
+
+    /// Like `dispatch`, but an `exit` run by a function or `source` comes
+    /// back as `ControlFlow::Exit` for the caller to raise.
+    async fn dispatch_flow(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
         self.dispatch_command(cmd, ctx).await
     }
 
@@ -7922,6 +8008,10 @@ impl CommandDispatcher for Kernel {
     /// awareness kaish's own interpreter loops have had all along.
     fn is_cancelled(&self) -> bool {
         Kernel::is_cancelled(self)
+    }
+
+    async fn has_function(&self, name: &str) -> bool {
+        Kernel::has_function(self, name).await
     }
 
     /// Produce a forked dispatcher with independent mutable state (detached).
@@ -8315,6 +8405,13 @@ fn is_valueless(signal: &ExecResult) -> bool {
             Some(bytes) => bytes.is_empty(),
             None => signal.text_out().is_empty(),
         }
+}
+
+/// What a condition produced: its truth value, or an `exit` that a function
+/// in it ran, which ends the statement.
+enum Condition {
+    Value(Value),
+    Exit(i64),
 }
 
 /// Check if a value is truthy.

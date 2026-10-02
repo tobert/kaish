@@ -87,6 +87,7 @@ const CASES: &[Case] = &[
     Case { name: "cd", setup: &[], cmd: "cd src --json", expect: Expect::Empty },
     Case { name: "checksum", setup: &[], cmd: "checksum tmp/data.json --json", expect: Expect::Array },
     // Identical files → exit 0, no output (clean success untouched by --json).
+    Case { name: "command", setup: &[], cmd: "command -v echo --json", expect: Expect::String },
     Case { name: "cmp", setup: &[], cmd: "cmp tmp/data.json tmp/data.json --json", expect: Expect::Empty },
     Case { name: "cp", setup: &[], cmd: "cp tmp/data.json tmp/copy.json --json", expect: Expect::Empty },
     // cut populates `.data` with a per-line array (the same structure that
@@ -209,6 +210,7 @@ const CASES: &[Case] = &[
     Case { name: "typeof", setup: &["x=$(fromjson '[1,2,3]')"], cmd: "typeof $x --json", expect: Expect::String },
     Case { name: "unalias", setup: &["alias g=grep"], cmd: "unalias g --json", expect: Expect::Empty },
     Case { name: "uname", setup: &[], cmd: "uname --json", expect: Expect::String },
+    Case { name: "type", setup: &[], cmd: "type echo --json", expect: Expect::String },
     Case { name: "uniq", setup: &[], cmd: r#"printf 'a\na\nb\n' | uniq --json"#, expect: Expect::String },
     Case { name: "unset", setup: &["X=1"], cmd: "unset X --json", expect: Expect::Empty },
     Case { name: "values", setup: &["u=$(fromjson '{\"a\":1,\"b\":2}')"], cmd: "values $u --json", expect: Expect::Array },

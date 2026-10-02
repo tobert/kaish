@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use kaish_types::{ExecResult, ParamSchema, ToolArgs, ToolSchema, Value};
+use kaish_types::{ExecResult, ParamSchema, ToolArgs, ToolFlow, ToolSchema, Value};
 
 use crate::ctx::ToolCtx;
 use crate::issue::{IssueCode, Severity, ValidationIssue};
@@ -25,6 +25,17 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given arguments and context.
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult;
+
+    /// Execute the tool and report whether it ends the script.
+    ///
+    /// The kernel calls this, not `execute`. The default runs `execute` and
+    /// returns `ToolFlow::Normal`, which is right for almost every tool.
+    /// Override it only when the tool runs a user function or script for the
+    /// caller and an `exit` there must end the caller's script:
+    /// return `ToolFlow::Exit(result)` and the script stops with `result.code`.
+    async fn execute_flow(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ToolFlow {
+        ToolFlow::Normal(self.execute(args, ctx).await)
+    }
 
     /// Validate arguments without executing.
     ///

@@ -4,7 +4,7 @@
 //! trait so `FileWalker` and `IgnoreFilter` can work with any backend.
 
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::backend::KernelBackend;
 use crate::vfs::DirEntry;
@@ -61,5 +61,9 @@ impl WalkerFs for BackendWalkerFs<'_> {
 
     async fn file_size(&self, path: &Path) -> Option<u64> {
         self.0.stat(path).await.ok().map(|info| info.size)
+    }
+
+    fn walk_boundaries(&self) -> Vec<PathBuf> {
+        self.0.walk_boundaries()
     }
 }

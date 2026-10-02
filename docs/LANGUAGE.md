@@ -1403,6 +1403,7 @@ if (( n % 2 == 0 )); then echo even; else echo odd; fi
 set -e                           # exit on first error
 set -o trash                     # move rm'd files to freedesktop.org Trash
 set -o glob                      # enable bare glob expansion (on by default)
+set -o crossmounts               # recursive walks descend into other mounts
 set +o trash                     # disable trash
 set +o glob                      # disable bare glob expansion
 ```
@@ -1438,8 +1439,8 @@ on it to abort never does. Write the check the other way instead —
 one it actually gets.
 
 `set -o <name>` / `set +o <name>` on a name kaish doesn't implement exits
-**2** and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`,
-`trash`) — an unknown name is never silently ignored, because a caller that
+**2** and names the valid set (`crossmounts`, `glob`, `output-limit[=SIZE]`,
+`pipefail`, `trash`) — an unknown name is never silently ignored, because a caller that
 thinks it turned something on needs to know it didn't. The name is argv the
 caller can fix, so it is a usage error, not an operational 1.
 `set -o approvals` and `set -o latch` — retired spellings from
@@ -1572,6 +1573,35 @@ kaish-ignore                    # show current config
 See `help ignore` for the full `kaish-ignore` builtin (`add`/`remove`/`clear`/
 `defaults`/`auto`/`scope`) and the Agent-mode Enforced scope, where `find`
 filters too.
+
+### Walks stay in one mount
+
+A recursive walk stays in the mount where it starts. This covers `grep -r`,
+`find`, `ls -R`, `tree`, the `glob` builtin, and bare-glob expansion (`**`).
+The walk lists a mount point it reaches, as `find -xdev` does, but does not
+descend into it. A builtin whose walk skipped mounts names them once on
+stderr, after any errors, and keeps its exit status:
+`grep: skipped mounts /dev /tmp /v (use --cross-mounts to enter)`. Bare-glob
+expansion skips without a note. This is the reverse of GNU, where `-xdev` and
+`--one-file-system` are the opt-in: crawling `/v`, `/dev`, or an embedder's
+remote shares from `/` is rarely what a search of `/` wants.
+
+```sh
+grep -r TODO /                  # searches /, not /v, /dev, or /tmp
+grep -r TODO /v                 # names /v: walks it and every mount under it
+find / -name '*.log'            # prints /v and /tmp themselves, nothing below
+echo /tmp/*.log                  # a pattern's literal directories are named too
+grep -r --cross-mounts TODO /   # this call only: cross every mount
+set -o crossmounts              # this session: walks cross every mount
+find / -xdev -name '*.log'      # stays in its mount even under crossmounts
+```
+
+Mounts nested inside the one a walk starts in belong to it, so a walk from
+`/v` also walks the mounts under `/v`. A wildcard does not name a mount:
+`/v/**` walks `/v` and its nested mounts, but `/**` from `/` does not enter
+`/v`. A followed symlink (`-L`-style walks) is judged by where it points. An
+embedder decides which of its mounts count; see `KernelBackend::walk_boundaries`
+in `docs/EMBEDDING.md`.
 
 ## Error Handling
 
@@ -2018,7 +2048,7 @@ These are documented limitations of the current implementation:
 
 ### Builtins
 
-- **`set` supports `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. A bare unrecognized short flag (`-u`, `-x`) is silently ignored for compatibility, but an unrecognized `-o`/`+o` name exits 1 and names the valid set instead of no-opping (see Shell Options).
+- **`set` supports `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o crossmounts`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. A bare unrecognized short flag (`-u`, `-x`) is silently ignored for compatibility, but an unrecognized `-o`/`+o` name exits 1 and names the valid set instead of no-opping (see Shell Options).
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`grep` reads GNU BRE by default, exactly as GNU grep does** — `grep 'fn consult('` matches the text `fn consult(`: bare `( ) { } | + ?` are literal, and `\(…\)`, `\|`, `\{n,m\}`, `\+`, `\?` are operators. `*` at the start of a pattern or group and `^`/`$` in the middle of a pattern are literal; every character inside `[...]` is literal, backslash included; a backslash before an ordinary character (`\d`) is that character, with GNU's `grep: warning: stray \ before d` on stderr. `grep -E` is ERE (`grep -E 'a|b'`) — the same escape table applies there too: `grep -E -o '\d' f` still matches the letter `d`, not the regex engine's own digit class, and still warns. `grep -F` is a fixed string. Two GNU behaviors the regex engine cannot reach: back-references (`\1` is refused with exit 2, in BRE and in `-E` alike, even though GNU's `-E` runs one when a group precedes it), and the longest-alternative rule for `-o` (`grep -o 'a\|ab'` prints `a` on the line `ab`; GNU prints `ab`).
 - **`[[:alpha:]]` and its eleven siblings are Unicode-aware, matching GNU grep in a UTF-8 locale** — `grep -o '[[:alpha:]]' <<< 'héllo 日本語'` prints every letter, not just the ASCII ones (`grep -E` translates the same way). `[:digit:]` stays ASCII-only, as GNU's does. One gap remains: a combining mark (`e` + U+0301) is a word character for `-w`/`\w`/`\W` here (Unicode's mark property continues a word) but not for glibc's (it ends one).

@@ -4,15 +4,16 @@
 //! executed. The Kernel implements this trait with the full dispatch chain:
 //! user tools → builtins → .kai scripts → external commands → backend tools.
 //!
-//! `PipelineRunner` calls `dispatcher.dispatch()` for each command in a
-//! pipeline, handling I/O routing (stdin piping, redirects) around each call.
+//! `PipelineRunner` calls `dispatcher.dispatch_flow()` for each command in a
+//! pipeline (`dispatch()` is the same call with an `exit` folded into the
+//! result's code), handling I/O routing (stdin piping, redirects) around each call.
 //!
 //! ```text
 //! Stmt::Command ──┐
-//!                  ├──▶ execute_pipeline() ──▶ PipelineRunner::run(dispatcher, commands, ctx)
+//!                  ├──▶ execute_pipeline() ──▶ PipelineRunner::run_flow(dispatcher, commands, ctx)
 //! Stmt::Pipeline ──┘                                  │
 //!                                               for each command:
-//!                                                 dispatcher.dispatch(cmd, ctx)
+//!                                                 dispatcher.dispatch_flow(cmd, ctx)
 //!                                                     │
 //!                                               ┌─────┼──────────────┐
 //!                                               │     │              │
@@ -27,7 +28,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::ast::{Command, Expr, Stmt, Value};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ControlFlow, ExecResult};
 use crate::tools::ExecContext;
 #[cfg(test)]
 use crate::tools::{
@@ -123,6 +124,19 @@ pub trait CommandDispatcher: Send + Sync {
     /// output format extraction internally.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult>;
 
+    /// Dispatch a single command and report an `exit` it ran.
+    ///
+    /// Same as [`Self::dispatch`], except that a user function or `source`
+    /// whose body ran `exit` comes back as `ControlFlow::Exit` instead of
+    /// being folded into the result's code, so a caller that is not a
+    /// subshell (the statement runner, `timeout`) can end the script.
+    ///
+    /// The default wraps `dispatch` as `ControlFlow::Normal`: a dispatcher
+    /// with no functions never produces an exit. Only the `Kernel` overrides it.
+    async fn dispatch_flow(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
+        Ok(ControlFlow::Normal(self.dispatch(cmd, ctx).await?))
+    }
+
     /// Dispatch a compound statement (`if`, `for`, `while`, `case`) that sits
     /// in a pipeline stage.
     ///
@@ -166,6 +180,13 @@ pub trait CommandDispatcher: Send + Sync {
     /// The default is `false`: a dispatcher with no polled check of its own
     /// (the test-only `BackendDispatcher`) never reports one.
     fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    /// Whether `name` is a function defined in this dispatcher's shell, for
+    /// `command -v` and `type`. The default is `false`: a dispatcher without
+    /// a function table (the test-only `BackendDispatcher`) has none.
+    async fn has_function(&self, _name: &str) -> bool {
         false
     }
 

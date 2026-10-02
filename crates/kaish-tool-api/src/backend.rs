@@ -221,6 +221,22 @@ pub trait KernelBackend: Send + Sync {
     /// List all mount points.
     fn mounts(&self) -> Vec<MountInfo>;
 
+    /// The mount points a recursive walk stays between.
+    ///
+    /// Walking builtins (`grep -r`, `find`, `ls -R`, `tree`, `glob`, and glob
+    /// expansion) stay in the mount region where their walk starts: a walk
+    /// from `/` lists a mount point but does not descend into it, and a walk
+    /// that starts inside a mount also walks the mounts nested in it.
+    /// `--cross-mounts` or `set -o crossmounts` crosses. See
+    /// `kaish_glob::WalkBoundaries` for the rule.
+    ///
+    /// The default reports every mount point from [`mounts`](Self::mounts).
+    /// Override it to report fewer when some mounts are views of one
+    /// filesystem that a walk should pass through.
+    fn walk_boundaries(&self) -> Vec<PathBuf> {
+        self.mounts().into_iter().map(|mount| mount.path).collect()
+    }
+
     /// Resolve a VFS path to a real filesystem path.
     ///
     /// Returns `Some(path)` if the VFS path maps to a real filesystem (like
