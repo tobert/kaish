@@ -1701,7 +1701,7 @@ short-circuits the rest on a failure).
 
 Kaish has a single, uniform cancellation discipline that reaches every spawned external child:
 
-- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline. On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
+- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline; flags after the duration belong to `COMMAND` (`timeout 5 sh -c 'exit 3'`). On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
 - **`scatter ... --timeout DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result row is tagged `"timed_out": true` with `code` 124.
 - **`Kernel::cancel()`** (embedder API) — fires the kernel's cancellation token; running externals get SIGTERM/SIGKILL via the same path. The REPL wires this to Ctrl-C.
 - **`KernelConfig::request_timeout`** (embedder default) and **`ExecuteOptions::timeout`** (per-call) — apply at the kernel-call boundary; same kill behaviour, return code 124.
