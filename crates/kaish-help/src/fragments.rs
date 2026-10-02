@@ -824,10 +824,17 @@ set -e                    # exit on first error
 set -o pipefail           # a pipeline reports its rightmost failing stage
 set -o trash              # move rm'd / overwritten files to Trash
 set -o glob               # enable bare glob expansion (on by default)
+set -o crossmounts        # recursive walks descend into other mounts
 set +o trash              # disable trash
 set +o glob               # disable bare glob expansion
 set -o                    # report every option and its state
 ```
+
+Recursive walks (`grep -r`, `find`, `ls -R`, `tree`, `glob`, `**`) stay in the
+mount they start in: `grep -r x /` lists `/v` and `/dev` but does not search
+them. Name a mount to walk it (`grep -r x /v`); a walk inside a mount also
+walks the mounts nested in it. `--cross-mounts` on one command, or
+`set -o crossmounts`, crosses every mount.
 
 `cat missing | wc -l` exits **0** without pipefail — the status is the LAST
 stage's. With `set -o pipefail` it exits **1**. `${PIPESTATUS[0]}` reports
@@ -852,7 +859,8 @@ script — it exits 1 when `secret` IS in `f` and 0 when it is absent, but
 Env var: `KAISH_TRASH=1` enables trash at startup.
 
 `set -o NAME` / `set +o NAME` on a name kaish doesn't implement exits **2**
-and names the valid set (`glob`, `output-limit[=SIZE]`, `pipefail`, `trash`) — it never
+and names the valid set (`crossmounts`, `glob`, `output-limit[=SIZE]`, `pipefail`,
+`trash`) — it never
 silently no-ops. The name is argv the caller can fix, so this is a usage
 error, not an operational 1.
 `set -o approvals` and `set -o latch` — retired spellings from the removed

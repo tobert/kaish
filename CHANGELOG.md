@@ -24,6 +24,14 @@ breaking entries are marked **BREAKING**.
 - **Brace groups `{ a; b; }`** run a statement list in the current shell.
   Groups, `if`, `for`, `while`, and `case` accept trailing redirects, and
   planned commands report enclosing redirects so classifiers see the write.
+- **`KernelBackend::walk_boundaries`** and **`WalkerFs::walk_boundaries`** —
+  the mount points a recursive walk stays between. The backend default
+  reports `mounts()`; the `WalkerFs` default reports none (crosses
+  everything). `kaish_glob::WalkBoundaries` holds the rule, and
+  `WalkOptions::cross_mounts` turns it off for one walk.
+- **`set -o crossmounts`** and **`--cross-mounts`** on `grep`, `find`, `ls`,
+  `tree`, and `glob` — let a recursive walk descend into other mounts.
+
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
@@ -233,6 +241,16 @@ breaking entries are marked **BREAKING**.
   write to a closed pipe no longer kills the process outright.
 
 ### Changed
+
+- **BREAKING: recursive walks stay in the mount they start in.** `grep -r`,
+  `find`, `ls -R`, `tree`, `glob`, and bare-glob expansion (`**`) list a
+  mount point they reach but do not descend into it, the reverse of GNU's
+  `-xdev` opt-in: `grep -r x /` no longer searches `/v`, `/dev`, `/tmp`, or an
+  embedder's mounts. Naming a mount walks it and the mounts nested in it
+  (`grep -r x /v`). `--cross-mounts` on those builtins, or
+  `set -o crossmounts`, crosses. A walk over `/` from an embedder whose
+  writable directories are separate mounts no longer reaches them; see
+  `KernelBackend::walk_boundaries`.
 
 - **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does — bare
   `( ) { } | + ?` are literal (`grep 'fn consult('` works); use `grep -E '(a|b)'` for ERE.

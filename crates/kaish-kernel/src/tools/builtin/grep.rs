@@ -148,6 +148,11 @@ struct GrepArgs {
     #[arg(short = 'm', long = "max-count")]
     max_count: Option<String>,
 
+    /// Descend into other mounts during `-r`. By default the walk stays in
+    /// the mount region where it starts (see `set -o crossmounts`).
+    #[arg(long = "cross-mounts")]
+    cross_mounts: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -563,6 +568,7 @@ impl Grep {
                         yield_symlinks: dereference,
                         yield_special: false,
                         on_error: Some(Arc::clone(&on_error)),
+                        cross_mounts: ctx.walk_crosses_mounts(parsed.cross_mounts),
                         ..WalkOptions::default()
                     };
 

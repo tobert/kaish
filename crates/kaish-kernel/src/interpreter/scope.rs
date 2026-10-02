@@ -477,6 +477,9 @@ pub struct Scope {
     /// Pipefail mode (set -o pipefail): a pipeline reports the rightmost
     /// non-zero stage instead of only its last stage.
     pipefail_enabled: bool,
+    /// Cross-mounts mode (set -o crossmounts): recursive walks descend into
+    /// other mount regions instead of stopping at their mount points.
+    cross_mounts_enabled: bool,
     /// Kaish session identifier ($$). A monotonic counter assigned at Kernel
     /// construction (see `KERNEL_COUNTER` in kernel.rs) — *not* the OS PID.
     /// Subshells / forks inherit the parent's value (Scope clone copies it).
@@ -505,6 +508,7 @@ impl Scope {
             trash_max_size: 10 * 1024 * 1024, // 10 MB
             glob_enabled: true,
             pipefail_enabled: false,
+            cross_mounts_enabled: false,
             pid: 0,
         }
     }
@@ -785,6 +789,17 @@ impl Scope {
     /// Set the maximum file size for trash (bytes).
     pub fn set_trash_max_size(&mut self, size: u64) {
         self.trash_max_size = size;
+    }
+
+    /// Check if recursive walks cross mount regions (set -o crossmounts,
+    /// default false).
+    pub fn cross_mounts_enabled(&self) -> bool {
+        self.cross_mounts_enabled
+    }
+
+    /// Set cross-mounts mode (set -o crossmounts / set +o crossmounts).
+    pub fn set_cross_mounts_enabled(&mut self, enabled: bool) {
+        self.cross_mounts_enabled = enabled;
     }
 
     /// Check if glob expansion is enabled (set -o glob, default true).

@@ -6,10 +6,12 @@
 //! - **FileWalker**: Async recursive directory walker, generic over `WalkerFs`
 //! - **IgnoreFilter**: Gitignore-style pattern filtering
 //! - **IncludeExclude**: rsync-style include/exclude filters
+//! - **WalkBoundaries**: mount regions that keep a walk where it starts
 //!
 //! The walker is generic over `WalkerFs`, a minimal read-only filesystem trait.
 //! Consumers implement `WalkerFs` to adapt their own filesystem abstraction.
 
+mod boundaries;
 pub mod file_types;
 mod filter;
 pub mod filetype;
@@ -18,6 +20,7 @@ mod glob_path;
 mod ignore;
 mod walker;
 
+pub use boundaries::WalkBoundaries;
 pub use file_types::{build_file_types, list_file_types, FileTypeError};
 pub use filetype::{classify, detect, looks_like_text, Category, FileType, SNIFF_PREFIX_LEN};
 pub use filter::{FilterResult, IncludeExclude};
@@ -84,6 +87,17 @@ pub trait WalkerFs: Send + Sync {
     /// "unknown size" and yields the file regardless of the limit.
     async fn file_size(&self, _path: &Path) -> Option<u64> {
         None
+    }
+
+    /// The mount points a recursive walk stays between (see
+    /// [`WalkBoundaries`]): `FileWalker` does not descend from the region
+    /// where its walk starts into another one unless
+    /// `WalkOptions::cross_mounts` is set.
+    ///
+    /// Asked once per walk. The default reports none, so a walk over a
+    /// filesystem without mounts crosses everything.
+    fn walk_boundaries(&self) -> Vec<PathBuf> {
+        Vec::new()
     }
 }
 

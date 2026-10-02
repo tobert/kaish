@@ -40,6 +40,11 @@ struct TreeArgs {
     #[arg(long = "no-ignore", visible_alias = "no_ignore")]
     no_ignore: bool,
 
+    /// Descend into other mounts. By default the tree stays in the mount
+    /// region where it starts (see `set -o crossmounts`).
+    #[arg(long = "cross-mounts")]
+    cross_mounts: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -263,6 +268,9 @@ impl Tool for Tree {
             ctx.build_ignore_filter(&ctx.resolve_path(&resolved)).await
         };
 
+        // A directory in another mount region is shown but not entered.
+        let boundaries = ctx.walk_boundaries(parsed.cross_mounts);
+
         // Walk directory using stack-based iteration
         let mut stack: Vec<(String, usize)> = vec![(resolved.clone(), 0usize)];
         // Every directory the walk could not open: reported on stderr and
@@ -336,7 +344,9 @@ impl Tool for Tree {
                     .trim_start_matches('/');
 
                 if entry.is_dir() {
-                    stack.push((full_path.clone(), depth + 1));
+                    if boundaries.may_descend(Path::new(&resolved), Path::new(&full_path)) {
+                        stack.push((full_path.clone(), depth + 1));
+                    }
 
                     // Add directory to tree unless files_only
                     if !files_only {

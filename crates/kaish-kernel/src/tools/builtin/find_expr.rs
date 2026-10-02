@@ -2,8 +2,8 @@
 //!
 //! Precedence follows GNU find: `!` binds tighter than `-a` (also the
 //! implicit joiner between two tests), which binds tighter than `-o`.
-//! `-maxdepth` and `-mindepth` are options that read as an always-true test;
-//! they apply to the whole walk wherever they appear.
+//! `-maxdepth`, `-mindepth`, and `--cross-mounts` are options that read as an
+//! always-true test; they apply to the whole walk wherever they appear.
 
 use kaish_glob::glob_match;
 
@@ -67,6 +67,8 @@ pub(super) struct DepthOptions {
 pub(super) struct Parsed {
     pub expr: Expr,
     pub depth: DepthOptions,
+    /// `--cross-mounts`: the walk descends into other mount regions.
+    pub cross_mounts: bool,
 }
 
 /// Starting paths are the leading words that cannot begin an expression.
@@ -83,11 +85,11 @@ pub(super) fn split_operands(words: &[String]) -> (&[String], &[String]) {
 /// Errors are the complete text after `find: `.
 pub(super) fn parse(words: &[String]) -> Result<Parsed, String> {
     let mut parser = Parser {
-        words, at: 0, depth: DepthOptions::default(),
+        words, at: 0, depth: DepthOptions::default(), cross_mounts: false,
         nodes_remaining: MAX_EXPRESSION_NODES, nesting: 0,
     };
     if words.is_empty() {
-        return Ok(Parsed { expr: Expr::True, depth: parser.depth });
+        return Ok(Parsed { expr: Expr::True, depth: parser.depth, cross_mounts: false });
     }
     let expr = parser.or_expression()?;
     if let Some(word) = parser.peek() {
@@ -97,13 +99,14 @@ pub(super) fn parse(words: &[String]) -> Result<Parsed, String> {
             format!("'{word}' is not an operator or test here")
         });
     }
-    Ok(Parsed { expr, depth: parser.depth })
+    Ok(Parsed { expr, depth: parser.depth, cross_mounts: parser.cross_mounts })
 }
 
 struct Parser<'a> {
     words: &'a [String],
     at: usize,
     depth: DepthOptions,
+    cross_mounts: bool,
     nodes_remaining: usize,
     nesting: usize,
 }
@@ -271,6 +274,13 @@ impl Parser<'_> {
                 }
                 Ok(Expr::True)
             }
+            "-cross-mounts" if inline.is_some() => {
+                Err(format!("{word} does not take a value; use --cross-mounts"))
+            }
+            "-cross-mounts" => {
+                self.cross_mounts = true;
+                Ok(Expr::True)
+            }
             "-print" if inline.is_some() => Err(format!("{word} does not take a value; use -print")),
             "-print" => Ok(Expr::Print),
             _ => Err(format!("{word} is not supported (see `help find`)")),
@@ -423,6 +433,14 @@ mod tests {
         let parsed = parse(&words("-maxdepth 2 -mindepth 1 -name a")).unwrap();
         assert_eq!(parsed.depth, DepthOptions { max: Some(2), min: Some(1) });
         assert_eq!(parsed.expr, and(and(Expr::True, Expr::True), name("a")));
+    }
+
+    #[test]
+    fn cross_mounts_is_an_option_that_reads_as_true() {
+        let parsed = parse(&words("--cross-mounts -name a")).unwrap();
+        assert!(parsed.cross_mounts);
+        assert_eq!(parsed.expr, and(Expr::True, name("a")));
+        assert!(!parse(&words("-name a")).unwrap().cross_mounts);
     }
 
     #[test]

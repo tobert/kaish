@@ -80,6 +80,12 @@ struct FindArgs {
     #[arg(id = "ipath", long = "ipath")]
     _ipath: Option<String>,
 
+    /// Descend into other mounts. By default the walk stays in the mount
+    /// region where it starts and prints a mount point without entering it
+    /// (see `set -o crossmounts`).
+    #[arg(id = "cross-mounts", long = "cross-mounts")]
+    _cross_mounts: bool,
+
     #[command(flatten)]
     _global: GlobalFlags,
 
@@ -201,6 +207,7 @@ impl Tool for Find {
                 } else {
                     false
                 },
+                cross_mounts: ctx.walk_crosses_mounts(parsed.cross_mounts),
                 ..WalkOptions::default()
             };
 

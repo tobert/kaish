@@ -62,6 +62,12 @@ struct GlobArgs {
     #[arg(long = "exclude")]
     exclude: Vec<String>,
 
+    /// Descend into other mounts. By default the walk stays in the mount
+    /// region where the pattern's literal directories end (see
+    /// `set -o crossmounts`).
+    #[arg(long = "cross-mounts")]
+    cross_mounts: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -244,6 +250,7 @@ impl Tool for Glob {
                 include_hidden,
                 filter: filter.clone(),
                 types: file_types.clone(),
+                cross_mounts: ctx.walk_crosses_mounts(parsed.cross_mounts),
                 ..WalkOptions::default()
             };
 

@@ -900,6 +900,23 @@ impl ExecContext {
         Ok((None, text))
     }
 
+    /// Whether a recursive walk crosses mount regions: the builtin's own
+    /// `--cross-mounts` flag, or `set -o crossmounts`.
+    pub fn walk_crosses_mounts(&self, flag: bool) -> bool {
+        flag || self.scope.cross_mounts_enabled()
+    }
+
+    /// The mount regions a hand-rolled recursive walk (`ls -R`, `tree`)
+    /// stays in; `FileWalker` asks the backend itself. Empty when the walk
+    /// crosses mounts.
+    pub fn walk_boundaries(&self, flag: bool) -> crate::walker::WalkBoundaries {
+        if self.walk_crosses_mounts(flag) {
+            crate::walker::WalkBoundaries::default()
+        } else {
+            crate::walker::WalkBoundaries::new(self.backend.walk_boundaries())
+        }
+    }
+
     /// Resolve a path relative to cwd, normalizing `.` and `..` components.
     pub fn resolve_path(&self, path: &str) -> PathBuf {
         let raw = if path.starts_with('/') {
@@ -1288,6 +1305,7 @@ impl ExecContext {
         let options = WalkOptions {
             entry_types: EntryTypes::all(),
             respect_gitignore: self.ignore_config.auto_gitignore(),
+            cross_mounts: self.walk_crosses_mounts(false),
             ..WalkOptions::default()
         };
 

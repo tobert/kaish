@@ -7,7 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::{WalkerDirEntry, WalkerError, WalkerFs};
+use crate::{WalkBoundaries, WalkerDirEntry, WalkerError, WalkerFs};
 use crate::glob_path::GlobPath;
 use crate::ignore::IgnoreFilter;
 use crate::filter::IncludeExclude;
@@ -93,6 +93,11 @@ pub struct WalkOptions {
     /// Builds e.g. with `TypesBuilder::new().add_defaults().select("rust")`.
     /// Pure path-name matching — no I/O.
     pub types: Option<Arc<ignore::types::Types>>,
+    /// Descend into other mount regions (default `false`). By default a walk
+    /// stays in the region of its start, as reported by
+    /// `WalkerFs::walk_boundaries`: it yields a mount point it reaches but
+    /// does not descend into it. See [`WalkBoundaries`](crate::WalkBoundaries).
+    pub cross_mounts: bool,
 }
 
 impl fmt::Debug for WalkOptions {
@@ -110,6 +115,7 @@ impl fmt::Debug for WalkOptions {
             .field("yield_special", &self.yield_special)
             .field("on_error", &self.on_error.as_ref().map(|_| "..."))
             .field("types", &self.types.as_ref().map(|_| "..."))
+            .field("cross_mounts", &self.cross_mounts)
             .finish()
     }
 }
@@ -129,6 +135,7 @@ impl Clone for WalkOptions {
             yield_special: self.yield_special,
             on_error: self.on_error.clone(),
             types: self.types.clone(),
+            cross_mounts: self.cross_mounts,
         }
     }
 }
@@ -148,6 +155,7 @@ impl Default for WalkOptions {
             yield_special: true,
             on_error: None,
             types: None,
+            cross_mounts: false,
         }
     }
 }
@@ -234,10 +242,26 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
         if self.options.follow_symlinks {
             visited_dirs.insert(self.root.clone());
         }
-        // Stack carries: (directory, depth, ignore_filter for this dir)
-        let mut stack = vec![(self.root.clone(), 0usize, base_filter.clone())];
 
-        while let Some((dir, depth, current_filter)) = stack.pop() {
+        // Mount regions. The walk's start is its root extended by the
+        // pattern's leading literal directories: `/v/jobs/*` walked from `/`
+        // names `/v/jobs`, so the walk may enter it.
+        let boundaries = if self.options.cross_mounts {
+            WalkBoundaries::default()
+        } else {
+            WalkBoundaries::new(self.fs.walk_boundaries())
+        };
+        let start = match self.pattern.as_ref().and_then(GlobPath::static_prefix) {
+            Some(prefix) => self.root.join(prefix),
+            None => self.root.clone(),
+        };
+
+        // Stack carries: (directory, its real path, depth, ignore_filter for
+        // this dir). The real path differs from the directory once the walk
+        // follows a symlink; regions are decided on the real path.
+        let mut stack = vec![(self.root.clone(), self.root.clone(), 0usize, base_filter.clone())];
+
+        while let Some((dir, real_dir, depth, current_filter)) = stack.pop() {
             // Check max depth
             if let Some(max) = self.options.max_depth
                 && depth > max {
@@ -335,19 +359,25 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                         continue;
                     }
 
-                    // Cycle detection when following symlinks
-                    if entry_is_symlink && self.options.follow_symlinks {
-                        let canonical = self.fs.canonicalize(&full_path).await;
-                        if !visited_dirs.insert(canonical) {
-                            // Already visited this real directory — symlink cycle
-                            if let Some(ref cb) = self.options.on_error {
-                                cb(
-                                    &full_path,
-                                    &WalkerError::SymlinkCycle(full_path.display().to_string()),
-                                );
-                            }
-                            continue;
+                    // The real path decides the region; for a followed
+                    // symlink it also detects cycles.
+                    let real_path = if entry_is_symlink {
+                        self.fs.canonicalize(&full_path).await
+                    } else {
+                        real_dir.join(&entry_name)
+                    };
+                    if entry_is_symlink
+                        && self.options.follow_symlinks
+                        && !visited_dirs.insert(real_path.clone())
+                    {
+                        // Already visited this real directory — symlink cycle
+                        if let Some(ref cb) = self.options.on_error {
+                            cb(
+                                &full_path,
+                                &WalkerError::SymlinkCycle(full_path.display().to_string()),
+                            );
                         }
+                        continue;
                     }
 
                     // Check for nested .gitignore in this directory
@@ -388,8 +418,14 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                         }
                     };
 
-                    if should_recurse {
-                        dirs_to_push.push((full_path.clone(), depth + 1, child_filter));
+                    // A mount point in another region is yielded below but
+                    // not entered. A directory on the path to the start is
+                    // named, so it is checked by its lexical path.
+                    let same_region = start.starts_with(&full_path)
+                        || boundaries.may_descend(&start, &real_path);
+
+                    if should_recurse && same_region {
+                        dirs_to_push.push((full_path.clone(), real_path, depth + 1, child_filter));
                     }
 
                     // Yield directory if wanted
@@ -496,6 +532,8 @@ mod tests {
         dirs: Arc<RwLock<std::collections::HashSet<PathBuf>>>,
         /// Symlink path → target path (for directory symlinks)
         symlinks: Arc<RwLock<HashMap<PathBuf, PathBuf>>>,
+        /// Reported by `walk_boundaries`.
+        boundaries: Vec<PathBuf>,
     }
 
     impl MemoryFs {
@@ -506,7 +544,13 @@ mod tests {
                 files: Arc::new(RwLock::new(HashMap::new())),
                 dirs: Arc::new(RwLock::new(dirs)),
                 symlinks: Arc::new(RwLock::new(HashMap::new())),
+                boundaries: Vec::new(),
             }
+        }
+
+        fn with_boundaries(mut self, points: &[&str]) -> Self {
+            self.boundaries = points.iter().map(PathBuf::from).collect();
+            self
         }
 
         async fn add_file(&self, path: &str, content: &[u8]) {
@@ -635,6 +679,10 @@ mod tests {
         async fn canonicalize(&self, path: &Path) -> PathBuf {
             let symlinks = self.symlinks.read().await;
             Self::resolve_path(path, &symlinks)
+        }
+
+        fn walk_boundaries(&self) -> Vec<PathBuf> {
+            self.boundaries.clone()
         }
     }
 
@@ -1406,5 +1454,119 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(files, vec![PathBuf::from("/d/a.txt")]);
+    }
+
+    /// `/` holds `/home`; `/v` and `/dev` are mounts, and `/v/jobs` is a
+    /// mount nested in `/v`.
+    async fn make_mounted_fs() -> MemoryFs {
+        let fs = MemoryFs::new().with_boundaries(&["/", "/v", "/v/jobs", "/dev"]);
+        fs.add_file("/home/notes.txt", b"root region").await;
+        fs.add_file("/v/cas.txt", b"v region").await;
+        fs.add_file("/v/jobs/1/stdout", b"nested mount").await;
+        fs.add_file("/dev/zero", b"device").await;
+        fs
+    }
+
+    fn mount_walk_options() -> WalkOptions {
+        WalkOptions {
+            respect_gitignore: false,
+            entry_types: EntryTypes::all(),
+            ..Default::default()
+        }
+    }
+
+    fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths.sort();
+        paths
+    }
+
+    fn paths(items: &[&str]) -> Vec<PathBuf> {
+        sorted(items.iter().map(PathBuf::from).collect())
+    }
+
+    #[tokio::test]
+    async fn walk_from_root_yields_mount_points_without_entering_them() {
+        let fs = make_mounted_fs().await;
+        let found = FileWalker::new(&fs, "/")
+            .with_options(mount_walk_options())
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(sorted(found), paths(&["/dev", "/home", "/home/notes.txt", "/v"]));
+    }
+
+    #[tokio::test]
+    async fn walk_from_a_mount_enters_its_nested_mounts() {
+        let fs = make_mounted_fs().await;
+        let found = FileWalker::new(&fs, "/v")
+            .with_options(mount_walk_options())
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted(found),
+            paths(&["/v/cas.txt", "/v/jobs", "/v/jobs/1", "/v/jobs/1/stdout"])
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_mounts_walks_every_region() {
+        let fs = make_mounted_fs().await;
+        let found = FileWalker::new(&fs, "/")
+            .with_options(WalkOptions { cross_mounts: true, ..mount_walk_options() })
+            .collect()
+            .await
+            .unwrap();
+        assert!(found.contains(&PathBuf::from("/v/jobs/1/stdout")), "{found:?}");
+        assert!(found.contains(&PathBuf::from("/dev/zero")), "{found:?}");
+    }
+
+    #[tokio::test]
+    async fn pattern_naming_a_mount_reaches_it_from_root() {
+        let fs = make_mounted_fs().await;
+        let found = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("/v/jobs/*").unwrap())
+            .with_options(mount_walk_options())
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(found, vec![PathBuf::from("/v/jobs/1")]);
+    }
+
+    #[tokio::test]
+    async fn globstar_from_root_stays_in_the_root_region() {
+        let fs = make_mounted_fs().await;
+        let found = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("**/*.txt").unwrap())
+            .with_options(mount_walk_options())
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(found, vec![PathBuf::from("/home/notes.txt")]);
+    }
+
+    #[tokio::test]
+    async fn followed_symlink_into_another_region_is_not_entered() {
+        let fs = make_mounted_fs().await;
+        fs.add_dir_symlink("/home/jobs", "/v/jobs").await;
+        let found = FileWalker::new(&fs, "/home")
+            .with_options(WalkOptions { follow_symlinks: true, ..mount_walk_options() })
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(sorted(found), paths(&["/home/jobs", "/home/notes.txt"]));
+    }
+
+    #[tokio::test]
+    async fn pattern_naming_a_symlink_into_another_region_follows_it() {
+        let fs = make_mounted_fs().await;
+        fs.add_dir_symlink("/home/jobs", "/v/jobs").await;
+        let found = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("/home/jobs/*").unwrap())
+            .with_options(WalkOptions { follow_symlinks: true, ..mount_walk_options() })
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(found, vec![PathBuf::from("/home/jobs/1")]);
     }
 }
