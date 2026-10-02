@@ -4034,8 +4034,23 @@ impl Kernel {
         // `/v/bin/` / user-tool / builtin / `PATH` resolution unchanged.
         if let Some(form) = crate::validator::SpecialForm::from_name(name) {
             return match form {
-                crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
-                crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
+                crate::validator::SpecialForm::True | crate::validator::SpecialForm::False => {
+                    // Boolean forms ignore other argv; only global JSON needs binding.
+                    let format_args: Vec<Arg> = args.iter()
+                        .take_while(|arg| !matches!(arg, Arg::DoubleDash))
+                        .filter(|arg| matches!(arg,
+                            Arg::LongFlag(name) if name == "json"
+                        ) || matches!(arg, Arg::Named { key, .. } if key == "json"))
+                        .cloned().collect();
+                    let bound = self.build_args_async(&format_args, None, ctx).await?;
+                    let format = bound.has_flag("json").then_some(crate::interpreter::OutputFormat::Json);
+                    let result = if matches!(form, crate::validator::SpecialForm::True) {
+                        ExecResult::success("")
+                    } else {
+                        ExecResult::failure(1, "")
+                    };
+                    Ok(finalize_output(result, format, false))
+                }
                 crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args, ctx)).await,
             };
         }

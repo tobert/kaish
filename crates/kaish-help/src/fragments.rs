@@ -151,7 +151,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Depth::Summary,
         None,
         "**Structured output.** Every builtin can emit machine-readable data with \
-         `--json` (`ls --json`, `ps --json`, `kaish-vars --json`).",
+         `--json` (`ls --json`, `ps --json`, `kaish-vars --json`). Success keeps \
+         its value unwrapped; a nonzero formatted result uses \
+         `{\"code\":N,\"error\":\"...\"}`, with partial results under `data` or `output`. \
+         Check the exit code first. A spill keeps its preview and metadata.",
     )
     .ranked(8),
     en(

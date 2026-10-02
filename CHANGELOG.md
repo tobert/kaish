@@ -57,6 +57,10 @@ breaking entries are marked **BREAKING**.
   directories. Errors keep readable matches and exit 2. Recursive and
   multi-file searches read bounded chunks; `-q`, `-l`, and `-m` stop early.
 - `NAME --help` exits 0 across builtin argument binders, including `scatter` and `gather`. Declared option values shaped like `--help` or `--json` stay data. Unsupported builtin flags return a short refusal naming the supported help topic.
+- **BREAKING:** `--json` prints `{"code":N,"error":"..."}` for every nonzero
+  formatted result, including `grep` no-match, `false`, differing `diff` or
+  overlay results, and failed scatter workers. Partial results stay under `data` or `output`;
+  success stays unwrapped.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all

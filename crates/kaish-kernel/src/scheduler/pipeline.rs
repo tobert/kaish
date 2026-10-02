@@ -69,7 +69,7 @@ fn has_json_flag(args: &[Arg]) -> bool {
 /// (GH #222). Every early return in `run_scatter_gather` funnels through this
 /// one function, so it is the single place the format gets applied — not
 /// three separate copies threaded through each `return` site.
-fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
+pub(super) fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
     match format {
         Some(format) => apply_output_format(result, format),
         None => result,

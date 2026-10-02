@@ -1599,6 +1599,19 @@ a `VALUE` that isn't JSON is a flag value the builtin cannot use, also `2`.
 `124` (timeout) and `123` (a scatter worker failed) are the documented
 exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".
 
+### Nonzero JSON results
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+false --json                   # {"code":1,"error":""}
+diff --json before after       # exit 1, answer under data
+```
+
+`--json` keeps successful data unwrapped. An empty success prints nothing. A nonzero formatted result is an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The error removes one rendering newline and keeps other blank lines. Stderr still carries the same error. Check the exit code before reading the error or answer.
+
+Only the final builtin pipeline stage is formatted; earlier stages feed streams to the next stage. Command substitution captures the formatted result. `true` and `false` honor `--json` and its disabled forms. External commands receive the flag literally. Parse/validation refusals, unresolved commands, and redirect failures before builtin dispatch do not use this formatter. An output spill happens after formatting, so exit 3 keeps the truncated preview and spill metadata; the preview may be incomplete JSON. See "Shell Options".
+
 ## Background Jobs
 
 ```sh

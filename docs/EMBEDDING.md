@@ -52,9 +52,19 @@ newline. JSON output keeps its structure.
 
 Output is clean text by default — simple commands return plain text, structured
 builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable tab-separated
-values, and `--json` on any command emits JSON plus a parsed value (`data`) that
+values, and `--json` on a builtin emits JSON plus a parsed value (`data`) that
 builtins set explicitly — kaish never infers it by sniffing stdout. The exit
 code is something agents can branch on:
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+diff --json before after       # exit 1: {"code":1,"error":"","data":{...}}
+```
+
+With `--json`, success keeps the builtin's data unwrapped; an empty success prints nothing. Every nonzero formatted result uses an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The envelope's `error` removes one rendering newline; `err` remains unchanged. Check the exit code first, then the error and any partial data. `data` on the `ExecResult` mirrors the full envelope.
+
+Formatting applies to the final builtin stage and command substitution. Earlier pipeline stages remain input streams for the next stage. External commands receive `--json` as an argv word. Parse/validation refusals (`KernelError`), unresolved commands, and redirect failures before builtin dispatch do not pass through the builtin formatter. Spills are applied after formatting: exit 3 still returns the truncated preview and spill metadata rather than an envelope. Read `did_spill` and `original_code` before parsing that preview as JSON. Custom tools that own their output keep their successful format; nonzero results still use the envelope when they request JSON.
 
 | `code` | Meaning | Recovery |
 |--------|---------|----------|
