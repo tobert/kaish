@@ -245,4 +245,29 @@ mod tests {
             assert_eq!(parse(&text).unwrap(), t, "{text}");
         }
     }
+
+    #[test]
+    fn non_ascii_input_is_an_error_not_a_panic() {
+        // A multi-byte character at every position the parser slices or
+        // indexes: inside the year, at a separator, at the T, in the time
+        // fields, in the fraction, and at the zone.
+        for text in [
+            "2026-08-02T14:29:0\u{e9}.1Z",
+            "20\u{e9}6-08-02T14:29:01.1Z",
+            "202\u{e9}-08-02T14:29:01Z",
+            "2026-\u{e9}8-02T14:29:01Z",
+            "2026-08-02\u{e9}14:29:01Z",
+            "2026-08-02T1\u{e9}:29:01Z",
+            "2026-08-02T14:29:01\u{e9}Z",
+            "2026-08-02T14:29:01.\u{e9}Z",
+            "2026-08-02T14:29:01.12\u{e9}Z",
+            "2026-08-02T14:29:01.123\u{e9}",
+            "2026-08-02T14:29:01Z\u{e9}",
+            "\u{1f600}2026-08-02T14:29:01Z",
+            "2026-08-02T14:29:01.\u{1f600}\u{1f600}Z",
+        ] {
+            let err = parse(text).unwrap_err();
+            assert!(err.contains("invalid RFC 3339 timestamp"), "{text:?}: {err}");
+        }
+    }
 }
