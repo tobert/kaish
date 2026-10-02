@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, PipelineStage, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, ExecResult, OutputFormat, PathError};
+use crate::interpreter::{apply_output_format, ControlFlow, ExecResult, OutputFormat, PathError};
 use crate::tools::StdinState;
 use crate::tools::{global_flag_value_is_truthy, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
@@ -626,13 +626,24 @@ async fn run_opened_stage(
     opened: Result<OpenedRedirects, RedirectOpenError>,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
-) -> ExecResult {
+) -> ControlFlow {
     let redirects = stage.redirects();
-    let (result, in_effect, opened) = match opened {
+    let (flow, in_effect, opened) = match opened {
         Ok(opened) => (dispatch_redirected(stage, ctx, dispatcher).await, redirects, opened),
-        Err(failure) => failure.into_parts(redirects),
+        Err(failure) => {
+            let (result, in_effect, opened) = failure.into_parts(redirects);
+            (ControlFlow::Normal(result), in_effect, opened)
+        }
     };
-    finish_redirects(result, in_effect, opened, ctx).await
+    // An `exit` stays an exit through the redirects; its code is the
+    // finished result's, which the redirects may have changed.
+    let exited = matches!(flow, ControlFlow::Exit { .. });
+    let result = finish_redirects(flow.into_absorbed_result(), in_effect, opened, ctx).await;
+    if exited {
+        ControlFlow::Exit { code: result.code, result }
+    } else {
+        ControlFlow::Normal(result)
+    }
 }
 
 /// Send a result through the redirects in effect and write each opened
@@ -716,11 +727,11 @@ async fn dispatch_redirected(
     stage: &PipelineStage,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
-) -> ExecResult {
+) -> ControlFlow {
     let masked = mask_redirected_streams(stage.redirects(), ctx);
     let result = match dispatch_stage(stage, ctx, dispatcher).await {
-        Ok(result) => result,
-        Err(e) => fault_result(e),
+        Ok(flow) => flow,
+        Err(e) => ControlFlow::Normal(fault_result(e)),
     };
     masked.restore(ctx);
     result
@@ -731,10 +742,11 @@ async fn dispatch_stage(
     stage: &PipelineStage,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
-) -> anyhow::Result<ExecResult> {
+) -> anyhow::Result<ControlFlow> {
     match stage {
-        PipelineStage::Command(cmd) => dispatcher.dispatch(cmd, ctx).await,
-        PipelineStage::Compound(stmt) => dispatcher.dispatch_stmt(stmt, ctx).await,
+        PipelineStage::Command(cmd) => dispatcher.dispatch_flow(cmd, ctx).await,
+        // A compound stage is a subshell: its `exit` ended inside `dispatch_stmt`.
+        PipelineStage::Compound(stmt) => Ok(ControlFlow::Normal(dispatcher.dispatch_stmt(stmt, ctx).await?)),
     }
 }
 
@@ -765,8 +777,22 @@ impl PipelineRunner {
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
+        // This entry point has no script to end: an `exit` stops here.
+        self.run_flow(stages, ctx, dispatcher).await.into_absorbed_result()
+    }
+
+    /// Like [`Self::run`], but a lone command's `exit` (a function or
+    /// `source` that ran it) comes back as `ControlFlow::Exit`. Every other
+    /// shape absorbs it: a multi-stage pipeline's stages and a scatter's
+    /// workers are subshells.
+    pub async fn run_flow(
+        &self,
+        stages: &[PipelineStage],
+        ctx: &mut ExecContext,
+        dispatcher: &dyn CommandDispatcher,
+    ) -> ControlFlow {
         if stages.is_empty() {
-            return ExecResult::success("");
+            return ControlFlow::Normal(ExecResult::success(""));
         }
 
         // Check for scatter/gather pipeline. Scatter splits work across
@@ -781,16 +807,17 @@ impl PipelineRunner {
             {
                 Some(commands) => commands,
                 None => {
-                    return ExecResult::failure(
+                    return ControlFlow::Normal(ExecResult::failure(
                         2,
                         "scatter/gather cannot share a pipeline with an if/for/while/case \
                          stage. Run the compound on its own and pipe its output in.",
-                    )
+                    ))
                 }
             };
-            return self
-                .run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher)
-                .await;
+            return ControlFlow::Normal(
+                self.run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher)
+                    .await,
+            );
         }
 
         self.run_stage_sequence(stages, ctx, dispatcher).await
@@ -811,7 +838,8 @@ impl PipelineRunner {
             .cloned()
             .map(PipelineStage::Command)
             .collect();
-        self.run_stage_sequence(&stages, ctx, dispatcher).await
+        // Scatter workers and their pre/post stages are subshells: an `exit` stops here.
+        self.run_stage_sequence(&stages, ctx, dispatcher).await.into_absorbed_result()
     }
 
     /// Execute pipeline stages sequentially without scatter/gather detection.
@@ -820,24 +848,25 @@ impl PipelineRunner {
         stages: &[PipelineStage],
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
-    ) -> ExecResult {
+    ) -> ControlFlow {
         if stages.is_empty() {
-            return ExecResult::success("");
+            return ControlFlow::Normal(ExecResult::success(""));
         }
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            let result = self.run_single(&stages[0], ctx, dispatcher).await;
+            let mut flow = self.run_single(&stages[0], ctx, dispatcher).await;
+            let result = flow.result_mut();
             // A lone command is a pipeline of one, and bash reports it:
             // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
             // multi-stage case would leave the previous pipeline's codes
             // visible here — stale answers to a question the author just asked.
             ctx.scope.set_pipestatus(&[result.code]);
-            return result;
+            return flow;
         }
 
-        // Multi-stage pipeline
-        self.run_pipeline(stages, ctx, dispatcher).await
+        // Multi-stage pipeline: every stage is a subshell, so an `exit` ends only its stage.
+        ControlFlow::Normal(self.run_pipeline(stages, ctx, dispatcher).await)
     }
 
     /// Run a scatter/gather pipeline.
@@ -953,7 +982,7 @@ impl PipelineRunner {
         stage: &PipelineStage,
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
-    ) -> ExecResult {
+    ) -> ControlFlow {
         // Set pipeline position for stdio inheritance decisions
         ctx.pipeline_position = PipelinePosition::Only;
 
@@ -1074,7 +1103,10 @@ impl PipelineRunner {
                 // The stage's own (forked) dispatcher runs it: the borrowed
                 // `dispatcher` can't cross the spawn boundary, and
                 // `stage_ctx.dispatcher` is `None` on a bare kernel (GH #90).
-                let mut result = run_opened_stage(&stage, opened, &mut stage_ctx, &*task_dispatcher).await;
+                // A stage is a subshell: its `exit` ends the stage, not the script.
+                let mut result = run_opened_stage(&stage, opened, &mut stage_ctx, &*task_dispatcher)
+                    .await
+                    .into_absorbed_result();
 
                 // Close the read end now that the stage (redirects included)
                 // is done reading, so the stage writing into it gets a broken

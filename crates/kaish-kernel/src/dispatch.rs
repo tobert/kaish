@@ -27,7 +27,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::ast::{Command, Expr, Stmt, Value};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ControlFlow, ExecResult};
 use crate::tools::ExecContext;
 #[cfg(test)]
 use crate::tools::{
@@ -122,6 +122,19 @@ pub trait CommandDispatcher: Send + Sync {
     /// Implementations should handle schema-aware argument parsing and
     /// output format extraction internally.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult>;
+
+    /// Dispatch a single command and report an `exit` it ran.
+    ///
+    /// Same as [`Self::dispatch`], except that a user function or `source`
+    /// whose body ran `exit` comes back as `ControlFlow::Exit` instead of
+    /// being folded into the result's code, so a caller that is not a
+    /// subshell (the statement runner, `timeout`) can end the script.
+    ///
+    /// The default wraps `dispatch` as `ControlFlow::Normal`: a dispatcher
+    /// with no functions never produces an exit. Only the `Kernel` overrides it.
+    async fn dispatch_flow(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
+        Ok(ControlFlow::Normal(self.dispatch(cmd, ctx).await?))
+    }
 
     /// Dispatch a compound statement (`if`, `for`, `while`, `case`) that sits
     /// in a pipeline stage.

@@ -1908,14 +1908,14 @@ shell_compat! {
 // condition, a `[[ ]]` operand.
 shell_compat! {
     name: function_exit_in_for_word_substitution_is_absorbed,
-    script: "f(){ echo a; exit 3; }; for x in $(f); do echo got-$x; done; echo after",
+    script: "f(){ echo a; exit 3; }; for x in $(f); do echo \"got-$x\"; done; echo after",
     eq: "got-a\nafter",
     exit: 0,
 }
 
 shell_compat! {
     name: function_exit_in_condition_substitution_is_absorbed,
-    script: "f(){ echo hi; exit 4; }; if [ \"$(f)\" = hi ]; then echo yes; fi; echo after",
+    script: "f(){ echo hi; exit 4; }; if [[ \"$(f)\" == hi ]]; then echo yes; fi; echo after",
     eq: "yes\nafter",
     exit: 0,
 }
@@ -1939,4 +1939,25 @@ shell_compat! {
     script: "f(){ exit 3; }; false || f; echo after",
     eq: "",
     exit: 3,
+}
+
+shell_compat! {
+    name: function_exit_in_command_condition_substitution_is_absorbed,
+    script: "f(){ echo hi; exit 4; }; if echo \"$(f)\"; then echo yes; fi; echo after",
+    eq: "hi\nyes\nafter",
+    exit: 0,
+}
+
+shell_compat! {
+    name: function_exit_with_env_prefix_ends_script,
+    script: "f(){ exit 3; }; X=1 f; echo after",
+    eq: "",
+    exit: 3,
+}
+
+shell_compat! {
+    name: function_exit_in_background_job_ends_only_the_job,
+    script: "f(){ exit 3; }; f & wait; echo after",
+    contains: "after",
+    exit: 0,
 }

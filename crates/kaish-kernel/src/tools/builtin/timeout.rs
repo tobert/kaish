@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ast::{Arg, Command, Expr, Value};
 use crate::duration::parse_duration;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ControlFlow, ExecResult};
 use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Timeout tool: run a command with a deadline.
@@ -157,13 +157,22 @@ impl Tool for Timeout {
         });
 
         let saved = std::mem::replace(&mut ctx.cancel, child_token);
-        let dispatch_result = dispatcher.dispatch(&inner_cmd, ctx).await;
+        let dispatch_result = dispatcher.dispatch_flow(&inner_cmd, ctx).await;
         ctx.cancel = saved;
         timer.abort();
 
         match dispatch_result {
-            Ok(mut result) => {
-                if elapsed.load(Ordering::SeqCst) {
+            Ok(flow) => {
+                // `timeout` is not a subshell: an `exit` in the function it ran
+                // ends the script, unless the deadline already decided the status.
+                let timed_out = elapsed.load(Ordering::SeqCst);
+                if let ControlFlow::Exit { code, .. } = &flow
+                    && !timed_out
+                {
+                    ctx.redispatch_exit = Some(*code);
+                }
+                let mut result = flow.into_absorbed_result();
+                if timed_out {
                     result.code = 124;
                     // The timer firing is the authoritative reason, so always
                     // surface "timed out" — even when the inner command wrote

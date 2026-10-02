@@ -240,12 +240,13 @@ pub struct ExecContext {
     /// (`2>file`, `&>file`, `2>&1`) and for a whole-program job, which
     /// publishes each statement's stderr itself when the statement finishes.
     pub background_stream_stderr: bool,
-    /// Set by a user function or `source` whose body ran `exit N`: the
-    /// dispatch seam returns only an `ExecResult`, so this carries the signal
-    /// to `Kernel::execute_pipeline`, which turns it back into
-    /// `ControlFlow::Exit`. A multi-stage pipeline's stages run on child
-    /// contexts, so the flag never leaves a stage (bash runs each in a subshell).
-    pub(crate) exit_requested: Option<i64>,
+    /// The code of an `exit` that a builtin's re-dispatched command ran.
+    ///
+    /// `Tool::execute` returns only an `ExecResult`, so `timeout` leaves the
+    /// exit here for the kernel's builtin dispatch, which reads it from the
+    /// context it gave that builtin right after `execute` returns. Never
+    /// copied between contexts; every new context starts at `None`.
+    pub(crate) redispatch_exit: Option<i64>,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
@@ -574,7 +575,7 @@ impl ExecContext {
             background_job: None,
             background_stream_output: false,
             background_stream_stderr: false,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -618,7 +619,7 @@ impl ExecContext {
             background_job: None,
             background_stream_output: false,
             background_stream_stderr: false,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -659,7 +660,7 @@ impl ExecContext {
             background_job: None,
             background_stream_output: false,
             background_stream_stderr: false,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -700,7 +701,7 @@ impl ExecContext {
             background_job: None,
             background_stream_output: false,
             background_stream_stderr: false,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -744,7 +745,7 @@ impl ExecContext {
             background_job: None,
             background_stream_output: false,
             background_stream_stderr: false,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -785,7 +786,7 @@ impl ExecContext {
             background_job: None,
             background_stream_output: false,
             background_stream_stderr: false,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
@@ -1103,7 +1104,7 @@ impl ExecContext {
             background_job: self.background_job,
             background_stream_output: self.background_stream_output,
             background_stream_stderr: self.background_stream_stderr,
-            exit_requested: None,
+            redispatch_exit: None,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
