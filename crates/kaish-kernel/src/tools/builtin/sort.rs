@@ -108,9 +108,9 @@ impl Tool for Sort {
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => acc.push_str(&s),
-                        Err(_) => return ExecResult::failure(1, format!("sort: {}: invalid UTF-8", path)),
+                        Err(_) => return ExecResult::failure(2, format!("sort: {}: invalid UTF-8", path)),
                     },
-                    Err(e) => return ExecResult::failure(1, format!("sort: {}: {}", path, e)),
+                    Err(e) => return ExecResult::failure(2, format!("sort: {}: {}", path, e)),
                 }
             }
             acc

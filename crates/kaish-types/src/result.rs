@@ -857,7 +857,7 @@ mod tests {
         assert!(matches!(&result.out, OutputPayload::Text(s) if s.is_empty()));
         assert!(result.has_output());
         result.materialize();
-        assert_eq!(&*result.text_out(),"a\nb");
+        assert_eq!(&*result.text_out(),"a\nb\n");
         assert!(result.output.is_none());
     }
 

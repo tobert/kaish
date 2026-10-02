@@ -146,7 +146,7 @@ impl Tool for Checksum {
                 hasher.update(chunk);
             }
             let hash = hasher.finalize_hex();
-            let text = format!("{}  -", hash);
+            let text = format!("{}  -\n", hash);
             // Table convention (OutputData::to_json): first header binds to
             // node.name, remaining headers to cells — so HASH is the name.
             let node = OutputNode::new(&hash).with_cells(vec!["-".to_string(), algo]);
@@ -195,7 +195,10 @@ impl Tool for Checksum {
             }
         }
 
-        let text = text_lines.join("\n");
+        let mut text = text_lines.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
         let output = OutputData::table(
             vec!["HASH".to_string(), "FILE".to_string(), "ALGO".to_string()],
             nodes,

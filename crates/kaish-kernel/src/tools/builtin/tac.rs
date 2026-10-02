@@ -62,6 +62,7 @@ impl Tool for Tac {
         // Multiple files: reverse each in order (like GNU tac)
         if paths.len() > 1 {
             let mut output = String::new();
+            let mut errors = String::new();
             for path in &paths {
                 let resolved = ctx.resolve_path(path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
@@ -84,21 +85,19 @@ impl Tool for Tac {
                             }
                             output.push_str(&lines.join("\n"));
                         }
-                        Err(_) => {
-                            return ExecResult::failure(
-                                1,
-                                format!("tac: {}: invalid UTF-8", path),
-                            )
-                        }
+                        Err(_) => errors.push_str(&format!("tac: {}: invalid UTF-8\n", path)),
                     },
-                    Err(e) => return ExecResult::failure(1, format!("tac: {}: {}", path, e)),
+                    Err(e) => errors.push_str(&format!("tac: {}: {}\n", path, e)),
                 }
             }
             // Trailing-newline policy (builtin-sweep P4.1).
             if !output.is_empty() {
                 output.push('\n');
             }
-            return ExecResult::with_output(OutputData::text(output));
+            return super::with_operand_errors(
+                ExecResult::with_output(OutputData::text(output)),
+                errors,
+            );
         }
 
         // Single file or stdin

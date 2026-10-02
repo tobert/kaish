@@ -1040,8 +1040,8 @@ mod tests {
                 OutputNode::new("bar").with_cells(vec!["456".into()]),
             ],
         );
-        // "foo\t123\nbar\t456" = 3+1+3 + 1 + 3+1+3 = 15
-        assert_eq!(data.estimated_byte_size(), 15);
+        // "foo\t123\nbar\t456\n" = 3+1+3 + 1 + 3+1+3 + 1 = 16
+        assert_eq!(data.estimated_byte_size(), 16);
     }
 
     #[test]
@@ -1053,8 +1053,8 @@ mod tests {
                 OutputNode::new("lib.rs"),
             ]),
         ]);
-        // "src/{main.rs,lib.rs}" = 3 + 2 + 7 + 1 + 6 + 1 = 20
-        assert_eq!(data.estimated_byte_size(), 20);
+        // "src/{main.rs,lib.rs}\n" = 3 + 2 + 7 + 1 + 6 + 1 + 1 = 21
+        assert_eq!(data.estimated_byte_size(), 21);
     }
 
     #[test]

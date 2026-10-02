@@ -75,6 +75,7 @@ impl Tool for Cut {
 
         // POSIX: cut accepts multiple files and concatenates their content.
         // When no file is given, read stdin.
+        let mut errors = String::new();
         let input = if args.positional.is_empty() {
             match ctx.read_stdin_to_text().await {
                 Ok(s) => s.unwrap_or_default(),
@@ -91,9 +92,9 @@ impl Tool for Cut {
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => acc.push_str(&s),
-                        Err(_) => return ExecResult::failure(1, format!("cut: {}: invalid UTF-8", path)),
+                        Err(_) => errors.push_str(&format!("cut: {}: invalid UTF-8\n", path)),
                     },
-                    Err(e) => return ExecResult::failure(1, format!("cut: {}: {}", path, e)),
+                    Err(e) => errors.push_str(&format!("cut: {}: {}\n", path, e)),
                 }
             }
             acc
@@ -166,7 +167,7 @@ impl Tool for Cut {
             }
         }
 
-        if output.is_empty() {
+        let result = if output.is_empty() {
             ExecResult::success("")
         } else {
             // Populate .data so `for v in $(cut …)` iterates per output line.
@@ -177,7 +178,8 @@ impl Tool for Cut {
                 output.into_iter().map(serde_json::Value::String).collect(),
             ));
             ExecResult::success_with_data(text, data)
-        }
+        };
+        super::with_operand_errors(result, errors)
     }
 }
 
