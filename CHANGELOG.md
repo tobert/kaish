@@ -12,7 +12,9 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
-- Brace groups run a statement list in the current shell. Groups, `if`, `for`, `while`, and `case` accept trailing redirects; planned commands report enclosing redirects so classifiers see writes inside compounds.
+- **Brace groups `{ a; b; }`** run a statement list in the current shell.
+  Groups, `if`, `for`, `while`, and `case` accept trailing redirects, and
+  planned commands report enclosing redirects so classifiers see the write.
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the

@@ -48,7 +48,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 ## Execution
 
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
-- **A compound pipeline stage buffers.** A brace group, `for`/`while`/`if`/`case` may sit in any pipeline position, but such a stage runs to completion before the next stage sees a byte — `for f in $(seq 1 100000); do echo $f; done | head -n 1` runs every iteration where `sh` stops at the first line. Same answer, more work. Command stages still stream.
+- **A compound pipeline stage buffers.** Brace groups and `for`/`while`/`if`/`case` may sit in any pipeline position, but such a stage runs to completion before the next stage sees a byte — `for f in $(seq 1 100000); do echo $f; done | head -n 1` runs every iteration where `sh` stops at the first line. Same answer, more work. Command stages still stream.
 - **`scatter`/`gather` cannot share a pipeline with a compound stage** — exits 2. Run the compound on its own and pipe its output in.
 - **Scatter results are in item order**, never completion order — a row's position identifies its item.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.

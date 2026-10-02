@@ -2385,8 +2385,7 @@ fn pipeline_into_stmt(p: Pipeline) -> Stmt {
 
 /// True if `redirects` hold more than one stdin source (`<`, `<<`, `<<<`).
 /// Such a command or compound would silently depend on redirect ordering at
-/// execution time (`open_redirects` is last-wins), so `parse()` rejects it
-/// loudly.
+/// execution time (`open_redirects` is last-wins), so `parse()` refuses it.
 fn redirects_have_ambiguous_stdin(redirects: &[Redirect]) -> bool {
     redirects
         .iter()

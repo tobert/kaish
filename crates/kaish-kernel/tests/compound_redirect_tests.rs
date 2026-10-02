@@ -141,7 +141,7 @@ async fn a_redirect_that_cannot_open_trips_errexit() {
     assert_eq!(code, 1);
 }
 
-// ---- control flow survives the redirect ---------------------------------------
+// ---- control flow survives the redirect -------------------------------------
 
 /// A command anchors the redirect's plan while exit propagates out of the group.
 #[tokio::test]
@@ -204,7 +204,7 @@ async fn errexit_inside_a_redirected_body_exits() {
     assert_eq!(cat.text_out(), "first\n");
 }
 
-// ---- stdout and stderr ordering ---------------------------------------------------
+// ---- stdout and stderr ordering ---------------------------------------------
 
 /// kaish collects a compound's stdout and stderr separately, so `2>&1` puts
 /// all of stderr after all of stdout. bash interleaves them line by line
@@ -218,7 +218,7 @@ async fn merged_stderr_follows_stdout() {
     assert_eq!(code, 0);
 }
 
-// ---- stdin scoping --------------------------------------------------------------
+// ---- stdin scoping ----------------------------------------------------------
 
 /// Input redirects end with the compound; the displaced session input returns.
 #[tokio::test]
@@ -248,7 +248,7 @@ async fn redirected_compound_pipeline_preserves_session_input(
     assert_eq!(result.text_out(), expected);
 }
 
-// ---- plan: a compound's redirects reach every command inside it ---------------
+// ---- plan: a compound's redirects reach every command inside it -------------
 //
 // An embedder that classifies a statement as read-only because no
 // `PlannedCommand` carries a write redirect must see `{ cat a; } > out` as a
@@ -372,7 +372,7 @@ fn statement_kind_and_rendering(#[case] source: &str, #[case] kind: &str, #[case
     assert_eq!(plans[0].plan.rendered, rendered, "`{source}`");
 }
 
-// ---- refusals ---------------------------------------------------------------------
+// ---- refusals ---------------------------------------------------------------
 
 fn validation_codes(error: KernelError) -> Vec<(String, String)> {
     let KernelError::Validation { issues, .. } = error else {

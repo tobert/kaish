@@ -1499,7 +1499,7 @@ shell_compat! {
     bash_eq: "rc=0",
 }
 
-// ---- brace groups ----------------------------------------------------------
+// ---- brace groups ---------------------------------------------------------
 // `{ list; }` runs in the current shell: exit, return, break, and continue
 // inside it act on the enclosing script, function, or loop.
 
@@ -1568,7 +1568,7 @@ shell_compat! {
     bash_eq: "v=",
 }
 
-// ---- redirects on compound statements ----------------------------------------
+// ---- redirects on compound statements -------------------------------------
 // A redirect after `}`, `fi`, `done`, or `esac` applies to everything the
 // body writes. It opens before the body runs and does not stop `exit` or
 // `return` from leaving the enclosing script or function.

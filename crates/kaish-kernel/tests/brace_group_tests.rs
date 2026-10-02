@@ -58,7 +58,7 @@ fn a_record_literal_is_not_a_group() {
     assert!(!sexpr.contains("group"), "{sexpr}");
 }
 
-// ---- running a group ----------------------------------------------------------
+// ---- running a group --------------------------------------------------------
 
 #[rstest]
 #[case::in_order("{ echo a; echo b; }", "a\nb\n", 0)]
@@ -105,7 +105,7 @@ async fn loop_control_inside_a_group_reaches_the_loop(#[case] source: &str, #[ca
     assert_eq!(code, 0, "`{source}`");
 }
 
-// ---- session state -------------------------------------------------------------
+// ---- session state ----------------------------------------------------------
 
 /// A lone group runs in the current shell: what it sets stays set.
 #[rstest]
@@ -137,7 +137,7 @@ async fn a_group_as_an_earlier_stage_is_isolated() {
     assert_eq!(code, 0);
 }
 
-// ---- set -e ----------------------------------------------------------------------
+// ---- set -e -----------------------------------------------------------------
 
 /// A failing command inside a group trips errexit. A group whose status is
 /// nonzero only because a command failed where `-e` is ignored does not:
@@ -155,7 +155,7 @@ async fn errexit_inside_a_group_matches_bash(#[case] source: &str, #[case] stdou
     assert_eq!(actual_code, code, "`{source}` exit code");
 }
 
-// ---- validator --------------------------------------------------------------------
+// ---- validator --------------------------------------------------------------
 
 /// `break` inside a group inside a loop is inside the loop.
 #[tokio::test]
