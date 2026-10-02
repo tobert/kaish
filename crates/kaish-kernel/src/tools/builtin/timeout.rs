@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::ast::{Arg, Command, Expr, Value};
 use crate::duration::parse_duration;
 use crate::interpreter::{ControlFlow, ExecResult};
+use kaish_types::ToolFlow;
 use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Timeout tool: run a command with a deadline.
@@ -64,6 +65,21 @@ impl Tool for Timeout {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        // A direct caller has no script to end: the exit is the result's code.
+        self.run(args, ctx, &mut false).await
+    }
+
+    async fn execute_flow(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ToolFlow {
+        let mut exited = false;
+        let result = self.run(args, ctx, &mut exited).await;
+        // `timeout` is not a subshell: an `exit` in the function it ran ends the script.
+        if exited { ToolFlow::Exit(result) } else { ToolFlow::Normal(result) }
+    }
+}
+
+impl Timeout {
+    /// Run the command; `exited` is set when it ran `exit` before the deadline.
+    async fn run(&self, args: ToolArgs, ctx: &mut dyn ToolCtx, exited: &mut bool) -> ExecResult {
         let ctx = exec_context(ctx);
         let argv = match args.to_argv() {
             Ok(v) => v,
@@ -163,13 +179,10 @@ impl Tool for Timeout {
 
         match dispatch_result {
             Ok(flow) => {
-                // `timeout` is not a subshell: an `exit` in the function it ran
-                // ends the script, unless the deadline already decided the status.
+                // The deadline's verdict (124) outranks an exit that lost the race.
                 let timed_out = elapsed.load(Ordering::SeqCst);
-                if let ControlFlow::Exit { code, .. } = &flow
-                    && !timed_out
-                {
-                    ctx.redispatch_exit = Some(*code);
+                if matches!(flow, ControlFlow::Exit { .. }) && !timed_out {
+                    *exited = true;
                 }
                 let mut result = flow.into_absorbed_result();
                 if timed_out {

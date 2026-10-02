@@ -3863,7 +3863,6 @@ impl Kernel {
             background_job: ec.background_job,
             background_stream_output: ec.background_stream_output,
             background_stream_stderr: ec.background_stream_stderr,
-            redispatch_exit: None,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -4475,10 +4474,14 @@ impl Kernel {
             Some(stdout) => stdout.stats().await.total_written,
             None => 0,
         };
-        let mut result = tool.execute(tool_args, &mut *ctx).await;
-        // A re-dispatching builtin (`timeout`) leaves the exit of the command it
-        // ran here; read from this dispatch's own context, never copied back.
-        let redispatch_exit = ctx.redispatch_exit.take();
+        let flow = tool.execute_flow(tool_args, &mut *ctx).await;
+        let (mut result, exited) = match flow {
+            kaish_types::ToolFlow::Normal(result) => (result, false),
+            kaish_types::ToolFlow::Exit(result) => (result, true),
+            other => panic!(
+                "tool `{name}` returned a ToolFlow variant this kernel does not know: {other:?}"
+            ),
+        };
         if result.code == 2
             && let Some(refusal) = unknown_flag_refusal(name, &result.err)
         {
@@ -4548,11 +4551,11 @@ impl Kernel {
             }
         }
 
-        match redispatch_exit {
-            // `result.code`, not the requested code: the timeout verdict (124) is the result's.
-            Some(_) => Ok(ControlFlow::Exit { code: result.code, result }),
-            None => Ok(ControlFlow::Normal(result)),
+        // The tool ended the script; its result's code is the exit status.
+        if exited {
+            return Ok(ControlFlow::Exit { code: result.code, result });
         }
+        Ok(ControlFlow::Normal(result))
     }
 
     /// The session `HOME` from the kernel scope, if set. Tilde expansion reads
