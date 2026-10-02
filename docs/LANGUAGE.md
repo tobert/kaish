@@ -754,20 +754,21 @@ Both flags are repeatable. `--argjson` errors loudly on malformed JSON
 ### Read raw text with jq
 
 ```sh
-printf 'a\nb\n' | jq -R .       # one JSON string per line
-printf 'a\nb\n' | jq -R -s .    # one string: "a\nb\n"
-jq -R length notes.txt          # file input uses the same rules
+printf 'a\nb\n' | jq -R .     # one JSON string per line
+printf 'a\nb\n' | jq -R -s .  # one string: "a\nb\n"
+jq -R length notes.txt        # file input uses the same rules
 ```
 
-`-R` / `--raw-input` reads text instead of JSON. A final unterminated
-line still counts; a final newline adds no empty input line. Only LF separates
-lines; CR stays in the string. With `-s`,
-the whole input is one string, including its newlines; empty input is
-`""`. Without `-s`, empty input produces no results.
+`-R` / `--raw-input` reads text instead of JSON. A final unterminated line
+still counts; a final newline adds no empty input line. Only LF separates
+lines; CR stays in the string. With `-s`, the whole input is one string,
+including its newlines; empty input is `""`. Without `-s`, empty input
+produces no results.
 
 A runtime filter failure exits 1. Without `-s`, the error names its input
-line; other lines still run, and their output stays. `-n -R` is refused with exit 2 because
-kaish jq does not provide `input`/`inputs`; use `jq -R .` or `jq -R -s .`.
+line; other lines still run and their output stays. `-n -R` is refused with
+exit 2 because kaish jq does not provide `input`/`inputs`; use `jq -R .` or
+`jq -R -s .`.
 
 ### The text boundary — one document vs. many (JSONL)
 

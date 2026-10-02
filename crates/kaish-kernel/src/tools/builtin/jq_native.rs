@@ -474,8 +474,8 @@ impl Tool for JqNative {
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
         let mut issues = validate_against_schema(args, &self.schema());
 
-        // Runtime refuses this combination with supported input forms.
-        // Keep schema errors, but do not obscure that fix with filter compilation.
+        // Runtime refuses -n with -R and names the supported forms; skip
+        // filter compilation so its error cannot hide that refusal.
         if (args.has_flag("raw-input") || args.has_flag("R"))
             && (args.has_flag("null-input") || args.has_flag("n"))
         {
@@ -547,8 +547,8 @@ impl Tool for JqNative {
             None => return ExecResult::failure(2, "jq: filter expression required"),
         };
 
-        // Refused before compiling: a filter using `input`/`inputs` would
-        // otherwise fail as "undefined filter".
+        // Refuse before compiling: `input`/`inputs` would fail as
+        // "undefined filter".
         if (parsed.raw_input || args.has_flag("raw-input") || args.has_flag("R"))
             && (parsed.null_input || args.has_flag("null-input") || args.has_flag("n"))
         {
