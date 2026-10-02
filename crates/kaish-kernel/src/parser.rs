@@ -1540,27 +1540,45 @@ where
         let terminator = choice((just(Token::Newline), just(Token::Semi))).repeated();
 
         // A loop count is an integer. `NumericLiteral` is here because `-0` is
-        // one — a valid count whose source text does not round-trip, so it
-        // lexes as that variant rather than `Int` and would otherwise stop
-        // parsing.
+        // one — its source text does not round-trip, so it lexes as that
+        // variant rather than `Int`. It is still out of range (below 1).
         let loop_count = select! {
-            Token::Int(n) => n as usize,
+            Token::Int(n) => n,
             Token::NumericLiteral(data) if matches!(data.value, Value::Int(_)) => {
                 match data.value {
-                    Value::Int(n) => n as usize,
+                    Value::Int(n) => n,
                     _ => unreachable!("guarded by the select! pattern above"),
                 }
             },
         };
 
+        // The count must be at least 1, as in bash. Checked here, where the
+        // literal is known, so a negative count never reaches `as usize`.
+        let checked_count = |keyword: &'static str| {
+            loop_count
+                .map_with(|n, e| (n, e.span()))
+                .validate(move |(n, span), _, emitter| match usize::try_from(n) {
+                    Ok(levels) if levels >= 1 => levels,
+                    _ => {
+                        emitter.emit(Rich::custom(
+                            span,
+                            format!(
+                                "{keyword} {n}: loop count must be at least 1; write `{keyword}` or `{keyword} 1`"
+                            ),
+                        ));
+                        1
+                    }
+                })
+        };
+
         // break [N] - break out of N levels of loops (default 1)
         let break_stmt = just(Token::Break)
-            .ignore_then(loop_count.or_not())
+            .ignore_then(checked_count("break").or_not())
             .map(Stmt::Break);
 
         // continue [N] - continue to next iteration, skipping N levels (default 1)
         let continue_stmt = just(Token::Continue)
-            .ignore_then(loop_count.or_not())
+            .ignore_then(checked_count("continue").or_not())
             .map(Stmt::Continue);
 
         // return [expr] - return from a tool
