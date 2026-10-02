@@ -70,3 +70,58 @@ async fn unstattable_entry_fails_mtime_and_size_tests() {
     assert_eq!(r.code, 1);
     restore(&locked);
 }
+
+#[tokio::test]
+async fn missing_operand_is_reported_and_later_operands_still_run() {
+    let dir = tempdir();
+    std::fs::create_dir(dir.path().join("ok_dir")).unwrap();
+    std::fs::write(dir.path().join("ok_dir/a.txt"), "data").unwrap();
+    let kernel = kernel_at(dir.path());
+
+    let r = run(&kernel, "find missing ok_dir").await;
+    let out = r.text_out();
+    assert!(out.contains("ok_dir/a.txt"), "later operand skipped: {out}");
+    assert!(!out.contains("missing"), "missing operand printed: {out}");
+    assert_eq!(r.code, 1, "stderr: {}", r.err);
+    assert!(r.err.starts_with("find: 'missing': "), "stderr style: {}", r.err);
+    assert!(r.err.contains("No such file or directory"), "stderr reason: {}", r.err);
+}
+
+#[tokio::test]
+async fn unreadable_gitignore_is_reported_naming_the_file() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("a.txt"), "data").unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+    std::fs::set_permissions(
+        dir.path().join(".gitignore"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    if std::fs::read(dir.path().join(".gitignore")).is_ok() {
+        return; // permissions do not restrict this user (root)
+    }
+    let kernel = kernel_at(dir.path());
+    // find reads .gitignore only when the ignore config is enforced.
+    run(&kernel, "kaish-ignore scope enforced; kaish-ignore auto on").await;
+    let r = run(&kernel, "find . -name a.txt").await;
+    std::fs::set_permissions(
+        dir.path().join(".gitignore"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(r.text_out().contains("a.txt"), "walk must go on: {}", r.text_out());
+    assert_eq!(r.code, 1, "stderr: {}", r.err);
+    assert!(r.err.starts_with("find: './.gitignore': "), "stderr: {}", r.err);
+}
+
+#[tokio::test]
+async fn missing_gitignore_is_not_an_error() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("a.txt"), "data").unwrap();
+    let kernel = kernel_at(dir.path());
+    run(&kernel, "kaish-ignore scope enforced; kaish-ignore auto on").await;
+    let r = run(&kernel, "find . -name a.txt").await;
+    assert!(r.text_out().contains("a.txt"));
+    assert_eq!(r.code, 0, "stderr: {}", r.err);
+    assert_eq!(r.err, "");
+}
