@@ -33,6 +33,8 @@ enum Resolution {
     /// A `.kai` script on `PATH`.
     Script(PathBuf),
     /// A program on `PATH`.
+    // Only PATH resolution builds it, and that needs the subprocess feature.
+    #[cfg_attr(not(feature = "subprocess"), allow(dead_code))]
     File(String),
     /// A tool the embedder registered with the kernel backend.
     Tool,

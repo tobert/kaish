@@ -33,6 +33,8 @@ async fn run(kernel: &Kernel, script: &str) -> (String, String, i64) {
     (result.text_out().into_owned(), result.err.clone(), result.code)
 }
 
+// Resolving a program on PATH needs the subprocess feature.
+#[cfg(feature = "subprocess")]
 #[tokio::test]
 async fn command_v_names_each_kind() {
     let (kernel, dir) = kernel().await;
@@ -58,6 +60,8 @@ async fn command_v_of_a_missing_name_is_silent_and_fails() {
     }
 }
 
+// Resolving a program on PATH needs the subprocess feature.
+#[cfg(feature = "subprocess")]
 #[tokio::test]
 async fn command_v_answers_the_missing_program_idiom() {
     let (kernel, _dir) = kernel().await;
@@ -75,6 +79,8 @@ async fn command_v_with_several_names_fails_if_any_is_missing() {
     assert_eq!(code, 1);
 }
 
+// Resolving a program on PATH needs the subprocess feature.
+#[cfg(feature = "subprocess")]
 #[tokio::test]
 async fn type_describes_each_kind() {
     let (kernel, dir) = kernel().await;
@@ -92,6 +98,8 @@ async fn type_describes_each_kind() {
     }
 }
 
+// Resolving a program on PATH needs the subprocess feature.
+#[cfg(feature = "subprocess")]
 #[tokio::test]
 async fn type_t_prints_one_word() {
     let (kernel, _dir) = kernel().await;
