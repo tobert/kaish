@@ -58,7 +58,7 @@ pub mod walker {
     pub use kaish_glob::{
         build_file_types, list_file_types, EntryTypes, ErrorCallback, FileTypeError, FileWalker,
         FilterResult, GlobPath, IgnoreFilter, IncludeExclude, PathSegment, PatternError,
-        WalkOptions, WalkerDirEntry, WalkerError, WalkerFs,
+        WalkBoundaries, WalkOptions, WalkerDirEntry, WalkerError, WalkerFs,
     };
     pub use crate::backend_walker_fs::BackendWalkerFs;
 }

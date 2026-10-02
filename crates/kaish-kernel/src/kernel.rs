@@ -7950,6 +7950,10 @@ impl CommandDispatcher for Kernel {
         Kernel::is_cancelled(self)
     }
 
+    async fn has_function(&self, name: &str) -> bool {
+        Kernel::has_function(self, name).await
+    }
+
     /// Produce a forked dispatcher with independent mutable state (detached).
     ///
     /// Calls the inherent `Kernel::fork` method (note the UFCS to avoid
