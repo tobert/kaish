@@ -64,6 +64,10 @@ breaking entries are marked **BREAKING**.
   formatted result, including `grep` no-match, `false`, differing `diff` or
   overlay results, and failed scatter workers. Partial results stay under `data` or `output`;
   success stays unwrapped.
+- A redirect into a mount ancestor with no real directory names `mkdir -p`
+  when the backend can create the parent. For an uncovered target or an
+  immutable ancestor it names a writable mounted path. It never suggests a
+  read-only mount.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all

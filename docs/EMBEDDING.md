@@ -374,6 +374,18 @@ let kernel = Kernel::with_backend(
 )?;
 ```
 
+`KernelBackend::stat_write_parent` checks a redirect's parent directory in
+its owning filesystem, without synthesizing mount ancestors. The default
+refuses a read-only backend, then calls `stat`; a backend that synthesizes
+directories must override it. `LocalBackend` and `VirtualOverlayBackend`
+forward the query to the owning filesystem or backend. An uncovered redirect
+target exits 1 and names a mount from `mounts` whose root is writable and
+searchable, or says none is available. A covering filesystem with a missing
+real parent gets a `mkdir -p` hint. A missing immutable ancestor in
+`VirtualOverlayBackend` names a mounted path instead, because its `mkdir`
+cannot create that parent. Ordinary `stat` and directory listings still
+include mount ancestors.
+
 > **Warning:** `with_backend` kernels are **hermetic by construction**:
 > kaish mounts no host filesystem (your backend is the only I/O path),
 > output spill is forced in-memory (no host temp files), and
