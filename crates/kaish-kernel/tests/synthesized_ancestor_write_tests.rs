@@ -38,9 +38,9 @@ async fn redirect_into_synthesized_ancestor_names_the_fix() {
     assert_eq!((r.code, r.text_out().trim()), (0, "x"), "{r:?}");
 }
 
-// Keep the original observation census and enforce its exit-code contract.
+// Exit code of each write path into a synthesized ancestor.
 #[tokio::test]
-async fn census() {
+async fn write_paths_into_synthesized_ancestor() {
     for (script, expected_code) in [
         ("ls /", 0),
         ("ls /home", 0),
@@ -61,7 +61,7 @@ async fn census() {
         let r = kernel.execute(script).await.expect("execute");
         assert_eq!(r.code, expected_code, "{script}: {r:?}");
         eprintln!(
-            "CENSUS {script:?} => rc={} out={:?} err={:?}",
+            "{script:?} => rc={} out={:?} err={:?}",
             r.code,
             r.text_out(),
             r.err

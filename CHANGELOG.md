@@ -31,8 +31,10 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
-- Redirects into router-created mount ancestors now name `mkdir -p` when the backend permits creating a missing parent, or a writable mounted path for uncovered targets and immutable ancestors. Read-only mounts are never suggested.
-
+- A redirect into a mount ancestor with no real directory names `mkdir -p`
+  when the backend can create the parent. For an uncovered target or an
+  immutable ancestor it names a writable mounted path. It never suggests a
+  read-only mount.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all

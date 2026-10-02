@@ -425,9 +425,7 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
     let opened = if append {
         ctx.backend.append(&resolved, b"").await
     } else {
-        ctx.backend
-            .write(&resolved, b"", WriteMode::Overwrite)
-            .await
+        ctx.backend.write(&resolved, b"", WriteMode::Overwrite).await
     };
     if let Err(error) = opened {
         if matches!(error, BackendError::NotFound(_))
@@ -437,11 +435,7 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
         }
         return Err(redirect_error(path, &error));
     }
-    Ok(OpenedFile {
-        path: path.to_string(),
-        resolved,
-        append,
-    })
+    Ok(OpenedFile { path: path.to_string(), resolved, append })
 }
 
 /// Name an actual writable mount when no mount covers the failed target.
@@ -456,8 +450,8 @@ async fn unmounted_write_hint(ctx: &ExecContext, path: &str, resolved: &Path) ->
 
 /// The directory `mkdir -p` must create for `path` to open, or `None` when
 /// it cannot be named with certainty. Checks the spelled parent, then one
-/// symlink hop at `path`; a name is returned only once `stat_write_parent` confirms it is
-/// missing, so the hint never names a directory that exists.
+/// symlink hop at `path`; a name is returned only once `stat_write_parent`
+/// confirms it is missing, so the hint never names a directory that exists.
 async fn missing_directory_of(
     ctx: &ExecContext, path: &str, resolved: &Path,
 ) -> crate::backend::BackendResult<Option<PathBuf>> {
@@ -477,8 +471,7 @@ async fn missing_directory_of(
     }
     let link_target = match ctx.backend.read_link(resolved).await {
         Ok(target) => target,
-        // This is only a hint probe after canonicalization failed; preserve
-        // that failure when there is no readable link target to inspect.
+        // No readable link target: keep the canonicalization failure.
         Err(_) => return Ok(None),
     };
     let Some(target_parent) = link_target.parent().filter(|parent| !parent.as_os_str().is_empty()) else {

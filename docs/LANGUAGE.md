@@ -683,12 +683,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > cannot open, the command does not run and exits 1; the error goes where
 > stderr points at that moment (`cmd 2>&1 > /missing/f` sends it to
 > stdout). A missing parent directory is an error, never created — run
-> `mkdir -p` first. A router-created mount ancestor may be visible even when
-> its real parent directory is missing. When the backend permits creating
-> that parent, the error names `mkdir -p`. Outside every mount, or when an
-> overlay ancestor is immutable, it names a writable mounted path instead
-> (or says no writable mounted path is available). `cat f > f` empties `f`, as in bash, because `>`
-> truncates before `cat` reads.
+> `mkdir -p` first. A mount ancestor can be visible with no real directory.
+> When the backend can create that parent, the error names `mkdir -p`.
+> Outside every mount, or under an immutable overlay ancestor, it names a
+> writable mounted path instead, or says none is available. `cat f > f`
+> empties `f`, as in bash, because `>` truncates before `cat` reads.
 >
 > **One file as input and output is refused.** `sort < f > f` exits 1
 > with `redirect: f is both input and output (> empties it before it is

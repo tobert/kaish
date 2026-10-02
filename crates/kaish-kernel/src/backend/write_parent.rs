@@ -1,3 +1,5 @@
+//! Hints that name a usable path or command in a redirect error.
+
 use std::path::Path;
 
 use super::KernelBackend;
@@ -11,8 +13,7 @@ pub(crate) async fn mounted_path_hint(backend: &dyn KernelBackend, path: &Path) 
         (std::cmp::Reverse(shared), mount.path.clone())
     });
     for mount in mounts.into_iter().filter(|mount| !mount.read_only) {
-        // Inaccessible roots cannot supply a usable hint; the caller retains
-        // the original failed target instead of a different mount's error.
+        // Skip a root that cannot be probed; its error is not the redirect's.
         if let Ok(access) = backend.path_access(&mount.path).await
             && access.writable && access.executable
         {
@@ -40,4 +41,3 @@ pub(crate) fn hint_path(path: &Path) -> String {
         )
     }
 }
-
