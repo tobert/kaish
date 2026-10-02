@@ -35,6 +35,12 @@ breaking entries are marked **BREAKING**.
   points a walk reached without entering. Those builtins name them once on
   stderr: `grep: skipped mounts /dev /v (use --cross-mounts to enter)`. The
   exit status is unchanged.
+- **`command -v`, `command -V`, and `type`** — name what a command word
+  runs: an alias, function, builtin, `.kai` script, or program on `PATH`.
+  `command -v gcc >/dev/null || echo MISSING` now answers on a shell that
+  only looks programs up. `command NAME ARGS` without `-v`/`-V` is refused
+  with the fix. `CommandDispatcher::has_function` (default `false`) lets the
+  builtins see functions.
 - **`find -xdev`** (also `-mount`) — keeps the walk in its mount region even
   under `set -o crossmounts`. With `--cross-mounts` it is an error.
 
