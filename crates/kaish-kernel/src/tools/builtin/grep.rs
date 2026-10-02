@@ -72,7 +72,7 @@ struct GrepArgs {
 
     /// Like -r, but also read symlinks to files found inside. A symlinked
     /// directory is not entered.
-    #[arg(short = 'R')]
+    #[arg(id = "R", short = 'R')]
     recursive_upper: bool,
 
     /// Allow patterns to match across line boundaries.
@@ -136,7 +136,7 @@ struct GrepArgs {
     ftype_list: bool,
 
     /// Include hidden files and directories (dotfiles) in the recursive walk.
-    /// Off by default; applies to `-r` only.
+    /// Off by default; applies to `-r` and `-R` only.
     #[arg(long = "hidden")]
     hidden: bool,
 
@@ -450,6 +450,14 @@ impl Grep {
             max_count,
         };
 
+        // Validate search options even when -m 0 needs no input.
+        if max_count == Some(0) {
+            return match build_searcher(&grep_opts) {
+                Ok(_) => ExecResult::from_output(1, "", ""),
+                Err(error) => ExecResult::failure(2, format!("grep: {error}")),
+            };
+        }
+
         // Handle recursive search
         if recursive {
             // Partition the operands by kind. A *directory* is walked; a *file*
@@ -509,9 +517,9 @@ impl Grep {
                 let on_error: ErrorCallback = {
                     let walk_errors = Arc::clone(&walk_errors);
                     Arc::new(move |path: &Path, error: &WalkerError| {
-                        if let Ok(mut errors) = walk_errors.lock() {
-                            errors.push((path.to_path_buf(), error.to_string()));
-                        }
+                        let mut errors = walk_errors.lock()
+                            .unwrap_or_else(|_| panic!("grep walk error collector poisoned"));
+                        errors.push((path.to_path_buf(), error.to_string()));
                     })
                 };
                 for root in &dir_roots {
@@ -578,7 +586,7 @@ impl Grep {
                 sources.extend(file_operands.into_iter().map(|path| Source { path, walked: false }));
                 let walk_errors = match walk_errors.lock() {
                     Ok(mut errors) => std::mem::take(&mut *errors),
-                    Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+                    Err(_) => panic!("grep walk error collector poisoned"),
                 };
 
                 // Display prefix: GNU prefixes every result with the operand
@@ -965,6 +973,9 @@ impl Grep {
 
         let opts = GrepOptions {
             show_filename: true,
+            // These modes emit no context, so it must not force whole-file buffering.
+            before_context: if quiet || files_only || count_only { None } else { base_opts.before_context },
+            after_context: if quiet || files_only || count_only { None } else { base_opts.after_context },
             ..base_opts.clone()
         };
 
@@ -3087,6 +3098,17 @@ mod tests {
         assert!(whole.text.contains("needle after the quiet nul"));
         assert!(!whole.text.contains("never reported"));
         assert_parity(&input, "needle", &file_opts());
+    }
+
+    #[test]
+    fn chunked_search_preserves_binary_conversion() {
+        let mut input = b"needle before\0needle after\n".to_vec();
+        input.extend_from_slice(&haystack(30_000));
+        let opts = GrepOptions {
+            binary_detection: BinaryDetection::convert(b'\0'),
+            ..file_opts()
+        };
+        assert_parity(&input, "needle", &opts);
     }
 
     #[test]

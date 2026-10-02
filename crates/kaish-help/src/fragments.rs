@@ -452,6 +452,11 @@ push services[web][tags] canary   # bracket-path target
 ~/src/project             # tilde expands to $HOME
 cd                        # bare cd goes to $HOME
 cd -                      # previous directory
+
+# Tilde expansion applies only to an unquoted ~ at the start of a word —
+# a quoted "~" or '~' is a literal path, never $HOME:
+echo ~/x                  # /home/amy/x
+echo '~/x'                # ~/x
 ```"#,
     ),
     syntax_section(
@@ -530,6 +535,8 @@ A redirect target is a single word: quote it when it interpolates
 target (`> $(cmd)`) works; bare text-plus-interpolation does not.
 
 One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
+A redirect's input belongs to its command: `seq 3 | jq . < f` reads `f`, and
+the session's stdin is unchanged afterward.
 jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
 without a subprocess. jq also accepts real jq's `--arg NAME VALUE`,
 `--argjson NAME VALUE`, and `-n` / `--null-input` flags for binding
@@ -705,7 +712,18 @@ set -o glob               # re-enable (on by default)
 
 Zero matches is an error (exit code 1). The `glob` builtin receives its
 pattern as written — `glob **/*.rs` needs no quotes, takes multiple patterns,
-and adds `--exclude`, `--ftype`, and depth control."#,
+and adds `--exclude`, `--ftype`, and depth control.
+
+```sh
+grep -rn TODO src          # skip discovered symlinks, devices, FIFOs and sockets
+grep -R -l TODO src        # read file symlinks; do not enter linked directories
+```
+
+`grep` reads explicitly named paths. Walk and read errors name the path on stderr,
+keep other matches and exit 2; `-q` exits 0 on a match even after an error.
+Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the
+first match per file; `-m N` stops after N selected lines; `-m 0` reads no contents.
+Context output, multiline matching and encoding conversion still buffer whole files."#,
     ),
     syntax_section(
         "regex",

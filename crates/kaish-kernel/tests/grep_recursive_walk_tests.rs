@@ -521,3 +521,80 @@ async fn count_streams_a_large_text_file() {
     assert_eq!(counters.whole_reads.load(Ordering::SeqCst), 0);
     assert!(counters.largest_request.load(Ordering::SeqCst) <= CHUNK);
 }
+
+#[rstest::rstest]
+#[case("grep -rq -C 2 needle /data", "")]
+#[case("grep -rl -C 2 needle /data", "/data/endless.txt\n")]
+#[tokio::test]
+async fn early_match_modes_ignore_context_on_endless_input(
+    #[case] command: &str,
+    #[case] expected: &str,
+) {
+    let (kernel, counters) = generated_kernel("endless.txt", Content::EndlessNeedles);
+    let result = run_bounded(&kernel, command).await.expect("bounded grep finished");
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out(), expected);
+    assert!(counters.bytes_served.load(Ordering::SeqCst) <= 2 * CHUNK);
+}
+
+#[rstest::rstest]
+#[case("grep -r -m 0 -C 2 needle /data")]
+#[case("grep -r -c -m 0 needle /data")]
+#[case("grep -c -m 0 needle /data/endless.txt")]
+#[tokio::test]
+async fn zero_max_count_does_not_read_file_contents(#[case] command: &str) {
+    let (kernel, counters) = generated_kernel("endless.txt", Content::EndlessNeedles);
+    let result = run_bounded(&kernel, command)
+        .await.expect("bounded grep finished");
+    assert_eq!(result.code, 1, "{}", result.err);
+    assert_eq!(result.text_out(), "");
+    assert_eq!(counters.bytes_served.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_missing_root_does_not_discard_matches_in_another_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("tree")).unwrap();
+    std::fs::write(tmp.path().join("tree/plain.txt"), "needle\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+    let result = run_bounded(&kernel, "grep -r needle missing tree")
+        .await.expect("bounded grep finished");
+    assert_eq!(result.text_out(), "tree/plain.txt:needle\n");
+    assert_eq!(result.code, 2);
+    assert!(result.err.contains("missing"), "{}", result.err);
+}
+
+#[tokio::test]
+async fn zero_max_count_still_refuses_invalid_encoding() {
+    let (kernel, counters) = generated_kernel("endless.txt", Content::EndlessNeedles);
+    let result = run_bounded(&kernel,
+        "grep -r -m 0 needle /data --encoding no-such-encoding")
+        .await.expect("bounded grep finished");
+    assert_eq!(result.code, 2, "{}", result.err);
+    assert!(result.err.contains("invalid encoding") && result.err.contains("no-such-encoding"),
+        "{}", result.err);
+    assert_eq!(counters.bytes_served.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn published_dereference_parameter_names_a_supported_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("tree")).unwrap();
+    std::fs::write(tmp.path().join("plain.txt"), "needle\n").unwrap();
+    symlink("../plain.txt", tmp.path().join("tree/link")).unwrap();
+    let kernel = kernel_at(tmp.path());
+    let schemas = kernel.tool_schemas();
+    let grep = schemas.iter().find(|schema| schema.name == "grep").unwrap();
+    let parameter = grep.params.iter().find(|parameter|
+        parameter.name == "R" || parameter.aliases.iter().any(|alias| alias == "R"))
+        .unwrap();
+    let flag = if parameter.name.len() == 1 {
+        format!("-{}", parameter.name)
+    } else {
+        format!("--{}", parameter.name)
+    };
+    let result = run_bounded(&kernel, &format!("grep {flag} needle tree"))
+        .await.expect("bounded grep finished");
+    assert_eq!(result.code, 0, "published parameter {}: {}", parameter.name, result.err);
+    assert_eq!(result.text_out(), "tree/link:needle\n");
+}

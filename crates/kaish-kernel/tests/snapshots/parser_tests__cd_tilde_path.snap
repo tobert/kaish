@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd cd (pos (string "~/foo")))
+(cmd cd (pos (tilde-path "~/foo")))
