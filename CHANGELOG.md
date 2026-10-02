@@ -19,6 +19,8 @@ breaking entries are marked **BREAKING**.
 - `jq -R` reads each text line as a string; `-R -s` reads the whole input
   as one string. A failing input line is reported with exit 1 while other
   lines still run. `-n -R` is refused with an alternative.
+- Builtin `find` supports AND, OR, negation, quoted parenthesis groups, and ordered `-print` actions. Expressions are limited to 256 nodes and 64 nested groups or negations.
+- Builtin `cat` supports `-A`, `-v`, `-E`, and `-T`; `ls -d` lists directories themselves, and `grep -x` matches whole lines.
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
@@ -54,6 +56,7 @@ breaking entries are marked **BREAKING**.
   under `-r`; `-R` reads file symlinks but does not enter linked
   directories. Errors keep readable matches and exit 2. Recursive and
   multi-file searches read bounded chunks; `-q`, `-l`, and `-m` stop early.
+- `NAME --help` exits 0 across builtin argument binders, including `scatter` and `gather`. Declared option values shaped like `--help` or `--json` stay data. Unsupported builtin flags return a short refusal naming the supported help topic.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all

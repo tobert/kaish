@@ -661,6 +661,24 @@ including `--json`. The value still expands: `echo -- --greeting=$USER`
 prints `--greeting=` followed by the variable. A short flag with a value
 (`-n=1`) is not a word on either side of `--`; quote it (`echo "-n=1"`).
 
+### Builtin flags and expressions
+
+```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                    # same as -vET
+ls -d directory                # list the directory itself; overrides -R
+grep -x 'ready' file           # match a whole line; overrides -w
+find --help                    # print help and exit 0
+find . -name --help            # --help is the name to match
+```
+
+`find` joins tests with `-a` (or `-and`, also implied by adjacency), `-o` (or `-or`), and `!` (or `-not`). Negation binds before AND, then OR. Quote parentheses to group tests. Tests short-circuit; each reached `-print` prints the entry once, so two reached actions print twice. Without an explicit `-print`, a matching entry prints once. An expression allows at most 256 nodes, counting tests, operators, and groups, with at most 64 nested groups or negations. Larger expressions exit 2 with a smaller-expression hint. See `help find` for the supported tests and depth options.
+
+`cat -v` marks control bytes as `^X`, DEL as `^?`, and bytes above 127 with `M-` plus the same notation; tabs and newlines stay. `-T` marks tabs as `^I`; `-E` adds `$` before each newline and marks a preceding carriage return as `^M`. `-A` enables all three. Display modes buffer the input. `-n` numbers the marked lines; with only `-E` or `-T`, non-UTF-8 input exits 1 and names `-v` as the fix.
+
+`NAME --help` prints builtin help to stdout and exits 0. A declared option value shaped like `--help` or `--json` remains data. Expression tools such as `test` recognize only a leading `--help`. Unsupported builtin flags exit 2 and name `help NAME` for the supported flags.
+
 ## Pipes & Redirects
 
 ```sh

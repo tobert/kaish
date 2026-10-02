@@ -22,6 +22,22 @@ struct CatArgs {
     #[arg(short = 'n', long = "number")]
     number: bool,
 
+    /// Show nonprinting characters, tabs, and line ends: same as -vET.
+    #[arg(short = 'A', long = "show-all")]
+    show_all: bool,
+
+    /// Show nonprinting characters as ^X, or M-X for bytes above 127. Tabs and newlines stay.
+    #[arg(short = 'v', long = "show-nonprinting")]
+    show_nonprinting: bool,
+
+    /// Show `$` at the end of each line.
+    #[arg(short = 'E', long = "show-ends")]
+    show_ends: bool,
+
+    /// Show tabs as ^I.
+    #[arg(short = 'T', long = "show-tabs")]
+    show_tabs: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -62,6 +78,14 @@ impl Tool for Cat {
         };
         parsed.global.apply(ctx);
         let number_lines = parsed.number;
+        let show = ShowOptions {
+            nonprinting: parsed.show_all || parsed.show_nonprinting,
+            ends: parsed.show_all || parsed.show_ends,
+            tabs: parsed.show_all || parsed.show_tabs,
+        };
+        if show.any() {
+            return show_stream(ctx, &args, number_lines, show).await;
+        }
 
         // If no files specified, read from stdin (like POSIX cat)
         if args.positional.is_empty() {
@@ -261,6 +285,138 @@ impl Tool for Cat {
             );
         }
         super::with_operand_errors(ExecResult::with_output(OutputData::text(all_content)), errors)
+    }
+}
+
+/// Which of `-v`, `-E`, `-T` are on (`-A` turns on all three).
+#[derive(Clone, Copy)]
+struct ShowOptions {
+    nonprinting: bool,
+    ends: bool,
+    tabs: bool,
+}
+
+impl ShowOptions {
+    fn any(self) -> bool {
+        self.nonprinting || self.ends || self.tabs
+    }
+}
+
+/// `cat -v/-E/-T/-A`: read stdin or every file as one byte stream, mark it
+/// up, and optionally number the marked lines (`-n`).
+async fn show_stream(
+    ctx: &mut ExecContext,
+    args: &ToolArgs,
+    number_lines: bool,
+    show: ShowOptions,
+) -> ExecResult {
+    let mut data: Vec<u8> = Vec::new();
+    let mut errors = Vec::new();
+    if args.positional.is_empty() {
+        match ctx.read_stdin_to_bytes().await {
+            Ok(stdin) => data = stdin.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(1, format!("cat: {e}")),
+        }
+    } else {
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("cat: {e}")),
+        };
+        if paths.is_empty() {
+            return ExecResult::failure(1, "cat: missing path argument");
+        }
+        for path in &paths {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("cat");
+            }
+            let resolved = ctx.resolve_path(path);
+            match ctx.backend.read(Path::new(&resolved), None).await {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(e) => errors.push(format!("cat: {path}: {e}")),
+            }
+        }
+    }
+    let marked = match mark_up(&data, show, ctx).await {
+        Ok(marked) => marked,
+        Err(_) => return kaish_tool_api::Interrupted.result("cat"),
+    };
+    let finish = |mut result: ExecResult| {
+        if !errors.is_empty() {
+            result.code = 1;
+            result.err = errors.join("\n");
+        }
+        result
+    };
+    if !number_lines {
+        return finish(ExecResult::success_text_or_bytes(marked));
+    }
+    let text = match String::from_utf8(marked) {
+        Ok(t) => t,
+        Err(_) => {
+            return ExecResult::failure(
+                1,
+                "cat: -n with -E or -T needs text; add -v to show non-text bytes",
+            )
+        }
+    };
+    if text.is_empty() {
+        return finish(ExecResult::with_output(OutputData::text(text)));
+    }
+    let rows: Vec<crate::interpreter::OutputNode> = text
+        .lines()
+        .enumerate()
+        .map(|(i, line)| crate::interpreter::OutputNode::new(line).at_line(i as u64 + 1))
+        .collect();
+    let mut numbered = text
+        .lines()
+        .enumerate()
+        .map(|(i, line)| format!("{:6}\t{}", i + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.ends_with('\n') {
+        numbered.push('\n');
+    }
+    let table = OutputData::table(vec!["TEXT".to_string()], rows);
+    finish(ExecResult::with_output_and_text(table, numbered))
+}
+
+/// Render `data` as GNU `cat -vET` does. With `-E`, a carriage return that
+/// directly precedes a newline shows as `^M`, as it does in GNU cat.
+async fn mark_up(data: &[u8], show: ShowOptions, ctx: &mut ExecContext) -> Result<Vec<u8>, kaish_tool_api::Interrupted> {
+    let mut out = Vec::with_capacity(data.len() + data.len() / 8);
+    for (at, &byte) in data.iter().enumerate() {
+        if at % (64 * 1024) == 0 {
+            ctx.checkpoint().await?;
+        }
+        match byte {
+            b'\n' => {
+                if show.ends {
+                    out.push(b'$');
+                }
+                out.push(b'\n');
+            }
+            b'\t' if show.tabs => out.extend_from_slice(b"^I"),
+            b'\t' => out.push(b'\t'),
+            b'\r' if show.ends && data.get(at + 1) == Some(&b'\n') => out.extend_from_slice(b"^M"),
+            _ if show.nonprinting => push_visible(&mut out, byte),
+            _ => out.push(byte),
+        }
+    }
+    Ok(out)
+}
+
+/// `^X` for control bytes, `^?` for DEL, `M-` plus the same for bytes of 128 and up.
+fn push_visible(out: &mut Vec<u8>, byte: u8) {
+    let low = if byte >= 128 {
+        out.extend_from_slice(b"M-");
+        byte - 128
+    } else {
+        byte
+    };
+    match low {
+        0..=31 => out.extend_from_slice(&[b'^', low + 64]),
+        127 => out.extend_from_slice(b"^?"),
+        _ => out.push(low),
     }
 }
 

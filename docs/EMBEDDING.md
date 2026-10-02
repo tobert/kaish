@@ -916,8 +916,8 @@ its `Value::Bytes`, so binary never crosses the argv/text boundary.
 `words_argv()` renders the stream into argv tokens, with a `Value::Bytes` word
 as an inert placeholder whose real bytes stay at the same index in `words`.
 
-- **`--json` stays the kernel's.** It is removed from `words` wherever it
-  appears — including last, where a subcommand tree puts it — and recorded in
+- **Standalone `--json` stays the kernel's.** It is removed from `words` before
+  `--` unless consumed as a root-schema-declared option value, and recorded in
   `flags`, so `args.has_flag("json")` answers it and the kernel applies the
   output format exactly as for a typed tool. Past a literal `--` it is your
   operand, not the kernel's flag.
@@ -927,9 +927,11 @@ as an inert placeholder whose real bytes stay at the same index in `words`.
   owning output: you emit the final bytes, so you parse the flag that asks for
   them. Lifting it would strip it from your argv *and* skip rendering, leaving
   the request handled by nobody.
-- **`--help`/`-h` reach your parser.** `flags` is empty of them, so the
-  kernel's generic help router stands aside — the same responsibility
-  `.with_owned_output()` carries, and the two combine.
+- **Standalone `--help` requests generic help.** The kernel skips
+  root-schema-declared option values while checking for help. A flag claimed
+  by your schema stays yours. A `--` word stops generic help detection.
+  Verbatim `-h` stays tool-owned. With `.with_owned_output()`, both help
+  flags reach your parser and handling them is your responsibility.
 - **The schema is unchanged.** It still supplies help, completion and the
   parameter list. Schema-shaped argument validation is skipped, because it
   would judge a decomposition your tool never receives; override

@@ -4238,13 +4238,7 @@ impl Kernel {
             // schema can't express "this leaf claims help" and intercepting here would
             // render top-level help and return before `execute()` ever sees the
             // request (#51). Pass it through and let the tool render its own help.
-            let schema_claims = |flag: &str| -> bool {
-                let bare = flag.trim_start_matches('-');
-                schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
-            };
-            let wants_help = !schema.owns_output
-                && ((tool_args.flags.contains("help") && !schema_claims("help"))
-                    || (tool_args.flags.contains("h") && !schema_claims("-h")));
+            let wants_help = crate::tools::requests_builtin_help(&tool_args, schema);
 
             (tool_args, wants_help, schema.owns_output, schema.raw_argv, schema.typed_substitution)
         };
@@ -4329,6 +4323,11 @@ impl Kernel {
             None => 0,
         };
         let mut result = tool.execute(tool_args, &mut *ctx).await;
+        if result.code == 2
+            && let Some(refusal) = unknown_flag_refusal(name, &result.err)
+        {
+            result.err = refusal;
+        }
         // A command substitution binds `.data` only when it is the result's
         // VALUE. `--json` and the pipeline sideband read `.data` either way,
         // so this marks the ONE consumer whose answer is a matter of taste.
@@ -7068,8 +7067,13 @@ pub(crate) async fn bind_tool_args(
     if schema.is_some_and(|s| matches!(s.arg_binding, crate::tools::ArgBinding::Verbatim)) {
         let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
         let mut words: Vec<Value> = Vec::new();
-        let mut past_double_dash = false;
+        let mut argument_state = crate::tools::VerbatimArgumentState::default();
+        let schema = match schema {
+            Some(schema) => schema,
+            None => unreachable!("verbatim binding requires a schema"),
+        };
         for arg in args {
+            let words_start = words.len();
             match arg {
                 Arg::Positional(expr) => {
                     let glob = if let Expr::GlobPattern(p) = expr {
@@ -7104,7 +7108,8 @@ pub(crate) async fn bind_tool_args(
                 Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
                 Arg::LongFlag(name) => {
                     if lift_global_flags
-                        && !past_double_dash
+                        && !argument_state.past_end_marker()
+                        && !argument_state.expects_value()
                         && crate::tools::is_global_output_flag(name)
                     {
                         tool_args.flags.insert(name.clone());
@@ -7117,7 +7122,8 @@ pub(crate) async fn bind_tool_args(
                         anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
                     })?;
                     if lift_global_flags
-                        && !past_double_dash
+                        && !argument_state.past_end_marker()
+                        && !argument_state.expects_value()
                         && crate::tools::is_global_output_flag(key)
                     {
                         // Removed from the words whether or not it is on: the
@@ -7159,9 +7165,12 @@ pub(crate) async fn bind_tool_args(
                     words.push(Value::String(format!("{key}={val_str}")));
                 }
                 Arg::DoubleDash => {
-                    past_double_dash = true;
+                    argument_state.mark_end_marker();
                     words.push(Value::String("--".to_string()));
                 }
+            }
+            for word in &words[words_start..] {
+                argument_state.consume(word, schema);
             }
         }
         tool_args.words = Some(words);
@@ -8661,6 +8670,28 @@ mod argv_classify_tests {
             );
         }
     }
+}
+
+/// Rewrite a builtin's clap "unexpected argument" error for a flag-shaped
+/// word as `ls: -Z is not supported (see `help ls`)`.
+///
+/// clap's text adds a usage block and a tip about passing the word as a
+/// value; for a word the binder already read as a flag, that tip misleads.
+/// Every clap-parsed builtin formats its parse error as `NAME: {clap error}`,
+/// so one rewrite after dispatch covers them all. `None` leaves any other
+/// error, and a stray operand that is not flag-shaped, as the tool wrote it.
+fn unknown_flag_refusal(name: &str, err: &str) -> Option<String> {
+    let rest = err.strip_prefix(name)?.strip_prefix(": error: unexpected argument '")?;
+    let (word, tail) = rest.split_once('\'')?;
+    if !word.starts_with('-') {
+        return None;
+    }
+    let similar = tail
+        .split_once("a similar argument exists: '")
+        .and_then(|(_, after)| after.split_once('\''))
+        .map(|(flag, _)| format!(" (similar: {flag})"))
+        .unwrap_or_default();
+    Some(format!("{name}: {word} is not supported{similar} (see `help {name}`)"))
 }
 
 #[cfg(all(test, feature = "subprocess"))]
@@ -12173,5 +12204,26 @@ AFTER="yes"'"#)
             Some(job_id),
             "a pipeline stage under a background job lost the job id",
         );
+    }
+
+    #[test]
+    fn unknown_flag_refusal_rewrites_clap_text() {
+        let clap = "ls: error: unexpected argument '-Z' found\n\n  tip: to pass '-Z' as a value, use '-- -Z'\n\nUsage: ls [OPTIONS] [PATHS]...\n";
+        assert_eq!(
+            unknown_flag_refusal("ls", clap).as_deref(),
+            Some("ls: -Z is not supported (see `help ls`)")
+        );
+        let similar = "ls: error: unexpected argument '--lon' found\n\n  tip: a similar argument exists: '--long'\n";
+        assert_eq!(
+            unknown_flag_refusal("ls", similar).as_deref(),
+            Some("ls: --lon is not supported (similar: --long) (see `help ls`)")
+        );
+    }
+
+    #[test]
+    fn unknown_flag_refusal_leaves_other_errors_alone() {
+        assert_eq!(unknown_flag_refusal("ls", "ls: error: unexpected argument 'extra' found\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "cat: error: unexpected argument '-Z' found\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "ls: cannot access 'x'\n"), None);
     }
 }

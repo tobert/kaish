@@ -433,6 +433,27 @@ Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the
 first match per file; `-m N` stops after N selected lines; `-m 0` reads no contents.
 Context output, multiline matching and encoding conversion still buffer whole files.
 
+## Builtin Flags
+
+```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                # show nonprinting bytes, tabs, and line ends
+ls -d directory            # list the directory itself; overrides -R
+grep -x 'ready' file       # match a whole line; overrides -w
+find --help                # print help and exit 0
+```
+
+In `find`, `!` binds before `-a` (also implied between tests), then `-o`.
+Quote parentheses to pass them to `find`. Tests short-circuit; each reached
+`-print` prints once. Without `-print`, matching entries print once.
+Expressions allow at most 256 nodes and 64 nested groups or negations;
+larger expressions exit 2 and name the limit.
+
+`--help` and `--json` used as a declared option value stay data:
+`find . -name --help` searches for that name. Unsupported builtin flags
+exit 2 and name `help` for the builtin's supported flags.
+
 ## Regex (grep, sed, awk)
 
 ```sh
