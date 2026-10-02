@@ -466,4 +466,35 @@ mod tests {
         assert!(result.ok());
         assert_eq!(result.text_out().as_ref(), "hello");
     }
+
+    #[rstest::rstest]
+    #[case::length_negative("length", -1, Err("-l -1"))]
+    #[case::length_zero("length", 0, Ok(""))]
+    #[case::length_valid("length", 2, Ok("6865\n"))]
+    #[case::seek_negative("seek", -1, Err("-s -1"))]
+    #[case::seek_zero("seek", 0, Ok("68656c6c6f\n"))]
+    #[case::seek_valid("seek", 2, Ok("6c6c6f\n"))]
+    #[tokio::test]
+    async fn test_xxd_count_flags(
+        #[case] flag: &str,
+        #[case] value: i64,
+        #[case] expected: Result<&str, &str>,
+    ) {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+        let mut args = ToolArgs::new();
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        args.named.insert(flag.to_string(), Value::Int(value));
+        let result = Xxd.execute(args, &mut ctx).await;
+        match expected {
+            Ok(out) => {
+                assert!(result.ok(), "{}", result.err);
+                assert_eq!(result.text_out().as_ref(), out);
+            }
+            Err(named) => {
+                assert_eq!(result.code, 2, "{}", result.text_out());
+                assert!(result.err.contains(named), "{}", result.err);
+            }
+        }
+    }
 }

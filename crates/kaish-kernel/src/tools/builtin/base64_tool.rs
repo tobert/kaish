@@ -362,4 +362,27 @@ mod tests {
         assert!(result.ok());
         assert_eq!(result.text_out().as_ref(), "");
     }
+
+    #[rstest::rstest]
+    #[case::negative(-1, Err("-w -1"))]
+    #[case::zero(0, Ok("aGVsbG8gd29ybGQ=\n"))]
+    #[case::valid(8, Ok("aGVsbG8g\nd29ybGQ=\n"))]
+    #[tokio::test]
+    async fn test_wrap_width(#[case] width: i64, #[case] expected: Result<&str, &str>) {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello world".to_string());
+        let mut args = ToolArgs::new();
+        args.named.insert("wrap".to_string(), Value::Int(width));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        match expected {
+            Ok(out) => {
+                assert!(result.ok(), "{}", result.err);
+                assert_eq!(result.text_out().as_ref(), out);
+            }
+            Err(named) => {
+                assert_eq!(result.code, 2, "{}", result.text_out());
+                assert!(result.err.contains(named), "{}", result.err);
+            }
+        }
+    }
 }
