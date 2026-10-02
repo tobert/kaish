@@ -278,6 +278,25 @@ impl KernelBackend for VirtualOverlayBackend {
         }
     }
 
+    async fn stat_write_parent(&self, path: &Path) -> BackendResult<DirEntry> {
+        if self.is_virtual_path(path) {
+            if self.vfs.read_only_at(path)? {
+                return Err(BackendError::ReadOnly);
+            }
+            Ok(self.vfs.stat_backing(path).await?)
+        } else {
+            match self.inner.stat_write_parent(path).await {
+                Err(BackendError::NotFound(_)) if self.is_shared_ancestor(path) => {
+                    let hint = super::write_parent::mounted_path_hint(self, path).await;
+                    Err(BackendError::InvalidOperation(format!(
+                        "parent directory is a read-only mount ancestor; {hint}"
+                    )))
+                }
+                result => result,
+            }
+        }
+    }
+
     async fn mkdir(&self, path: &Path) -> BackendResult<()> {
         if self.is_virtual_path(path) {
             self.vfs.mkdir(path).await?;

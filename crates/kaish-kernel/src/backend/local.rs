@@ -321,6 +321,13 @@ impl KernelBackend for LocalBackend {
         Ok(self.vfs.stat(path).await?)
     }
 
+    async fn stat_write_parent(&self, path: &Path) -> BackendResult<DirEntry> {
+        if self.vfs.read_only_at(path)? {
+            return Err(BackendError::ReadOnly);
+        }
+        Ok(self.vfs.stat_backing(path).await?)
+    }
+
     async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()> {
         self.vfs.set_mtime(path, mtime).await?;
         Ok(())
