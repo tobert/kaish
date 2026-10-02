@@ -36,6 +36,7 @@ mod fromjson;
 mod fromjsonl;
 mod glob;
 mod find;
+mod find_expr;
 pub(crate) mod format_string;
 mod gather;
 mod grep;

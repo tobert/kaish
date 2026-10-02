@@ -94,6 +94,10 @@ impl Tool for Scatter {
             std::iter::once("scatter".to_string()).chain(argv),
         ) {
             Ok(p) => p,
+            // `--help` is a request, not a failure.
+            Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
+                return ExecResult::success(e.to_string());
+            }
             Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
         };
         parsed.global.apply(ctx);

@@ -19,7 +19,7 @@ use kaish_types::ToolArgs;
 /// dispatcher can read the output format post-execute and apply it.
 #[derive(Args, Debug, Clone, Default)]
 pub struct GlobalFlags {
-    /// Render structured output as JSON.
+    /// Render output as JSON; nonzero exits include code and error.
     #[arg(long)]
     pub json: bool,
 }

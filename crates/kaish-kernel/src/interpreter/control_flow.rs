@@ -88,6 +88,18 @@ impl ControlFlow {
         matches!(self, ControlFlow::Normal(_))
     }
 
+    /// The result this flow carries, whatever its kind: the output produced
+    /// so far, including before a signal.
+    pub(crate) fn result_mut(&mut self) -> &mut ExecResult {
+        match self {
+            ControlFlow::Normal(result)
+            | ControlFlow::Break { result, .. }
+            | ControlFlow::Continue { result, .. }
+            | ControlFlow::Exit { result, .. } => result,
+            ControlFlow::Return { value } => value,
+        }
+    }
+
     /// Get the result if this is normal flow.
     pub fn into_result(self) -> Option<ExecResult> {
         match self {

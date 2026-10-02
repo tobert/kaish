@@ -232,29 +232,21 @@ async fn no_signal_still_defaults_to_term() {
     assert_eq!(r.code, 0, "bare kill %1 should still terminate the job: {}", r.err);
 }
 
-/// Known, accepted trade-off of `raw_argv`: the kernel's generic `--help`/
-/// `-h` interception reads `args.flags`, which is always empty under
-/// raw_argv, so it no longer intercepts `kill --help`/`kill -h` (same gap
-/// `test` already had — this isn't new to raw_argv, just newly relevant to
-/// `kill`). Pinned here rather than silently drifting: `--help`/`-h` now
-/// fall into the "unrecognized option" usage error, which explicitly points
-/// at `help kill` — the fully equivalent replacement (verified byte-for-byte
-/// identical to the old `kill --help` output before this change).
+/// A leading `--help` requests generic help even with raw argv binding.
 #[tokio::test]
-async fn help_flag_no_longer_auto_intercepted_but_points_at_help_kill() {
+async fn leading_help_flag_matches_help_kill() {
     let kernel = setup().await;
     let r = kernel.execute("kill --help").await.expect("execute");
-    assert_eq!(r.code, 2, "no longer auto-intercepted: {:?}", r);
-    assert!(r.err.contains("help kill"), "points at the replacement: {}", r.err);
+    assert_eq!(r.code, 0, "{:?}", r);
+    assert!(r.err.is_empty(), "{}", r.err);
 
     let help_kill = kernel.execute("help kill").await.expect("execute");
     assert_eq!(help_kill.code, 0);
+    assert_eq!(r.text_out(), help_kill.text_out());
     assert!(help_kill.text_out().contains("--signal"), "help kill documents --signal: {}", help_kill.text_out());
 }
 
-/// `-h` gets the same treatment as `--help` (both fall into the
-/// "unrecognized option" branch) — pinned separately since it's a distinct
-/// token shape.
+/// Raw argv keeps `-h` tool-owned; kill refuses it with the supported help form.
 #[tokio::test]
 async fn dash_h_also_points_at_help_kill() {
     let kernel = setup().await;

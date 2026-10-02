@@ -69,7 +69,7 @@ fn has_json_flag(args: &[Arg]) -> bool {
 /// (GH #222). Every early return in `run_scatter_gather` funnels through this
 /// one function, so it is the single place the format gets applied — not
 /// three separate copies threaded through each `return` site.
-fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
+pub(super) fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
     match format {
         Some(format) => apply_output_format(result, format),
         None => result,
@@ -230,6 +230,14 @@ impl RedirectOpenError {
         let in_effect = self.in_effect(redirects);
         apply_redirects(ExecResult::failure(1, self.message), in_effect, &self.opened, ctx).await
     }
+
+    /// The failed command's result before any redirect applies, the
+    /// redirects in effect, and the targets they opened: what
+    /// [`finish_redirects`] takes.
+    pub(crate) fn into_parts(self, redirects: &[Redirect]) -> (ExecResult, &[Redirect], OpenedRedirects) {
+        let in_effect = self.in_effect(redirects);
+        (ExecResult::failure(1, self.message), in_effect, self.opened)
+    }
 }
 
 /// Evaluate and open every redirect target, left to right, before the
@@ -387,25 +395,39 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
     let missing_directory = |directory: Option<&Path>| match directory {
         Some(directory) => format!(
             "redirect: {path}: no such file or directory; create the directory first: mkdir -p {}",
-            directory.display()
+            crate::backend::write_parent::hint_path(directory)
         ),
         None => format!("redirect: {path}: no such file or directory"),
     };
     let canonical = match ctx.backend.canonicalize(&resolved, true).await {
         Ok(canonical) => canonical,
         Err(BackendError::NotFound(_)) => {
-            let directory = missing_directory_of(ctx, path, &resolved).await;
+            if let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await {
+                return Err(hint);
+            }
+            let directory = missing_directory_of(ctx, path, &resolved).await
+                .map_err(|error| redirect_error(path, &error))?;
             return Err(missing_directory(directory.as_deref()));
         }
         Err(e) => return Err(redirect_error(path, &e)),
     };
     // A dangling symlink's target can sit in a missing directory too.
     if let Some(parent) = canonical.parent() {
-        match ctx.backend.stat(parent).await {
+        match ctx.backend.stat_write_parent(parent).await {
             Ok(entry) if entry.is_dir() => {}
             Ok(_) => return Err(format!("redirect: {path}: not a directory")),
-            Err(BackendError::NotFound(_)) => return Err(missing_directory(Some(parent))),
-            Err(e) => return Err(redirect_error(path, &e)),
+            Err(BackendError::NotFound(_)) => {
+                if let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await {
+                    return Err(hint);
+                }
+                return Err(missing_directory(Some(parent)));
+            }
+            Err(error) => {
+                if let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await {
+                    return Err(hint);
+                }
+                return Err(redirect_error(path, &error));
+            }
         }
     }
     let opened = if append {
@@ -413,27 +435,56 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
     } else {
         ctx.backend.write(&resolved, b"", WriteMode::Overwrite).await
     };
-    opened.map_err(|e| redirect_error(path, &e))?;
+    if let Err(error) = opened {
+        if matches!(error, BackendError::NotFound(_))
+            && let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await
+        {
+            return Err(hint);
+        }
+        return Err(redirect_error(path, &error));
+    }
     Ok(OpenedFile { path: path.to_string(), resolved, append })
+}
+
+/// Name an actual writable mount when no mount covers the failed target.
+async fn unmounted_write_hint(ctx: &ExecContext, path: &str, resolved: &Path) -> Option<String> {
+    let mounts = ctx.backend.mounts();
+    if mounts.is_empty() || mounts.iter().any(|mount| resolved.starts_with(&mount.path)) {
+        return None;
+    }
+    Some(format!("redirect: {path}: outside a mounted filesystem; {}",
+        crate::backend::write_parent::mounted_path_hint(ctx.backend.as_ref(), resolved).await))
 }
 
 /// The directory `mkdir -p` must create for `path` to open, or `None` when
 /// it cannot be named with certainty. Checks the spelled parent, then one
-/// symlink hop at `path`; a name is returned only once `stat` confirms it is
-/// missing, so the hint never names a directory that exists.
-async fn missing_directory_of(ctx: &ExecContext, path: &str, resolved: &Path) -> Option<PathBuf> {
+/// symlink hop at `path`; a name is returned only once `stat_write_parent`
+/// confirms it is missing, so the hint never names a directory that exists.
+async fn missing_directory_of(
+    ctx: &ExecContext, path: &str, resolved: &Path,
+) -> crate::backend::BackendResult<Option<PathBuf>> {
+    use crate::backend::BackendError;
     let is_missing = |directory: PathBuf| async move {
-        let found = ctx.backend.stat(&ctx.resolve_path(&directory.to_string_lossy())).await;
-        matches!(found, Err(crate::backend::BackendError::NotFound(_))).then_some(directory)
+        match ctx.backend.stat_write_parent(&ctx.resolve_path(&directory.to_string_lossy())).await {
+            Ok(_) => Ok(None),
+            Err(BackendError::NotFound(_)) => Ok(Some(directory)),
+            Err(error) => Err(error),
+        }
     };
     let spelled_parent = Path::new(path).parent().filter(|parent| !parent.as_os_str().is_empty());
-    if let Some(parent) = spelled_parent
-        && let Some(directory) = is_missing(parent.to_path_buf()).await
+    if let Some(parent) = spelled_parent.or_else(|| resolved.parent())
+        && let Some(directory) = is_missing(parent.to_path_buf()).await?
     {
-        return Some(directory);
+        return Ok(Some(directory));
     }
-    let link_target = ctx.backend.read_link(resolved).await.ok()?;
-    let target_parent = link_target.parent().filter(|parent| !parent.as_os_str().is_empty())?;
+    let link_target = match ctx.backend.read_link(resolved).await {
+        Ok(target) => target,
+        // No readable link target: keep the canonicalization failure.
+        Err(_) => return Ok(None),
+    };
+    let Some(target_parent) = link_target.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        return Ok(None);
+    };
     let directory = if target_parent.is_absolute() {
         target_parent.to_path_buf()
     } else {
@@ -620,19 +671,26 @@ async fn run_opened_stage(
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
     let redirects = stage.redirects();
-    let (mut result, in_effect, mut opened) = match opened {
+    let (result, in_effect, opened) = match opened {
         Ok(opened) => (dispatch_redirected(stage, ctx, dispatcher).await, redirects, opened),
-        Err(failure) => {
-            let in_effect = failure.in_effect(redirects);
-            (ExecResult::failure(1, failure.message), in_effect, failure.opened)
-        }
+        Err(failure) => failure.into_parts(redirects),
     };
-    // The redirect's input ends with the command; what it left unread is
-    // dropped and the stdin the redirect displaced comes back.
+    finish_redirects(result, in_effect, opened, ctx).await
+}
+
+/// Send a result through the redirects in effect and write each opened
+/// target. The last step for anything `open_redirects` opened for: a
+/// command stage, and a redirected compound statement.
+pub(crate) async fn finish_redirects(
+    mut result: ExecResult,
+    in_effect: &[Redirect],
+    mut opened: OpenedRedirects,
+    ctx: &mut ExecContext,
+) -> ExecResult {
+    // Discard the redirect's remainder and restore the input it displaced.
     if let Some(displaced) = opened.displaced_stdin.take() {
         ctx.restore_stdin_state(*displaced);
     }
-
     // `2>&1` moves this stage's stderr into its stdout, but only once
     // `apply_redirects` runs below — capture what stdout held before
     // that, so only the newly merged bytes get published (whatever was
@@ -653,38 +711,61 @@ async fn run_opened_stage(
     result
 }
 
-/// Dispatch a stage with its output kept off the streams its redirects
-/// replace.
+/// The stream state [`mask_redirected_streams`] replaced, put back by
+/// [`MaskedStreams::restore`].
+pub(crate) struct MaskedStreams {
+    stream_output: bool,
+    stream_stderr: bool,
+    held_pipe: Option<super::pipe_stream::PipeWriter>,
+}
+
+/// Keep output off the streams `redirects` replace until the redirects
+/// apply.
 ///
 /// A redirected stdout or stderr goes to its target, not to a job's stream,
 /// and a redirected stdout does not reach the pipe: both are decided before
-/// dispatch, or an external command or a nested dispatch inside a function
-/// writes live to the wrong place before the redirect applies.
+/// the stage runs, or an external command or a nested dispatch inside a
+/// function writes live to the wrong place before the redirect applies.
+pub(crate) fn mask_redirected_streams(redirects: &[Redirect], ctx: &mut ExecContext) -> MaskedStreams {
+    let mut masked = MaskedStreams {
+        stream_output: ctx.background_stream_output,
+        stream_stderr: ctx.background_stream_stderr,
+        held_pipe: None,
+    };
+    if redirects_stdout(redirects) {
+        ctx.background_stream_output = false;
+        masked.held_pipe = ctx.pipe_stdout.take();
+    }
+    if redirects_stderr(redirects) {
+        ctx.background_stream_stderr = false;
+    }
+    masked
+}
+
+impl MaskedStreams {
+    /// Put back what [`mask_redirected_streams`] replaced.
+    pub(crate) fn restore(self, ctx: &mut ExecContext) {
+        ctx.background_stream_output = self.stream_output;
+        ctx.background_stream_stderr = self.stream_stderr;
+        if self.held_pipe.is_some() {
+            ctx.pipe_stdout = self.held_pipe;
+        }
+    }
+}
+
+/// Dispatch a stage with its output kept off the streams its redirects
+/// replace.
 async fn dispatch_redirected(
     stage: &PipelineStage,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
-    let redirects = stage.redirects();
-    let stream_output = ctx.background_stream_output;
-    let stream_stderr = ctx.background_stream_stderr;
-    let mut held_pipe = None;
-    if redirects_stdout(redirects) {
-        ctx.background_stream_output = false;
-        held_pipe = ctx.pipe_stdout.take();
-    }
-    if redirects_stderr(redirects) {
-        ctx.background_stream_stderr = false;
-    }
+    let masked = mask_redirected_streams(stage.redirects(), ctx);
     let result = match dispatch_stage(stage, ctx, dispatcher).await {
         Ok(result) => result,
         Err(e) => fault_result(e),
     };
-    ctx.background_stream_output = stream_output;
-    ctx.background_stream_stderr = stream_stderr;
-    if held_pipe.is_some() {
-        ctx.pipe_stdout = held_pipe;
-    }
+    masked.restore(ctx);
     result
 }
 

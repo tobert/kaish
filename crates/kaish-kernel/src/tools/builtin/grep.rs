@@ -65,6 +65,10 @@ struct GrepArgs {
     #[arg(short = 'w', long = "word-regexp", visible_alias = "word_regexp")]
     word_regexp: bool,
 
+    /// Match whole lines only. Overrides -w.
+    #[arg(short = 'x', long = "line-regexp", visible_alias = "line_regexp")]
+    line_regexp: bool,
+
     /// Search directories recursively. Symlinks, devices, FIFOs, and sockets
     /// found inside are skipped; a path named on the command line is read.
     #[arg(short = 'r', long = "recursive")]
@@ -343,6 +347,7 @@ impl Grep {
         let quiet = args.has_flag("quiet") || args.has_flag("q");
         let files_only = args.has_flag("files-with-matches") || args.has_flag("l");
         let word_regexp = args.has_flag("word-regexp") || args.has_flag("w");
+        let line_regexp = args.has_flag("line-regexp") || args.has_flag("x");
         let recursive = args.has_flag("recursive") || args.has_flag("r") || args.has_flag("R");
         let fixed_strings = args.has_flag("F") || args.has_flag("fixed-strings");
 
@@ -397,7 +402,10 @@ impl Grep {
         // character. The group keeps an alternation inside the boundaries, and
         // the half boundaries let a pattern start or end on punctuation
         // (`grep -w 'KjCaller {'`).
-        let final_pattern = if word_regexp {
+        // -x wins over -w, as in GNU grep: the whole line is the match.
+        let final_pattern = if line_regexp {
+            format!("^(?:{escaped})$")
+        } else if word_regexp {
             format!(r"\b{{start-half}}(?:{escaped})\b{{end-half}}")
         } else {
             escaped

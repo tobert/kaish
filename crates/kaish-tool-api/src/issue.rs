@@ -123,6 +123,15 @@ pub enum IssueCode {
     /// command reads it, so kaish refuses the command. The runtime compares
     /// resolved paths; this check sees only two literal spellings of one path.
     RedirectInputIsOutput,
+    /// A redirect on a compound statement that runs no command
+    /// (`{ x=1; } > out`). A compound's redirect applies to the commands
+    /// inside it, and a plan publishes it on each of them; with none, the
+    /// plan would hide the write. The runtime refuses it too.
+    CompoundRedirectWithoutCommand,
+    /// A here-doc on a compound statement (`while read l; do …; done
+    /// <<EOF`). Pipe it in instead: `cat <<EOF | while …; done`. The
+    /// runtime refuses it too.
+    CompoundHeredoc,
 }
 
 impl IssueCode {
@@ -165,6 +174,8 @@ impl IssueCode {
             IssueCode::WrappedCallRejected => "E021",
             IssueCode::NegatedBackgroundPipeline => "E022",
             IssueCode::RedirectInputIsOutput => "E023",
+            IssueCode::CompoundRedirectWithoutCommand => "E024",
+            IssueCode::CompoundHeredoc => "E025",
         }
     }
 
@@ -221,7 +232,9 @@ impl IssueCode {
             | IssueCode::UnreadableAssignmentTarget
             | IssueCode::InvisibleAssignmentTarget
             | IssueCode::NegatedBackgroundPipeline
-            | IssueCode::RedirectInputIsOutput => Severity::Error,
+            | IssueCode::RedirectInputIsOutput
+            | IssueCode::CompoundRedirectWithoutCommand
+            | IssueCode::CompoundHeredoc => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

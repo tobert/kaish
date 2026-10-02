@@ -28,6 +28,16 @@ fn parse_json(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("expected valid JSON, got error {e}; text was: {text:?}"))
 }
 
+/// Exit 1 (files differ) is a non-zero exit, so `--json` wraps the diff in the
+/// failure envelope: `{"code":1,"error":"","data":{...diff...}}`. Return the
+/// diff document under `data`.
+fn diff_under_envelope(text: &str) -> serde_json::Value {
+    let envelope = parse_json(text);
+    assert_eq!(envelope["code"], 1, "differ exit rides in the envelope: {envelope}");
+    assert_eq!(envelope["error"], "", "differ has no message: {envelope}");
+    envelope["data"].clone()
+}
+
 // ── identical-files path ──────────────────────────────────────────────────────
 
 /// Identical files: `differ:false`, `hunks:[]`, and `old_file`/`new_file`
@@ -78,7 +88,7 @@ async fn diff_json_full_diff_shape_has_differ_and_hunks() {
         .expect("diff should execute (exit 1 is not an Err)");
     assert_eq!(result.code, 1, "differing files → exit 1");
 
-    let json = parse_json(&result.text_out());
+    let json = diff_under_envelope(&result.text_out());
 
     assert_eq!(json["old_file"], "old.txt", "old_file must always be present: {json}");
     assert_eq!(json["new_file"], "new.txt", "new_file must always be present: {json}");
@@ -113,7 +123,7 @@ async fn diff_json_quiet_shape_has_differ_no_hunks() {
         .expect("diff -q should execute");
     assert_eq!(result.code, 1, "differing files → exit 1");
 
-    let json = parse_json(&result.text_out());
+    let json = diff_under_envelope(&result.text_out());
 
     assert_eq!(json["old_file"], "x.txt", "old_file must always be present: {json}");
     assert_eq!(json["new_file"], "y.txt", "new_file must always be present: {json}");
@@ -151,7 +161,11 @@ async fn diff_json_all_paths_have_core_keys() {
             .expect("diff should execute");
         assert_eq!(result.code, *expected_code, "exit code for `{cmd}`");
 
-        let json = parse_json(&result.text_out());
+        let json = if *expected_code == 0 {
+            parse_json(&result.text_out())
+        } else {
+            diff_under_envelope(&result.text_out())
+        };
         for key in &["old_file", "new_file", "differ"] {
             assert!(
                 json.get(*key).is_some(),

@@ -26,6 +26,14 @@ pub enum Stmt {
     While(WhileLoop),
     /// Case statement: `case expr in pattern) ... ;; esac`
     Case(CaseStmt),
+    /// Brace group: `{ a; b; }`. Runs its statements in the current shell,
+    /// like an `if` body: session changes stay, and `exit`, `return`,
+    /// `break`, and `continue` reach the enclosing script, function, or loop.
+    Group(Vec<Stmt>),
+    /// A compound statement with redirects: `{ …; } > out`, `while …; done
+    /// < f`. `body` is always `If`, `For`, `While`, `Case`, or `Group`. The
+    /// redirects open before `body` runs and apply to everything it writes.
+    Redirected { body: Box<Stmt>, redirects: Vec<Redirect> },
     /// Break out of loop: `break` or `break N`
     Break(Option<usize>),
     /// Continue to next iteration: `continue` or `continue N`
@@ -64,7 +72,9 @@ pub enum Stmt {
 }
 
 impl Stmt {
-    /// Human-readable variant name for tracing spans.
+    /// The variant's name, published as `Plan::statement_kind` and used in
+    /// tracing spans. Every value is listed in `docs/EMBEDDING.md`,
+    /// "Command analysis".
     pub fn kind_name(&self) -> &'static str {
         match self {
             Stmt::Assignment(_) => "assignment",
@@ -74,6 +84,8 @@ impl Stmt {
             Stmt::For(_) => "for",
             Stmt::While(_) => "while",
             Stmt::Case(_) => "case",
+            Stmt::Group(_) => "group",
+            Stmt::Redirected { .. } => "redirected",
             Stmt::Break(_) => "break",
             Stmt::Continue(_) => "continue",
             Stmt::Return(_) => "return",
@@ -126,7 +138,7 @@ pub struct Command {
 }
 
 /// One stage of a pipeline. A stage is a command, or a compound statement
-/// (`if`, `for`, `while`, `case`) whose output feeds the pipe.
+/// (`if`, `for`, `while`, `case`, `{ … }`) whose output feeds the pipe.
 ///
 /// A compound stage buffers: its whole output is collected before the next
 /// stage sees a byte. See `PipelineRunner::run_pipeline` for why, and for the
@@ -147,8 +159,9 @@ impl PipelineStage {
         }
     }
 
-    /// Redirects attached to this stage. A compound stage carries none — the
-    /// grammar does not accept a redirect after `done`/`fi`/`esac`.
+    /// Redirects the pipeline runner opens for this stage. A compound stage
+    /// reports none: its redirects live on a `Stmt::Redirected` and open
+    /// inside the statement, where `exit` and `return` still work.
     pub fn redirects(&self) -> &[Redirect] {
         match self {
             PipelineStage::Command(cmd) => &cmd.redirects,

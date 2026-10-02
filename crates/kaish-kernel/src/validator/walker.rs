@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, ListElem, Pipeline,
-    PipelineStage, Program, RedirectKind, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
+    PipelineStage, Program, Redirect, RedirectKind, SpannedPart, Stmt, StringPart, TestCmpOp, TestExpr, ToolDef, VarPath,
     VarSegment,
     WhileLoop,
     Value,
@@ -96,6 +96,28 @@ impl<'a> Validator<'a> {
             Stmt::For(for_loop) => self.validate_for(for_loop),
             Stmt::While(while_loop) => self.validate_while(while_loop),
             Stmt::Case(case_stmt) => self.validate_case(case_stmt),
+            // A group runs in the current shell: what it binds stays bound,
+            // so it takes no scope frame.
+            Stmt::Group(body) => {
+                for stmt in body {
+                    self.validate_stmt(stmt);
+                }
+            }
+            Stmt::Redirected { body, redirects } => {
+                use crate::ast::plan::{compound_redirect_refusal, CompoundRedirectRefusal};
+                if let Some(refusal) = compound_redirect_refusal(body, redirects) {
+                    let code = match refusal {
+                        CompoundRedirectRefusal::Heredoc(_) => IssueCode::CompoundHeredoc,
+                        CompoundRedirectRefusal::NoCommand(_) => IssueCode::CompoundRedirectWithoutCommand,
+                    };
+                    self.issues.push(ValidationIssue::error(code, refusal.message()));
+                }
+                self.validate_stmt(body);
+                for redirect in redirects {
+                    self.validate_expr(&redirect.target);
+                }
+                self.validate_redirect_input_is_output(redirects, None);
+            }
             Stmt::Break(levels) => self.validate_break(*levels),
             Stmt::Continue(levels) => self.validate_continue(*levels),
             Stmt::Return(expr) => self.validate_return(expr.as_deref()),
@@ -325,8 +347,11 @@ impl<'a> Validator<'a> {
                 cmd.name, schema.name
             );
             let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
-            let tool_issues = tool.validate(&tool_args);
-            self.issues.extend(tool_issues);
+            let asks_for_help = crate::tools::requests_builtin_help(&tool_args, schema);
+            if !asks_for_help {
+                let tool_issues = tool.validate(&tool_args);
+                self.issues.extend(tool_issues);
+            }
         } else if let Some(user_tool) = self.user_tools.get(&cmd.name) {
             // Validate against user-defined tool parameters
             self.validate_user_tool_args(user_tool, &cmd.args);
@@ -336,13 +361,14 @@ impl<'a> Validator<'a> {
         for redirect in &cmd.redirects {
             self.validate_expr(&redirect.target);
         }
-        self.validate_redirect_input_is_output(cmd);
+        self.validate_redirect_input_is_output(&cmd.redirects, Some(&cmd.name));
     }
 
     /// `sort < f > f`: the output's truncation would empty the input before
     /// the command reads it. Only two literal spellings of one path are
-    /// visible here; the runtime compares resolved paths.
-    fn validate_redirect_input_is_output(&mut self, cmd: &Command) {
+    /// visible here; the runtime compares resolved paths. `command` names
+    /// the command the redirects belong to; a compound statement has none.
+    fn validate_redirect_input_is_output(&mut self, redirects: &[Redirect], command: Option<&str>) {
         fn literal_path(expr: &Expr) -> Option<&str> {
             match expr {
                 Expr::Literal(Value::String(path)) => Some(path),
@@ -365,13 +391,12 @@ impl<'a> Validator<'a> {
             };
             significant(a) == significant(b)
         }
-        let inputs: Vec<&str> = cmd
-            .redirects
+        let inputs: Vec<&str> = redirects
             .iter()
             .filter(|r| r.kind == RedirectKind::Stdin)
             .filter_map(|r| literal_path(&r.target))
             .collect();
-        for redirect in &cmd.redirects {
+        for redirect in redirects {
             let is_output = matches!(
                 redirect.kind,
                 RedirectKind::StdoutOverwrite | RedirectKind::StdoutAppend | RedirectKind::Stderr | RedirectKind::Both
@@ -379,13 +404,14 @@ impl<'a> Validator<'a> {
             if let (true, Some(path)) = (is_output, literal_path(&redirect.target))
                 && inputs.iter().any(|input| same_path(input, path))
             {
-                self.issues.push(
-                    ValidationIssue::error(
-                        IssueCode::RedirectInputIsOutput,
-                        crate::scheduler::pipeline::same_file_message(path, &redirect.kind),
-                    )
-                    .with_command(cmd.name.clone()),
+                let mut issue = ValidationIssue::error(
+                    IssueCode::RedirectInputIsOutput,
+                    crate::scheduler::pipeline::same_file_message(path, &redirect.kind),
                 );
+                if let Some(command) = command {
+                    issue = issue.with_command(command.to_string());
+                }
+                self.issues.push(issue);
                 return;
             }
         }
@@ -1040,20 +1066,27 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
         // `has_flag("json")` must see what execution will.
         let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
         let mut words = Vec::new();
-        let mut past_double_dash = false;
+        let mut argument_state = crate::tools::VerbatimArgumentState::default();
+        let schema = match schema {
+            Some(schema) => schema,
+            None => unreachable!("verbatim binding requires a schema"),
+        };
         for arg in args {
+            let words_start = words.len();
             match arg {
                 Arg::Positional(expr) => words.push(expr_to_placeholder(expr)),
                 Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
                 Arg::LongFlag(name) => {
-                    if lift_global_flags && !past_double_dash && is_global_output_flag(name) {
+                    if lift_global_flags && !argument_state.past_end_marker()
+                        && !argument_state.expects_value() && is_global_output_flag(name) {
                         tool_args.flags.insert(name.clone());
                     } else {
                         words.push(Value::String(format!("--{name}")));
                     }
                 }
                 Arg::Named { key, value } => {
-                    if lift_global_flags && !past_double_dash && is_global_output_flag(key) {
+                    if lift_global_flags && !argument_state.past_end_marker()
+                        && !argument_state.expects_value() && is_global_output_flag(key) {
                         // Same truthiness rule execution applies. A literal
                         // survives `expr_to_placeholder` intact and is judged;
                         // anything dynamic becomes the `<dynamic>` string,
@@ -1070,9 +1103,12 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     words.push(Value::String(format!("{key}=<value>")));
                 }
                 Arg::DoubleDash => {
-                    past_double_dash = true;
+                    argument_state.mark_end_marker();
                     words.push(Value::String("--".to_string()));
                 }
+            }
+            for word in &words[words_start..] {
+                argument_state.consume(word, schema);
             }
         }
         tool_args.words = Some(words);
