@@ -48,9 +48,19 @@ and `data` are public fields.
 
 Output is clean text by default — simple commands return plain text, structured
 builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable tab-separated
-values, and `--json` on any command emits JSON plus a parsed value (`data`) that
+values, and `--json` on a builtin emits JSON plus a parsed value (`data`) that
 builtins set explicitly — kaish never infers it by sniffing stdout. The exit
 code is something agents can branch on:
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+diff --json before after       # exit 1: {"code":1,"error":"","data":{...}}
+```
+
+With `--json`, success keeps the builtin's data unwrapped; an empty success prints nothing. Every nonzero formatted result uses an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The envelope's `error` removes one rendering newline; `err` remains unchanged. Check the exit code first, then the error and any partial data. `data` on the `ExecResult` mirrors the full envelope.
+
+Formatting applies to the final builtin stage and command substitution. Earlier pipeline stages remain input streams for the next stage. External commands receive `--json` as an argv word. Parse/validation refusals (`KernelError`), unresolved commands, and redirect failures before builtin dispatch do not pass through the builtin formatter. Spills are applied after formatting: exit 3 still returns the truncated preview and spill metadata rather than an envelope. Read `did_spill` and `original_code` before parsing that preview as JSON. Custom tools that own their output keep their successful format; nonzero results still use the envelope when they request JSON.
 
 | `code` | Meaning | Recovery |
 |--------|---------|----------|
@@ -786,15 +796,16 @@ let result = kernel.execute_argv("my-tool", &[Value::Bytes(blob)]).await?;
 Semantics:
 
 - **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no command
-  substitution, no word splitting — the "single-quoted word" rule taken to its
-  end. `execute_argv("echo", &[Value::String("*.txt".into())])` emits `*.txt`.
-  And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
-  door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
-  a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
-  choose, which is the point of the typed door. **Exception:** a leading `~` is
-  expanded against the session `HOME`, matching the string door (kaish expands
-  `~` uniformly, even in quotes — so the doors agree); pass a pre-resolved path
-  if you need it byte-literal.
+  substitution, no word splitting, and no tilde expansion — the "single-quoted
+  word" rule taken to its end. `execute_argv("echo", &[Value::String("*.txt"
+  .into())])` emits `*.txt`; `execute_argv("echo", &[Value::String("~/a".into())
+  ])` emits `~/a` unexpanded, same as `execute("echo '~/a'")` — an argv token
+  carries no quoting, so it is treated the same as a quoted source word. Pass
+  an already-expanded path if you need one resolved. And no **number
+  coercion**: a `Value::String("00")` stays `"00"` (the string door's lexer
+  would coerce the bare word `00` to an integer and print `0`). Pass a
+  `Value::Int`/`Value::Float` when you mean a number — the type is yours to
+  choose, which is the point of the typed door.
 - **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
   no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
   not a subset that drops expressiveness, it's a different door that converges with
@@ -1414,12 +1425,15 @@ fn myapp_data_dir() -> PathBuf {
 }
 ```
 
-For user-facing path handling, use `expand_tilde`:
+For user-facing path handling, use `expand_tilde`. It takes the home
+directory explicitly — the kernel is hermetic and never reads the host
+`$HOME` on its own — so pass the session's `HOME` (or `None`, which leaves
+`~` unexpanded rather than guessing):
 
 ```rust
 use kaish_kernel::expand_tilde;
 
-let path = expand_tilde("~/projects/myrepo");
+let path = expand_tilde("~/projects/myrepo", Some("/home/username"));
 // → /home/username/projects/myrepo
 ```
 

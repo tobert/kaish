@@ -429,6 +429,40 @@ café=au-lait;  echo $café       # au-lait
 😁=grin;       echo $😁         # grin
 ```
 
+### Tilde expansion
+
+`echo ~/src` — expands to `$HOME/src`. Tilde expansion applies only to an
+**unquoted** tilde-prefix written directly in the source: a bare word starting
+with `~` (`~`, `~/path`, `~user`, `~user/path`), including an assignment's
+value (`x=~/a`). It never applies to a quoted string, to a variable's value,
+or to a command substitution's output — those are already values, not source
+words, by the time kaish sees them.
+
+```sh
+echo ~/src                # /home/amy/src — unquoted, expands
+echo '~/src'               # ~/src — quoted, stays literal
+x='~/src'; echo "$x"       # ~/src — the value was never an unquoted word
+x=~/src; echo $x           # /home/amy/src — the assignment's OWN value was unquoted
+```
+
+`~user` reads the named user's home directory from `/etc/passwd`, which
+needs the `host` capability; without it, `~user` stays literal, the same as
+when the string doesn't match a real user. `~` alone reads the session
+`HOME` — the kernel never reads the host process's `$HOME`
+(`docs/EMBEDDING.md`, "Initial Variables and Hermetic Subprocess Env"). With
+no `HOME` in scope, `~`/`~/path` stays literal rather than expanding to
+nothing.
+
+`~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
+
+A `~` that is not at the start of a word is never a tilde-prefix: kaish has
+no bareword-pasting rule, so an unquoted `~` glued to a preceding word
+(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
+a silently literal concatenation. A heredoc body never expands `~`, even
+when the delimiter is unquoted and the body otherwise interpolates — tilde
+expansion is a source-word operation, and a heredoc body is never split into
+words.
+
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
 them, and `echo a-b`, `ls -l`, and `my-file.txt` are unaffected — but a name
@@ -610,6 +644,7 @@ tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
+tool 1>&2                       # merge stdout into stderr
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -661,6 +696,12 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
+> **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
+> join captured stdout first, then stderr. kaish does not preserve the
+> command's interleaved write order. If stderr has already reached a
+> background job stream, `1>&2` keeps those bytes first and appends
+> captured stdout; each byte reaches the stream once.
+>
 > **Known differences from bash.** bash evaluates and opens each target in
 > turn; kaish evaluates all of them before opening any, so the same-file
 > check sees every target. As a result:
@@ -681,6 +722,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
 > combining two of them on the same command is a parse error (rather than
 > silently taking the last one, as bash does).
+
+> **A redirect's input belongs to its command.** `seq 1 3 | jq -c length < f`
+> reads `f`, not the pipe. When the command ends, what it left unread of `f`
+> is dropped, and the session's stdin is what it was before: `read x < f; cat`
+> prints the session's stdin, not the rest of `f`.
 
 > **jq is built-in.** kaish ships a native jq (jaq) in-process — no external
 > binary required. The `$VAR → jq <<<` idiom replaces bash's
@@ -947,8 +993,15 @@ A `$(...)` body accepts the **full statement grammar**: pipelines, `&&`/`||`
 chains, `;` sequences, multi-line bodies, `#` comments, and control structures
 (`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
 way. Output accumulates across the statements (no separator inserted, like
-`;`), and the body's side effects (`cd`, assignments) stay contained — only the
-captured stdout becomes the value.
+`;`), and the body's session changes stay contained — variables, `cd`, `alias`,
+function definitions (`f() { ...; }`, `source`), `kaish-ignore`, and
+`kaish-output-limit` all revert when the body ends. Only the captured stdout
+becomes the value:
+
+```sh
+x=$(f() { echo hi; }; f)   # x is "hi"
+f                          # command not found, exit 127
+```
 
 **stderr is not captured.** A substitution's stderr joins the enclosing
 statement's stderr, so a command that fails inside `$(...)` still reports why:
@@ -1446,6 +1499,19 @@ a `VALUE` that isn't JSON is a flag value the builtin cannot use, also `2`.
 
 `124` (timeout) and `123` (a scatter worker failed) are the documented
 exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".
+
+### Nonzero JSON results
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+false --json                   # {"code":1,"error":""}
+diff --json before after       # exit 1, answer under data
+```
+
+`--json` keeps successful data unwrapped. An empty success prints nothing. A nonzero formatted result is an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The error removes one rendering newline and keeps other blank lines. Stderr still carries the same error. Check the exit code before reading the error or answer.
+
+Only the final builtin pipeline stage is formatted; earlier stages feed streams to the next stage. Command substitution captures the formatted result. `true` and `false` honor `--json` and its disabled forms. External commands receive the flag literally. Parse/validation refusals, unresolved commands, and redirect failures before builtin dispatch do not use this formatter. An output spill happens after formatting, so exit 3 keeps the truncated preview and spill metadata; the preview may be incomplete JSON. See "Shell Options".
 
 ## Background Jobs
 

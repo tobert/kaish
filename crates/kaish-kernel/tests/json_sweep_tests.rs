@@ -43,8 +43,6 @@ enum Expect {
     Number,
     /// exit 0; stdout empty (`--json` leaves an empty success untouched)
     Empty,
-    /// given nonzero exit; stdout empty (special forms ignore `--json`)
-    FailsClean(i64),
     /// given nonzero exit; stdout is the `{"code":…,"error":…}` envelope
     FailsEnvelope(i64),
 }
@@ -108,9 +106,7 @@ const CASES: &[Case] = &[
     Case { name: "echo", setup: &[], cmd: "echo hi --json", expect: Expect::String },
     Case { name: "env", setup: &["export FOO=bar"], cmd: "env --json", expect: Expect::String },
     Case { name: "export", setup: &[], cmd: "export FOO=bar --json", expect: Expect::Empty },
-    // `true`/`false` are special forms, not tools: they take no flags, so
-    // `--json` neither parses nor wraps their exit.
-    Case { name: "false", setup: &[], cmd: "false --json", expect: Expect::FailsClean(1) },
+    Case { name: "false", setup: &[], cmd: "false --json", expect: Expect::FailsEnvelope(1) },
     Case { name: "file", setup: &[], cmd: "file tmp/data.json --json", expect: Expect::Array },
     Case { name: "find", setup: &[], cmd: "find src -name '*.rs' --json", expect: Expect::Array },
     Case { name: "fromjson", setup: &[], cmd: r#"fromjson '{"a":1}' --json"#, expect: Expect::Object },
@@ -313,17 +309,6 @@ async fn check_case(case: &Case) -> Result<(), String> {
                 Ok(())
             } else {
                 Err(format!("{}: expected empty stdout, got: {out:?}", case.name))
-            }
-        }
-        Expect::FailsClean(code) => {
-            expect_code(code)?;
-            if out.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}: clean failure should leave stdout empty, got: {out:?}",
-                    case.name
-                ))
             }
         }
         Expect::FailsEnvelope(code) => {

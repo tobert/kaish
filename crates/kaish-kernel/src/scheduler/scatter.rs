@@ -22,10 +22,10 @@ use tracing::Instrument;
 use crate::ast::{Command, Redirect, Value};
 use crate::dispatch::CommandDispatcher;
 use crate::duration::parse_duration;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{apply_output_format, ExecResult, OutputFormat};
 use crate::tools::{ExecContext, ToolRegistry};
 
-use super::pipeline::{apply_redirects, is_input, open_redirects, PipelineRunner};
+use super::pipeline::{apply_redirects, finalize_scatter_gather_error, is_input, open_redirects, PipelineRunner};
 
 /// Options for scatter operation.
 #[derive(Debug, Clone)]
@@ -157,32 +157,30 @@ impl ScatterGatherRunner {
         ctx: &mut ExecContext,
     ) -> ExecResult {
         let runner = PipelineRunner::new(self.tools.clone());
+        let format = gather_opts.json.then_some(OutputFormat::Json);
 
         // gather reads its workers' results; a `<` would have nothing to feed.
         if gather_redirects.iter().any(|redirect| is_input(&redirect.kind)) {
-            return ExecResult::failure(
+            return finalize_scatter_gather_error(ExecResult::failure(
                 2,
                 "gather: takes no input redirect; it reads its workers' results. Remove the <, <<, or <<<",
-            );
+            ), format);
         }
         // gather's own targets open before anything in the pipeline runs, so a
         // target that cannot open runs no worker.
         let gather_opened = match open_redirects(gather_redirects, ctx, &*self.sequential_dispatcher).await {
             Ok(opened) => opened,
-            Err(failure) => return failure.into_result(gather_redirects, ctx).await,
+            Err(failure) => return finalize_scatter_gather_error(failure.into_result(gather_redirects, ctx).await, format),
         };
 
         // Run pre-scatter commands to get input.
         // Uses run_sequential to avoid async recursion (scatter → run → scatter).
         let (text, data) = if pre_scatter.is_empty() {
-            // Use existing stdin — structured data, a buffered byte vector, or
-            // a lazy `pipe_stdin` (a frontend-seeded process-stdin pipe).
-            // `take_stdin` alone would miss the pipe; `read_stdin_to_text`
-            // prefers it.
-            let data = ctx.take_stdin_data();
-            let text = match ctx.read_stdin_to_text().await {
-                Ok(s) => s.unwrap_or_default(),
-                Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+            // Resolve the upstream sideband after draining its pipe, as a
+            // standalone scatter does. Numeric items must keep their type.
+            let (data, text) = match ctx.resolve_stdin().await {
+                Ok(input) => input,
+                Err(error) => return finalize_scatter_gather_error(ExecResult::failure(2, format!("scatter: {error}")), format),
             };
             (text, data)
         } else {
@@ -208,7 +206,28 @@ impl ScatterGatherRunner {
             // reaches it.
             crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
             if !result.ok() {
-                return result;
+                return if result.did_spill {
+                    result
+                } else {
+                    finalize_scatter_gather_error(result, format)
+                };
+            }
+            // A lone stage's stderr stays on its result, where a multi-stage
+            // pre_scatter has already sent it to the statement's stderr. Send
+            // it the same way, so the one path and the other agree.
+            ctx.publish_job_stderr(&mut result).await;
+            match &ctx.stderr {
+                Some(stderr) => {
+                    stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
+                    result.err.clear();
+                    result.stderr_published_len = 0;
+                }
+                // Only a hand-built context lacks the stream; the kernel
+                // always seeds one.
+                None if !result.err.is_empty() => {
+                    tracing::warn!("pre_scatter stderr dropped: no stderr stream");
+                }
+                None => {}
             }
             (result.text_out().into_owned(), result.data)
         };
@@ -216,7 +235,7 @@ impl ScatterGatherRunner {
         // Extract items from structured data or text
         let items = match extract_items(data.as_ref(), &text) {
             Ok(items) => items,
-            Err(msg) => return ExecResult::failure(1, msg),
+            Err(msg) => return finalize_scatter_gather_error(ExecResult::failure(1, msg), format),
         };
         if items.is_empty() {
             return ExecResult::success("");
@@ -255,11 +274,16 @@ impl ScatterGatherRunner {
             ctx.publish_job_stdout(&gathered).await;
             gathered
         } else {
+            // The rows are the post-gather commands' input and nothing else:
+            // the session's stdin state waits aside and comes back after.
+            let session_stdin = ctx.take_stdin_state();
             ctx.set_stdin_with_data(
                 gathered.text_out().into_owned(),
                 gathered.data.clone(),
             );
-            runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await
+            let result = runner.run_sequential(post_gather, ctx, &*self.sequential_dispatcher).await;
+            ctx.restore_stdin_state(session_stdin);
+            result
         }
     }
 
@@ -644,7 +668,10 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult
         // hatch, and a U+FFFD-laden line would be exactly the silent
         // corruption this hardening pass exists to prevent.
         if !failed.is_empty() {
-            return ExecResult::failure(code, format!("{err} (drop --lines to get per-worker rows)"));
+            return finalize_scatter_gather_error(
+                ExecResult::failure(code, format!("{err} (drop --lines to get per-worker rows)")),
+                opts.json.then_some(OutputFormat::Json),
+            );
         }
         let text = results
             .iter()
@@ -670,7 +697,11 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> ExecResult
     // marks itself — see `ExecResult::data_is_value`.
     let mut result = ExecResult::from_parts(code, text, err, Some(Value::Json(array)));
     result.data_is_value = true;
-    result
+    if opts.json && !result.ok() {
+        apply_output_format(result, OutputFormat::Json)
+    } else {
+        result
+    }
 }
 
 /// Human-readable repr of a `Value` for a "wrong type" error message —

@@ -583,6 +583,7 @@ pub enum OutputFormat {
 /// than mistakes (`grep` no-match, `diff` differs). `error` is the stderr text,
 /// empty when the command wrote none. Partial results ride along under `data`
 /// (structured) or `output` (text). Apps check the exit code, then `error`.
+/// An unchanged failure formatted again in-process keeps its existing envelope.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
     if !result.ok() {
         return failure_envelope(result, format);
@@ -639,17 +640,21 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
 
 /// Replace a failed result's stdout with the `{"code","error"}` envelope.
 fn failure_envelope(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    if result.json_failure_formatted {
+        return result;
+    }
     match format {
         OutputFormat::Json => {
-            // The line terminator is a text-rendering contract (#363); the
-            // envelope carries the message as written.
+            // Remove the single rendering terminator, keeping message blank lines.
             let mut obj = serde_json::json!({
                 "code": result.code,
-                "error": result.err.trim_end_matches('\n'),
+                "error": result.err.strip_suffix('\n').unwrap_or(&result.err),
             });
             if result.is_bytes() {
-                obj["data"] =
-                    crate::bytes::bytes_to_envelope(result.out_bytes().unwrap_or(&[]));
+                let bytes = result.out_bytes().unwrap_or_else(|| {
+                    panic!("binary result must contain byte output")
+                });
+                obj["data"] = crate::bytes::bytes_to_envelope(bytes);
             } else if let Some(output) = result.output() {
                 obj["data"] = output.to_json();
             } else if let Some(data) = &result.data {
@@ -660,10 +665,13 @@ fn failure_envelope(mut result: ExecResult, format: OutputFormat) -> ExecResult 
                     obj["output"] = serde_json::Value::String(text.into_owned());
                 }
             }
-            let out = serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
+            let out = serde_json::to_string(&obj).unwrap_or_else(|error| {
+                panic!("failed to serialize JSON failure envelope: {error}")
+            });
             result.set_out(out);
             result.data = Some(crate::result::json_to_value(obj));
             result.set_output(None);
+            result.json_failure_formatted = true;
             result
         }
     }
@@ -944,13 +952,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_output_format_leaves_clean_no_match_empty() {
-        // grep no-match: exit 1, empty stdout, empty err. Not an error — must
-        // NOT be wrapped in a JSON error object; stays empty.
+    fn apply_output_format_wraps_clean_no_match() {
+        // Nonzero answers use the same envelope as reported errors.
         let result = ExecResult::failure(1, "");
         let formatted = apply_output_format(result, OutputFormat::Json);
-        assert!(formatted.text_out().is_empty());
-        assert!(formatted.data.is_none());
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
     }
 
     #[test]
@@ -1037,6 +1044,22 @@ mod tests {
         let formatted = apply_output_format(ExecResult::failure(1, ""), OutputFormat::Json);
         let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
         assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
+    }
+
+    #[test]
+    fn json_failure_keeps_blank_lines_in_the_error() {
+        let result = ExecResult::from_output(1, "", "boom\n\n");
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json["error"], "boom\n");
+        assert_eq!(formatted.err, "boom\n\n");
+    }
+
+    #[test]
+    fn json_failure_formatting_twice_keeps_one_envelope() {
+        let once = apply_output_format(ExecResult::failure(1, "boom"), OutputFormat::Json);
+        let twice = apply_output_format(once.clone(), OutputFormat::Json);
+        assert_eq!(once, twice);
     }
 
     #[test]

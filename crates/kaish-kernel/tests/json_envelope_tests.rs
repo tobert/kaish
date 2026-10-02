@@ -52,14 +52,23 @@ async fn failure_without_message_has_empty_error() {
     assert_eq!(err, "");
 }
 
-/// `true`/`false` are special forms and take no flags, so `--json` does not
-/// reach them: the exit code is the whole answer.
 #[tokio::test]
-async fn false_special_form_ignores_json() {
+async fn false_special_form_reports_json() {
     let (_dir, kernel) = fixture();
-    let result = kernel.execute("false --json").await.expect("execute");
-    assert_eq!(result.code, 1);
-    assert_eq!(result.text_out(), "");
+    let (json, code, err) = envelope(&kernel, "false --json").await;
+    assert_eq!(code, 1);
+    assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
+    assert_eq!(err, "");
+}
+
+#[tokio::test]
+async fn boolean_special_forms_respect_disabled_and_literal_json_flags() {
+    let (_dir, kernel) = fixture();
+    for script in ["false --json=false", "false -- --json", "true --json"] {
+        let result = kernel.execute(script).await.unwrap();
+        assert_eq!(result.text_out(), "", "{script}");
+        assert!(result.err.is_empty(), "{script}");
+    }
 }
 
 #[tokio::test]
@@ -99,6 +108,54 @@ async fn last_pipeline_stage_failure_is_an_envelope() {
     let (json, code, _) = envelope(&kernel, "echo hi | grep --json zzz").await;
     assert_eq!(code, 1);
     assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
+}
+
+#[tokio::test]
+async fn failed_scatter_workers_keep_rows_under_data() {
+    let (_dir, kernel) = fixture();
+    let (json, code, _) = envelope(&kernel, "seq 1 2 | scatter | false | gather --json").await;
+    assert_eq!(code, 123);
+    assert_eq!(json["code"], 123);
+    assert_eq!(json["data"].as_array().unwrap().len(), 2);
+    assert_eq!(json["data"][0]["code"], 1);
+}
+
+#[tokio::test]
+async fn scatter_input_failure_is_an_envelope() {
+    let (_dir, kernel) = fixture();
+    let (json, code, _) = envelope(&kernel, "fromjson '{\"x\":1}' | scatter | echo $ITEM | gather --json").await;
+    assert_eq!(code, 1);
+    assert_eq!(json["code"], 1);
+    assert!(json["error"].as_str().unwrap().contains("scatter"));
+}
+
+#[tokio::test]
+async fn formatted_pre_scatter_failure_is_not_wrapped_twice() {
+    let (_dir, kernel) = fixture();
+    let (json, code, _) = envelope(&kernel, "cat --json nosuch | scatter | echo $ITEM | gather --json").await;
+    assert_eq!(code, 1);
+    assert_eq!(json["code"], 1);
+    assert!(json.get("data").is_none(), "no partial data: {json}");
+}
+
+#[tokio::test]
+async fn failed_line_gather_reports_json() {
+    let (_dir, kernel) = fixture();
+    let (json, code, _) = envelope(&kernel, "seq 1 2 | scatter | false | gather --lines --json").await;
+    assert_eq!(code, 123);
+    assert_eq!(json["code"], 123);
+    assert!(json.get("data").is_none());
+}
+
+#[tokio::test]
+async fn failed_gather_redirect_writes_the_envelope() {
+    let (dir, kernel) = fixture();
+    let result = kernel.execute("seq 1 2 | scatter | false | gather --json > report").await.unwrap();
+    assert_eq!(result.code, 123);
+    assert_eq!(result.text_out(), "");
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(dir.path().join("report")).unwrap()).unwrap();
+    assert_eq!(json["code"], 123);
+    assert_eq!(json["data"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]

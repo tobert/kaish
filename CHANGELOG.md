@@ -31,6 +31,7 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **BREAKING:** `--json` uses a `code`/`error` envelope for every nonzero formatted result, including `grep` no-match, `false`, differing `diff`/overlay results, and failed scatter workers. Partial results stay under `data` or `output`; success stays unwrapped and the spill contract stays unchanged.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all
@@ -43,6 +44,9 @@ breaking entries are marked **BREAKING**.
 - A bareword containing `==`, `!=`, or `!` is one literal word: `echo ===`,
   `echo ===1.50===`, `export X==1`, and `echo !x` parse, as in a bash script.
   A word with a single `=` (`./bin=1`) or a substitution still needs quotes.
+- A quoted `~` stays `~`: `echo '~'`, `echo "~"`, and `x='~'; echo "$x"` printed
+  `$HOME`. Only an unquoted `~` in the source expands, as in bash, now also in
+  globs (`ls ~/src/*.rs`), redirects, `for` items, and alias bodies.
 - Usage errors across the builtins now exit 2 instead of 1: a missing operand,
   an unknown subcommand, a flag value the builtin cannot use. The sweep and a
   follow-up review together cover 114 sites in 56 builtins. What a caller can
@@ -199,6 +203,9 @@ breaking entries are marked **BREAKING**.
 - **BREAKING**: `sed` without `-E`/`-r` reads GNU BRE, as GNU sed does:
   `sed 's/fn main(/x/'` works, and `\(…\)`, `\{n\}`, `\|` are the operators.
   `awk` reads gawk's ERE, where `\(` is a literal paren.
+- `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
+  a token is literal, as it already was for globs and `$VAR`. Expand paths
+  before passing them in.
 - **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
   `Execution { error, output }`. `output` holds what ran before the fault; a
   `KernelError::Execution(e)` pattern no longer compiles.
