@@ -95,6 +95,9 @@ async fn return_inside_a_group_returns_from_the_function() {
 #[rstest]
 #[case::continue_skips("for i in 1 2 3; do { [[ $i == 2 ]] && continue; echo $i; }; done", "1\n3\n")]
 #[case::break_stops("for i in 1 2 3; do { [[ $i == 2 ]] && break; echo $i; }; done", "1\n")]
+#[case::break_two("for i in 1 2; do for j in 1 2; do { break 2; }; echo no; done; echo no; done; echo after", "after\n")]
+#[case::continue_two("for i in 1 2; do for j in 1 2; do { continue 2; }; echo no; done; echo no; done; echo after", "after\n")]
+#[case::break_two_before_brace("for i in 1 2; do for j in 1 2; do { break 2 }; done; done; echo after", "after\n")]
 #[tokio::test]
 async fn loop_control_inside_a_group_reaches_the_loop(#[case] source: &str, #[case] stdout: &str) {
     let (out, code) = run(source).await;
@@ -107,7 +110,7 @@ async fn loop_control_inside_a_group_reaches_the_loop(#[case] source: &str, #[ca
 /// A lone group runs in the current shell: what it sets stays set.
 #[rstest]
 #[case::variable("{ x=2; }; echo $x", "2\n")]
-#[case::cwd("{ cd /tmp; }; pwd", "/tmp\n")]
+#[case::cwd("{ cd /tmp; }; echo \"$(pwd)\"", "/tmp\n")]
 #[case::function("{ g() { echo from-g; }; }; g", "from-g\n")]
 #[tokio::test]
 async fn a_lone_group_keeps_session_changes(#[case] source: &str, #[case] stdout: &str) {

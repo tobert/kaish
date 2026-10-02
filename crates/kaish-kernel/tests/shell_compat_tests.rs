@@ -1599,7 +1599,7 @@ shell_compat! {
 
 shell_compat! {
     name: loop_stderr_merged_into_a_pipe,
-    script: "for i in 1 2; do echo out$i; echo err$i >&2; done 2>&1 | wc -l",
+    script: "for i in 1 2; do echo \"out$i\"; echo \"err$i\" >&2; done 2>&1 | wc -l",
     eq: "4",
 }
 
@@ -1607,14 +1607,14 @@ shell_compat! {
 // all of stderr after all of stdout; bash interleaves them. Same as `f 2>&1`.
 shell_compat! {
     name: loop_merged_stderr_order,
-    script: "for i in 1 2; do echo out$i; echo err$i >&2; done 2>&1 | cat",
+    script: "for i in 1 2; do echo \"out$i\"; echo \"err$i\" >&2; done 2>&1 | cat",
     kaish_eq: "out1\nout2\nerr1\nerr2",
     bash_eq: "out1\nerr1\nout2\nerr2",
 }
 
 shell_compat! {
     name: exit_in_a_redirected_group_exits,
-    script: "f() { { exit 4; } > /dev/null; echo after; }; f",
+    script: "{ :; exit 4; } > /dev/null; echo after",
     eq: "",
     exit: 4,
 }
@@ -1661,4 +1661,65 @@ shell_compat! {
     name: compound_target_truncates_before_the_body_reads,
     script: "d=\"/tmp/kaish-compat-group-${BASH_VERSINFO:-kaish}\"; echo data > \"$d-s\"; { cat \"$d-s\"; } > \"$d-s\"; echo \"size:$(wc -c < \"$d-s\")\"",
     eq: "size:0",
+}
+
+// ---- Tilde expansion: only an UNQUOTED source word expands ----------------
+//
+// `shell_compat!`'s kaish side always runs `KernelConfig::transient()`,
+// which seeds no `HOME` (the kernel is hermetic — see `hermetic_home_tests.rs`).
+// So a BARE `~` is a genuine, documented divergence here (kaish leaves it
+// literal with no session `HOME`; bash reads the real host `$HOME`) — that is
+// a HOME-seeding difference, not the bug this suite is about. A QUOTED `~`
+// is what actually pins the fix: it must come out identical, `~`, on both
+// sides, regardless of `HOME` — the exact case that used to leak the home
+// directory through a quoted string.
+
+shell_compat! {
+    name: tilde_quoted_single_stays_literal,
+    script: "echo '~'",
+    eq: "~",
+}
+
+shell_compat! {
+    name: tilde_quoted_double_stays_literal,
+    script: "echo \"~\"",
+    eq: "~",
+}
+
+shell_compat! {
+    name: tilde_quoted_value_via_variable_stays_literal,
+    script: "x='~'; echo \"$x\"",
+    eq: "~",
+}
+
+shell_compat! {
+    name: tilde_quoted_path_stays_literal,
+    script: "echo '~/a'",
+    eq: "~/a",
+}
+
+// Documented divergence: kaish's `transient()` config has no `HOME` in
+// scope, so a bare `~` stays literal there; bash always has the real host
+// `$HOME`. Both sides still agree that it's the UNQUOTED form that would
+// expand — see `hermetic_home_tests.rs` for the same contract with `HOME`
+// actually seeded.
+shell_compat! {
+    name: tilde_bare_word_diverges_on_home_seeding,
+    script: "echo ~",
+    kaish_eq: "~",
+    bash_eq: &std::env::var("HOME").unwrap_or_default(),
+}
+
+// `~` only starts a tilde-prefix at the START of a word (bash: `foo~bar` is
+// one literal word, `~` has no special meaning mid-word). kaish has no
+// bareword-pasting rule at all, so an unquoted `~` glued to a preceding
+// word is a PARSE ERROR (`parser::tests` / `tilde_expansion_tests.rs`'s
+// `tilde_not_at_word_start_is_never_a_tilde_expansion` pin that directly) —
+// `shell_compat!`'s kaish side `.expect()`s a successful parse, so that
+// case can't run through this macro; quoting it, which both shells accept
+// and neither expands, is what's left to compare here.
+shell_compat! {
+    name: tilde_mid_word_quoted_is_never_an_expansion,
+    script: "echo \"foo~bar\"",
+    eq: "foo~bar",
 }

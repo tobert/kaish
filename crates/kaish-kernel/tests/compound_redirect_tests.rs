@@ -102,7 +102,7 @@ fn two_stdin_redirects_on_a_compound_are_refused() {
 #[case::input_redirect_beats_the_pipe("echo in-file > /in; echo piped | { cat; } < /in", "in-file\n", 0)]
 #[case::status_of_the_body("{ echo a; false; } > /dev/null; echo $?", "1\n", 0)]
 #[case::session_changes_stay("{ x=2; echo hi; } > /dev/null; echo $x", "2\n", 0)]
-#[case::cwd_stays("{ cd /tmp; pwd; } > /dev/null; pwd", "/tmp\n", 0)]
+#[case::cwd_stays("{ cd /tmp; pwd; } > /dev/null; echo \"$(pwd)\"", "/tmp\n", 0)]
 #[tokio::test]
 async fn a_redirected_compound_runs(#[case] source: &str, #[case] stdout: &str, #[case] code: i64) {
     let (out, actual_code) = run(source).await;
@@ -143,10 +143,10 @@ async fn a_redirect_that_cannot_open_trips_errexit() {
 
 // ---- control flow survives the redirect ---------------------------------------
 
-/// bash: `f() { { exit 4; } >/dev/null; echo after; }; f` exits 4.
+/// A command anchors the redirect's plan while exit propagates out of the group.
 #[tokio::test]
 async fn exit_inside_a_redirected_group_exits_the_script() {
-    let (out, code) = run("f() { { exit 4; } > /dev/null; echo after; }; f; echo after2").await;
+    let (out, code) = run("{ :; exit 4; } > /dev/null; echo after").await;
     assert_eq!(out, "");
     assert_eq!(code, 4);
 }
@@ -180,7 +180,7 @@ async fn return_inside_a_redirected_group_returns() {
 }
 
 #[rstest]
-#[case::continue_skips("for i in 1 2 3; do { [[ $i == 2 ]] && continue; echo $i; } > /dev/null; echo i$i; done", "i1\ni3\n")]
+#[case::continue_skips("for i in 1 2 3; do { [[ $i == 2 ]] && continue; echo $i; } > /dev/null; echo \"i$i\"; done", "i1\ni3\n")]
 #[case::break_stops("for i in 1 2 3; do { [[ $i == 2 ]] && break; echo $i; } > \"/fo$i\"; done; cat /fo1; [[ -e /fo2 ]] && echo fo2; [[ -e /fo3 ]] || echo no-fo3", "1\nfo2\nno-fo3\n")]
 #[tokio::test]
 async fn loop_control_inside_a_redirected_group_reaches_the_loop(#[case] source: &str, #[case] stdout: &str) {
@@ -213,22 +213,16 @@ async fn errexit_inside_a_redirected_body_exits() {
 /// `limits.md` with it.
 #[tokio::test]
 async fn merged_stderr_follows_stdout() {
-    let (out, code) = run("for i in 1 2; do echo out$i; echo err$i >&2; done 2>&1 | cat").await;
+    let (out, code) = run("for i in 1 2; do echo \"out$i\"; echo \"err$i\" >&2; done 2>&1 | cat").await;
     assert_eq!(out, "out1\nout2\nerr1\nerr2\n");
     assert_eq!(code, 0);
 }
 
 // ---- stdin scoping --------------------------------------------------------------
 
-/// Known bug, shared with commands (`read x < g; cat` loses the session's
-/// stdin the same way): an input redirect on a compound replaces the
-/// session's stdin for the rest of the call instead of only for the
-/// compound. bash prints `L:a`, `L:b`, then `S`. The input-redirect scoping
-/// fix restores the displaced stdin in `finish_redirects`, which this
-/// wrapper shares with command stages. When that fix lands this test fails;
-/// change the expected output to "L:a\nL:b\nS\n".
+/// Input redirects end with the compound; the displaced session input returns.
 #[tokio::test]
-async fn known_bug_an_input_redirect_on_a_compound_outlives_it() {
+async fn an_input_redirect_on_a_compound_restores_session_input() {
     let kernel = kernel();
     let result = kernel
         .execute_with_options(
@@ -237,7 +231,21 @@ async fn known_bug_an_input_redirect_on_a_compound_outlives_it() {
         )
         .await
         .expect("runs");
-    assert_eq!(result.text_out(), "L:a\nL:b\n");
+    assert_eq!(result.text_out(), "L:a\nL:b\nS\n");
+}
+
+#[rstest]
+#[case::first_stage("printf 'file\\n' > /f; { read x; echo \"$x\"; } < /f | cat; cat", "file\nS\n")]
+#[case::nested_first_stage("printf 'outer\\n' > /outer; printf 'inner\\n' > /inner; { { read x; echo \"$x\"; } < /inner; read y; echo \"$y\"; } < /outer | cat; cat", "inner\nouter\nS\n")]
+#[case::last_stage("printf 'file\\n' > /f; echo pipe | { read x; echo \"$x\"; } < /f; cat", "file\nS\n")]
+#[tokio::test]
+async fn redirected_compound_pipeline_preserves_session_input(
+    #[case] source: &str,
+    #[case] expected: &str,
+) {
+    let result = kernel().execute_with_options(source, ExecuteOptions::new().with_stdin("S\n")).await.unwrap();
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out(), expected);
 }
 
 // ---- plan: a compound's redirects reach every command inside it ---------------

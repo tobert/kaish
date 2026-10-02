@@ -15,6 +15,7 @@
 mod builtin;
 mod clap_schema;
 mod context;
+pub(crate) use context::StdinState;
 mod global_flags;
 mod registry;
 mod traits;
