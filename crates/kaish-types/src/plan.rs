@@ -33,19 +33,80 @@ impl PlanDigest {
 /// `#[non_exhaustive]` vocabulary is the seam an embedder-side redaction pass
 /// writes its own variant into, without every consumer needing to switch
 /// from reading a `String` first.
+///
+/// A consumer that does not know a variant must treat it as unclassified,
+/// never as safe.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlannedValue {
-    /// The literal text, exactly as it would render on the command line.
+    /// Text that contains an expansion or is not a single known word: a
+    /// variable, `$(...)`, `$((...))`, a glob, an unquoted leading `~`, a
+    /// double-quoted string with an interpolation, a list or record. The
+    /// text is exactly as it would render on the command line, and the word
+    /// the command receives is not known until the statement runs.
     Plain(String),
+    /// A fully literal word: no variable, command substitution, arithmetic,
+    /// glob, tilde, or other expansion appears anywhere in it, so the word
+    /// the command receives is known before the statement runs.
+    ///
+    /// `value` is the source word after quotes and literal escapes are
+    /// decoded. An external command receives exactly that word in its
+    /// argument list. A builtin may bind the word as a typed value (`5` as
+    /// an integer) instead of text. A redirect target's `value` is a path
+    /// as written: kaish resolves it against the working directory and its
+    /// mounts at execution, so it is not necessarily absolute. `text` is
+    /// the rendering for display, which may quote the word (`'0'` for the
+    /// string `0`) so that it reads back as the same string. Read `value`
+    /// to classify an argument; never strip quotes from `text`.
+    ///
+    /// The word forms are:
+    ///
+    /// - a plain, quoted, or numeric word (`x`, `'a b'`, `"0"`, `5`): the
+    ///   word itself, `value` as the author wrote it (`0.10` stays `0.10`)
+    /// - a flag (`-n`, `--force`) or the `--` marker: the flag text, so
+    ///   `value` equals `text`
+    /// - a long flag with an attached value (`--tail=5`, `--tail="5"`) or a
+    ///   `KEY=value` word: the whole joined word (`--tail=5`, `KEY=1`), the
+    ///   same argument an external command receives
+    /// - a redirect target path (`> "out 1"`): the path (`out 1`)
+    ///
+    /// An unquoted leading `~` expands at runtime and stays `Plain`.
+    /// Quoted `~` is literal, as in `'~/x'`.
+    Literal {
+        /// The rendering, as for `Plain`: quoted where a shell reader needs
+        /// the quotes.
+        text: String,
+        /// The word the command receives.
+        value: String,
+    },
 }
 
 impl PlannedValue {
-    /// The text a sink should show: the literal, for `Plain`.
+    /// Name a literal word by its rendering and its value.
+    pub fn literal(text: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::Literal {
+            text: text.into(),
+            value: value.into(),
+        }
+    }
+
+    /// The text a sink should show: the rendering, for `Plain` and
+    /// `Literal`.
     pub fn display(&self) -> String {
         match self {
             Self::Plain(s) => s.clone(),
+            Self::Literal { text, .. } => text.clone(),
+        }
+    }
+
+    /// The word the command receives, when it is fully literal; `None` for
+    /// `Plain`. Classify arguments with this and never by stripping quotes
+    /// from [`display`](Self::display).
+    pub fn literal_value(&self) -> Option<&str> {
+        match self {
+            Self::Literal { value, .. } => Some(value),
+            _ => None,
         }
     }
 }

@@ -113,6 +113,7 @@ fn format_token(token: &Token) -> String {
         // Literals
         Token::String(s) => format!("STRING({})", escape_for_display(s)),
         Token::SingleString(s) => format!("SINGLESTRING({})", s),
+        Token::EscapedWord(word) => format!("ESCAPED({})", word.literal),
         Token::HereDoc(d) => format!("HEREDOC({}, literal={})", escape_for_display(&d.content), d.literal),
         Token::VarRef(s) => format!("VARREF({})", s),
         Token::SimpleVarRef(s) => format!("SIMPLEVARREF({})", s),
@@ -257,6 +258,100 @@ fn lexer_identifiers(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::numident_with_dot("019dda1c.commit", &["NUMIDENT(019dda1c.commit)"])]
 fn lexer_number_idents(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
+}
+
+// `^` is an ordinary word character, as in bash: `HEAD^`, `a^b`, `^foo`.
+// `$(( ))` and `${…}` never reach these word classes.
+#[rstest]
+#[case::caret_alone("^", &["IDENT(^)"])]
+#[case::caret_infix("a^b", &["IDENT(a^b)"])]
+#[case::caret_git_parent("HEAD^", &["IDENT(HEAD^)"])]
+#[case::caret_git_second_parent("HEAD^2", &["IDENT(HEAD^2)"])]
+#[case::caret_leading("^foo", &["IDENT(^foo)"])]
+#[case::caret_digit_leading("1^2", &["NUMIDENT(1^2)"])]
+#[case::caret_path("/a^b", &["PATH(/a^b)"])]
+#[case::caret_relative_path("a^/b", &["RELPATH(a^/b)"])]
+#[case::caret_dotted(".a^b", &["DOTIDENT(.a^b)"])]
+#[case::caret_tilde_path("~/a^b", &["TILDEPATH(~/a^b)"])]
+#[case::caret_at_word("@a^b", &["ATWORD(@a^b)"])]
+fn lexer_caret_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// A `~` that does not start a word is an ordinary character: `HEAD~1`,
+// `a~b`, `f.txt~`. A word that starts with `~` is still a tilde path.
+#[rstest]
+#[case::tilde_infix("a~b", &["IDENT(a~b)"])]
+#[case::tilde_suffix("x~", &["IDENT(x~)"])]
+#[case::tilde_git_ancestor("HEAD~1", &["IDENT(HEAD~1)"])]
+#[case::tilde_git_mixed("HEAD~1^2", &["IDENT(HEAD~1^2)"])]
+#[case::tilde_digit_leading("1~2", &["NUMIDENT(1~2)"])]
+#[case::tilde_path_word("/tmp/f~", &["PATH(/tmp/f~)"])]
+#[case::tilde_relative_path("a/b~c", &["RELPATH(a/b~c)"])]
+#[case::tilde_dotted(".a~b", &["DOTIDENT(.a~b)"])]
+#[case::tilde_at_word("@a~b", &["ATWORD(@a~b)"])]
+#[case::tilde_inner_tilde("~/a~b", &["TILDEPATH(~/a~b)"])]
+#[case::tilde_long_flag_value("--from=HEAD~1", &["LONGFLAG(from)", "EQ", "IDENT(HEAD~1)"])]
+#[case::tilde_leading_unchanged("~/x", &["TILDEPATH(~/x)"])]
+#[case::tilde_alone_unchanged("~", &["TILDE"])]
+fn lexer_tilde_inside_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// A digit-leading word with a dash is text, including a trailing dash: the
+// `cut -c 9-` and `cut -f 1-3,5-` field lists. A plain numeral stays a number.
+#[rstest]
+#[case::dashnum_open_range("9-", &["DASHNUM(9-)"])]
+#[case::dashnum_double_dash("1--", &["DASHNUM(1--)"])]
+#[case::dashnum_range_then_dash("1-3-", &["DASHNUM(1-3-)"])]
+#[case::dashnum_float_then_dash("1.5-", &["DASHNUM(1.5-)"])]
+#[case::dashnum_minus_led_open("-5-", &["DASHNUM(-5-)"])]
+#[case::dashnum_minus_led_range("-1-3", &["DASHNUM(-1-3)"])]
+#[case::dashnum_field_list("1-3,5-", &["IDENT(1-3,5-)"])]
+#[case::dashnum_field_list_short("2,4-", &["IDENT(2,4-)"])]
+#[case::dashnum_segment_punctuation("1-a@b+c", &["DASHNUM(1-a@b+c)"])]
+#[case::dashnum_glob_class("[0-9-]*", &["GLOB([0-9-]*)"])]
+#[case::dashnum_int_unchanged("5", &["INT(5)"])]
+#[case::dashnum_negative_unchanged("-5", &["INT(-5)"])]
+#[case::dashnum_range_unchanged("1-3", &["DASHNUM(1-3)"])]
+fn lexer_digit_leading_dash_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// A backslash outside quotes makes the next character literal. The escaped
+// character and its plain neighbors fold into one quoted word; a flag, its
+// `=`, and an assignment key stay structure.
+#[rstest]
+#[case::escape_alone(r"\(", &["ESCAPED(()"])]
+#[case::escape_space(r"a\ b", &["ESCAPED(a b)"])]
+#[case::escape_backslash(r"\\", &[r"ESCAPED(\)"])]
+#[case::escape_dollar(r"\$HOME", &["ESCAPED($HOME)"])]
+#[case::escape_star(r"\*.txt", &["ESCAPED(*.txt)"])]
+#[case::escape_hash_run(r"\##", &["ESCAPED(##)"])]
+#[case::escape_then_comment(r"a\ #b", &["ESCAPED(a #b)"])]
+#[case::escape_separate_words(r"\( a \)", &["ESCAPED(()", "IDENT(a)", "ESCAPED())"])]
+#[case::escape_long_flag_value(r"--opt=a\ b", &["LONGFLAG(opt)", "EQ", "ESCAPED(a b)"])]
+#[case::escape_short_flag_value(r"-F\;", &["SHORTFLAG(F)", "ESCAPED(;)"])]
+#[case::escape_assignment_value(r"x=a\ b", &["IDENT(x)", "EQ", "ESCAPED(a b)"])]
+#[case::escape_in_assignment_key(r"a\=b", &["ESCAPED(a=b)"])]
+#[case::escape_tilde_path(r"~/a\ b", &["ESCAPED(~/a b)"])]
+#[case::escape_tilde_prefix(r"~\ b", &["ESCAPED(~ b)"])]
+#[case::escape_then_continuation_untouched("a \\\nb", &["IDENT(a)", "IDENT(b)"])]
+fn lexer_backslash_escapes(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+#[rstest]
+#[case::star(r"a\ *.txt")]
+#[case::question(r"a\ ?")]
+#[case::bracket_pair(r"a\ [bc]")]
+fn lexer_backslash_words_retain_unquoted_globs(#[case] input: &str) {
+    let tokens = tokenize(input).expect("word remains data until its parser context is known");
+    let [token] = tokens.as_slice() else { panic!("expected one word: {tokens:?}") };
+    let Token::EscapedWord(word) = &token.token else { panic!("expected escaped word: {token:?}") };
+    assert!(word.has_unquoted_glob, "the ordinary-word parser must refuse: {word:?}");
+    assert_eq!(word.source, input);
+    assert_eq!(&input[token.span.clone()], input);
 }
 
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
@@ -1209,4 +1304,18 @@ fn line_continuation_stays_out_of_token_spans(#[case] source: &str) {
         );
         assert_ne!(t.token, Token::LineContinuation, "{source:?}: leaked {tokens:?}");
     }
+}
+
+#[rstest]
+#[case("café")]
+#[case("名前")]
+#[case("😁")]
+fn escaped_suffix_keeps_the_complete_variable_name(#[case] name: &str) {
+    let source = format!("${name}\\ suffix");
+    let tokens = tokenize(&source).expect("tokenize");
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].token, Token::SimpleVarRef(name.to_string()));
+    assert_eq!(tokens[0].span, 0..name.len() + 1);
+    assert!(matches!(&tokens[1].token, Token::EscapedWord(word) if word.literal == " suffix"));
+    assert_eq!(tokens[1].span, name.len() + 1..source.len());
 }

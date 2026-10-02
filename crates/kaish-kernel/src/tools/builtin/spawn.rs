@@ -96,8 +96,10 @@ impl Tool for Spawn {
             [
                 ("Run a command", "spawn --command cargo --argv build"),
                 ("With timeout", "spawn --command sleep --argv 10 --timeout 1000"),
+                ("Flags after the command are its own", "spawn --timeout 5000 echo -n hi"),
             ],
         )
+        .with_options_end_at_operand()
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -196,7 +198,13 @@ impl Tool for Spawn {
             }
             None => {
                 let mut out = Vec::with_capacity(argv_positionals.len());
-                for v in argv_positionals {
+                let first_argv_index = args.positional.len() - argv_positionals.len();
+                for (offset, v) in argv_positionals.iter().enumerate() {
+                    // A numeral spelled `-0` or `007` reaches the command as written.
+                    if let Some(raw) = args.positional_raw.get(&(first_argv_index + offset)) {
+                        out.push(raw.clone());
+                        continue;
+                    }
                     match extract_positional_argv_element(v) {
                         Ok(mut words) => out.append(&mut words),
                         Err(msg) => return ExecResult::failure(1, format!("spawn: {msg}")),

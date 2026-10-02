@@ -1091,7 +1091,7 @@ fn parser_case_multiple_branches() {
 
 #[test]
 fn parser_case_with_patterns() {
-    parse_and_snapshot("case_with_patterns", "case \"test.rs\" in\n    \"*.py\") echo \"Python\" ;;\n    \"*.rs\") echo \"Rust\" ;;\nesac");
+    parse_and_snapshot("case_with_patterns", "case \"test.rs\" in\n    *.py) echo \"Python\" ;;\n    *.rs) echo \"Rust\" ;;\nesac");
 }
 
 #[test]
@@ -1101,7 +1101,7 @@ fn parser_case_multiple_patterns() {
 
 #[test]
 fn parser_case_with_default() {
-    parse_and_snapshot("case_with_default", "case \"x\" in\n    \"*\") echo \"default\" ;;\nesac");
+    parse_and_snapshot("case_with_default", "case \"x\" in\n    *) echo \"default\" ;;\nesac");
 }
 
 #[test]
@@ -1520,13 +1520,13 @@ fn glued_positional_after_double_dash_is_rejected() {
     assert!(msg.to_lowercase().contains("quote"), "should hint to quote: {msg}");
 }
 
-/// A spaced (non-glued) positional after `--` is unaffected.
+/// Keep unquoted operator syntax after `--`; the binder gives it operand meaning.
 #[test]
 fn spaced_positional_after_double_dash_still_parses() {
     let sexpr = one_stmt_sexpr("echo hi -- --this-is-data");
     assert!(sexpr.contains("(doubledash)"), "got: {sexpr}");
     assert!(
-        sexpr.contains(r#"(pos (string "--this-is-data"))"#),
+        sexpr.contains(r#"(longflag this-is-data)"#),
         "got: {sexpr}"
     );
 }

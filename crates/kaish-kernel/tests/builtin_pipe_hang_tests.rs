@@ -195,6 +195,7 @@ async fn kernel_with_big_file() -> Kernel {
 #[case::sed("sed 's/1/9/' /tmp/big.txt")]
 #[case::awk("awk '{print $1}' /tmp/big.txt")]
 #[case::base64("base64 /tmp/big.txt")]
+#[case::jq_raw(r#"jq -R 'split("") | length' /tmp/big.txt"#)]
 #[tokio::test]
 async fn request_timeout_stops_a_busy_builtin(#[case] script: &str) {
     let kernel = kernel_with_big_file().await;

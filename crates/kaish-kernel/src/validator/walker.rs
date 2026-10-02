@@ -347,8 +347,11 @@ impl<'a> Validator<'a> {
                 cmd.name, schema.name
             );
             let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
-            let tool_issues = tool.validate(&tool_args);
-            self.issues.extend(tool_issues);
+            let asks_for_help = crate::tools::requests_builtin_help(&tool_args, schema);
+            if !asks_for_help {
+                let tool_issues = tool.validate(&tool_args);
+                self.issues.extend(tool_issues);
+            }
         } else if let Some(user_tool) = self.user_tools.get(&cmd.name) {
             // Validate against user-defined tool parameters
             self.validate_user_tool_args(user_tool, &cmd.args);
@@ -985,51 +988,73 @@ fn is_special_command(name: &str) -> bool {
     matches!(name, "true" | "false" | "readonly" | "local")
 }
 
+/// Bind `args` as plain words in source order over placeholders, mirroring
+/// the runtime binder's raw words (`kernel::bind_raw_words`).
+///
+/// No `past_double_dash` tracking: `--` stays a literal word and the tool
+/// decides what it means, which is what the runtime does too.
+fn push_raw_words_for_validation(args: &[Arg], tool_args: &mut ToolArgs, preserve_syntax: bool) {
+    for arg in args {
+        let index = tool_args.positional.len();
+        if let Arg::Positional(Expr::NumericLiteral { raw, .. }) = arg {
+            tool_args.positional_raw.insert(index, raw.clone());
+        }
+        if preserve_syntax {
+            let syntax = match arg {
+                Arg::ShortFlag(name) => Some(kaish_types::ArgumentSyntax::ShortFlag(name.clone())),
+                Arg::LongFlag(name) => Some(kaish_types::ArgumentSyntax::LongFlag(name.clone())),
+                Arg::Named { key, value } | Arg::WordAssign { key, value } => {
+                    let raw = match value {
+                        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+                        _ => None,
+                    };
+                    let value = expr_to_placeholder(value);
+                    Some(if matches!(arg, Arg::Named { .. }) {
+                        kaish_types::ArgumentSyntax::Named {
+                            key: key.clone(),
+                            value,
+                            raw,
+                        }
+                    } else {
+                        kaish_types::ArgumentSyntax::WordAssign {
+                            key: key.clone(),
+                            value,
+                            raw,
+                        }
+                    })
+                }
+                Arg::DoubleDash => Some(kaish_types::ArgumentSyntax::DoubleDash),
+                Arg::Positional(_) => None,
+            };
+            if let Some(syntax) = syntax {
+                tool_args.positional_syntax.insert(index, syntax);
+            }
+        }
+        match arg {
+            Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
+            Arg::ShortFlag(name) => tool_args.positional.push(Value::String(format!("-{name}"))),
+            Arg::LongFlag(name) => tool_args.positional.push(Value::String(format!("--{name}"))),
+            Arg::Named { key, value } | Arg::WordAssign { key, value } => {
+                let text = match value {
+                    Expr::NumericLiteral { raw, .. } => raw.clone(),
+                    _ => crate::interpreter::value_to_string(&expr_to_placeholder(value)),
+                };
+                let prefix = if matches!(arg, Arg::Named { .. }) { "--" } else { "" };
+                tool_args
+                    .positional
+                    .push(Value::String(format!("{prefix}{key}={text}")));
+            }
+            Arg::DoubleDash => tool_args.positional.push(Value::String("--".to_string())),
+        }
+    }
+}
+
 /// Build ToolArgs from AST Args for validation purposes.
 ///
 /// This is a simplified version that doesn't evaluate expressions -
 /// it uses placeholder values since we only care about argument structure.
 pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
-
-    // A `raw_argv` tool keeps every word in source order, in `positional`,
-    // with no flag/operand split — mirroring the runtime binder's raw-argv
-    // arm (kernel.rs). Without this, validation split the words by token
-    // shape and destroyed the ORDER, which for `test` is the only thing that
-    // separates an operator from a literal: `test "-a" = "-a"` and
-    // `test a = a -a b = b` decomposed to the same flags/positional sets, so
-    // no `Tool::validate` could tell them apart. The verbatim arm below was
-    // added for exactly this reason; raw_argv had gone without one until now.
-    if schema.is_some_and(|s| s.raw_argv) {
-        // No `past_double_dash` tracking: raw_argv keeps `--` as a literal
-        // word and lets the tool decide what it means, which is what the
-        // runtime arm does too.
-        for arg in args {
-            match arg {
-                Arg::Positional(expr) => tool_args.positional.push(expr_to_placeholder(expr)),
-                Arg::ShortFlag(name) => {
-                    tool_args.positional.push(Value::String(format!("-{name}")))
-                }
-                Arg::LongFlag(name) => {
-                    tool_args.positional.push(Value::String(format!("--{name}")))
-                }
-                Arg::Named { key, value } => tool_args.positional.push(Value::String(format!(
-                    "--{key}={}",
-                    crate::interpreter::value_to_string(&expr_to_placeholder(value))
-                ))),
-                Arg::WordAssign { key, value } => tool_args.positional.push(Value::String(
-                    format!(
-                        "{key}={}",
-                        crate::interpreter::value_to_string(&expr_to_placeholder(value))
-                    ),
-                )),
-                Arg::DoubleDash => {
-                    tool_args.positional.push(Value::String("--".to_string()));
-                }
-            }
-        }
-        return tool_args;
-    }
 
     // Validation binds the way execution does — placeholders in source order,
     // into `words` — so the schema checks never judge a decomposition the tool
@@ -1041,20 +1066,27 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
         // `has_flag("json")` must see what execution will.
         let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
         let mut words = Vec::new();
-        let mut past_double_dash = false;
+        let mut argument_state = crate::tools::VerbatimArgumentState::default();
+        let schema = match schema {
+            Some(schema) => schema,
+            None => unreachable!("verbatim binding requires a schema"),
+        };
         for arg in args {
+            let words_start = words.len();
             match arg {
                 Arg::Positional(expr) => words.push(expr_to_placeholder(expr)),
                 Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
                 Arg::LongFlag(name) => {
-                    if lift_global_flags && !past_double_dash && is_global_output_flag(name) {
+                    if lift_global_flags && !argument_state.past_end_marker()
+                        && !argument_state.expects_value() && is_global_output_flag(name) {
                         tool_args.flags.insert(name.clone());
                     } else {
                         words.push(Value::String(format!("--{name}")));
                     }
                 }
                 Arg::Named { key, value } => {
-                    if lift_global_flags && !past_double_dash && is_global_output_flag(key) {
+                    if lift_global_flags && !argument_state.past_end_marker()
+                        && !argument_state.expects_value() && is_global_output_flag(key) {
                         // Same truthiness rule execution applies. A literal
                         // survives `expr_to_placeholder` intact and is judged;
                         // anything dynamic becomes the `<dynamic>` string,
@@ -1071,12 +1103,39 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     words.push(Value::String(format!("{key}=<value>")));
                 }
                 Arg::DoubleDash => {
-                    past_double_dash = true;
+                    argument_state.mark_end_marker();
                     words.push(Value::String("--".to_string()));
                 }
             }
+            for word in &words[words_start..] {
+                argument_state.consume(word, schema);
+            }
         }
         tool_args.words = Some(words);
+        return tool_args;
+    }
+
+    if schema.is_some_and(|s| s.raw_argv) {
+        push_raw_words_for_validation(args, &mut tool_args, false);
+        return tool_args;
+    }
+
+    if let Some(wrapper) = schema.filter(|s| s.options_end_at_operand) {
+        let (boundary, values) = crate::scheduler::pipeline::wrapper_option_layout(args, wrapper);
+        let boundary = boundary.unwrap_or(args.len());
+        let mut options = args[..boundary].to_vec();
+        for index in values {
+            if !matches!(args[index], Arg::Positional(_)) {
+                let mut word = ToolArgs::new();
+                push_raw_words_for_validation(&args[index..index + 1], &mut word, false);
+                assert_eq!(word.positional.len(), 1, "one wrapper option value word");
+                options[index] = Arg::Positional(Expr::Literal(word.positional.remove(0)));
+            }
+        }
+        let mut options_schema = wrapper.clone();
+        options_schema.options_end_at_operand = false;
+        let mut tool_args = build_tool_args_for_validation(&options, Some(&options_schema));
+        push_raw_words_for_validation(&args[boundary..], &mut tool_args, true);
         return tool_args;
     }
 
@@ -1089,7 +1148,10 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
 
     for i in 0..args.len() {
         match &args[i] {
-            Arg::DoubleDash => past_double_dash = true,
+            Arg::DoubleDash => {
+                if past_double_dash { tool_args.positional.push(Value::String("--".into())); }
+                past_double_dash = true;
+            },
             Arg::Positional(expr) => {
                 if !consumed.contains(&i) {
                     tool_args.positional.push(expr_to_placeholder(expr));
@@ -1114,6 +1176,12 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     if global_flag_value_is_truthy(&v) {
                         tool_args.flags.insert(key.clone());
                     }
+                    continue;
+                }
+                let declared_value = param_lookup.get(key.as_str()).is_some_and(|(_, kind, _, _)| !is_bool_type(kind));
+                let repeatable = param_lookup.get(key.as_str()).is_some_and(|(_, _, _, repeatable)| *repeatable);
+                if matches!(v, Value::Bool(_)) && !declared_value && !repeatable {
+                    if v == Value::Bool(true) { tool_args.flags.insert(key.clone()); }
                     continue;
                 }
                 match param_lookup.get(key.as_str()) {

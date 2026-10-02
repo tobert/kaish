@@ -69,7 +69,7 @@ fn has_json_flag(args: &[Arg]) -> bool {
 /// (GH #222). Every early return in `run_scatter_gather` funnels through this
 /// one function, so it is the single place the format gets applied — not
 /// three separate copies threaded through each `return` site.
-fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
+pub(super) fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
     match format {
         Some(format) => apply_output_format(result, format),
         None => result,
@@ -1349,6 +1349,65 @@ pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, 
         }
     }
     map
+}
+
+/// Index of the first operand in `args`, for a tool whose schema sets
+/// [`ToolSchema::options_end_at_operand`]; `None` when every word is an option
+/// or an option's value.
+///
+/// The operand is the first positional or `key=value` word that is not the
+/// value of a value-taking option. The tool's own options sit before it and
+/// the wrapped command starts at it. The runtime and validation binders both
+/// call this, so they cannot disagree about where the command begins.
+pub fn operand_boundary(args: &[Arg], schema: &ToolSchema) -> Option<usize> {
+    wrapper_option_layout(args, schema).0
+}
+
+/// Return the first operand and the words consumed by preceding options.
+/// Every word shape can be an option value; an unconsumed `--` ends options.
+pub(crate) fn wrapper_option_layout(args: &[Arg], schema: &ToolSchema) -> (Option<usize>, Vec<usize>) {
+    let lookup = schema_param_lookup(schema);
+    let mut owed = 0usize;
+    let mut values = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if owed > 0 {
+            values.push(index);
+            owed -= 1;
+            continue;
+        }
+        match arg {
+            Arg::Positional(_) | Arg::WordAssign { .. } => return (Some(index), values),
+            Arg::DoubleDash => return ((index + 1 < args.len()).then_some(index + 1), values),
+            Arg::Named { .. } => {}
+            Arg::ShortFlag(name) => owed = short_flag_values_owed(name, &lookup),
+            Arg::LongFlag(name) => {
+                owed = match lookup.get(name.as_str()) {
+                    Some(&(_, kind, consumes, _)) if !is_bool_type(kind) => consumes.max(1),
+                    _ => 0,
+                };
+            }
+        }
+    }
+    (None, values)
+}
+
+/// How many following words a short-flag token takes as values, by the rules
+/// the binders use: a whole-name match, else the first value-taking letter,
+/// which takes the rest of the token (glued) or, as the last letter, the next
+/// word.
+fn short_flag_values_owed(name: &str, lookup: &HashMap<String, (&str, &str, usize, bool)>) -> usize {
+    if let Some(&(_, kind, consumes, _)) = lookup.get(name) {
+        return if is_bool_type(kind) { 0 } else { consumes.max(1) };
+    }
+    let letters: Vec<char> = name.chars().collect();
+    for (position, letter) in letters.iter().enumerate() {
+        if let Some(&(_, kind, consumes, _)) = lookup.get(letter.to_string().as_str()) {
+            if !is_bool_type(kind) {
+                return if position + 1 == letters.len() { consumes.max(1) } else { 0 };
+            }
+        }
+    }
+    0
 }
 
 /// Check if a type is considered boolean.

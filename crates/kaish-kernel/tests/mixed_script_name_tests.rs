@@ -164,36 +164,17 @@ async fn a_for_loop_with_a_mixed_script_name_still_runs_and_binds() {
     assert_eq!(out, "x\ny");
 }
 
-/// A known over-reach, pinned rather than hidden.
-///
-/// `env` sets variables from the words before the command, and the words after
-/// it belong to that command. The binder does not preserve that split: an
-/// unquoted `key=value` anywhere in the line lands in `named`, so
-/// `env FOO=1 mycmd PАTH=2` judges the command's own argument as if it were a
-/// variable env sets. The order that would tell them apart is gone by the time
-/// any validate runs.
-///
-/// Warning on it is the better half of the trade — a mixed-script `PАTH=2` is
-/// worth reporting wherever it appears, and W007 never blocks execution. But
-/// the message says "names a different variable", which is not what that word
-/// does. Quoting the argument (`'PАTH=2'`) keeps it positional and quiet.
-///
-/// This test exists so the day the binder stops discarding order, someone has
-/// to look at this line and decide, rather than silently changing it.
+/// `env` sets variables from the words before the command; the words after
+/// it belong to that command. The binder keeps source order for `env`, so a
+/// command argument spelled like an assignment is not judged.
 #[tokio::test]
-async fn env_also_judges_a_command_argument_that_looks_like_an_assignment() {
+async fn env_does_not_judge_a_command_argument_that_looks_like_an_assignment() {
     let name = cyrillic_path();
     let (_, _, err) = run(&format!("env FOO=1 mycmd {name}=2")).await;
-    assert!(
-        err.contains("W007"),
-        "current behavior: the command's own key=value is judged too: {err:?}"
-    );
+    assert!(!err.contains("W007"), "the command's own key=value is not env's: {err:?}");
 
-    let (_, _, quiet) = run(&format!("env FOO=1 mycmd '{name}=2'")).await;
-    assert!(
-        !quiet.contains("W007"),
-        "a quoted argument after the command is not judged: {quiet:?}"
-    );
+    let (_, _, before) = run(&format!("env {name}=2 mycmd")).await;
+    assert!(before.contains("W007"), "a variable env sets is judged: {before:?}");
 }
 
 /// The advisory reaches the streaming callback **and** the returned

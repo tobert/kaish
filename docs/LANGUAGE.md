@@ -401,13 +401,14 @@ echo "$(echo "$(date +%F)")"
 
 ### Word characters
 
-A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`,
-and **any non-ASCII character** — kaish, like bash, never inspects word bytes
-for alphabetic-ness. Any script lexes unquoted, no quoting needed. (ASCII
-punctuation outside that set is still not a word character: `echo 100%` is an
-error, as it was before.)
+A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`, `^`,
+`~` after the first character, and **any non-ASCII character** — kaish, like
+bash, never inspects word bytes for alphabetic-ness. Any script lexes
+unquoted, no quoting needed. (ASCII punctuation outside that set is still not
+a word character: `echo 100%` is an error, as it was before.)
 
 ```sh
+echo HEAD^2 HEAD~1 f.txt~ 9-    # complete literal words
 echo 123.txt 1.2.3 true:foo a+b # complete literal words
 ls 1.0*                       # glob keeps the written numeric prefix
 p=~/x; echo "$p"               # assignment followed by a home-relative path
@@ -455,13 +456,13 @@ nothing.
 
 `~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
 
-A `~` that is not at the start of a word is never a tilde-prefix: kaish has
-no bareword-pasting rule, so an unquoted `~` glued to a preceding word
-(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
-a silently literal concatenation. A heredoc body never expands `~`, even
-when the delimiter is unquoted and the body otherwise interpolates — tilde
-expansion is a source-word operation, and a heredoc body is never split into
-words.
+`echo HEAD~1 foo~bar a/~` prints those three words as written: a `~` after the first character is ordinary text. `^` is ordinary text in a word too (`HEAD^2`); `$(( ))` and `${…}` keep their own operators.
+
+Digit-leading words containing a dash stay text, including open ranges (`9-`, `1-3,5-`) and repeated dashes (`1--`). Complete scalar numerals keep their number rules.
+
+A heredoc body never expands `~`, even when the delimiter is unquoted and
+the body otherwise interpolates — tilde expansion is a source-word operation,
+and a heredoc body is never split into words.
 
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
@@ -560,6 +561,32 @@ A name containing `#` is not a valid assignment target: `abc#3=5` is error
 `E018`, because `$abc#3` would not read it back. kaish refuses to create a
 variable nothing can reference.
 
+### Backslash quoting
+
+```sh
+printf '<%s>\n' a\ b          # one literal argument: a b
+printf '<%s>\n' \( \)         # literal parentheses
+find . -name \*.rs            # find receives the pattern *.rs
+case '*' in \*) echo hit;; esac
+[[ a.b =~ ^a\.b ]]            # the escaped dot matches a literal dot
+```
+
+Outside quotes, a backslash makes the next character literal. It can join
+literal text into one word. An escaped leading `~` stays literal; `~/a\ b`
+still expands the unescaped `~/`. A trailing backslash is an error.
+Backslash followed by a newline continues the line as before.
+
+In `case` patterns and `[[ =~ ]]` operands, escaped characters match
+literally while unescaped pattern operators keep their meaning. Quoted
+`case` patterns also match literally.
+
+An ordinary argument that mixes escapes with unquoted glob characters is
+an error naming the fully quoted literal form. Write `'a *.rs'` to pass
+that text. To expand a glob, write a glob without backslash quoting.
+Backslashes do not join text to an unquoted expansion; see "Quote to join".
+For a short flag with an escaped value, separate the flag and value:
+`awk -F 'a b'`. A backslash after a combined short flag is refused.
+
 ### Quote to join
 
 ```sh
@@ -633,6 +660,24 @@ Everything after `--` is an operand, including a word shaped like a flag and
 including `--json`. The value still expands: `echo -- --greeting=$USER`
 prints `--greeting=` followed by the variable. A short flag with a value
 (`-n=1`) is not a word on either side of `--`; quote it (`echo "-n=1"`).
+
+### Builtin flags and expressions
+
+```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                    # same as -vET
+ls -d directory                # list the directory itself; overrides -R
+grep -x 'ready' file           # match a whole line; overrides -w
+find --help                    # print help and exit 0
+find . -name --help            # --help is the name to match
+```
+
+`find` joins tests with `-a` (or `-and`, also implied by adjacency), `-o` (or `-or`), and `!` (or `-not`). Negation binds before AND, then OR. Quote parentheses to group tests. Tests short-circuit; each reached `-print` prints the entry once, so two reached actions print twice. Without an explicit `-print`, a matching entry prints once. An expression allows at most 256 nodes, counting tests, operators, and groups, with at most 64 nested groups or negations. Larger expressions exit 2 with a smaller-expression hint. See `help find` for the supported tests and depth options.
+
+`cat -v` marks control bytes as `^X`, DEL as `^?`, and bytes above 127 with `M-` plus the same notation; tabs and newlines stay. `-T` marks tabs as `^I`; `-E` adds `$` before each newline and marks a preceding carriage return as `^M`. `-A` enables all three. Display modes buffer the input. `-n` numbers the marked lines; with only `-E` or `-T`, non-UTF-8 input exits 1 and names `-v` as the fix.
+
+`NAME --help` prints builtin help to stdout and exits 0. A declared option value shaped like `--help` or `--json` remains data. Expression tools such as `test` recognize only a leading `--help`. Unsupported builtin flags exit 2 and name `help NAME` for the supported flags.
 
 ## Pipes & Redirects
 
@@ -753,6 +798,25 @@ jq -n --arg a one --arg b two -r '$a + "-" + $b'
 Both flags are repeatable. `--argjson` errors loudly on malformed JSON
 (matching real jq).
 
+### Read raw text with jq
+
+```sh
+printf 'a\nb\n' | jq -R .     # one JSON string per line
+printf 'a\nb\n' | jq -R -s .  # one string: "a\nb\n"
+jq -R length notes.txt        # file input uses the same rules
+```
+
+`-R` / `--raw-input` reads text instead of JSON. A final unterminated line
+still counts; a final newline adds no empty input line. Only LF separates
+lines; CR stays in the string. With `-s`, the whole input is one string,
+including its newlines; empty input is `""`. Without `-s`, empty input
+produces no results.
+
+A runtime filter failure exits 1. Without `-s`, the error names its input
+line; other lines still run and their output stays. `-n -R` is refused with
+exit 2 because kaish jq does not provide `input`/`inputs`; use `jq -R .` or
+`jq -R -s .`.
+
 ### The text boundary — one document vs. many (JSONL)
 
 `fromjson` / `tojson` and kaish's `jq` all take **exactly one JSON document**
@@ -800,6 +864,17 @@ f() { ! cmd; }; f &             # negate inside the job, then background the cal
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.
+
+Builtin lists, tables, and trees end their last text line with a newline,
+so `ls dir | wc -l` counts every row. Text output keeps its written bytes.
+Command substitution strips final newlines; JSON output keeps its structure.
+
+`cat`, `head`, `tail`, `tac`, `cut`, and `file` continue after an unreadable
+file, print the other files in order, name each failure on stderr, and exit
+1. `sort` stops at an unreadable file with exit 2. `uniq`, `base64`, and
+`xxd` accept one input file; extra file operands are refused with exit 1.
+Use a redirect for output: `uniq input > output`. `head -c N a b` reads
+at most N bytes from each file, including binary prefixes.
 
 > **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
 > its flipped status — see "Shell Options" → "`!` and `set -e`" below for the
@@ -1428,6 +1503,30 @@ The `glob` builtin's `-a`/`--hidden` flag (and any hidden-inclusive walk) acts
 like `shopt -s dotglob`: bare wildcards then match dotfiles too. `find` includes
 hidden entries by default.
 
+### Recursive grep
+
+```sh
+grep -rn TODO src
+grep -R -l TODO src
+grep -r -m 2 TODO src
+```
+
+`grep -r` skips symlinks, devices, FIFOs and sockets found inside a directory.
+`-R` reads symlinks to regular files, reports broken links, and skips linked
+directories and special files. Neither mode enters a linked directory found
+inside the walk. A path explicitly given as an operand is read, including a
+symlink or device; an explicitly named directory is walked.
+
+Walk and read errors name the path on stderr, retain matches from readable
+files and exit 2. `-q` exits 0 on a match even after an error. A completed
+search exits 0 with matches or 1 without matches. Recursive and multi-file
+searches read 256 KiB chunks; `-q` and `-l` stop on the first match per file,
+and `-m N` stops after N selected lines per file. Context flags do not force
+full reads for `-q`, `-l` or `-c`. `-m 0` reads no file contents. Ordinary text
+scanning retains the unfinished line and output results; context output,
+multiline matching, explicit encoding and byte-order marks still require
+whole-file buffering.
+
 ### Ignore-aware filtering (`.gitignore`, `kaish-ignore`)
 
 The reference REPL is ignore-aware by default: interactive, `-c`, and script
@@ -1527,6 +1626,19 @@ a `VALUE` that isn't JSON is a flag value the builtin cannot use, also `2`.
 
 `124` (timeout) and `123` (a scatter worker failed) are the documented
 exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".
+
+### Nonzero JSON results
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+false --json                   # {"code":1,"error":""}
+diff --json before after       # exit 1, answer under data
+```
+
+`--json` keeps successful data unwrapped. An empty success prints nothing. A nonzero formatted result is an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The error removes one rendering newline and keeps other blank lines. Stderr still carries the same error. Check the exit code before reading the error or answer.
+
+Only the final builtin pipeline stage is formatted; earlier stages feed streams to the next stage. Command substitution captures the formatted result. `true` and `false` honor `--json` and its disabled forms. External commands receive the flag literally. Parse/validation refusals, unresolved commands, and redirect failures before builtin dispatch do not use this formatter. An output spill happens after formatting, so exit 3 keeps the truncated preview and spill metadata; the preview may be incomplete JSON. See "Shell Options".
 
 ## Background Jobs
 
@@ -1729,7 +1841,7 @@ short-circuits the rest on a failure).
 
 Kaish has a single, uniform cancellation discipline that reaches every spawned external child:
 
-- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline. On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
+- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline; flags after the duration belong to `COMMAND` (`timeout 5 sh -c 'exit 3'`). On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
 - **`scatter ... --timeout DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result row is tagged `"timed_out": true` with `code` 124.
 - **`Kernel::cancel()`** (embedder API) — fires the kernel's cancellation token; running externals get SIGTERM/SIGKILL via the same path. The REPL wires this to Ctrl-C.
 - **`KernelConfig::request_timeout`** (embedder default) and **`ExecuteOptions::timeout`** (per-call) — apply at the kernel-call boundary; same kill behaviour, return code 124.

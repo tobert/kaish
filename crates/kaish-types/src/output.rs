@@ -355,7 +355,8 @@ impl OutputData {
                     size += 1 + cell.len(); // tab + cell
                 }
             }
-            return size;
+            // Final line terminator.
+            return size + usize::from(!self.root.is_empty());
         }
 
         // Tree: estimate brace notation
@@ -366,7 +367,7 @@ impl OutputData {
             }
             size += n.estimated_byte_size();
         }
-        size
+        size + usize::from(!self.root.is_empty())
     }
 
     /// Write canonical representation to a writer with optional byte budget.
@@ -404,6 +405,10 @@ impl OutputData {
                     return Ok(written);
                 }
             }
+            if !self.root.is_empty() {
+                w.write_all(b"\n")?;
+                written += 1;
+            }
             return Ok(written);
         }
 
@@ -418,6 +423,10 @@ impl OutputData {
                 return Ok(written);
             }
         }
+        if !self.root.is_empty() {
+            w.write_all(b"\n")?;
+            written += 1;
+        }
         Ok(written)
     }
 
@@ -425,10 +434,13 @@ impl OutputData {
     ///
     /// This produces a simple string representation suitable for
     /// piping to other commands:
-    /// - Text nodes: their text content
-    /// - Named nodes: names joined by newlines
+    /// - Text nodes: their text content, verbatim
+    /// - Named nodes: one name per line
     /// - Tabular nodes (name + cells): TSV format (name\tcell1\tcell2...)
-    /// - Nested nodes: brace notation
+    /// - Nested nodes: brace notation, one root per line
+    ///
+    /// Lists, tables, and trees end every line, the last included, with a
+    /// newline, as GNU tools do: `ls d | wc -l` counts every row.
     pub fn to_canonical_string(&self) -> String {
         if let Some(text) = self.as_text() {
             return text.to_string();
@@ -447,8 +459,8 @@ impl OutputData {
                         parts.join("\t")
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .map(|line| line + "\n")
+                .collect();
         }
 
         // For trees, use brace notation
@@ -464,9 +476,8 @@ impl OutputData {
         }
 
         self.root.iter()
-            .map(format_node)
-            .collect::<Vec<_>>()
-            .join("\n")
+            .map(|n| format_node(n) + "\n")
+            .collect()
     }
 
     /// Serialize to a JSON value for `--json` flag handling.
@@ -578,10 +589,16 @@ pub enum OutputFormat {
 
 /// Transform an ExecResult into the requested output format.
 ///
-/// Serializes regardless of exit code — commands like `diff` (exit 1 = files differ)
-/// and `grep` (exit 1 = no matches) use non-zero exits for semantic meaning,
-/// not errors. The `--json` contract must hold for all exit codes.
+/// Success prints the data unwrapped. Any non-zero exit prints the envelope
+/// `{"code":N,"error":"..."}` instead, including exits that are answers rather
+/// than mistakes (`grep` no-match, `diff` differs). `error` is the stderr text,
+/// empty when the command wrote none. Partial results stay under `data`
+/// (structured) or `output` (text). Apps check the exit code, then `error`.
+/// An unchanged failure formatted again in-process keeps its existing envelope.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    if !result.ok() {
+        return failure_envelope(result, format);
+    }
     // Binary results serialize as the self-describing base64 envelope, never a
     // lossy-decoded JSON string. See docs/binary-data.md.
     if result.is_bytes() {
@@ -598,34 +615,7 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         return result;
     }
     if !result.has_output() && result.text_out().is_empty() {
-        // No stdout to format. A failure that carries a diagnostic message must
-        // still honor --json — otherwise the message leaks out as plain text
-        // even though structured output was requested. Emit a JSON error object
-        // so the contract holds on the error path. A clean non-zero exit with no
-        // message (e.g. `grep` no-match, exit 1) is not an error and stays empty.
-        if !result.ok() && !result.err.is_empty() {
-            match format {
-                OutputFormat::Json => {
-                    // The line terminator is a text-rendering contract (#363);
-                    // the JSON envelope carries the message as written.
-                    let mut obj = serde_json::json!({
-                        "error": result.err.trim_end_matches('\n'),
-                        "code": result.code,
-                    });
-                    // A tool that attached structured data to an error result
-                    // must keep it reachable under --json — nest it under `data`
-                    // so the envelope holds the diagnostic *and* the structured
-                    // truth instead of clobbering one with the other.
-                    if let Some(data) = &result.data {
-                        obj["data"] = crate::result::value_to_json(data);
-                    }
-                    let out =
-                        serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string());
-                    result.set_out(out);
-                    result.data = Some(crate::result::json_to_value(obj));
-                }
-            }
-        }
+        // Empty success: nothing to format.
         return result;
     }
     match format {
@@ -654,6 +644,45 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
             }
             // Clear sentinel — format already applied, prevents double-encoding
             result.set_output(None);
+            result
+        }
+    }
+}
+
+/// Replace a failed result's stdout with the `{"code","error"}` envelope.
+fn failure_envelope(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    if result.json_failure_formatted {
+        return result;
+    }
+    match format {
+        OutputFormat::Json => {
+            // Remove the single rendering terminator, keeping message blank lines.
+            let mut obj = serde_json::json!({
+                "code": result.code,
+                "error": result.err.strip_suffix('\n').unwrap_or(&result.err),
+            });
+            if result.is_bytes() {
+                let bytes = result.out_bytes().unwrap_or_else(|| {
+                    panic!("binary result must contain byte output")
+                });
+                obj["data"] = crate::bytes::bytes_to_envelope(bytes);
+            } else if let Some(output) = result.output() {
+                obj["data"] = output.to_json();
+            } else if let Some(data) = &result.data {
+                obj["data"] = crate::result::value_to_json(data);
+            } else {
+                let text = result.text_out();
+                if !text.is_empty() {
+                    obj["output"] = serde_json::Value::String(text.into_owned());
+                }
+            }
+            let out = serde_json::to_string(&obj).unwrap_or_else(|error| {
+                panic!("failed to serialize JSON failure envelope: {error}")
+            });
+            result.set_out(out);
+            result.data = Some(crate::result::json_to_value(obj));
+            result.set_output(None);
+            result.json_failure_formatted = true;
             result
         }
     }
@@ -934,13 +963,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_output_format_leaves_clean_no_match_empty() {
-        // grep no-match: exit 1, empty stdout, empty err. Not an error — must
-        // NOT be wrapped in a JSON error object; stays empty.
+    fn apply_output_format_wraps_clean_no_match() {
+        // Nonzero answers use the same envelope as reported errors.
         let result = ExecResult::failure(1, "");
         let formatted = apply_output_format(result, OutputFormat::Json);
-        assert!(formatted.text_out().is_empty());
-        assert!(formatted.data.is_none());
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
     }
 
     #[test]
@@ -998,5 +1026,56 @@ mod tests {
     fn into_text_empty() {
         let data = OutputData::text("");
         assert_eq!(data.into_text(), Ok("".to_string()));
+    }
+
+    #[test]
+    fn json_failure_keeps_partial_text_under_output() {
+        let mut result = ExecResult::from_output(1, "partial\n", "boom\n");
+        result.set_output(None);
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"code": 1, "error": "boom", "output": "partial\n"})
+        );
+        assert_eq!(formatted.err, "boom\n", "stderr keeps its message");
+    }
+
+    #[test]
+    fn json_failure_keeps_structured_output_under_data() {
+        let mut result = ExecResult::from_output(2, "", "bad\n");
+        result.set_output(Some(OutputData::text("kept")));
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 2, "error": "bad", "data": "kept"}));
+    }
+
+    #[test]
+    fn json_failure_without_message_has_empty_error() {
+        let formatted = apply_output_format(ExecResult::failure(1, ""), OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 1, "error": ""}));
+    }
+
+    #[test]
+    fn json_failure_keeps_blank_lines_in_the_error() {
+        let result = ExecResult::from_output(1, "", "boom\n\n");
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json["error"], "boom\n");
+        assert_eq!(formatted.err, "boom\n\n");
+    }
+
+    #[test]
+    fn json_failure_formatting_twice_keeps_one_envelope() {
+        let once = apply_output_format(ExecResult::failure(1, "boom"), OutputFormat::Json);
+        let twice = apply_output_format(once.clone(), OutputFormat::Json);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn json_success_with_no_output_stays_empty() {
+        let formatted = apply_output_format(ExecResult::success(""), OutputFormat::Json);
+        assert_eq!(formatted.text_out(), "");
     }
 }
