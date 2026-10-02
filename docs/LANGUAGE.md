@@ -778,6 +778,25 @@ jq -n --arg a one --arg b two -r '$a + "-" + $b'
 Both flags are repeatable. `--argjson` errors loudly on malformed JSON
 (matching real jq).
 
+### Read raw text with jq
+
+```sh
+printf 'a\nb\n' | jq -R .     # one JSON string per line
+printf 'a\nb\n' | jq -R -s .  # one string: "a\nb\n"
+jq -R length notes.txt        # file input uses the same rules
+```
+
+`-R` / `--raw-input` reads text instead of JSON. A final unterminated line
+still counts; a final newline adds no empty input line. Only LF separates
+lines; CR stays in the string. With `-s`, the whole input is one string,
+including its newlines; empty input is `""`. Without `-s`, empty input
+produces no results.
+
+A runtime filter failure exits 1. Without `-s`, the error names its input
+line; other lines still run and their output stays. `-n -R` is refused with
+exit 2 because kaish jq does not provide `input`/`inputs`; use `jq -R .` or
+`jq -R -s .`.
+
 ### The text boundary — one document vs. many (JSONL)
 
 `fromjson` / `tojson` and kaish's `jq` all take **exactly one JSON document**
@@ -825,6 +844,17 @@ f() { ! cmd; }; f &             # negate inside the job, then background the cal
 ```
 
 > **Output model:** kaish concatenates statement outputs verbatim, like bash — `printf "a"; printf "b"` and `printf "a" && printf "b"` both yield `ab`, with no separator inserted between commands. A line break appears only when a command emits its own (e.g. `echo`, which appends a trailing newline). No implicit per-statement separator is added.
+
+Builtin lists, tables, and trees end their last text line with a newline,
+so `ls dir | wc -l` counts every row. Text output keeps its written bytes.
+Command substitution strips final newlines; JSON output keeps its structure.
+
+`cat`, `head`, `tail`, `tac`, `cut`, and `file` continue after an unreadable
+file, print the other files in order, name each failure on stderr, and exit
+1. `sort` stops at an unreadable file with exit 2. `uniq`, `base64`, and
+`xxd` accept one input file; extra file operands are refused with exit 1.
+Use a redirect for output: `uniq input > output`. `head -c N a b` reads
+at most N bytes from each file, including binary prefixes.
 
 > **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
 > its flipped status — see "Shell Options" → "`!` and `set -e`" below for the

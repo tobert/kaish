@@ -16,7 +16,9 @@ breaking entries are marked **BREAKING**.
   `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
   match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
   escapes with unquoted globs is an error that names the quoted form.
-
+- `jq -R` reads each text line as a string; `-R -s` reads the whole input
+  as one string. A failing input line is reported with exit 1 while other
+  lines still run. `-n -R` is refused with an alternative.
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
@@ -36,6 +38,11 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
+  an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
+  refuse extra operands. `head -c` reads a byte prefix of each file.
+- Lists, tables, and trees end their last text line with a newline, so
+  `ls dir | wc -l` counts every row.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all

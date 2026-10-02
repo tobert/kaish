@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     if result.code != 0 {
         eprintln!("script failed: {}", result.err);
     }
-    println!("{}", result.text_out());
+    print!("{}", result.text_out());
 
     Ok(())
 }
@@ -43,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
 `ExecResult` exposes stdout via the `text_out()` accessor (it materializes
 structured output when a builtin returned a table or tree); `code`, `err`,
 and `data` are public fields.
+
+Print stdout verbatim. Lists, tables, and trees end their last text row with
+a newline; text nodes keep their written bytes, including an absent final
+newline. JSON output keeps its structure.
 
 ## The result contract
 

@@ -184,6 +184,32 @@ pub(crate) fn read_repeatable_strings(
     }
 }
 
+/// Refuse an operand after the first for a one-input tool. kaish tools write
+/// to stdout, so GNU's output-file operand (`uniq IN OUT`) is a redirect.
+pub(crate) fn extra_operand_error(
+    tool: &str,
+    operands: &[String],
+) -> Option<crate::interpreter::ExecResult> {
+    let extra = operands.get(1)?;
+    Some(crate::interpreter::ExecResult::failure(
+        1,
+        format!("{tool}: extra operand '{extra}': {tool} reads one input; write output with `> {extra}`"),
+    ))
+}
+
+/// Attach the failures of a multi-operand reader to its result: one stderr
+/// line per failed operand, exit code 1. The good operands' output stays.
+pub(crate) fn with_operand_errors(
+    mut result: crate::interpreter::ExecResult,
+    errors: String,
+) -> crate::interpreter::ExecResult {
+    if !errors.is_empty() {
+        result.err.push_str(&errors);
+        result.code = 1;
+    }
+    result
+}
+
 /// Read a path-typed positional/named arg as a string, going LOUD on a
 /// `Value::Bytes` operand rather than `ToolArgs::get_string`'s silent `None`
 /// (that method lives in the `kaish-types` leaf crate, which has no

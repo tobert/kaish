@@ -94,5 +94,5 @@ async fn named_path_argument_expands_before_tool_binding() {
         [("HOME".into(), Value::String("/home/fixture".into()))].into())).unwrap();
     let result = kernel.execute("mkdir -p /home/fixture; touch /home/fixture/x /home/fixture/y; find /home/fixture --path=~/x").await.unwrap();
     assert!(result.ok(), "{result:?}");
-    assert_eq!(result.text_out(), "/home/fixture/x");
+    assert_eq!(result.text_out(), "/home/fixture/x\n");
 }

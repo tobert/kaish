@@ -34,7 +34,7 @@ struct UniqArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Input file; reads stdin when omitted.
+    /// One input file; reads stdin when omitted. Use a redirect for output.
     paths: Vec<String>,
 }
 
@@ -69,6 +69,10 @@ impl Tool for Uniq {
             Err(e) => return ExecResult::failure(2, format!("uniq: {e}")),
         };
         parsed.global.apply(ctx);
+
+        if let Some(refusal) = super::extra_operand_error("uniq", &parsed.paths) {
+            return refusal;
+        }
 
         // Get input: from file or stdin. A binary `path` operand goes loud
         // rather than silently falling through to the stdin branch below.

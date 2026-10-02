@@ -146,7 +146,7 @@ impl Tool for Tokens {
         );
 
         // Pipe output is just the count; structured data carries the full table
-        ExecResult::with_output_and_text(table, count.to_string())
+        ExecResult::with_output_and_text(table, format!("{count}\n"))
     }
 }
 
