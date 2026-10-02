@@ -31,6 +31,10 @@ breaking entries are marked **BREAKING**.
   `WalkOptions::cross_mounts` turns it off for one walk.
 - **`set -o crossmounts`** and **`--cross-mounts`** on `grep`, `find`, `ls`,
   `tree`, and `glob` — let a recursive walk descend into other mounts.
+- **`FileWalker::walk`** — returns the matches and `skipped_mounts`, the mount
+  points a walk reached without entering. Those builtins name them once on
+  stderr: `grep: skipped mounts /dev /v (use --cross-mounts to enter)`. The
+  exit status is unchanged.
 
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate

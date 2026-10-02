@@ -1557,7 +1557,10 @@ filters too.
 A recursive walk stays in the mount where it starts. This covers `grep -r`,
 `find`, `ls -R`, `tree`, the `glob` builtin, and bare-glob expansion (`**`).
 The walk lists a mount point it reaches, as `find -xdev` does, but does not
-descend into it. This is the reverse of GNU, where `-xdev` and
+descend into it. A builtin whose walk skipped mounts names them once on
+stderr, after any errors, and keeps its exit status:
+`grep: skipped mounts /dev /tmp /v (use --cross-mounts to enter)`. Bare-glob
+expansion skips without a note. This is the reverse of GNU, where `-xdev` and
 `--one-file-system` are the opt-in: crawling `/v`, `/dev`, or an embedder's
 remote shares from `/` is rarely what a search of `/` wants.
 

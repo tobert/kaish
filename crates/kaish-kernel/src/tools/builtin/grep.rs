@@ -19,7 +19,7 @@ use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, translate_strict_ere};
-use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
     build_file_types, list_file_types, ErrorCallback, FileWalker, GlobPath, IncludeExclude,
@@ -535,6 +535,7 @@ impl Grep {
                         errors.push((path.to_path_buf(), error.to_string()));
                     })
                 };
+                let mut skipped_mounts: Vec<PathBuf> = Vec::new();
                 for root in &dir_roots {
                     // include/exclude are walk-only (see the validation note
                     // above); rebuilt per root since `with_options` moves.
@@ -584,8 +585,11 @@ impl Grep {
                         walker = walker.with_ignore(ignore_filter);
                     }
 
-                    match walker.collect().await {
-                        Ok(f) => files.extend(f),
+                    match walker.walk().await {
+                        Ok(walk) => {
+                            files.extend(walk.paths);
+                            skipped_mounts.extend(walk.skipped_mounts);
+                        }
                         Err(e) => return ExecResult::failure(2, format!("grep: {}", e)),
                     }
                 }
@@ -656,6 +660,7 @@ impl Grep {
                         result.code = 2;
                     }
                 }
+                note_skipped_mounts(&mut result, "grep", skipped_mounts);
                 return result;
             }
         }

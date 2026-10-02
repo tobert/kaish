@@ -7,7 +7,7 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::read_repeatable_strings;
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::walker::{
     build_file_types, list_file_types, EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions,
 };
@@ -212,6 +212,7 @@ impl Tool for Glob {
         let fs = BackendWalkerFs(ctx.backend.as_ref());
         let mut nodes: Vec<OutputNode> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut skipped_mounts: Vec<std::path::PathBuf> = Vec::new();
 
         for pattern in &patterns {
             let glob = match GlobPath::new(pattern) {
@@ -265,10 +266,11 @@ impl Tool for Glob {
                 }
             }
 
-            let paths = match walker.collect().await {
-                Ok(p) => p,
+            let (paths, skipped) = match walker.walk().await {
+                Ok(walk) => (walk.paths, walk.skipped_mounts),
                 Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
             };
+            skipped_mounts.extend(skipped);
 
             // Strict-glob guarantee, per pattern: zero matches is an error
             // naming the pattern that missed, not silent success. This is
@@ -277,7 +279,10 @@ impl Tool for Glob {
             // the same contract so agents can rely on a non-zero exit to
             // detect misses.
             if paths.is_empty() {
-                return ExecResult::failure(1, format!("glob: no matches for pattern '{pattern}'"));
+                let mut result =
+                    ExecResult::failure(1, format!("glob: no matches for pattern '{pattern}'"));
+                note_skipped_mounts(&mut result, "glob", skipped_mounts);
+                return result;
             }
 
             // Build OutputNodes for each matched path, deduped across patterns
@@ -318,7 +323,9 @@ impl Tool for Glob {
                 .map(|n| n.name.as_str())
                 .collect::<Vec<_>>()
                 .join("\0");
-            return ExecResult::success(output);
+            let mut result = ExecResult::success(output);
+            note_skipped_mounts(&mut result, "glob", skipped_mounts);
+            return result;
         }
 
         let mut result = ExecResult::with_output(OutputData::nodes(nodes));
@@ -333,6 +340,7 @@ impl Tool for Glob {
         {
             return ExecResult::failure(2, e);
         }
+        note_skipped_mounts(&mut result, "glob", skipped_mounts);
         result
     }
 }

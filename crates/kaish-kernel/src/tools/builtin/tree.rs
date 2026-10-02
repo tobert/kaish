@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::get_path_string;
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tree tool: display directory structure.
 pub struct Tree;
@@ -280,6 +280,7 @@ impl Tool for Tree {
         // this call, so a gitignored-and-unreadable directory is not an
         // error.
         let mut errors: Vec<String> = Vec::new();
+        let mut skipped_mounts: Vec<std::path::PathBuf> = Vec::new();
         // Set when the root itself can't be opened — it has no TreeNode of
         // its own to mark_error on (the root is implicit; `tree.children`
         // holds only what was discovered underneath it), so its marker is
@@ -346,6 +347,8 @@ impl Tool for Tree {
                 if entry.is_dir() {
                     if boundaries.may_descend(Path::new(&resolved), Path::new(&full_path)) {
                         stack.push((full_path.clone(), depth + 1));
+                    } else if max_depth.is_none_or(|max| depth + 1 < max) {
+                        skipped_mounts.push(full_path.clone().into());
                     }
 
                     // Add directory to tree unless files_only
@@ -374,6 +377,7 @@ impl Tool for Tree {
             return apply_walk_errors(
                 ExecResult::with_output(OutputData::text(output.trim_end())),
                 &errors,
+                skipped_mounts,
             );
         }
 
@@ -383,6 +387,7 @@ impl Tool for Tree {
             return apply_walk_errors(
                 ExecResult::with_output(OutputData::text(output.trim_end())),
                 &errors,
+                skipped_mounts,
             );
         }
 
@@ -399,6 +404,7 @@ impl Tool for Tree {
         apply_walk_errors(
             ExecResult::with_output(OutputData::nodes(vec![root_node])),
             &errors,
+            skipped_mounts,
         )
     }
 }
@@ -407,11 +413,17 @@ impl Tool for Tree {
 /// gets every failure (the walk continues past each one rather than
 /// stopping at the first), and the exit code moves to 1 so an agent reading
 /// only the exit code doesn't mistake a partial walk for a complete one.
-fn apply_walk_errors(mut result: ExecResult, errors: &[String]) -> ExecResult {
+/// Mount points shown but not entered add one note after the failures.
+fn apply_walk_errors(
+    mut result: ExecResult,
+    errors: &[String],
+    skipped_mounts: Vec<std::path::PathBuf>,
+) -> ExecResult {
     if !errors.is_empty() {
         result.err = ExecResult::terminate_diagnostic(errors.join("\n"));
         result = result.with_code(1);
     }
+    note_skipped_mounts(&mut result, "tree", skipped_mounts);
     result
 }
 

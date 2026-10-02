@@ -32,7 +32,9 @@ runs via the `subprocess` capability against your system `git`, not a VFS mount.
 the walk starts. From `/` they list `/v`, `/dev`, and `/tmp` but do not
 descend into them. Name a mount to walk it: `grep -r x /v` walks `/v` and every
 mount nested under it. `--cross-mounts` (one command) or `set -o crossmounts`
-(the session) crosses.
+(the session) crosses. A walk that skipped mounts says so once on stderr,
+`grep: skipped mounts /dev /tmp /v (use --cross-mounts to enter)`, and keeps
+its exit status.
 
 ## /v/jobs — Job Observability
 

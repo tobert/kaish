@@ -365,6 +365,29 @@ pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectat
 /// unclaimed `/v/*` to the embedder's backend, whose *real* content under `/v`
 /// (a real path like `/v/cas/blob.bin`) must keep the trash safety net; a
 /// `/v` prefix exclusion here would silently strip it.
+/// Append the one stderr line for a walk that reached mount points in
+/// another region without entering them:
+/// `grep: skipped mounts /r /v (use --cross-mounts to enter)`. Adds nothing
+/// when `skipped` is empty. The exit status is unchanged.
+pub(crate) fn note_skipped_mounts(
+    result: &mut ExecResult,
+    tool: &str,
+    skipped: impl IntoIterator<Item = PathBuf>,
+) {
+    let skipped: std::collections::BTreeSet<PathBuf> = skipped.into_iter().collect();
+    if skipped.is_empty() {
+        return;
+    }
+    let points: Vec<String> = skipped.iter().map(|p| p.display().to_string()).collect();
+    if !result.err.is_empty() && !result.err.ends_with('\n') {
+        result.err.push('\n');
+    }
+    result.err.push_str(&format!(
+        "{tool}: skipped mounts {} (use --cross-mounts to enter)\n",
+        points.join(" ")
+    ));
+}
+
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
     matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
 }

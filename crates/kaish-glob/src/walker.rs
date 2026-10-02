@@ -160,6 +160,17 @@ impl Default for WalkOptions {
     }
 }
 
+/// The result of [`FileWalker::walk`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Walk {
+    /// The matching paths, in walk order.
+    pub paths: Vec<PathBuf>,
+    /// Mount points in another region that the walk would have entered,
+    /// sorted. Empty when the walk crosses mounts. A caller that hides these
+    /// paths from its user should say they were skipped.
+    pub skipped_mounts: Vec<PathBuf>,
+}
+
 /// Async file walker, generic over any `WalkerFs` implementation.
 ///
 /// # Examples
@@ -211,7 +222,12 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
     }
 
     /// Collect all matching paths.
-    pub async fn collect(mut self) -> Result<Vec<PathBuf>, crate::WalkerError> {
+    pub async fn collect(self) -> Result<Vec<PathBuf>, crate::WalkerError> {
+        self.walk().await.map(|walk| walk.paths)
+    }
+
+    /// Walk, and report the mount points the walk reached but did not enter.
+    pub async fn walk(mut self) -> Result<Walk, crate::WalkerError> {
         // Set up base ignore filter
         let base_filter = if self.options.respect_gitignore {
             let mut filter = self
@@ -237,6 +253,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
         };
 
         let mut results = Vec::new();
+        let mut skipped_mounts = std::collections::BTreeSet::new();
         // Track visited directories for symlink cycle detection (only when following symlinks)
         let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
         if self.options.follow_symlinks {
@@ -263,10 +280,9 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
 
         while let Some((dir, real_dir, depth, current_filter)) = stack.pop() {
             // Check max depth
-            if let Some(max) = self.options.max_depth
-                && depth > max {
-                    continue;
-                }
+            if !self.depth_lists(depth) {
+                continue;
+            }
 
             // List directory contents
             let entries = match self.fs.list_dir(&dir).await {
@@ -426,6 +442,8 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
 
                     if should_recurse && same_region {
                         dirs_to_push.push((full_path.clone(), real_path, depth + 1, child_filter));
+                    } else if should_recurse && self.depth_lists(depth + 1) {
+                        skipped_mounts.insert(full_path.clone());
                     }
 
                     // Yield directory if wanted
@@ -459,7 +477,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             stack.extend(dirs_to_push);
         }
 
-        Ok(results)
+        Ok(Walk { paths: results, skipped_mounts: skipped_mounts.into_iter().collect() })
     }
 
     fn relative_path(&self, full_path: &Path) -> PathBuf {
@@ -477,6 +495,12 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             }
             None => true,
         }
+    }
+
+    /// Whether a directory at `depth` is within `max_depth`, so the walk
+    /// would list it.
+    fn depth_lists(&self, depth: usize) -> bool {
+        self.options.max_depth.is_none_or(|max| depth <= max)
     }
 
     /// Whether an entry at the given containing-directory depth should be
@@ -1555,6 +1579,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sorted(found), paths(&["/home/jobs", "/home/notes.txt"]));
+    }
+
+    #[tokio::test]
+    async fn walk_reports_the_mount_points_it_does_not_enter() {
+        let fs = make_mounted_fs().await;
+        let walk = FileWalker::new(&fs, "/")
+            .with_options(mount_walk_options())
+            .walk()
+            .await
+            .unwrap();
+        assert_eq!(walk.skipped_mounts, paths(&["/dev", "/v"]));
+        assert!(walk.paths.contains(&PathBuf::from("/home/notes.txt")));
+    }
+
+    #[tokio::test]
+    async fn walk_that_crosses_or_stays_inside_reports_no_skips() {
+        let fs = make_mounted_fs().await;
+        let crossing = FileWalker::new(&fs, "/")
+            .with_options(WalkOptions { cross_mounts: true, ..mount_walk_options() })
+            .walk()
+            .await
+            .unwrap();
+        assert!(crossing.skipped_mounts.is_empty(), "{:?}", crossing.skipped_mounts);
+        let inside = FileWalker::new(&fs, "/v")
+            .with_options(mount_walk_options())
+            .walk()
+            .await
+            .unwrap();
+        assert!(inside.skipped_mounts.is_empty(), "{:?}", inside.skipped_mounts);
+    }
+
+    #[tokio::test]
+    async fn mount_point_past_max_depth_is_not_a_skip() {
+        let fs = make_mounted_fs().await;
+        // Depth 0 lists `/` only; nothing below `/v` would be read anyway.
+        let walk = FileWalker::new(&fs, "/")
+            .with_options(WalkOptions { max_depth: Some(0), ..mount_walk_options() })
+            .walk()
+            .await
+            .unwrap();
+        assert!(walk.paths.contains(&PathBuf::from("/v")), "{:?}", walk.paths);
+        assert!(walk.skipped_mounts.is_empty(), "{:?}", walk.skipped_mounts);
+    }
+
+    #[tokio::test]
+    async fn mount_point_the_pattern_cannot_reach_is_not_a_skip() {
+        let fs = make_mounted_fs().await;
+        let walk = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("home/*.txt").unwrap())
+            .with_options(mount_walk_options())
+            .walk()
+            .await
+            .unwrap();
+        assert_eq!(walk.paths, vec![PathBuf::from("/home/notes.txt")]);
+        assert!(walk.skipped_mounts.is_empty(), "{:?}", walk.skipped_mounts);
     }
 
     #[tokio::test]

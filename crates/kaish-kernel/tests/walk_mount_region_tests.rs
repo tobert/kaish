@@ -244,3 +244,70 @@ fn walk_boundaries_default_reports_mount_points() {
     let points = backend.walk_boundaries();
     assert!(points.iter().any(|p| p == Path::new("/r")), "{points:?}");
 }
+
+/// stdout lines and stderr of one script.
+async fn run_err(kernel: &Kernel, script: &str) -> (Vec<String>, String, i64) {
+    let result = kernel.execute(script).await.expect("kernel execute");
+    let (out, code) = (
+        result
+            .text_out()
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect(),
+        result.code,
+    );
+    (out, result.err.clone(), code)
+}
+
+const SKIP_NOTE: &str = "skipped mounts /dev /tmp /v (use --cross-mounts to enter)";
+
+#[tokio::test]
+async fn walk_that_skips_mounts_says_so_once() {
+    let kernel = isolated().await;
+    for (script, tool) in [
+        ("grep -rl needle /", "grep"),
+        ("find / -name '*.txt'", "find"),
+        ("ls -R /", "ls"),
+        ("tree /", "tree"),
+        ("glob '/**/*.txt'", "glob"),
+    ] {
+        let (out, err, code) = run_err(&kernel, script).await;
+        assert_eq!(code, 0, "{script}: {out:?} {err}");
+        assert_eq!(err, format!("{tool}: {SKIP_NOTE}\n"), "{script}");
+    }
+}
+
+#[tokio::test]
+async fn walk_over_two_roots_says_so_once() {
+    let kernel = isolated().await;
+    let (out, err, code) = run_err(&kernel, "grep -rl needle / /data").await;
+    assert_eq!(code, 0, "{out:?} {err}");
+    assert_eq!(err, format!("grep: {SKIP_NOTE}\n"));
+}
+
+#[tokio::test]
+async fn walk_that_skips_nothing_says_nothing() {
+    for script in [
+        "grep -rl needle /v",
+        "grep -rl --cross-mounts needle /",
+        "set -o crossmounts; grep -rl needle /",
+        "find / -maxdepth 1",
+        "ls -R --cross-mounts /",
+        "tree -L 1 /",
+    ] {
+        // A fresh kernel each time: `set -o crossmounts` persists.
+        let kernel = isolated().await;
+        let (out, err, code) = run_err(&kernel, script).await;
+        assert_eq!(code, 0, "{script}: {out:?} {err}");
+        assert_eq!(err, "", "{script}");
+    }
+}
+
+#[tokio::test]
+async fn walk_that_finds_nothing_keeps_its_exit_status() {
+    let kernel = isolated().await;
+    let (out, err, code) = run_err(&kernel, "grep -rl absent /").await;
+    assert_eq!(code, 1, "{out:?} {err}");
+    assert_eq!(err, format!("grep: {SKIP_NOTE}\n"));
+}

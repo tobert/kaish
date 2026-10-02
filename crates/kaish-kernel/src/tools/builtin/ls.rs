@@ -3,12 +3,12 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::cmp::Ordering;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::vfs::DirEntry;
 
 /// Ls tool: list directory contents.
@@ -582,6 +582,7 @@ impl Ls {
         // never reaches this call, so a gitignored-and-unreadable directory
         // is not an error.
         let mut errors: Vec<String> = Vec::new();
+        let mut skipped_mounts: Vec<PathBuf> = Vec::new();
 
         while let Some((dir_path, display_path, text_display_path)) = dirs_to_visit.pop() {
             if ctx.checkpoint().await.is_err() {
@@ -623,7 +624,14 @@ impl Ls {
             let subdirs: Vec<_> = filtered
                 .iter()
                 .filter(|e| e.is_dir())
-                .filter(|e| boundaries.may_descend(root, &Path::new(&dir_path).join(&e.name)))
+                .filter(|e| {
+                    let child = Path::new(&dir_path).join(&e.name);
+                    let enter = boundaries.may_descend(root, &child);
+                    if !enter {
+                        skipped_mounts.push(child);
+                    }
+                    enter
+                })
                 .map(|e| {
                     let child_path = format!("{}/{}", dir_path.trim_end_matches('/'), e.name);
                     let child_display = if display_path == "." {
@@ -700,6 +708,7 @@ impl Ls {
             result.err = ExecResult::terminate_diagnostic(errors.join("\n"));
             result = result.with_code(1);
         }
+        note_skipped_mounts(&mut result, "ls", skipped_mounts);
         result
     }
 }

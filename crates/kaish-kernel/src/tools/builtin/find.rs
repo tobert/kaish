@@ -27,7 +27,7 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{exec_context, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, WalkOptions};
 
 use super::find_expr::{self, EntryView};
@@ -157,6 +157,7 @@ impl Tool for Find {
             nodes.push(OutputNode::new(display).with_entry_type(entry_type));
             json_array.push(serde_json::Value::String(display.to_string()));
         };
+        let mut skipped_mounts: Vec<std::path::PathBuf> = Vec::new();
 
         for start_path in &start_paths {
             let resolved_path = ctx.resolve_path(start_path);
@@ -220,10 +221,11 @@ impl Tool for Find {
                 }
             }
 
-            let paths = match walker.collect().await {
-                Ok(p) => p,
+            let (paths, skipped) = match walker.walk().await {
+                Ok(walk) => (walk.paths, walk.skipped_mounts),
                 Err(e) => return ExecResult::failure(1, format!("find: {}", e)),
             };
+            skipped_mounts.extend(skipped);
 
             for path in paths {
                 // lstat, not stat: a symlink is classified by its own kind,
@@ -269,6 +271,7 @@ impl Tool for Find {
         {
             return ExecResult::failure(2, e);
         }
+        note_skipped_mounts(&mut result, "find", skipped_mounts);
         result
     }
 }

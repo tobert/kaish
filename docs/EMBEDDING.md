@@ -513,7 +513,10 @@ Recursive walks stay in the mount region where they start: `grep -r x /` does
 not search `/v`, `/dev`, or another mount below `/`, and `grep -r x /v` walks
 `/v` and every mount nested in it. `KernelBackend::walk_boundaries` reports the
 mount points that start a region; kaish asks once per walk. The rule itself is
-`kaish_glob::WalkBoundaries`.
+`kaish_glob::WalkBoundaries`. `FileWalker::walk` returns the matches and the
+mount points the walk reached without entering (`Walk::skipped_mounts`); the
+builtins print those once on stderr. A walker of your own should say what it
+skipped too.
 
 The default reports every path from `mounts()`. `VirtualOverlayBackend`
 (`Kernel::with_backend`) adds kaish's own mounts and, when `/v` is a

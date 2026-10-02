@@ -520,7 +520,8 @@ Recursive walks (`grep -r`, `find`, `ls -R`, `tree`, `glob`, `**`) stay in the
 mount they start in: `grep -r x /` lists `/v` and `/dev` but does not search
 them. Name a mount to walk it (`grep -r x /v`); a walk inside a mount also
 walks the mounts nested in it. `--cross-mounts` on one command, or
-`set -o crossmounts`, crosses every mount.
+`set -o crossmounts`, crosses every mount. A walk that skipped mounts names
+them once on stderr and keeps its exit status.
 
 `cat missing | wc -l` exits **0** without pipefail — the status is the LAST
 stage's. With `set -o pipefail` it exits **1**. `${PIPESTATUS[0]}` reports
