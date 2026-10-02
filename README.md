@@ -35,7 +35,7 @@ Agents need to compose operations such as filtering output, transforming data,
 and iterating over results. They are already good at Bourne shell idioms, and
 shell is already an ideal language for text processing. kaish inherits all of
 that, so piping, redirecting, and composing commands works like it always has,
-with just a couple changes.
+with a few changes.
 
 ```sh
 # Filter and transform in one script
@@ -68,7 +68,7 @@ deserialization steps.
 
 ## What's Different About kaish?
 
-Kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
+kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
 language that comes naturally, while providing better pre-execution
 syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 
@@ -94,9 +94,8 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# bare *.log recurses too with **; reach for the glob builtin for options
-# like --exclude. glob has a POSIX counterpart (find), so $(glob ...) binds
-# text, one path per line, same as $(find ...) or $(ls ...).
+# ** recurses; the glob builtin adds options such as --exclude.
+# Like $(find ...), $(glob ...) binds text, one path per line.
 for file in $(glob **/*.log --exclude="*.tmp.log"); do
     echo "logfile: $file"
 done
@@ -199,8 +198,8 @@ async fn main() -> anyhow::Result<()> {
 
 The kernel is hermetic by default — it never reads the OS environment (the
 frontend supplies vars), and the OS-touching capability features (`subprocess`,
-`host`, `os-integration`, `tokens`) are opt-in cargo features, so the dangerous
-surface is explicit. Every `execute()` returns an `ExecResult` with
+`host`, `os-integration`, `tokens`) are opt-in cargo features, so every way to
+reach the host is explicit. Every `execute()` returns an `ExecResult` with
 clean text output, an optional typed `data` payload (`--json` on any command),
 and an exit code agents can branch on: `2` is a usage error or a refusal that
 names what to do instead (e.g. `kaish-trash empty` without `--confirm`), `3`
@@ -210,8 +209,8 @@ means output was truncated, `124` is a timeout.
 capability features, `ExecuteOptions`, custom tools, the exit-code contract, and
 thread stack sizing.
 
-**Using kaish over MCP?** kaish core doesn't ship an MCP server — that surface
-lives in the embedders. [**kaibo**](https://github.com/tobert/kaibo) is the
+**Using kaish over MCP?** kaish core doesn't ship an MCP server — MCP servers
+live in the embedders. [**kaibo**](https://github.com/tobert/kaibo) is the
 showcase: agents with kaish powers in an MCP (or CLI). Kaibo agents have a kaish
 shell tool for exploring filesystems and text.
 
@@ -288,12 +287,13 @@ git clone https://github.com/tobert/kaish
 cd kaish
 cargo build --release
 cargo test --all
-cargo clippy --all --all-targets   # must be warning-free
+cargo clippy --all --all-targets -- -D warnings
 ```
 
-CI runs the test and clippy gates on every PR and push to `main` — plus a
-no-default-features check of the kernel (the capability-feature sandbox) and a
-`wasm32-wasip1` build of `kaish-wasi`. See
+CI runs five gates on every PR and push to `main`: tests, clippy, rustdoc, a
+no-default-features test run of the kernel (the capability-feature sandbox), and a
+`wasm32-wasip1` build of `kaish-wasi`. [AGENTS.md](AGENTS.md), "Gates" lists the
+commands. See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml); releases to crates.io
 are cut manually, so that one workflow is the whole CI story.
 
