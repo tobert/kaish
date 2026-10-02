@@ -62,18 +62,23 @@ pub fn parse(s: &str) -> Result<SystemTime, String> {
     }
 
     let num = |range: std::ops::Range<usize>, what: &str| -> Result<u64, String> {
-        let text = &s[range];
+        // Slice bytes, not the &str: a multi-byte character on a range edge
+        // would make `&s[range]` panic. Non-ASCII fails the digit check.
+        let text = &b[range];
         // The emptiness check is load-bearing, not just a nicer error: an
         // empty string passes the all-digits check vacuously and then panics
         // `str::parse` under the expect below.
-        if text.is_empty() || !text.bytes().all(|c| c.is_ascii_digit()) {
+        if text.is_empty() || !text.iter().all(u8::is_ascii_digit) {
             return Err(std::format!(
                 "invalid RFC 3339 timestamp {s:?}: non-digit {what}; expected YYYY-MM-DDTHH:MM:SS[.fff]Z (UTC `Z` only)"
             ));
         }
         // Non-empty digits-only with length <= 9 cannot fail or overflow u64.
         #[allow(clippy::expect_used)]
-        Ok(text.parse::<u64>().expect("non-empty digit-checked"))
+        Ok(std::str::from_utf8(text)
+            .expect("ASCII digits are UTF-8")
+            .parse::<u64>()
+            .expect("non-empty digit-checked"))
     };
 
     let year = num(0..4, "year")?;
@@ -100,12 +105,12 @@ pub fn parse(s: &str) -> Result<SystemTime, String> {
             if b[19] != b'.' {
                 return fail("expected `.` before fractional seconds");
             }
-            let digits = &s[20..s.len() - 1];
-            if digits.is_empty() || digits.len() > 9 {
+            let digit_count = b.len() - 21;
+            if digit_count == 0 || digit_count > 9 {
                 return fail("fractional seconds need 1-9 digits");
             }
             let value = num(20..s.len() - 1, "fractional seconds")?;
-            (value * 10u64.pow(9 - digits.len() as u32)) as u32
+            (value * 10u64.pow(9 - digit_count as u32)) as u32
         }
     };
 
