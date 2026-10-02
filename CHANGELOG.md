@@ -31,7 +31,10 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
-- **BREAKING**: Plans report fully literal arguments and file redirect targets as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the external argument or unresolved path, and `text` for display; expanding words stay `plain`. Job command strings use the plan's renderer.
+- **BREAKING**: Plans report a fully literal argument or file redirect
+  target as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the
+  word the command receives, `text` for display. Expanding words stay
+  `plain`. Job command strings use the plan's renderer.
 
 ### Fixed
 

@@ -50,16 +50,15 @@ pub enum PlannedValue {
     /// glob, tilde, or other expansion appears anywhere in it, so the word
     /// the command receives is known before the statement runs.
     ///
-    /// `value` is the source word after quotes and literal escapes are decoded.
-    /// An external
-    /// command receives exactly that word in its argument list. A builtin
-    /// may bind the word as a typed value (`5` as an integer) instead of
-    /// text. A redirect target's `value` is a path as written: kaish
-    /// resolves it against the working directory and its mounts at execution.
-    /// It is not necessarily absolute. `text` is the rendering for display, which may
-    /// quote the word (`'0'` for the string `0`) so that it reads back as
-    /// the same string. Read `value` to classify an argument and never
-    /// strip quotes from `text`.
+    /// `value` is the source word after quotes and literal escapes are
+    /// decoded. An external command receives exactly that word in its
+    /// argument list. A builtin may bind the word as a typed value (`5` as
+    /// an integer) instead of text. A redirect target's `value` is a path
+    /// as written: kaish resolves it against the working directory and its
+    /// mounts at execution, so it is not necessarily absolute. `text` is
+    /// the rendering for display, which may quote the word (`'0'` for the
+    /// string `0`) so that it reads back as the same string. Read `value`
+    /// to classify an argument; never strip quotes from `text`.
     ///
     /// The word forms are:
     ///
