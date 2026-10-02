@@ -191,9 +191,11 @@ async fn export_with_double_equals_and_an_int_value() {
 
 #[tokio::test]
 async fn flag_glued_to_an_equals_run_still_fuses_after_double_dash() {
-    // Past `--`, `--flag` is a plain positional string like any other —
-    // already worked before the widening (no numeral piece involved).
-    assert_eq!(run("echo -- --flag==x").await, "--flag==x\n");
+    // Binding gives flag tokens operand meaning after `--`; fusion keeps
+    // their source spelling before that binding takes place.
+    for word in ["--flag==x", "-n==x", "--==x"] {
+        assert_eq!(run(&format!("echo -- {word}")).await, format!("{word}\n"));
+    }
 }
 
 #[tokio::test]

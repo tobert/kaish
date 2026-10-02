@@ -12,6 +12,10 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- Backslash quoting outside strings: `a\ b` is one literal word and
+  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
+  match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
+  escapes with unquoted globs is an error that names the quoted form.
 - `jq -R` reads each text line as a string; `-R -s` reads the whole input
   as one string. A failing input line is reported with exit 1 while other
   lines still run. `-n -R` is refused with an alternative.

@@ -401,13 +401,14 @@ echo "$(echo "$(date +%F)")"
 
 ### Word characters
 
-A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`,
-and **any non-ASCII character** — kaish, like bash, never inspects word bytes
-for alphabetic-ness. Any script lexes unquoted, no quoting needed. (ASCII
-punctuation outside that set is still not a word character: `echo 100%` is an
-error, as it was before.)
+A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`, `^`,
+`~` after the first character, and **any non-ASCII character** — kaish, like
+bash, never inspects word bytes for alphabetic-ness. Any script lexes
+unquoted, no quoting needed. (ASCII punctuation outside that set is still not
+a word character: `echo 100%` is an error, as it was before.)
 
 ```sh
+echo HEAD^2 HEAD~1 f.txt~ 9-    # complete literal words
 echo 123.txt 1.2.3 true:foo a+b # complete literal words
 ls 1.0*                       # glob keeps the written numeric prefix
 p=~/x; echo "$p"               # assignment followed by a home-relative path
@@ -455,13 +456,13 @@ nothing.
 
 `~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
 
-A `~` that is not at the start of a word is never a tilde-prefix: kaish has
-no bareword-pasting rule, so an unquoted `~` glued to a preceding word
-(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
-a silently literal concatenation. A heredoc body never expands `~`, even
-when the delimiter is unquoted and the body otherwise interpolates — tilde
-expansion is a source-word operation, and a heredoc body is never split into
-words.
+`echo HEAD~1 foo~bar a/~` prints those three words as written: a `~` after the first character is ordinary text. `^` is ordinary text in a word too (`HEAD^2`); `$(( ))` and `${…}` keep their own operators.
+
+Digit-leading words containing a dash stay text, including open ranges (`9-`, `1-3,5-`) and repeated dashes (`1--`). Complete scalar numerals keep their number rules.
+
+A heredoc body never expands `~`, even when the delimiter is unquoted and
+the body otherwise interpolates — tilde expansion is a source-word operation,
+and a heredoc body is never split into words.
 
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
@@ -559,6 +560,32 @@ the rest of the line, which is the defect this rule exists to close.
 A name containing `#` is not a valid assignment target: `abc#3=5` is error
 `E018`, because `$abc#3` would not read it back. kaish refuses to create a
 variable nothing can reference.
+
+### Backslash quoting
+
+```sh
+printf '<%s>\n' a\ b          # one literal argument: a b
+printf '<%s>\n' \( \)         # literal parentheses
+find . -name \*.rs            # find receives the pattern *.rs
+case '*' in \*) echo hit;; esac
+[[ a.b =~ ^a\.b ]]            # the escaped dot matches a literal dot
+```
+
+Outside quotes, a backslash makes the next character literal. It can join
+literal text into one word. An escaped leading `~` stays literal; `~/a\ b`
+still expands the unescaped `~/`. A trailing backslash is an error.
+Backslash followed by a newline continues the line as before.
+
+In `case` patterns and `[[ =~ ]]` operands, escaped characters match
+literally while unescaped pattern operators keep their meaning. Quoted
+`case` patterns also match literally.
+
+An ordinary argument that mixes escapes with unquoted glob characters is
+an error naming the fully quoted literal form. Write `'a *.rs'` to pass
+that text. To expand a glob, write a glob without backslash quoting.
+Backslashes do not join text to an unquoted expansion; see "Quote to join".
+For a short flag with an escaped value, separate the flag and value:
+`awk -F 'a b'`. A backslash after a combined short flag is refused.
 
 ### Quote to join
 
@@ -1731,7 +1758,7 @@ short-circuits the rest on a failure).
 
 Kaish has a single, uniform cancellation discipline that reaches every spawned external child:
 
-- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline. On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
+- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline; flags after the duration belong to `COMMAND` (`timeout 5 sh -c 'exit 3'`). On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
 - **`scatter ... --timeout DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result row is tagged `"timed_out": true` with `code` 124.
 - **`Kernel::cancel()`** (embedder API) — fires the kernel's cancellation token; running externals get SIGTERM/SIGKILL via the same path. The REPL wires this to Ctrl-C.
 - **`KernelConfig::request_timeout`** (embedder default) and **`ExecuteOptions::timeout`** (per-call) — apply at the kernel-call boundary; same kill behaviour, return code 124.

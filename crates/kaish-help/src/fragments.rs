@@ -466,6 +466,11 @@ echo '~/x'                # ~/x
 "hello $NAME"             # double quotes — interpolation
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
+printf '<%s>\n' a\ b      # backslash quotes the next character: one argument
+printf '<%s>\n' \( \)     # escaped parentheses are arguments
+find . -name \*.rs        # find receives the pattern *.rs
+# Mixed escapes and unquoted globs are errors; quote the whole literal word.
+# Backslash does not join text to an unquoted expansion.
 
 # Quote the whole word to join text with interpolation:
 "$dir/file.txt"           # one path
@@ -477,6 +482,8 @@ echo $dir/file.txt        # error — quote "$dir/file.txt"
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
 # Literal words keep their complete spelling, without quotes:
+echo HEAD^2 HEAD~1 f.txt~ 9-  # ^, mid-word ~, and 9- stay literal
+printf 'abcdefghijkl\n' | cut -c 9-  # open range stays one word
 echo 123.txt 1.2.3 true:foo a+b .git/HEAD
 p=~/x; echo "$p"          # assignment followed by a home-relative path
 ls 1.0*                  # glob keeps the written numeric prefix
