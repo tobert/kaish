@@ -7552,9 +7552,8 @@ pub(crate) async fn bind_tool_args(
                     // space-form value (`-t explorer`) from a bool flag
                     // sitting before a real positional (`-f file.txt`).
                     // Unlike `--flag`, there is no `-f=value` escape hatch to
-                    // suggest: a glued `-f=val` is two tokens with a dangling
-                    // `=` that the parser's no-token-pasting guard already
-                    // rejects — the only fix is declaring the flag.
+                    // suggest: a glued `-f=val` is one positional word, not a
+                    // flag — the only fix is declaring the flag.
                     let ambiguous_value = (lookup.is_none()
                         && leaf.is_some_and(|s| s.map_positionals)
                         && !consumed.contains(&(i + 1)))
@@ -7626,9 +7625,9 @@ pub(crate) async fn bind_tool_args(
                     // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
                     // `grep -A1`, `sed -e1d`. The first char is a declared
                     // value-taking short flag, so the rest of the token is its
-                    // value — the coreutils idiom. The lexer's flag char class is
-                    // `[a-zA-Z][a-zA-Z0-9-]*`, so the first byte is always ASCII
-                    // (safe to slice) and the tail is a plain literal.
+                    // value — the coreutils idiom. Every short-flag name starts
+                    // with an ASCII letter (later merges only append to it), so
+                    // the first byte is safe to slice.
                     bind_glued_short_value(
                         &mut tool_args,
                         &name[..1],
@@ -7648,18 +7647,19 @@ pub(crate) async fn bind_tool_args(
                     // error). Undeclared/bool chars stay bare flags, so a
                     // schemaless tool keeps the old all-boolean behavior.
                     // The first char being value-taking is handled by the
-                    // glued arm above, so it never reaches here. The flag
-                    // char class is ASCII, so byte indexing is char indexing
-                    // (no `Vec<char>` allocation needed).
+                    // glued arm above, so it never reaches here.
                     let bytes = name.as_bytes();
                     let mut p = 0;
                     while p < bytes.len() {
-                        let key = &name[p..p + 1];
+                        // A comma list (`-l,é`) can carry non-ASCII text
+                        // after the flag letters.
+                        let width = name[p..].chars().next().map_or(1, char::len_utf8);
+                        let key = &name[p..p + width];
                         match param_lookup.get(key) {
                             Some(&(canonical, typ, consumes, repeatable))
                                 if !is_bool_type(typ) =>
                             {
-                                let glued = name[p + 1..].to_string();
+                                let glued = name[p + width..].to_string();
                                 if glued.is_empty() {
                                     // Value flag is the last char: take the
                                     // next positional. `consume_flag_positionals`
@@ -7689,9 +7689,18 @@ pub(crate) async fn bind_tool_args(
                                 }
                                 break;
                             }
+                            _ if key == "," => {
+                                // `-l,a`: no value flag before the comma owns
+                                // the list. Never bind `,` as a flag.
+                                let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
+                                anyhow::bail!(
+                                    "{tool}: -{name}: no flag before the comma takes a value; \
+                                     quote the word to pass it as text"
+                                );
+                            }
                             _ => {
                                 tool_args.flags.insert(key.to_string());
-                                p += 1;
+                                p += width;
                             }
                         }
                     }
@@ -8329,11 +8338,12 @@ fn classify_argv_token(token: &Value) -> Arg {
             };
         }
     } else if let Some(rest) = s.strip_prefix('-') {
-        // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`. A
-        // token carrying any other char — notably `=` (`-k=v` is a parse error in
-        // the string door) — or a leading digit (`-1` lexes as a number) is not a
-        // short-flag word, so it falls through to a literal positional instead of
-        // a `ShortFlag("k=v")` the binder would mangle into a stray `=` flag.
+        // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`,
+        // plus a glued `:` run or comma list (`-F:`, `-d,`, `-Wl,-rpath,/x`). A
+        // token carrying `=` (`-k=v` is one positional word in the string door
+        // too) or a leading digit (`-1` lexes as a number) is not a short-flag
+        // word, so it falls through to a literal positional instead of a
+        // `ShortFlag("k=v")` the binder would mangle into a stray `=` flag.
         if is_short_flag_body(rest) {
             return Arg::ShortFlag(rest.to_string());
         }
@@ -8375,17 +8385,30 @@ fn classify_alias_word(word: &str) -> Expr {
     Expr::Literal(Value::String(word.to_string()))
 }
 
-/// A short-flag word: a leading ASCII letter, then only ASCII
-/// letters/digits/`-` (the lexer's base `-[a-zA-Z][a-zA-Z0-9-]*` regex) or `:`
-/// (which `merge_flag_metachar_adjacent` glues onto a `ShortFlag` for the
-/// `awk -F:` idiom). `-la`, `-A1`, `-a:` qualify; `-1` (a number), `-k=v`
-/// (`=` is the assignment operator — a parse error in the string door), and
-/// any non-ASCII tail (never produced by the lexer, and not safe for the
-/// combined-short-flag binder's byte-index slicing) do not, so they fall
-/// through to a literal positional instead of a malformed `ShortFlag`.
+/// A short-flag word, as `merge_flag_metachar_adjacent` builds one: a leading
+/// ASCII letter, then ASCII letters/digits/`-` (the lexer's base
+/// `-[a-zA-Z][a-zA-Z0-9-]*` regex) or `:` (the `awk -F:` idiom), then
+/// optionally a comma list (`-d,`, `-k2,2n`, `-Wl,-rpath,/x`). The list takes
+/// bareword and path characters, including non-ASCII; `=`, `$`, quotes,
+/// backslashes, globs, whitespace, and operators end it in the lexer, so a
+/// word holding one is not a short flag here either. `-la`, `-A1`, `-a:`,
+/// `-d,` qualify; `-1` (a number), `-k=v` (one positional word in the string
+/// door too), and `-d,$x` do not, so they fall through to a literal
+/// positional instead of a malformed `ShortFlag`.
 fn is_short_flag_body(s: &str) -> bool {
+    let (letters, list) = match s.split_once(',') {
+        Some((letters, list)) => (letters, Some(list)),
+        None => (s, None),
+    };
     s.starts_with(|c: char| c.is_ascii_alphabetic())
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':')
+        && letters.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':')
+        && list.is_none_or(|list| {
+            list.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || !c.is_ascii()
+                    || matches!(c, '-' | ':' | ',' | '.' | '/' | '@' | '+' | '^' | '~' | '_')
+            })
+        })
 }
 
 /// Bash-style assignment-LHS identifier: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -8665,6 +8688,20 @@ mod argv_classify_tests {
         // Digits after the first flag char are ordinary (kept verbatim).
         assert_eq!(classify("-A1"), Arg::ShortFlag("A1".into()));
         assert_eq!(classify("--type2"), Arg::LongFlag("type2".into()));
+        // A comma list stays a short flag, as the lexer fuses it.
+        assert_eq!(classify("-d,"), Arg::ShortFlag("d,".into()));
+        assert_eq!(classify("-Wl,-rpath,/x"), Arg::ShortFlag("Wl,-rpath,/x".into()));
+        // `-name=value` is one positional word on both doors.
+        assert_eq!(
+            classify("-Wl,-rpath=/x"),
+            Arg::Positional(Expr::Literal(Value::String("-Wl,-rpath=/x".into())))
+        );
+        assert_eq!(classify("-std=c11"), Arg::Positional(Expr::Literal(Value::String("-std=c11".into()))));
+        // A list holding a character the lexer would stop at is text.
+        for word in ["-d,$x", "-n, a", "-k1,*"] {
+            assert_eq!(classify(word), Arg::Positional(Expr::Literal(Value::String(word.into()))), "{word}");
+        }
+        assert_eq!(classify("-Wl,-rpath,/opt/日本"), Arg::ShortFlag("Wl,-rpath,/opt/日本".into()));
         // Leading-digit dash is a number to the lexer, not a flag → positional.
         assert_eq!(classify("-1"), Arg::Positional(Expr::Literal(Value::String("-1".into()))));
         // Numeric strings keep their literal text — `execute_argv` does NOT
@@ -8767,14 +8804,14 @@ mod argv_classify_tests {
         fn classifier_matches_parser_on_clean_tokens(
             // No digits: this property tests the *classification* boundary
             // (dash → flag, `--` → marker, `=` → assignment, colon-merge → one
-            // positional), not numeric coercion. The lexer coerces digit runs to
+            // positional, comma list → one flag), not numeric coercion. The lexer coerces digit runs to
             // `Int`/`Float` and drops the literal text (even inside a colon-merged
             // word: `00:` → `0:`); the classifier intentionally preserves the raw
             // string. Those numeric edges are pinned exactly by the unit tests.
             // Non-ASCII is a word character now, so the generator has to
             // reach it — an ASCII-only strategy tests a shrinking slice of
             // what the classifier actually sees.
-            token in "[a-zA-Z_=./@:+\\-\u{00e9}\u{540d}\u{1f600}]{1,8}"
+            token in "[a-zA-Z_=./@:,+\\-\u{00e9}\u{540d}\u{1f600}]{1,8}"
         ) {
             let parsed = match parse(&format!("cmd {token}")) {
                 Ok(p) => p,

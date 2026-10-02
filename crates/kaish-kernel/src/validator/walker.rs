@@ -1286,10 +1286,12 @@ fn bind_short_flag_for_validation(
     let bytes = name.as_bytes();
     let mut p = 0;
     while p < bytes.len() {
-        let key = &name[p..p + 1];
+        // A comma list (`-l,é`) can carry non-ASCII text after the flag letters.
+        let width = name[p..].chars().next().map_or(1, char::len_utf8);
+        let key = &name[p..p + width];
         match param_lookup.get(key) {
             Some(&(canonical, typ, consumes, repeatable)) if !is_bool_type(typ) => {
-                let glued = name[p + 1..].to_string();
+                let glued = name[p + width..].to_string();
                 if glued.is_empty() {
                     bind_value_or_flag(
                         tool_args, key, canonical, consumes, repeatable, args, i, consumed,
@@ -1303,7 +1305,7 @@ fn bind_short_flag_for_validation(
             }
             _ => {
                 tool_args.flags.insert(key.to_string());
-                p += 1;
+                p += width;
             }
         }
     }

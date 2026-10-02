@@ -50,6 +50,12 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `-name=value` is one word, like `--name=value`: `gcc -std=c11`,
+  `pdflatex -interaction=nonstopmode`, `java -Dkey='a b'`. The value is one
+  literal or quoted word; `-a=$x` is still refused. A comma list glued to a
+  short flag is one word: `-Wl,-rpath,/opt/lib` reaches an external command
+  whole, and `cut -f1,3` and `sort -k2,2n` bind `1,3` and `2,2n` instead
+  of reading `,3` as a file. `chmod +x f` and `echo ...` parse.
 - `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
   an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
   refuse extra operands. `head -c` reads a byte prefix of each file.

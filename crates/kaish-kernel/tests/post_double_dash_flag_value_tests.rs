@@ -40,26 +40,12 @@ async fn long_flag_value_is_one_operand() {
     assert_eq!(echoed("echo -- --flag=value").await, "--flag=value");
 }
 
-/// `-x=value` is deliberately NOT part of this: it is refused on both sides
-/// of `--` today (`echo -n=1` is the same parse error), so accepting it only
-/// after `--` would trade one asymmetry for another. Pinned so the decision is
-/// visible if someone changes the short-flag grammar.
+/// `-x=value` is one operand on both sides of `--`, so the two spellings
+/// agree. Before `--` it is a positional word, not the `-n` flag.
 #[tokio::test]
-async fn short_flag_value_is_still_refused_on_both_sides() {
-    let k = kernel();
-    for script in ["echo -n=1", "echo -- -n=1"] {
-        let err = match k.execute(script).await {
-            Err(e) => e.to_string(),
-            Ok(r) => {
-                assert_ne!(r.code, 0, "`{script}` must not succeed");
-                r.err.clone()
-            }
-        };
-        assert!(
-            err.contains("adjacent words with no space between them"),
-            "`{script}` should still be the parse error, got: {err}"
-        );
-    }
+async fn short_flag_value_is_one_operand_on_both_sides() {
+    assert_eq!(echoed("echo -n=1").await, "-n=1");
+    assert_eq!(echoed("echo -- -n=1").await, "-n=1");
 }
 
 /// The bare form leaked the same way, and predates this change: past `--`,

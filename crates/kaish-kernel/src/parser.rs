@@ -2485,7 +2485,8 @@ fn is_glue_candidate(arg: &Arg, flags_are_data: bool) -> bool {
     matches!(
         arg,
         Arg::Positional(_) | Arg::LongFlag(_) | Arg::Named { .. } | Arg::WordAssign { .. }
-    ) || (flags_are_data && matches!(arg, Arg::ShortFlag(_) | Arg::DoubleDash))
+    ) || matches!(arg, Arg::ShortFlag(name) if name.contains(','))
+        || (flags_are_data && matches!(arg, Arg::ShortFlag(_) | Arg::DoubleDash))
 }
 
 /// The exact, unprocessed source text of `arg` at `span`, when `arg` is
@@ -2721,14 +2722,15 @@ where
 
     // Keep operator syntax after `--`; binding decides which command owns it.
     let post_dash_arg = choice((
-        // `--flag=value` — one operand, like `name=value` below. Long flags
-        // only; see the production's own doc for why `-x=value` is not here.
-        // This must precede the bare-flag rule, which would otherwise take
-        // `--flag` and leave `=value` to be rejected as a glued word. Past
+        // `--flag=value` and `-flag=value` — one operand each, like
+        // `name=value` below. These must precede the bare-flag rule, which
+        // would otherwise take the flag and leave `=value` to be rejected as
+        // a glued word. Past
         // `--` there is no flag for a value to belong to, so the pair is
         // simply text; the binders stringify it the way they already
         // stringify a post-`--` `WordAssign`.
         post_dash_flag_value_parser(),
+        short_flag_value_word_parser(),
         // A wrapper's `--` does not end its child command's options.
         select! {
             Token::ShortFlag(name) => Arg::ShortFlag(name),
@@ -2744,6 +2746,7 @@ where
         word_assign_arg_parser(),
         // `test`/`[` operators stay literal after `--` too (`test -- a = b`).
         test_operator_arg_parser(),
+        ellipsis_word(),
         // Everything else stays the same
         primary_expr_parser().map(Arg::Positional),
     ));
@@ -2826,10 +2829,8 @@ where
 /// pasting.
 ///
 /// Long flags only, because `Arg::Named` means a long flag everywhere else
-/// and the binders reconstruct it with `--`. `-x=value` is refused on BOTH
-/// sides of `--` today (`echo -n=1` is the same parse error), so accepting it
-/// only after `--` would trade one asymmetry for another; that spelling is
-/// its own question about the flag grammar.
+/// and the binders reconstruct it with `--`. `-x=value` is
+/// `short_flag_value_word_parser`, on both sides of `--`.
 fn post_dash_flag_value_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -2914,6 +2915,71 @@ where
     .map(|s| Arg::Positional(Expr::Literal(Value::String(s.to_string()))))
 }
 
+/// A bare `...` argument is the literal word `...` (`echo ...`). Spread
+/// (`[...$xs]`) exists only inside a list literal, which never reaches here.
+fn ellipsis_word<'tokens, I>(
+) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    just(Token::DotDotDot).to(Arg::Positional(Expr::Literal(Value::String("...".to_string()))))
+}
+
+/// `-name=value` with no space on either side of `=` is one literal word,
+/// like `--name=value`: `gcc -std=c11`, `pdflatex -interaction=nonstopmode`,
+/// `-Dkey='a b'`, `-Wl,-rpath=/x`. The command receives `-name=value`
+/// verbatim; a builtin sees it as a positional, as the argv door classifies
+/// it.
+///
+/// The value is one literal or quoted word. An unquoted `$var`, `$(...)`, or
+/// glob after `=` fails this production, and the word is refused as
+/// pasting; quoting the whole word is the fix.
+fn short_flag_value_word_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    // `filter`, not `try_map`: a non-match is an ordinary expected-token
+    // miss that the next alternative answers, never a diagnosis of its own.
+    select! { Token::ShortFlag(name) => name }
+        .map_with(|s, e| -> (String, Span) { (s, e.span()) })
+        .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
+        .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
+        .map(
+            |(((name, name_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span))| {
+                let glued = gap_is_only_continuations(name_span.end, eq_span.start)
+                    && gap_is_only_continuations(eq_span.end, value_span.start);
+                glued.then(|| short_flag_value_word(&name, value)).flatten()
+            },
+        )
+        .filter(Option::is_some)
+        .map(|word| {
+            let Some(word) = word else {
+                unreachable!("filtered to Some above")
+            };
+            Arg::Positional(word)
+        })
+}
+
+/// The expression for the word `-{name}={value}`, or `None` when `value` is
+/// not a literal or a quoted string.
+fn short_flag_value_word(name: &str, value: Expr) -> Option<Expr> {
+    let prefix = format!("-{name}=");
+    let text = match value {
+        Expr::Literal(Value::String(s)) => s,
+        Expr::Literal(Value::Int(n)) => n.to_string(),
+        Expr::Literal(Value::Float(f)) => f.to_string(),
+        Expr::Literal(Value::Bool(b)) => b.to_string(),
+        Expr::NumericLiteral { raw, .. } => raw,
+        Expr::Interpolated(mut parts) => {
+            parts.insert(0, StringPart::Literal(prefix));
+            return Some(Expr::Interpolated(parts));
+        }
+        _ => return None,
+    };
+    Some(Expr::Literal(Value::String(format!("{prefix}{text}"))))
+}
+
 /// Argument parser for arguments before `--` (normal flag handling).
 fn arg_before_double_dash_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -2932,6 +2998,9 @@ where
     let long_flag = select! {
         Token::LongFlag(name) => Arg::LongFlag(name),
     };
+
+    // One word: -name=value
+    let short_flag_with_value = short_flag_value_word_parser();
 
     // Boolean short flag: -x
     let short_flag = select! {
@@ -2954,9 +3023,11 @@ where
     choice((
         long_flag_with_value,
         long_flag,
+        short_flag_with_value,
         short_flag,
         named,
         test_operator,
+        ellipsis_word(),
         positional,
     ))
     .boxed()
@@ -3656,11 +3727,12 @@ where
     }
     .map(|s| Expr::Literal(Value::String(s.to_string())));
 
-    // Bare words starting with + or - (e.g., date +%s, cat -), and a
-    // `--`-prefixed word that isn't a valid long flag (`echo ---`,
+    // Bare words starting with + or - (e.g., date +%s, chmod +x, cat -),
+    // and a `--`-prefixed word that isn't a valid long flag (`echo ---`,
     // `echo --=x`, GH #137).
     let plus_minus_bare = select! {
         Token::PlusBare(s) => Expr::Literal(Value::String(s)),
+        Token::PlusFlag(s) => Expr::Literal(Value::String(format!("+{s}"))),
         Token::MinusBare(s) => Expr::Literal(Value::String(s)),
         Token::MinusAlone => Expr::Literal(Value::String("-".to_string())),
         Token::DoubleDashBare(s) => Expr::Literal(Value::String(s)),
@@ -4103,7 +4175,8 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::Tilde | Token::RelativePath(_) | Token::DotSlashPath(_)
         | Token::DottedIdent(_) | Token::Star | Token::Bang | Token::Question
         | Token::GlobWord(_) | Token::Arithmetic(_) | Token::LongFlag(_)
-        | Token::DoubleDashBare(_) | Token::PlusBare(_) | Token::MinusBare(_)
+        | Token::DoubleDashBare(_) | Token::PlusBare(_) | Token::PlusFlag(_) | Token::MinusBare(_)
+        | Token::DotDotDot
         | Token::JobSpec(_) | Token::MinusAlone | Token::String(_)
         | Token::SingleString(_) | Token::EscapedWord(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
         | Token::Positional(_) | Token::AllArgs | Token::ArgCount | Token::LastExitCode
@@ -4140,7 +4213,7 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::StdoutToStderr | Token::StdoutToStderr2 => false,
 
         // Statement and collection structure.
-        Token::Pipe | Token::Amp | Token::Semi | Token::DoubleSemi | Token::DotDotDot
+        Token::Pipe | Token::Amp | Token::Semi | Token::DoubleSemi
         | Token::LBrace | Token::RBrace | Token::LBracket | Token::RBracket
         | Token::LParen | Token::RParen => false,
 
@@ -4154,7 +4227,7 @@ fn is_word_token(tok: &Token) -> bool {
 
         // Excluded to match `is_glue_candidate`'s own exclusion of
         // `Arg::ShortFlag`/`Arg::DoubleDash` — see that function.
-        Token::ShortFlag(_) | Token::PlusFlag(_) | Token::DoubleDash => false,
+        Token::ShortFlag(_) | Token::DoubleDash => false,
 
         // Heredoc bodies, lexer errors, trivia: never argv words.
         Token::HereDoc(_) | Token::InvalidFloatNoLeading | Token::InvalidFloatNoTrailing
@@ -4163,15 +4236,16 @@ fn is_word_token(tok: &Token) -> bool {
     }
 }
 
-/// A key token `word_assign_arg_parser`/`long_flag_with_value` accept —
-/// `Ident` for `key=value`, `LongFlag` for `--key=value`.
+/// A key token `word_assign_arg_parser`/`long_flag_with_value`/
+/// `short_flag_value_word_parser` accept — `Ident` for `key=value`,
+/// `LongFlag` for `--key=value`, `ShortFlag` for `-key=value`.
 ///
 /// The `LongFlag` half fuses `--key=value` into ONE unit; without it a spaced
 /// `--a=1 --b=2` would scan as adjacent fragments and be flagged as a paste it
 /// is not. `keyword_word`'s wider key set is deliberately not reproduced: this
 /// scanner re-derives common shapes, not the whole grammar.
 fn is_assign_key_token(tok: &Token) -> bool {
-    matches!(tok, Token::Ident(_) | Token::LongFlag(_))
+    matches!(tok, Token::Ident(_) | Token::LongFlag(_) | Token::ShortFlag(_))
 }
 
 /// If `tokens[i]` starts a single glue-candidate word — one `is_word_token`
