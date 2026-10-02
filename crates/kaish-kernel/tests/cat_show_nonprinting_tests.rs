@@ -17,6 +17,17 @@ const BYTES: &[u8] = b"a\tb\n\x01c\xc3\xa9 \x7f \xff\r\n\nend";
 /// The same without 0xFF, so -E and -T output is valid UTF-8 text.
 const TEXT_BYTES: &[u8] = b"a\tb\n\x01c\xc3\xa9 \x7f\r\n\nend";
 
+#[tokio::test]
+async fn display_mode_keeps_good_files_around_a_missing_file() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a"), b"a\t").unwrap();
+    fs::write(dir.path().join("b"), b"b\n").unwrap();
+    let result = kernel_at(dir.path()).execute("cat -A a missing b").await.unwrap();
+    assert_eq!(result.code, 1);
+    assert!(result.err.contains("missing"), "{}", result.err);
+    assert_eq!(result.text_out(), "a^Ib$\n");
+}
+
 async fn cat(args: &str) -> (String, String, i64) {
     cat_bytes(args, BYTES).await
 }

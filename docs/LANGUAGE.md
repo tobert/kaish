@@ -429,6 +429,40 @@ café=au-lait;  echo $café       # au-lait
 😁=grin;       echo $😁         # grin
 ```
 
+### Tilde expansion
+
+`echo ~/src` — expands to `$HOME/src`. Tilde expansion applies only to an
+**unquoted** tilde-prefix written directly in the source: a bare word starting
+with `~` (`~`, `~/path`, `~user`, `~user/path`), including an assignment's
+value (`x=~/a`). It never applies to a quoted string, to a variable's value,
+or to a command substitution's output — those are already values, not source
+words, by the time kaish sees them.
+
+```sh
+echo ~/src                # /home/amy/src — unquoted, expands
+echo '~/src'               # ~/src — quoted, stays literal
+x='~/src'; echo "$x"       # ~/src — the value was never an unquoted word
+x=~/src; echo $x           # /home/amy/src — the assignment's OWN value was unquoted
+```
+
+`~user` reads the named user's home directory from `/etc/passwd`, which
+needs the `host` capability; without it, `~user` stays literal, the same as
+when the string doesn't match a real user. `~` alone reads the session
+`HOME` — the kernel never reads the host process's `$HOME`
+(`docs/EMBEDDING.md`, "Initial Variables and Hermetic Subprocess Env"). With
+no `HOME` in scope, `~`/`~/path` stays literal rather than expanding to
+nothing.
+
+`~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
+
+A `~` that is not at the start of a word is never a tilde-prefix: kaish has
+no bareword-pasting rule, so an unquoted `~` glued to a preceding word
+(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
+a silently literal concatenation. A heredoc body never expands `~`, even
+when the delimiter is unquoted and the body otherwise interpolates — tilde
+expansion is a source-word operation, and a heredoc body is never split into
+words.
+
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep
 them, and `echo a-b`, `ls -l`, and `my-file.txt` are unaffected — but a name
@@ -600,6 +634,24 @@ including `--json`. The value still expands: `echo -- --greeting=$USER`
 prints `--greeting=` followed by the variable. A short flag with a value
 (`-n=1`) is not a word on either side of `--`; quote it (`echo "-n=1"`).
 
+### Builtin flags and expressions
+
+```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                    # same as -vET
+ls -d directory                # list the directory itself; overrides -R
+grep -x 'ready' file            # match a whole line; overrides -w
+find --help                    # print help and exit 0
+find . -name --help             # --help is the name to match
+```
+
+`find` joins tests with `-a` (or `-and`, also implied by adjacency), `-o` (or `-or`), and `!` (or `-not`). Negation binds before AND, then OR. Quote parentheses to group tests. Tests short-circuit; each reached `-print` prints the entry once, so two reached actions print twice. Without an explicit `-print`, a matching entry prints once. An expression allows at most 256 nodes, counting tests, operators, and groups, with at most 64 nested groups or negations. Larger expressions exit 2 with a smaller-expression hint. See `help find` for the supported tests and depth options.
+
+`cat -v` marks control bytes as `^X`, DEL as `^?`, and bytes above 127 with `M-` plus the same notation; tabs and newlines stay. `-T` marks tabs as `^I`; `-E` adds `$` before each newline and marks a preceding carriage return as `^M`. `-A` enables all three. Display modes buffer the input. `-n` numbers the marked lines; with only `-E` or `-T`, non-UTF-8 input exits 1 and names `-v` as the fix.
+
+`NAME --help` prints builtin help to stdout and exits 0. A declared option value shaped like `--help` or `--json` remains data. Expression tools such as `test` recognize only a leading `--help`. Unsupported builtin flags exit 2 and name `help NAME` for the supported flags.
+
 ## Pipes & Redirects
 
 ```sh
@@ -610,6 +662,7 @@ tool < file                     # stdin from file
 tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
+tool 1>&2                       # merge stdout into stderr
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -661,6 +714,12 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
+> **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
+> join captured stdout first, then stderr. kaish does not preserve the
+> command's interleaved write order. If stderr has already reached a
+> background job stream, `1>&2` keeps those bytes first and appends
+> captured stdout; each byte reaches the stream once.
+>
 > **Known differences from bash.** bash evaluates and opens each target in
 > turn; kaish evaluates all of them before opening any, so the same-file
 > check sees every target. As a result:
@@ -681,6 +740,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > **One stdin source per command.** `<`, `<<`, and `<<<` all feed stdin —
 > combining two of them on the same command is a parse error (rather than
 > silently taking the last one, as bash does).
+
+> **A redirect's input belongs to its command.** `seq 1 3 | jq -c length < f`
+> reads `f`, not the pipe. When the command ends, what it left unread of `f`
+> is dropped, and the session's stdin is what it was before: `read x < f; cat`
+> prints the session's stdin, not the rest of `f`.
 
 > **jq is built-in.** kaish ships a native jq (jaq) in-process — no external
 > binary required. The `$VAR → jq <<<` idiom replaces bash's
@@ -947,8 +1011,15 @@ A `$(...)` body accepts the **full statement grammar**: pipelines, `&&`/`||`
 chains, `;` sequences, multi-line bodies, `#` comments, and control structures
 (`if`/`for`/`while`/`case`) — quoted or unquoted, the body parses the same
 way. Output accumulates across the statements (no separator inserted, like
-`;`), and the body's side effects (`cd`, assignments) stay contained — only the
-captured stdout becomes the value.
+`;`), and the body's session changes stay contained — variables, `cd`, `alias`,
+function definitions (`f() { ...; }`, `source`), `kaish-ignore`, and
+`kaish-output-limit` all revert when the body ends. Only the captured stdout
+becomes the value:
+
+```sh
+x=$(f() { echo hi; }; f)   # x is "hi"
+f                          # command not found, exit 127
+```
 
 **stderr is not captured.** A substitution's stderr joins the enclosing
 statement's stderr, so a command that fails inside `$(...)` still reports why:

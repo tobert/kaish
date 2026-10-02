@@ -786,15 +786,16 @@ let result = kernel.execute_argv("my-tool", &[Value::Bytes(blob)]).await?;
 Semantics:
 
 - **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no command
-  substitution, no word splitting — the "single-quoted word" rule taken to its
-  end. `execute_argv("echo", &[Value::String("*.txt".into())])` emits `*.txt`.
-  And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
-  door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
-  a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
-  choose, which is the point of the typed door. **Exception:** a leading `~` is
-  expanded against the session `HOME`, matching the string door (kaish expands
-  `~` uniformly, even in quotes — so the doors agree); pass a pre-resolved path
-  if you need it byte-literal.
+  substitution, no word splitting, and no tilde expansion — the "single-quoted
+  word" rule taken to its end. `execute_argv("echo", &[Value::String("*.txt"
+  .into())])` emits `*.txt`; `execute_argv("echo", &[Value::String("~/a".into())
+  ])` emits `~/a` unexpanded, same as `execute("echo '~/a'")` — an argv token
+  carries no quoting, so it is treated the same as a quoted source word. Pass
+  an already-expanded path if you need one resolved. And no **number
+  coercion**: a `Value::String("00")` stays `"00"` (the string door's lexer
+  would coerce the bare word `00` to an integer and print `0`). Pass a
+  `Value::Int`/`Value::Float` when you mean a number — the type is yours to
+  choose, which is the point of the typed door.
 - **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
   no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
   not a subset that drops expressiveness, it's a different door that converges with
@@ -911,8 +912,8 @@ its `Value::Bytes`, so binary never crosses the argv/text boundary.
 `words_argv()` renders the stream into argv tokens, with a `Value::Bytes` word
 as an inert placeholder whose real bytes stay at the same index in `words`.
 
-- **`--json` stays the kernel's.** It is removed from `words` wherever it
-  appears — including last, where a subcommand tree puts it — and recorded in
+- **Standalone `--json` stays the kernel's.** It is removed from `words` before
+  `--` unless consumed as a root-schema-declared option value, and recorded in
   `flags`, so `args.has_flag("json")` answers it and the kernel applies the
   output format exactly as for a typed tool. Past a literal `--` it is your
   operand, not the kernel's flag.
@@ -922,9 +923,7 @@ as an inert placeholder whose real bytes stay at the same index in `words`.
   owning output: you emit the final bytes, so you parse the flag that asks for
   them. Lifting it would strip it from your argv *and* skip rendering, leaving
   the request handled by nobody.
-- **`--help`/`-h` reach your parser.** `flags` is empty of them, so the
-  kernel's generic help router stands aside — the same responsibility
-  `.with_owned_output()` carries, and the two combine.
+- **Standalone `--help` requests generic help.** The kernel skips root-schema-declared option values while checking for help. A flag claimed by your schema stays yours. A `--` word stops generic help detection. Verbatim `-h` stays tool-owned. With `.with_owned_output()`, both help flags reach your parser and handling them is your responsibility.
 - **The schema is unchanged.** It still supplies help, completion and the
   parameter list. Schema-shaped argument validation is skipped, because it
   would judge a decomposition your tool never receives; override
@@ -1414,12 +1413,15 @@ fn myapp_data_dir() -> PathBuf {
 }
 ```
 
-For user-facing path handling, use `expand_tilde`:
+For user-facing path handling, use `expand_tilde`. It takes the home
+directory explicitly — the kernel is hermetic and never reads the host
+`$HOME` on its own — so pass the session's `HOME` (or `None`, which leaves
+`~` unexpanded rather than guessing):
 
 ```rust
 use kaish_kernel::expand_tilde;
 
-let path = expand_tilde("~/projects/myrepo");
+let path = expand_tilde("~/projects/myrepo", Some("/home/username"));
 // → /home/username/projects/myrepo
 ```
 

@@ -154,6 +154,11 @@ push services[web][tags] canary   # bracket-path target
 ~/src/project             # tilde expands to $HOME
 cd                        # bare cd goes to $HOME
 cd -                      # previous directory
+
+# Tilde expansion applies only to an unquoted ~ at the start of a word —
+# a quoted "~" or '~' is a literal path, never $HOME:
+echo ~/x                  # /home/amy/x
+echo '~/x'                # ~/x
 ```
 
 ## Quoting
@@ -229,6 +234,8 @@ A redirect target is a single word: quote it when it interpolates
 target (`> $(cmd)`) works; bare text-plus-interpolation does not.
 
 One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
+A redirect's input belongs to its command: `seq 3 | jq . < f` reads `f`, and
+the session's stdin is unchanged afterward.
 jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
 without a subprocess. jq also accepts real jq's `--arg NAME VALUE`,
 `--argjson NAME VALUE`, and `-n` / `--null-input` flags for binding
@@ -398,6 +405,27 @@ set -o glob               # re-enable (on by default)
 Zero matches is an error (exit code 1). The `glob` builtin receives its
 pattern as written — `glob **/*.rs` needs no quotes, takes multiple patterns,
 and adds `--exclude`, `--ftype`, and depth control.
+
+## Builtin Flags
+
+```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                # show nonprinting bytes, tabs, and line ends
+ls -d directory            # list the directory itself; overrides -R
+grep -x 'ready' file        # match a whole line; overrides -w
+find --help                # print help and exit 0
+```
+
+In `find`, `!` binds before `-a` (also implied between tests), then `-o`.
+Quote parentheses to pass them to `find`. Tests short-circuit; each reached
+`-print` prints once. Without `-print`, matching entries print once.
+Expressions allow at most 256 nodes and 64 nested groups or negations;
+larger expressions exit 2 and name the limit.
+
+`--help` and `--json` used as a declared option value stay data:
+`find . -name --help` searches for that name. Unsupported builtin flags
+exit 2 and name `help` for the builtin's supported flags.
 
 ## Regex (grep, sed, awk)
 

@@ -11,8 +11,8 @@
 //!
 //! What these tests pin:
 //! - order and multiplicity survive (the two things decomposition destroys),
-//! - `--json` stays kernel-owned: stripped from `words` at any position and
-//!   still applied to the output format,
+//! - standalone `--json` stays kernel-owned before `--`; schema-declared
+//!   option values stay in `words`,
 //! - a `Typed` tool is unaffected — `Typed` is the default and nothing
 //!   existing changes behavior.
 
@@ -319,4 +319,70 @@ async fn a_verbatim_tool_that_does_not_own_output_still_has_json_lifted() {
     // The kernel rendered the tool's text as a JSON string, which is the half
     // an owned-output tool suppresses — the two rows differ in both directions.
     assert!(out.starts_with('"'), "the kernel rendered this one: {out}");
+}
+
+mod declared_values {
+    use super::*;
+    use std::sync::Mutex;
+    use kaish_kernel::tools::ParamSchema;
+    use kaish_kernel::validator::ValidationIssue;
+
+    struct RoleTool {
+        validated: Arc<Mutex<Vec<ToolArgs>>>,
+        executed: Arc<Mutex<Option<ToolArgs>>>,
+    }
+
+    #[async_trait]
+    impl Tool for RoleTool {
+        fn name(&self) -> &str { "roletool" }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("roletool", "declared two-value option")
+                .param(ParamSchema::new("pair", "string").consumes(2))
+                .with_verbatim_argv()
+        }
+        fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+            self.validated.lock().unwrap().push(args.clone());
+            Vec::new()
+        }
+        async fn execute(&self, args: ToolArgs, _ctx: &mut dyn ToolCtx) -> ExecResult {
+            *self.executed.lock().unwrap() = Some(args);
+            ExecResult::success("ok")
+        }
+    }
+
+    #[rstest::rstest]
+    #[case("roletool --pair first --json", false, vec!["--pair", "first", "--json"])]
+    #[case("roletool --pair --help --json", false, vec!["--pair", "--help", "--json"])]
+    #[case("roletool --pair -- first --json", false, vec!["--pair", "--", "first", "--json"])]
+    #[case("roletool --pair -- first --help", false, vec!["--pair", "--", "first", "--help"])]
+    #[case("roletool --pair '--' first --json", true, vec!["--pair", "--", "first"])]
+    #[case("roletool --pair one two --json", true, vec!["--pair", "one", "two"])]
+    #[case("roletool -- --help --json", false, vec!["--", "--help", "--json"])]
+    #[tokio::test]
+    async fn validation_and_execution_agree_on_declared_value_roles(
+        #[case] source: &str,
+        #[case] json: bool,
+        #[case] words: Vec<&str>,
+    ) {
+        let validated = Arc::new(Mutex::new(Vec::new()));
+        let executed = Arc::new(Mutex::new(None));
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+        let kernel = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |tools| {
+            tools.register(RoleTool { validated: Arc::clone(&validated), executed: Arc::clone(&executed) });
+        }).unwrap();
+        let result = kernel.execute(source).await.unwrap();
+        assert_eq!(result.code, 0, "{}", result.err);
+        assert_eq!(result.text_out(), if json { "\"ok\"" } else { "ok" });
+        let actual = executed.lock().unwrap().clone().expect("tool executed");
+        assert_eq!(actual.words_argv(), words);
+        assert_eq!(actual.has_flag("json"), json);
+        let validated = validated.lock().unwrap();
+        assert!(!validated.is_empty(), "tool validation ran");
+        for args in validated.iter() {
+            assert_eq!(args.words, actual.words, "validation saw different words");
+            assert_eq!(args.flags, actual.flags, "validation saw different flags");
+        }
+    }
 }

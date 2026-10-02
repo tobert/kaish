@@ -9,6 +9,9 @@ use kaish_glob::glob_match;
 
 use crate::vfs::DirEntry;
 
+const MAX_EXPRESSION_NODES: usize = 256;
+const MAX_EXPRESSION_NESTING: usize = 64;
+
 /// A node in the parsed expression.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Expr {
@@ -79,7 +82,10 @@ pub(super) fn split_operands(words: &[String]) -> (&[String], &[String]) {
 ///
 /// Errors are the complete text after `find: `.
 pub(super) fn parse(words: &[String]) -> Result<Parsed, String> {
-    let mut parser = Parser { words, at: 0, depth: DepthOptions::default() };
+    let mut parser = Parser {
+        words, at: 0, depth: DepthOptions::default(),
+        nodes_remaining: MAX_EXPRESSION_NODES, nesting: 0,
+    };
     if words.is_empty() {
         return Ok(Parsed { expr: Expr::True, depth: parser.depth });
     }
@@ -98,9 +104,28 @@ struct Parser<'a> {
     words: &'a [String],
     at: usize,
     depth: DepthOptions,
+    nodes_remaining: usize,
+    nesting: usize,
 }
 
 impl Parser<'_> {
+    fn charge_node(&mut self) -> Result<(), String> {
+        self.nodes_remaining = self.nodes_remaining.checked_sub(1).ok_or_else(|| {
+            format!("expression has more than {MAX_EXPRESSION_NODES} tests, operators, or groups; use a smaller expression")
+        })?;
+        Ok(())
+    }
+
+    fn nested(&mut self, parse: fn(&mut Self) -> Result<Expr, String>) -> Result<Expr, String> {
+        if self.nesting >= MAX_EXPRESSION_NESTING {
+            return Err(format!("expression nesting exceeds {MAX_EXPRESSION_NESTING}; use fewer groups or ! operators"));
+        }
+        self.nesting += 1;
+        let result = parse(self);
+        self.nesting -= 1;
+        result
+    }
+
     fn peek(&self) -> Option<&str> {
         self.words.get(self.at).map(String::as_str)
     }
@@ -121,6 +146,7 @@ impl Parser<'_> {
             if self.at >= self.words.len() || self.peek() == Some(")") {
                 return Err(format!("{word} needs a test after it"));
             }
+            self.charge_node()?;
             let right = self.and_expression()?;
             left = Expr::Or(Box::new(left), Box::new(right));
         }
@@ -141,6 +167,7 @@ impl Parser<'_> {
                 }
                 Some(_) => {} // two tests side by side are joined by -a
             }
+            self.charge_node()?;
             let right = self.not_expression()?;
             left = Expr::And(Box::new(left), Box::new(right));
         }
@@ -154,13 +181,15 @@ impl Parser<'_> {
                 if self.at >= self.words.len() || self.peek() == Some(")") {
                     return Err(format!("{word} needs a test after it"));
                 }
-                Ok(Expr::Not(Box::new(self.not_expression()?)))
+                self.charge_node()?;
+                Ok(Expr::Not(Box::new(self.nested(Self::not_expression)?)))
             }
             _ => self.primary(),
         }
     }
 
     fn primary(&mut self) -> Result<Expr, String> {
+        self.charge_node()?;
         let Some(word) = self.advance().map(str::to_string) else {
             return Err("the expression ends where a test was expected".to_string());
         };
@@ -169,7 +198,7 @@ impl Parser<'_> {
                 if self.peek() == Some(")") {
                     return Err("'(' ')' has no test inside".to_string());
                 }
-                let inner = self.or_expression()?;
+                let inner = self.nested(Self::or_expression)?;
                 match self.advance() {
                     Some(")") => Ok(inner),
                     _ => Err("'(' has no matching ')'".to_string()),
@@ -242,6 +271,7 @@ impl Parser<'_> {
                 }
                 Ok(Expr::True)
             }
+            "-print" if inline.is_some() => Err(format!("{word} does not take a value; use -print")),
             "-print" => Ok(Expr::Print),
             _ => Err(format!("{word} is not supported (see `help find`)")),
         }
@@ -281,11 +311,11 @@ impl EntryView<'_> {
 }
 
 /// True when `expr` holds for `entry`. Sets `printed` when a `-print` ran.
-pub(super) fn evaluate(expr: &Expr, entry: &EntryView<'_>, printed: &mut bool) -> bool {
+pub(super) fn evaluate(expr: &Expr, entry: &EntryView<'_>, printed: &mut usize) -> bool {
     match expr {
         Expr::True => true,
         Expr::Print => {
-            *printed = true;
+            *printed += 1;
             true
         }
         Expr::Not(inner) => !evaluate(inner, entry, printed),
@@ -299,12 +329,11 @@ pub(super) fn evaluate(expr: &Expr, entry: &EntryView<'_>, printed: &mut bool) -
     }
 }
 
-/// Whether the walk should print `entry`: any `-print` that ran, or, when the
-/// expression has no `-print`, a true expression.
-pub(super) fn selects(parsed: &Parsed, entry: &EntryView<'_>) -> bool {
-    let mut printed = false;
+/// Count evaluated `-print` actions, or one implicit print for a true expression.
+pub(super) fn print_count(parsed: &Parsed, entry: &EntryView<'_>) -> usize {
+    let mut printed = 0;
     let holds = evaluate(&parsed.expr, entry, &mut printed);
-    if has_print(&parsed.expr) { printed } else { holds }
+    if has_print(&parsed.expr) { printed } else { usize::from(holds) }
 }
 
 fn has_print(expr: &Expr) -> bool {
@@ -418,6 +447,27 @@ mod tests {
         assert_eq!(parse_comparison("2G", true).map(|c| c.amount), Some(2 * 1024 * 1024 * 1024));
         assert_eq!(parse_comparison("1K", false), None);
         assert_eq!(parse_comparison("x", true), None);
+    }
+
+    #[rstest::rstest]
+    #[case::negation(format!("{}-name x", "! ".repeat(65)))]
+    #[case::groups(format!("{}-name x{}", "( ".repeat(65), " )".repeat(65)))]
+    #[case::chain(std::iter::repeat_n("-name x", 130).collect::<Vec<_>>().join(" "))]
+    #[test]
+    fn excessive_expression_depth_or_size_is_refused(#[case] source: String) {
+        assert!(parse(&words(&source)).is_err(), "unbounded expression accepted");
+    }
+
+    #[test]
+    fn expressions_at_the_nesting_and_node_limits_are_accepted() {
+        assert!(parse(&words(&format!("{}-name x", "! ".repeat(64)))).is_ok());
+        let chain = std::iter::repeat_n("-name x", 128).collect::<Vec<_>>().join(" ");
+        assert!(parse(&words(&chain)).is_ok());
+    }
+
+    #[test]
+    fn print_refuses_an_attached_value() {
+        assert!(parse(&words("--print=ignored")).is_err());
     }
 
     #[test]

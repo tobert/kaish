@@ -47,3 +47,22 @@ async fn help_word_after_an_expression_operand_is_still_data_for_test() {
     assert_eq!(result.code, 1, "{}", result.err);
     assert_eq!(result.text_out(), "");
 }
+
+#[rstest]
+#[case("-name", vec!["./--help"])]
+#[case("-iname", vec!["./--help"])]
+#[case("-path", vec![])]
+#[case("-ipath", vec![])]
+#[case("-wholename", vec![])]
+#[tokio::test]
+async fn help_word_consumed_by_a_find_test_is_data(
+    #[case] predicate: &str,
+    #[case] expected: Vec<&str>,
+) {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("--help"), "data\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute(&format!("find . {predicate} --help")).await.unwrap();
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out().lines().collect::<Vec<_>>(), expected);
+}

@@ -198,3 +198,32 @@ async fn find_maxdepth_two_reaches_grandchildren() {
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out, expect(&["./b.rs", "./sub/e.rs"]));
 }
+
+#[rstest::rstest]
+#[case("-print -print", 2)]
+#[case("-print -o -print", 1)]
+#[case("! -print", 1)]
+#[case("'(' -print -a -print ')'", 2)]
+#[tokio::test]
+async fn each_evaluated_print_action_emits_a_row(#[case] expression: &str, #[case] rows: usize) {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "data\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute(&format!("find a.txt {expression}")).await.unwrap();
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out().lines().collect::<Vec<_>>(), vec!["a.txt"; rows]);
+}
+
+#[rstest::rstest]
+#[case("--json")]
+#[case("--json=false")]
+#[case("--json=true")]
+#[tokio::test]
+async fn a_global_output_flag_consumed_as_a_pattern_stays_data(#[case] pattern: &str) {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join(pattern), "data\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel.execute(&format!("find . -name {pattern}")).await.unwrap();
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out().lines().collect::<Vec<_>>(), vec![format!("./{pattern}")]);
+}

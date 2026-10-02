@@ -40,6 +40,8 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `ls`/`find`/`glob` | A name containing a newline is **refused** in text output (exit 2), naming the path and `--json`. One newline is one path boundary in text, so reporting such a name would split it into two paths that name no file. `--json` reads it losslessly. |
 | `ps` | Linux-only (reads `/proc`) |
+| `find` expressions | At most 256 expression nodes (tests, operators, and groups), with at most 64 nested groups or negations. Larger expressions exit 2; split the expression into smaller searches. No `-exec` or `-delete`. |
+| `cat -A/-v/-E/-T` | Buffers input before marking bytes. `-A` is `-vET`; `-n` with `-E` or `-T` needs UTF-8 text unless `-v` is also given. |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
 | `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
@@ -53,6 +55,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 - **Scatter results are in item order**, never completion order — a row's position identifies its item.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
 - **Redirect targets open before the command runs** — a target that cannot open (missing directory, read-only mount) exits 1 and the command does not run. A redirect never creates a directory: `mkdir -p` first.
+- **Captured output merges use two blocks** — `2>&1`, `1>&2`, and a shared file join stdout first, then stderr, without preserving interleaved write order. When stderr has already reached a background job stream, `1>&2` keeps published stderr first and appends stdout. See `docs/LANGUAGE.md`, "Pipes & Redirects".
 - **`sort < f > f` and `cat < f >> f` are refused** (exit 1): bash empties `f` or grows it without end. Write to a temp file, then `mv` it over `f` (or append it).
 - **Recursion is depth-capped at 48** — nested `$(...)`, recursive shell functions, and `.kai` scripts sourcing each other are bounded so a runaway (or a missing base case) returns a loud `maximum recursion depth exceeded` error instead of overflowing the stack. Real recursion nests far shallower; this only stops runaways.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.

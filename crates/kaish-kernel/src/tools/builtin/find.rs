@@ -73,7 +73,7 @@ struct FindArgs {
     _size: Option<String>,
 
     /// Whole path matches the glob.
-    #[arg(id = "path", long = "path")]
+    #[arg(id = "path", long = "path", visible_alias = "wholename")]
     _path: Option<String>,
 
     /// Whole path matches the glob, ignoring case.
@@ -84,6 +84,7 @@ struct FindArgs {
     _global: GlobalFlags,
 
     /// Starting paths for the search; defaults to the current directory.
+    #[arg(id = "paths")]
     _paths: Vec<String>,
 }
 
@@ -171,7 +172,8 @@ impl Tool for Find {
             if !start_stat.is_dir() || max_depth == Some(0) {
                 if gnu_mindepth == 0 {
                     let entry = EntryView { display: start_path, info: Some(&start_stat) };
-                    if find_expr::selects(&parsed, &entry) {
+                    let print_count = find_expr::print_count(&parsed, &entry);
+                    if print_count > 0 {
                         let entry_type = if start_stat.is_symlink() {
                             EntryType::Symlink
                         } else if start_stat.is_dir() {
@@ -179,7 +181,9 @@ impl Tool for Find {
                         } else {
                             EntryType::File
                         };
-                        emit(start_path, entry_type);
+                        for _ in 0..print_count {
+                            emit(start_path, entry_type);
+                        }
                     }
                 }
                 continue;
@@ -223,7 +227,8 @@ impl Tool for Find {
                 // operand was written, as GNU find does.
                 let display_path = relative_display_path(&path, &resolved_path, start_path);
                 let entry = EntryView { display: &display_path, info: info.as_ref() };
-                if !find_expr::selects(&parsed, &entry) {
+                let print_count = find_expr::print_count(&parsed, &entry);
+                if print_count == 0 {
                     continue;
                 }
 
@@ -238,7 +243,9 @@ impl Tool for Find {
                         }
                     })
                     .unwrap_or(EntryType::File);
-                emit(&display_path, entry_type);
+                for _ in 0..print_count {
+                    emit(&display_path, entry_type);
+                }
             }
         }
 

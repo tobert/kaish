@@ -325,23 +325,7 @@ impl<'a> Validator<'a> {
                 cmd.name, schema.name
             );
             let tool_args = build_tool_args_for_validation(&cmd.args, Some(schema));
-            // `cmd --help` prints help and never runs, so the tool's own
-            // operand checks (`diff` wants two files) must not refuse it.
-            let schema_claims_help = schema
-                .params
-                .iter()
-                .any(|p| p.matches_flag("--help") || p.matches_flag("help"));
-            let asks_for_help = !schema.owns_output
-                && !schema_claims_help
-                && (tool_args.flags.contains("help")
-                    || tool_args.words.as_deref().is_some_and(|words| {
-                        words.iter().any(|w| matches!(w, Value::String(s) if s == "--help"))
-                    })
-                    || (schema.raw_argv
-                        && tool_args
-                            .positional
-                            .first()
-                            .is_some_and(|w| matches!(w, Value::String(s) if s == "--help"))));
+            let asks_for_help = crate::tools::requests_builtin_help(&tool_args, schema);
             if !asks_for_help {
                 let tool_issues = tool.validate(&tool_args);
                 self.issues.extend(tool_issues);
@@ -365,6 +349,12 @@ impl<'a> Validator<'a> {
         fn literal_path(expr: &Expr) -> Option<&str> {
             match expr {
                 Expr::Literal(Value::String(path)) => Some(path),
+                // The validator has no session HOME to expand against, and
+                // doesn't need one: comparing the raw `~/f` text is enough
+                // to catch `sort < ~/f > ~/f` — two identical unexpanded
+                // spellings resolve to the same path regardless of what
+                // HOME turns out to be at runtime.
+                Expr::TildePath(path) => Some(path),
                 _ => None,
             }
         }
@@ -690,10 +680,16 @@ impl<'a> Validator<'a> {
     /// function the runtime uses, so the two cannot disagree about what
     /// counts as a number.
     fn check_numeric_literal_operand(&mut self, expr: &Expr) {
-        let Expr::Literal(value) = expr else {
-            return;
+        // A `TildePath` expands to a path at runtime, never a number, so its
+        // raw text stands in for the value the same way a plain string
+        // literal does — the check's answer doesn't depend on what HOME
+        // turns out to be.
+        let value = match expr {
+            Expr::Literal(value) => value.clone(),
+            Expr::TildePath(raw) => Value::String(raw.clone()),
+            _ => return,
         };
-        let Some(reason) = crate::interpreter::numeric_operand_refusal(value) else {
+        let Some(reason) = crate::interpreter::numeric_operand_refusal(&value) else {
             return;
         };
         self.issues.push(
@@ -713,6 +709,7 @@ impl<'a> Validator<'a> {
             Expr::Not(inner) => self.validate_expr(inner),
             Expr::Literal(_) => {}
             Expr::NumericLiteral { .. } => {}
+            Expr::TildePath(_) => {}
             Expr::VarRef(path) => self.validate_var_ref(path),
             Expr::Interpolated(parts) => {
                 for part in parts {
@@ -1024,20 +1021,27 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
         // `has_flag("json")` must see what execution will.
         let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
         let mut words = Vec::new();
-        let mut past_double_dash = false;
+        let mut argument_state = crate::tools::VerbatimArgumentState::default();
+        let schema = match schema {
+            Some(schema) => schema,
+            None => unreachable!("verbatim binding requires a schema"),
+        };
         for arg in args {
+            let words_start = words.len();
             match arg {
                 Arg::Positional(expr) => words.push(expr_to_placeholder(expr)),
                 Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
                 Arg::LongFlag(name) => {
-                    if lift_global_flags && !past_double_dash && is_global_output_flag(name) {
+                    if lift_global_flags && !argument_state.past_end_marker()
+                        && !argument_state.expects_value() && is_global_output_flag(name) {
                         tool_args.flags.insert(name.clone());
                     } else {
                         words.push(Value::String(format!("--{name}")));
                     }
                 }
                 Arg::Named { key, value } => {
-                    if lift_global_flags && !past_double_dash && is_global_output_flag(key) {
+                    if lift_global_flags && !argument_state.past_end_marker()
+                        && !argument_state.expects_value() && is_global_output_flag(key) {
                         // Same truthiness rule execution applies. A literal
                         // survives `expr_to_placeholder` intact and is judged;
                         // anything dynamic becomes the `<dynamic>` string,
@@ -1054,9 +1058,12 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                     words.push(Value::String(format!("{key}=<value>")));
                 }
                 Arg::DoubleDash => {
-                    past_double_dash = true;
+                    argument_state.mark_end_marker();
                     words.push(Value::String("--".to_string()));
                 }
+            }
+            for word in &words[words_start..] {
+                argument_state.consume(word, schema);
             }
         }
         tool_args.words = Some(words);

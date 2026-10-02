@@ -306,6 +306,7 @@ async fn show_stream(
     show: ShowOptions,
 ) -> ExecResult {
     let mut data: Vec<u8> = Vec::new();
+    let mut errors = Vec::new();
     if args.positional.is_empty() {
         match ctx.read_stdin_to_bytes().await {
             Ok(stdin) => data = stdin.unwrap_or_default(),
@@ -320,16 +321,29 @@ async fn show_stream(
             return ExecResult::failure(1, "cat: missing path argument");
         }
         for path in &paths {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("cat");
+            }
             let resolved = ctx.resolve_path(path);
             match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(bytes) => data.extend_from_slice(&bytes),
-                Err(e) => return ExecResult::failure(1, format!("cat: {path}: {e}")),
+                Err(e) => errors.push(format!("cat: {path}: {e}")),
             }
         }
     }
-    let marked = mark_up(&data, show);
+    let marked = match mark_up(&data, show, ctx).await {
+        Ok(marked) => marked,
+        Err(_) => return kaish_tool_api::Interrupted.result("cat"),
+    };
+    let finish = |mut result: ExecResult| {
+        if !errors.is_empty() {
+            result.code = 1;
+            result.err = errors.join("\n");
+        }
+        result
+    };
     if !number_lines {
-        return ExecResult::success_text_or_bytes(marked);
+        return finish(ExecResult::success_text_or_bytes(marked));
     }
     let text = match String::from_utf8(marked) {
         Ok(t) => t,
@@ -341,7 +355,7 @@ async fn show_stream(
         }
     };
     if text.is_empty() {
-        return ExecResult::with_output(OutputData::text(text));
+        return finish(ExecResult::with_output(OutputData::text(text)));
     }
     let rows: Vec<crate::interpreter::OutputNode> = text
         .lines()
@@ -358,14 +372,17 @@ async fn show_stream(
         numbered.push('\n');
     }
     let table = OutputData::table(vec!["TEXT".to_string()], rows);
-    ExecResult::with_output_and_text(table, numbered)
+    finish(ExecResult::with_output_and_text(table, numbered))
 }
 
 /// Render `data` as GNU `cat -vET` does. With `-E`, a carriage return that
 /// directly precedes a newline shows as `^M`, as it does in GNU cat.
-fn mark_up(data: &[u8], show: ShowOptions) -> Vec<u8> {
+async fn mark_up(data: &[u8], show: ShowOptions, ctx: &mut ExecContext) -> Result<Vec<u8>, kaish_tool_api::Interrupted> {
     let mut out = Vec::with_capacity(data.len() + data.len() / 8);
     for (at, &byte) in data.iter().enumerate() {
+        if at % (64 * 1024) == 0 {
+            ctx.checkpoint().await?;
+        }
         match byte {
             b'\n' => {
                 if show.ends {
@@ -380,7 +397,7 @@ fn mark_up(data: &[u8], show: ShowOptions) -> Vec<u8> {
             _ => out.push(byte),
         }
     }
-    out
+    Ok(out)
 }
 
 /// `^X` for control bytes, `^?` for DEL, `M-` plus the same for bytes of 128 and up.
