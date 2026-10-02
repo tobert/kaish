@@ -466,6 +466,11 @@ echo '~/x'                # ~/x
 "hello $NAME"             # double quotes — interpolation
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
+printf '<%s>\n' a\ b      # backslash quotes the next character: one argument
+printf '<%s>\n' \( \)     # escaped parentheses are arguments
+find . -name \*.rs        # find receives the pattern *.rs
+# Mixed escapes and unquoted globs are errors; quote the whole literal word.
+# Backslash does not join text to an unquoted expansion.
 
 # Quote the whole word to join text with interpolation:
 "$dir/file.txt"           # one path
@@ -477,6 +482,8 @@ echo $dir/file.txt        # error — quote "$dir/file.txt"
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
 # Literal words keep their complete spelling, without quotes:
+echo HEAD^2 HEAD~1 f.txt~ 9-  # ^, mid-word ~, and 9- stay literal
+printf 'abcdefghijkl\n' | cut -c 9-  # open range stays one word
 echo 123.txt 1.2.3 true:foo a+b .git/HEAD
 p=~/x; echo "$p"          # assignment followed by a home-relative path
 ls 1.0*                  # glob keeps the written numeric prefix
@@ -540,7 +547,16 @@ the session's stdin is unchanged afterward.
 jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
 without a subprocess. jq also accepts real jq's `--arg NAME VALUE`,
 `--argjson NAME VALUE`, and `-n` / `--null-input` flags for binding
-kaish variables directly into the filter."#,
+kaish variables directly into the filter.
+
+```sh
+printf 'a\nb\n' | jq -R .    # one JSON string per line
+printf 'a\nb\n' | jq -R -s . # the whole text as one string
+```
+
+`jq -R` reads raw text instead of JSON. A failing line is named on stderr;
+other lines still run and the command exits 1. `-n -R` is refused with
+exit 2; use `jq -R .` or `jq -R -s .`."#,
     ),
     syntax_section(
         "operators",
@@ -712,7 +728,18 @@ set -o glob               # re-enable (on by default)
 
 Zero matches is an error (exit code 1). The `glob` builtin receives its
 pattern as written — `glob **/*.rs` needs no quotes, takes multiple patterns,
-and adds `--exclude`, `--ftype`, and depth control."#,
+and adds `--exclude`, `--ftype`, and depth control.
+
+```sh
+grep -rn TODO src          # skip discovered symlinks, devices, FIFOs and sockets
+grep -R -l TODO src        # read file symlinks; do not enter linked directories
+```
+
+`grep` reads explicitly named paths. Walk and read errors name the path on stderr,
+keep other matches and exit 2; `-q` exits 0 on a match even after an error.
+Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the
+first match per file; `-m N` stops after N selected lines; `-m 0` reads no contents.
+Context output, multiline matching and encoding conversion still buffer whole files."#,
     ),
     syntax_section(
         "regex",

@@ -6,6 +6,12 @@
 timeout DURATION COMMAND [ARGS...]
 ```
 
+Options (`--json`) go before the duration. Everything after the duration is the
+command and its arguments, passed on as written: `timeout 10 python3 -c 'print(1)'`
+gives `-c` to `python3`. Quoted and computed words keep their meaning as
+data for a builtin: `timeout 5 echo "-n" hi` prints `-n hi` and a newline.
+Literal numeral spellings such as `-0` and `0.10` are preserved.
+
 ## Duration formats
 
 `30` (seconds), `30s`, `500ms`, `5m`, `1h`. Pure numbers and the `s` suffix
@@ -32,6 +38,7 @@ inner command's exit code unchanged.
 timeout 5 sleep 10                  # exits 124 after ~5s; sleep is killed
 timeout 500ms curl example.com      # bounds a network call
 timeout 2m cargo build              # bounds a long build
+timeout 5 echo -n hi                # -n is echo's; prints "hi" with no newline
 ```
 
 ## Notes

@@ -355,7 +355,8 @@ impl OutputData {
                     size += 1 + cell.len(); // tab + cell
                 }
             }
-            return size;
+            // Final line terminator.
+            return size + usize::from(!self.root.is_empty());
         }
 
         // Tree: estimate brace notation
@@ -366,7 +367,7 @@ impl OutputData {
             }
             size += n.estimated_byte_size();
         }
-        size
+        size + usize::from(!self.root.is_empty())
     }
 
     /// Write canonical representation to a writer with optional byte budget.
@@ -404,6 +405,10 @@ impl OutputData {
                     return Ok(written);
                 }
             }
+            if !self.root.is_empty() {
+                w.write_all(b"\n")?;
+                written += 1;
+            }
             return Ok(written);
         }
 
@@ -418,6 +423,10 @@ impl OutputData {
                 return Ok(written);
             }
         }
+        if !self.root.is_empty() {
+            w.write_all(b"\n")?;
+            written += 1;
+        }
         Ok(written)
     }
 
@@ -425,10 +434,13 @@ impl OutputData {
     ///
     /// This produces a simple string representation suitable for
     /// piping to other commands:
-    /// - Text nodes: their text content
-    /// - Named nodes: names joined by newlines
+    /// - Text nodes: their text content, verbatim
+    /// - Named nodes: one name per line
     /// - Tabular nodes (name + cells): TSV format (name\tcell1\tcell2...)
-    /// - Nested nodes: brace notation
+    /// - Nested nodes: brace notation, one root per line
+    ///
+    /// Lists, tables, and trees end every line, the last included, with a
+    /// newline, as GNU tools do: `ls d | wc -l` counts every row.
     pub fn to_canonical_string(&self) -> String {
         if let Some(text) = self.as_text() {
             return text.to_string();
@@ -447,8 +459,8 @@ impl OutputData {
                         parts.join("\t")
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .map(|line| line + "\n")
+                .collect();
         }
 
         // For trees, use brace notation
@@ -464,9 +476,8 @@ impl OutputData {
         }
 
         self.root.iter()
-            .map(format_node)
-            .collect::<Vec<_>>()
-            .join("\n")
+            .map(|n| format_node(n) + "\n")
+            .collect()
     }
 
     /// Serialize to a JSON value for `--json` flag handling.

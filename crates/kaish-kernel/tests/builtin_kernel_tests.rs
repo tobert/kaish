@@ -758,7 +758,7 @@ async fn sort_missing_file_errors_with_name() {
     let dir = tempdir().unwrap();
     let kernel = kernel_at(dir.path());
     let (_out, err, code) = run_err(&kernel, "sort nope.txt").await;
-    assert_eq!(code, 1, "missing file → exit 1; err={err:?}");
+    assert_eq!(code, 2, "missing file → exit 2, as GNU sort; err={err:?}");
     assert!(err.contains("nope.txt"), "err should name the file: {err:?}");
 }
 

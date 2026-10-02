@@ -955,6 +955,18 @@ impl Filesystem for OverlayFs {
             }
         }
 
+        // A device, FIFO, or socket has no content to snapshot, so its removal
+        // could not show in `changes()` or reach a commit. Refuse it.
+        if visible.is_special() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "{} is a device, FIFO, or socket; an overlay cannot record its removal",
+                    path.display()
+                ),
+            ));
+        }
+
         // Prepare the lower-side bookkeeping (snapshot read + budget charge)
         // before mutating the upper, so a refused charge or failed read
         // aborts the remove with both layers intact.
@@ -2131,5 +2143,47 @@ mod tests {
                 b"changed in overlay"
             );
         }
+    }
+
+    /// A lower holding one FIFO, `pipe`. Reading it is a test failure.
+    struct FifoLower;
+
+    #[async_trait]
+    impl Filesystem for FifoLower {
+        async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            Err(io::Error::other(format!("{} must not be read", path.display())))
+        }
+        async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::ReadOnlyFilesystem))
+        }
+        async fn list(&self, _path: &Path) -> io::Result<Vec<DirEntry>> {
+            Ok(vec![self.stat(Path::new("pipe")).await?])
+        }
+        async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
+            match path.to_string_lossy().trim_matches('/') {
+                "" => Ok(DirEntry::directory("")),
+                "pipe" => Ok(DirEntry { kind: DirEntryKind::Fifo, ..DirEntry::file("pipe", 0) }),
+                _ => Err(not_found(path)),
+            }
+        }
+        async fn mkdir(&self, _path: &Path) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::ReadOnlyFilesystem))
+        }
+        async fn remove(&self, _path: &Path) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::ReadOnlyFilesystem))
+        }
+        fn read_only(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_a_lower_fifo_is_refused_and_records_nothing() {
+        let overlay = OverlayFs::over(Arc::new(FifoLower));
+        let error = overlay.remove(Path::new("pipe")).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("pipe is a device, FIFO, or socket"), "{error}");
+        assert!(overlay.lstat(Path::new("pipe")).await.is_ok(), "the FIFO is still visible");
+        assert!(overlay.changes().await.unwrap().is_empty());
     }
 }

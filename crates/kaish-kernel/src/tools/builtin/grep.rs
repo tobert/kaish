@@ -10,7 +10,9 @@ use clap::{CommandFactory, Parser};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Encoding, Searcher, SearcherBuilder};
 use regex::RegexBuilder;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
@@ -20,7 +22,8 @@ use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, tra
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
-    build_file_types, list_file_types, FileWalker, GlobPath, IncludeExclude, WalkOptions,
+    build_file_types, list_file_types, ErrorCallback, FileWalker, GlobPath, IncludeExclude,
+    WalkOptions, WalkerError,
 };
 
 /// Grep tool: search for patterns in text.
@@ -62,12 +65,14 @@ struct GrepArgs {
     #[arg(short = 'w', long = "word-regexp", visible_alias = "word_regexp")]
     word_regexp: bool,
 
-    /// Search directories recursively (lowercase).
+    /// Search directories recursively. Symlinks, devices, FIFOs, and sockets
+    /// found inside are skipped; a path named on the command line is read.
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Search directories recursively (identical to -r; the uppercase spelling is accepted).
-    #[arg(short = 'R')]
+    /// Like -r, but also read symlinks to files found inside. A symlinked
+    /// directory is not entered.
+    #[arg(id = "R", short = 'R')]
     recursive_upper: bool,
 
     /// Allow patterns to match across line boundaries.
@@ -131,7 +136,7 @@ struct GrepArgs {
     ftype_list: bool,
 
     /// Include hidden files and directories (dotfiles) in the recursive walk.
-    /// Off by default; applies to `-r` only.
+    /// Off by default; applies to `-r` and `-R` only.
     #[arg(long = "hidden")]
     hidden: bool,
 
@@ -445,6 +450,14 @@ impl Grep {
             max_count,
         };
 
+        // Validate search options even when -m 0 needs no input.
+        if max_count == Some(0) {
+            return match build_searcher(&grep_opts) {
+                Ok(_) => ExecResult::from_output(1, "", ""),
+                Err(error) => ExecResult::failure(2, format!("grep: {error}")),
+            };
+        }
+
         // Handle recursive search
         if recursive {
             // Partition the operands by kind. A *directory* is walked; a *file*
@@ -478,14 +491,18 @@ impl Grep {
             let mut dir_operand_text: Vec<String> = Vec::new();
             for operand in &operands {
                 let resolved = ctx.resolve_path(operand);
+                // Any non-directory operand is read, a device or FIFO
+                // included, as GNU grep reads one named on the command line.
                 match ctx.backend.stat(&resolved).await {
-                    Ok(entry) if entry.is_file() => file_operands.push(resolved),
+                    Ok(entry) if !entry.is_dir() => file_operands.push(resolved),
                     _ => {
                         dir_roots.push(resolved);
                         dir_operand_text.push(operand.clone());
                     }
                 }
             }
+            // `-R` reads symlinks found while recursing; `-r` skips them.
+            let dereference = args.has_flag("R");
 
             // No directory to recurse into: every operand is a plain file. Fall
             // through to the ordinary file-operand handling below (a lone file
@@ -494,6 +511,17 @@ impl Grep {
             if !dir_roots.is_empty() {
                 let fs = BackendWalkerFs(ctx.backend.as_ref());
                 let mut files: Vec<PathBuf> = Vec::new();
+                // Directories the walk could not list, reported once the
+                // display names are known.
+                let walk_errors: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::default();
+                let on_error: ErrorCallback = {
+                    let walk_errors = Arc::clone(&walk_errors);
+                    Arc::new(move |path: &Path, error: &WalkerError| {
+                        let mut errors = walk_errors.lock()
+                            .unwrap_or_else(|_| panic!("grep walk error collector poisoned"));
+                        errors.push((path.to_path_buf(), error.to_string()));
+                    })
+                };
                 for root in &dir_roots {
                     // include/exclude are walk-only (see the validation note
                     // above); rebuilt per root since `with_options` moves.
@@ -524,6 +552,9 @@ impl Grep {
                         include_hidden,
                         filter,
                         types: file_types.clone(),
+                        yield_symlinks: dereference,
+                        yield_special: false,
+                        on_error: Some(Arc::clone(&on_error)),
                         ..WalkOptions::default()
                     };
 
@@ -548,7 +579,15 @@ impl Grep {
                 // Directly-named file operands (the mixed `grep -r p file dir`
                 // case) join the walked set.
                 let has_file_operands = !file_operands.is_empty();
-                files.extend(file_operands);
+                let mut sources: Vec<Source> = files
+                    .into_iter()
+                    .map(|path| Source { path, walked: true })
+                    .collect();
+                sources.extend(file_operands.into_iter().map(|path| Source { path, walked: false }));
+                let walk_errors = match walk_errors.lock() {
+                    Ok(mut errors) => std::mem::take(&mut *errors),
+                    Err(_) => panic!("grep walk error collector poisoned"),
+                };
 
                 // Display prefix: GNU prefixes every result with the operand
                 // exactly as written — `grep -r p dir` → `dir/a.txt`,
@@ -585,12 +624,25 @@ impl Grep {
                     (root, None)
                 };
 
-                return self
+                let names = DisplayNames { root: &display_root, prefix: display_prefix.as_deref() };
+                let mut early_errors = String::new();
+                for (path, error) in &walk_errors {
+                    early_errors.push_str(&format!("grep: {}: {}\n", names.of(path), error));
+                }
+                let mut result = self
                     .grep_multiple_files(
-                        ctx, &files, &display_root, display_prefix.as_deref(), &matcher,
-                        &grep_opts, quiet, files_only, count_only, false,
+                        ctx, &sources, &names, &matcher, &grep_opts, quiet, files_only,
+                        count_only, dereference,
                     )
                     .await;
+                if !early_errors.is_empty() {
+                    early_errors.push_str(&result.err);
+                    result.err = early_errors;
+                    if !(quiet && result.code == 0) {
+                        result.code = 2;
+                    }
+                }
+                return result;
             }
         }
 
@@ -607,13 +659,15 @@ impl Grep {
             };
         if file_operands.len() > 1 {
             let root = ctx.resolve_path(".");
-            let resolved: Vec<PathBuf> = file_operands
+            let sources: Vec<Source> = file_operands
                 .iter()
-                .map(|f| ctx.resolve_path(f))
+                .map(|f| Source { path: ctx.resolve_path(f), walked: false })
                 .collect();
+            let names = DisplayNames { root: &root, prefix: None };
             return self
                 .grep_multiple_files(
-                    ctx, &resolved, &root, None, &matcher, &grep_opts, quiet, files_only, count_only, true,
+                    ctx, &sources, &names, &matcher, &grep_opts, quiet, files_only, count_only,
+                    false,
                 )
                 .await;
         }
@@ -891,28 +945,23 @@ impl Grep {
 
     /// Search several files, prefixing each match with its filename.
     ///
-    /// `report_missing` distinguishes the two callers: explicit file operands
-    /// (`grep p a.txt b.txt`) must report an unreadable operand on stderr and
-    /// exit 2, like POSIX grep — silently skipping it would hide a typo. The
-    /// recursive walk (`grep -r`) passes `false`: a file vanishing between the
-    /// directory walk and the read is a benign race, not a user error.
+    /// Each file streams in bounded chunks (see `ChunkedFileSearch`). An
+    /// error on one file is reported on stderr and the search goes on; any
+    /// error makes the exit 2, as in GNU grep. `dereference` (`-R`) checks a
+    /// walked path before reading it, since a followed symlink can name a
+    /// directory, a device, or a FIFO.
     #[allow(clippy::too_many_arguments)]
     async fn grep_multiple_files(
         &self,
         ctx: &mut ExecContext,
-        files: &[PathBuf],
-        root: &Path,
-        // The sole-directory GNU-parity case: the operand text to re-join
-        // after stripping `root`, e.g. `dir` or `./dir` (see the call site).
-        // `None` for every other case — the stripped path is the display name
-        // as-is.
-        display_prefix: Option<&str>,
+        sources: &[Source],
+        names: &DisplayNames<'_>,
         matcher: &RegexMatcher,
         base_opts: &GrepOptions,
         quiet: bool,
         files_only: bool,
         count_only: bool,
-        report_missing: bool,
+        dereference: bool,
     ) -> ExecResult {
         let mut total_output = String::new();
         let mut total_nodes: Vec<OutputNode> = Vec::new();
@@ -924,6 +973,9 @@ impl Grep {
 
         let opts = GrepOptions {
             show_filename: true,
+            // These modes emit no context, so it must not force whole-file buffering.
+            before_context: if quiet || files_only || count_only { None } else { base_opts.before_context },
+            after_context: if quiet || files_only || count_only { None } else { base_opts.after_context },
             ..base_opts.clone()
         };
 
@@ -935,42 +987,62 @@ impl Grep {
             Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
         };
 
-        for file_path in files {
+        for source in sources {
             if ctx.checkpoint().await.is_err() {
                 return kaish_tool_api::Interrupted.result("grep");
             }
-            // Create relative filename for display
-            let stripped = file_path.strip_prefix(root).unwrap_or(file_path);
-            let display_name = match display_prefix {
-                // Join the operand text back on, trimming any trailing slash
-                // it carried (`dir/` → `dir/a.txt`, not `dir//a.txt`) so the
-                // result is the same path GNU prints for the same operand.
-                Some(prefix) => {
-                    format!("{}/{}", prefix.trim_end_matches('/'), stripped.to_string_lossy())
-                }
-                None => stripped.to_string_lossy().to_string(),
-            };
+            let file_path = &source.path;
+            let display_name = names.of(file_path);
 
-            let bytes = match ctx.backend.read(file_path, None).await {
-                Ok(data) => data,
-                Err(e) => {
-                    if report_missing {
-                        error_text.push_str(&format!("grep: {}: {}\n", display_name, e));
+            if dereference && source.walked {
+                match ctx.backend.stat(file_path).await {
+                    // A symlinked directory is not entered; a followed link
+                    // to a device or FIFO is skipped like the device itself.
+                    Ok(entry) if entry.is_dir() || entry.is_special() => continue,
+                    Ok(_) => {}
+                    Err(e) => {
+                        error_text.push_str(&format!("grep: {display_name}: {e}\n"));
+                        continue;
                     }
+                }
+            }
+
+            let mut search = ChunkedFileSearch::new(
+                &mut searcher,
+                matcher,
+                &opts,
+                &display_name,
+                quiet || files_only,
+            );
+            let scan = ctx
+                .read_file_chunked(file_path, ExecContext::STREAM_CHUNK_SIZE, |chunk| {
+                    search.push(chunk)
+                })
+                .await;
+            match scan {
+                Ok(crate::tools::ScanOutcome::Complete) => {}
+                Ok(crate::tools::ScanOutcome::Interrupted) => {
+                    return kaish_tool_api::Interrupted.result("grep");
+                }
+                Err(e) => {
+                    error_text.push_str(&format!("grep: {display_name}: {e}\n"));
+                    continue;
+                }
+            }
+            let render = match search.finish() {
+                Ok(render) => render,
+                Err(e) => {
+                    error_text.push_str(&format!("grep: {display_name}: {e}\n"));
                     continue;
                 }
             };
 
-            let render = match search_with(&mut searcher, &bytes, matcher, &opts, Some(&display_name))
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    if report_missing {
-                        error_text.push_str(&format!("grep: {}: {}\n", display_name, e));
-                    }
-                    continue;
-                }
-            };
+            // GNU `-q` exits 0 at the first match, errors or not.
+            if quiet && render.match_count > 0 {
+                let mut result = ExecResult::success("");
+                result.err = error_text;
+                return result;
+            }
 
             if count_only {
                 // GNU parity: one `name:count` line per searched file, zero
@@ -1025,10 +1097,8 @@ impl Grep {
             ExecResult::with_output_and_text(output, total_output)
         };
 
-        // A read/parse error on an explicit operand is exit 2 and stderr,
-        // overriding the match-based code — the error must not be swallowed by
-        // matches found in the readable files. (`quiet` keeps a 0 on a match
-        // per POSIX; everything else surfaces the trouble.)
+        // A read error exits 2 and prints to stderr, even when other files
+        // matched. `quiet` keeps exit 0 on a match, as POSIX requires.
         if !error_text.is_empty() {
             result.err.push_str(&error_text);
             if !(quiet && total_matches > 0) {
@@ -1036,6 +1106,265 @@ impl Grep {
             }
         }
         result
+    }
+}
+
+/// A path to search. `walked` is false for a path named on the command line,
+/// which is read whatever it is.
+struct Source {
+    path: PathBuf,
+    walked: bool,
+}
+
+/// How a searched path is shown: `root` is stripped, then `prefix` (the
+/// operand as the caller wrote it) is joined back on.
+struct DisplayNames<'a> {
+    root: &'a Path,
+    prefix: Option<&'a str>,
+}
+
+impl DisplayNames<'_> {
+    fn of(&self, path: &Path) -> String {
+        let stripped = path.strip_prefix(self.root).unwrap_or(path);
+        let stripped_is_empty = stripped.as_os_str().is_empty();
+        match self.prefix {
+            Some(prefix) if stripped_is_empty => prefix.to_string(),
+            // Trim a trailing slash the operand carried (`dir/` → `dir/a.txt`,
+            // not `dir//a.txt`) so the name is the path GNU prints.
+            Some(prefix) => {
+                format!("{}/{}", prefix.trim_end_matches('/'), stripped.to_string_lossy())
+            }
+            None if stripped_is_empty => ".".to_string(),
+            None => stripped.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+/// The bytes `grep-searcher` checks for binary data before it searches a
+/// slice (its `DEFAULT_BUFFER_CAPACITY`).
+const BINARY_SNIFF_LEN: usize = 64 * 1024;
+
+/// The byte-order marks `grep-searcher` transcodes: UTF-8, UTF-16LE, UTF-16BE.
+fn has_byte_order_mark(head: &[u8]) -> bool {
+    head.starts_with(&[0xEF, 0xBB, 0xBF])
+        || head.starts_with(&[0xFF, 0xFE])
+        || head.starts_with(&[0xFE, 0xFF])
+}
+
+/// One file's search, fed in chunks, so memory follows the longest line
+/// rather than the file.
+///
+/// The result is the result of one `search_slice` over the whole file. That
+/// checks the first `BINARY_SNIFF_LEN` bytes for the quit byte and reports
+/// nothing if it is there; past that, a matched line holding the quit byte
+/// ends the search. The windows here do the same: `sniff` checks the head,
+/// and each window drops the first match that holds the quit byte and
+/// everything after it.
+///
+/// Context lines (`-A`/`-B`/`-C`), `-U`, and a transcoded file (`--encoding`,
+/// or a byte-order mark) need the whole file, so they buffer it and search
+/// once.
+struct ChunkedFileSearch<'a> {
+    searcher: &'a mut Searcher,
+    matcher: &'a RegexMatcher,
+    opts: &'a GrepOptions,
+    filename: &'a str,
+    /// `-l` and `-q` need one match per file.
+    first_match_only: bool,
+    whole_file: bool,
+    sniffed: bool,
+    /// Bytes read but not searched yet.
+    pending: Vec<u8>,
+    lines_searched: u64,
+    bytes_searched: u64,
+    result: RenderResult,
+    /// Nothing more to search: binary data, a limit reached, or an error.
+    finished: bool,
+    error: Option<String>,
+}
+
+impl<'a> ChunkedFileSearch<'a> {
+    fn new(
+        searcher: &'a mut Searcher,
+        matcher: &'a RegexMatcher,
+        opts: &'a GrepOptions,
+        filename: &'a str,
+        first_match_only: bool,
+    ) -> Self {
+        let whole_file = opts.before_context.unwrap_or(0) > 0
+            || opts.after_context.unwrap_or(0) > 0
+            || opts.multiline
+            || opts.encoding.is_some();
+        Self {
+            searcher,
+            matcher,
+            opts,
+            filename,
+            first_match_only,
+            whole_file,
+            sniffed: false,
+            pending: Vec::new(),
+            lines_searched: 0,
+            bytes_searched: 0,
+            result: RenderResult {
+                text: String::new(),
+                nodes: Vec::new(),
+                rich: Vec::new(),
+                match_count: 0,
+            },
+            finished: false,
+            error: None,
+        }
+    }
+
+    /// Take the next chunk. `Break` means the rest of the file is not needed.
+    fn push(&mut self, chunk: &[u8]) -> ControlFlow<()> {
+        if self.finished {
+            return ControlFlow::Break(());
+        }
+        self.pending.extend_from_slice(chunk);
+        // After a window, `pending` holds no newline, so only the new chunk
+        // needs a look; a long line costs one scan, not one per chunk.
+        let mut unscanned = self.pending.len() - chunk.len();
+        if !self.sniffed {
+            if self.pending.len() < BINARY_SNIFF_LEN {
+                return ControlFlow::Continue(());
+            }
+            self.sniff();
+            unscanned = 0;
+        }
+        if !self.finished
+            && !self.whole_file
+            && let Some(last_newline) =
+                self.pending[unscanned..].iter().rposition(|&b| b == b'\n')
+        {
+            self.search_window(unscanned + last_newline + 1);
+        }
+        if self.finished {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    /// Search what is left after end of file.
+    fn finish(mut self) -> Result<RenderResult, String> {
+        if !self.sniffed {
+            self.sniff();
+        }
+        if !self.finished {
+            if self.whole_file {
+                self.searcher.set_binary_detection(self.opts.binary_detection.clone());
+                match search_with(
+                    self.searcher,
+                    &self.pending,
+                    self.matcher,
+                    self.opts,
+                    Some(self.filename),
+                ) {
+                    Ok(render) => self.result = render,
+                    Err(e) => self.error = Some(e),
+                }
+            } else if !self.pending.is_empty() {
+                self.search_window(self.pending.len());
+            }
+        }
+        match self.error {
+            Some(e) => Err(e),
+            None => Ok(self.result),
+        }
+    }
+
+    /// Check the head of the file, as `search_slice` does before it searches.
+    fn sniff(&mut self) {
+        self.sniffed = true;
+        let head = &self.pending[..self.pending.len().min(BINARY_SNIFF_LEN)];
+        if self.opts.encoding.is_some() || has_byte_order_mark(head) {
+            // Transcoded: the searcher decides binary on the decoded text.
+            self.whole_file = true;
+            return;
+        }
+        if let Some(quit) = self.opts.binary_detection.quit_byte()
+            && head.contains(&quit)
+        {
+            self.finished = true;
+        }
+    }
+
+    /// Search `pending[..end]`, which ends at a line boundary or at end of file.
+    fn search_window(&mut self, end: usize) {
+        // The head was checked in `sniff`; from here only a matched line
+        // holding the quit byte stops the search (filtered below).
+        self.searcher.set_binary_detection(BinaryDetection::none());
+        let window = &self.pending[..end];
+        let mut events = match events_for(self.searcher, window, self.matcher) {
+            Ok(events) => events,
+            Err(e) => {
+                self.error = Some(e);
+                self.finished = true;
+                return;
+            }
+        };
+        shift_events(&mut events, self.lines_searched, self.bytes_searched);
+        if let Some(quit) = self.opts.binary_detection.quit_byte()
+            && let Some(binary_match) = events.iter().position(|event| {
+                matches!(event, SearchEvent::Match(m) if m.line_text.as_bytes().contains(&quit))
+            })
+        {
+            events.truncate(binary_match);
+            self.finished = true;
+        }
+
+        let limit = match (self.opts.max_count, self.first_match_only) {
+            (Some(max), true) => Some(max.min(1)),
+            (Some(max), false) => Some(max),
+            (None, true) => Some(1),
+            (None, false) => None,
+        };
+        let mut window_opts = self.opts.clone();
+        if let Some(limit) = limit {
+            let remaining = limit.saturating_sub(self.result.match_count);
+            if remaining == 0 {
+                self.finished = true;
+                return;
+            }
+            window_opts.max_count = Some(remaining);
+        }
+        let rendered = render_events(&events, &window_opts, Some(self.filename));
+        self.result.text.push_str(&rendered.text);
+        self.result.nodes.extend(rendered.nodes);
+        self.result.rich.extend(rendered.rich);
+        self.result.match_count += rendered.match_count;
+        if let Some(limit) = limit
+            && self.result.match_count >= limit
+        {
+            self.finished = true;
+        }
+
+        self.lines_searched += window.iter().filter(|&&b| b == b'\n').count() as u64;
+        self.bytes_searched += end as u64;
+        self.pending.drain(..end);
+    }
+}
+
+/// Move a window's line numbers and byte offsets to file positions: each
+/// window's search counts from line 1 and byte 0.
+fn shift_events(events: &mut [SearchEvent], lines: u64, bytes: u64) {
+    for event in events.iter_mut() {
+        match event {
+            SearchEvent::Match(m) => {
+                if let Some(n) = m.line_number.as_mut() {
+                    *n += lines;
+                }
+                m.absolute_byte_offset += bytes;
+            }
+            SearchEvent::Context(c) => {
+                if let Some(n) = c.line_number.as_mut() {
+                    *n += lines;
+                }
+            }
+            SearchEvent::ContextBreak => {}
+        }
     }
 }
 
@@ -2658,5 +2987,150 @@ mod tests {
         );
         let render = scanner.into_render_result();
         assert_eq!(render.match_count, 2, "exactly the capped number of matches");
+    }
+
+    // ── ChunkedFileSearch parity with one whole-buffer search ───────────────
+
+    fn file_opts() -> GrepOptions {
+        GrepOptions {
+            show_line_numbers: true,
+            invert: false,
+            only_matching: false,
+            before_context: None,
+            after_context: None,
+            show_filename: true,
+            multiline: false,
+            encoding: None,
+            binary_detection: BinaryDetection::quit(b'\x00'),
+            max_count: None,
+        }
+    }
+
+    fn whole_render(input: &[u8], pattern: &str, opts: &GrepOptions) -> RenderResult {
+        let matcher = RegexMatcherBuilder::new().build(pattern).unwrap();
+        let mut searcher = build_searcher(opts).unwrap();
+        search_with(&mut searcher, input, &matcher, opts, Some("f")).unwrap()
+    }
+
+    /// Feed `input` in `chunk`-byte pieces; also returns the bytes consumed
+    /// before the search asked to stop.
+    fn chunked_render(
+        input: &[u8],
+        pattern: &str,
+        opts: &GrepOptions,
+        chunk: usize,
+        first_match_only: bool,
+    ) -> (RenderResult, usize) {
+        let matcher = RegexMatcherBuilder::new().build(pattern).unwrap();
+        let mut searcher = build_searcher(opts).unwrap();
+        let mut search =
+            ChunkedFileSearch::new(&mut searcher, &matcher, opts, "f", first_match_only);
+        let mut consumed = 0;
+        for piece in input.chunks(chunk) {
+            consumed += piece.len();
+            if search.push(piece).is_break() {
+                break;
+            }
+        }
+        (search.finish().unwrap(), consumed)
+    }
+
+    fn assert_parity(input: &[u8], pattern: &str, opts: &GrepOptions) {
+        let whole = whole_render(input, pattern, opts);
+        for chunk in [1, 7, 4096, 65_535, 65_536, 300_000] {
+            let (chunked, _) = chunked_render(input, pattern, opts, chunk, false);
+            assert_eq!(chunked.text, whole.text, "text, chunk {chunk}");
+            assert_eq!(chunked.match_count, whole.match_count, "count, chunk {chunk}");
+            assert_eq!(chunked.rich, whole.rich, "rich JSON, chunk {chunk}");
+        }
+    }
+
+    /// `n` lines of `hay NNNNNN`, with `needle` on every 1000th.
+    fn haystack(n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..n {
+            if i % 1000 == 999 {
+                out.extend_from_slice(format!("needle {i:06}\n").as_bytes());
+            } else {
+                out.extend_from_slice(format!("hay {i:06}\n").as_bytes());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn chunked_search_matches_whole_buffer_on_text() {
+        let mut input = haystack(30_000);
+        // One line longer than a chunk, with the match in its middle.
+        input.extend_from_slice(&[b'x'; 150_000]);
+        input.extend_from_slice(b" needle in a long line ");
+        input.extend_from_slice(&[b'y'; 150_000]);
+        input.push(b'\n');
+        input.extend_from_slice(b"needle with crlf\r\nlast needle, no newline");
+        assert_parity(&input, "needle", &file_opts());
+        assert_parity(&input, "needle", &GrepOptions { invert: true, ..file_opts() });
+        assert_parity(&input, "ne+dle", &GrepOptions { only_matching: true, ..file_opts() });
+        assert_parity(&input, "needle", &GrepOptions { max_count: Some(7), ..file_opts() });
+        assert_parity(&input, "needle", &GrepOptions { binary_detection: BinaryDetection::none(), ..file_opts() });
+    }
+
+    #[test]
+    fn chunked_search_reports_nothing_for_a_binary_head() {
+        let mut input = b"needle before the nul\n\x00".to_vec();
+        input.extend_from_slice(&haystack(30_000));
+        assert_eq!(whole_render(&input, "needle", &file_opts()).match_count, 0);
+        assert_parity(&input, "needle", &file_opts());
+        let (_, consumed) = chunked_render(&input, "needle", &file_opts(), 4096, false);
+        assert_eq!(consumed, BINARY_SNIFF_LEN, "reading stops once the head is binary");
+    }
+
+    #[test]
+    fn chunked_search_stops_at_a_matched_line_holding_nul_past_the_head() {
+        let mut input = haystack(20_000);
+        assert!(input.len() > BINARY_SNIFF_LEN);
+        // A NUL on a line that does not match is ignored; one on a line that
+        // does match ends the search before that line.
+        input.extend_from_slice(b"hay with \x00 inside\nneedle after the quiet nul\n");
+        input.extend_from_slice(b"needle with \x00 inside\nneedle never reported\n");
+        let whole = whole_render(&input, "needle", &file_opts());
+        assert!(whole.text.contains("needle after the quiet nul"));
+        assert!(!whole.text.contains("never reported"));
+        assert_parity(&input, "needle", &file_opts());
+    }
+
+    #[test]
+    fn chunked_search_preserves_binary_conversion() {
+        let mut input = b"needle before\0needle after\n".to_vec();
+        input.extend_from_slice(&haystack(30_000));
+        let opts = GrepOptions {
+            binary_detection: BinaryDetection::convert(b'\0'),
+            ..file_opts()
+        };
+        assert_parity(&input, "needle", &opts);
+    }
+
+    #[test]
+    fn chunked_search_buffers_a_byte_order_mark_file_whole() {
+        let mut input = vec![0xFF, 0xFE];
+        for unit in "hay\nneedle\nhay\n".encode_utf16() {
+            input.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(whole_render(&input, "needle", &file_opts()).match_count, 1);
+        assert_parity(&input, "needle", &file_opts());
+    }
+
+    #[test]
+    fn chunked_search_keeps_context_across_the_whole_file() {
+        let input = haystack(30_000);
+        let opts = GrepOptions { before_context: Some(2), after_context: Some(1), ..file_opts() };
+        assert_parity(&input, "needle", &opts);
+    }
+
+    #[test]
+    fn chunked_search_stops_reading_at_the_first_match_for_files_only() {
+        let input = haystack(100_000);
+        let (render, consumed) = chunked_render(&input, "needle", &file_opts(), 4096, true);
+        assert_eq!(render.match_count, 1);
+        assert!(consumed < input.len() / 10, "read {consumed} of {} bytes", input.len());
     }
 }

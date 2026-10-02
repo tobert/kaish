@@ -20,7 +20,7 @@ struct HeadArgs {
     #[arg(short = 'n', long = "lines")]
     lines: Option<i64>,
 
-    /// Number of bytes to output (-c), overrides lines
+    /// Number of bytes per file (-c); overrides lines. Binary bytes are kept.
     #[arg(short = 'c', long = "bytes")]
     bytes: Option<i64>,
 
@@ -110,7 +110,7 @@ impl Tool for Head {
 
         // Multiple files: show each with header
         if paths.len() > 1 {
-            return self.head_files(ctx, &args, &paths).await;
+            return self.head_files(ctx, &args, &paths, bytes).await;
         }
 
         // Streaming path: read from pipe_stdin line by line, stop after N lines
@@ -224,19 +224,31 @@ impl Tool for Head {
 
 impl Head {
     /// Head for multiple files: show each with `==> filename <==` header.
-    async fn head_files(&self, ctx: &mut ExecContext, args: &ToolArgs, paths: &[String]) -> ExecResult {
+    async fn head_files(
+        &self,
+        ctx: &mut ExecContext,
+        args: &ToolArgs,
+        paths: &[String],
+        bytes: Option<usize>,
+    ) -> ExecResult {
+        if let Some(byte_count) = bytes {
+            return Self::head_files_bytes(ctx, paths, byte_count).await;
+        }
         let (count, all_but_last) = Self::line_spec(args);
         let mut output = String::new();
         let multi = paths.len() > 1;
+        let mut errors = String::new();
+        let mut printed_header = false;
 
-        for (i, path) in paths.iter().enumerate() {
+        for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
 
             match ctx.backend.read(std::path::Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if multi {
-                            if i > 0 { output.push('\n'); }
+                            if printed_header { output.push('\n'); }
+                            printed_header = true;
                             output.push_str(&format!("==> {} <==\n", path));
                         }
                         let mut file_lines: Vec<&str> = Vec::new();
@@ -255,14 +267,39 @@ impl Head {
                         output.push_str(&head.join("\n"));
                         output.push('\n');
                     }
-                    Err(_) => return ExecResult::failure(1, format!("head: {}: invalid UTF-8", path)),
+                    Err(_) => errors.push_str(&format!("head: {}: invalid UTF-8\n", path)),
                 },
-                Err(e) => return ExecResult::failure(1, format!("head: {}: {}", path, e)),
+                Err(e) => errors.push_str(&format!("head: {}: {}\n", path, e)),
             }
         }
 
         let trimmed = output.trim_end().to_string();
-        ExecResult::with_output(OutputData::text(trimmed))
+        super::with_operand_errors(ExecResult::with_output(OutputData::text(trimmed)), errors)
+    }
+
+    async fn head_files_bytes(ctx: &mut ExecContext, paths: &[String], byte_count: usize) -> ExecResult {
+        let mut output = Vec::new();
+        let mut errors = String::new();
+        let mut printed_header = false;
+        for path in paths {
+            if ctx.checkpoint().await.is_err() {
+                return kaish_tool_api::Interrupted.result("head");
+            }
+            let resolved = ctx.resolve_path(path);
+            let range = Some(ReadRange::bytes(0, byte_count as u64));
+            match ctx.backend.read(Path::new(&resolved), range).await {
+                Ok(data) => {
+                    if printed_header {
+                        output.push(b'\n');
+                    }
+                    printed_header = true;
+                    output.extend_from_slice(format!("==> {path} <==\n").as_bytes());
+                    output.extend_from_slice(&data);
+                }
+                Err(error) => errors.push_str(&format!("head: {path}: {error}\n")),
+            }
+        }
+        super::with_operand_errors(ExecResult::success_text_or_bytes(output), errors)
     }
 
     /// Parse the `-n` line spec into `(count, all_but_last)`. A negative value
