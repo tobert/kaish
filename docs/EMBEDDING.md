@@ -901,6 +901,19 @@ Notes:
   automatic (clap emits help on `--help`); a hand-rolled parser must handle it
   explicitly, or `--help` will fall into your default action.
 
+### Ending the script from a tool
+
+`Tool::execute_flow` is the method the kernel calls; its default runs `execute` and returns `ToolFlow::Normal`, which is right for almost every tool. Override it only when your tool runs a user function or script on the caller's behalf and an `exit` there must end the caller's script. Return `ToolFlow::Exit(result)`; the script stops and `result.code` is its exit status.
+
+```rust
+async fn execute_flow(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ToolFlow {
+    let result = self.run_user_function(args, ctx).await;
+    if result.code == 7 { ToolFlow::Exit(result) } else { ToolFlow::Normal(result) }
+}
+```
+
+An `Exit` ends only the stage in a multi-stage pipeline, inside `$( )`, and in a background job, as in bash. A tool reached through `KernelBackend::call_tool` (for example a registry passed to `LocalBackend::with_tools`) has no flow channel, so there an `Exit` becomes the result's status and the script goes on.
+
 ### Verbatim argv: a tool that parses its own grammar
 
 ```rust
