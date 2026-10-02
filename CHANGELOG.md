@@ -35,6 +35,8 @@ breaking entries are marked **BREAKING**.
   points a walk reached without entering. Those builtins name them once on
   stderr: `grep: skipped mounts /dev /v (use --cross-mounts to enter)`. The
   exit status is unchanged.
+- **`find -xdev`** (also `-mount`) — keeps the walk in its mount region even
+  under `set -o crossmounts`. With `--cross-mounts` it is an error.
 
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate

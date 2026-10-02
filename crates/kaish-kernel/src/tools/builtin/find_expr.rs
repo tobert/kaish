@@ -2,8 +2,9 @@
 //!
 //! Precedence follows GNU find: `!` binds tighter than `-a` (also the
 //! implicit joiner between two tests), which binds tighter than `-o`.
-//! `-maxdepth`, `-mindepth`, and `--cross-mounts` are options that read as an
-//! always-true test; they apply to the whole walk wherever they appear.
+//! `-maxdepth`, `-mindepth`, `--cross-mounts`, and `-xdev` (`-mount`) are
+//! options that read as an always-true test; they apply to the whole walk
+//! wherever they appear.
 
 use kaish_glob::glob_match;
 
@@ -67,8 +68,9 @@ pub(super) struct DepthOptions {
 pub(super) struct Parsed {
     pub expr: Expr,
     pub depth: DepthOptions,
-    /// `--cross-mounts`: the walk descends into other mount regions.
-    pub cross_mounts: bool,
+    /// `Some(true)` from `--cross-mounts`, `Some(false)` from `-xdev` or
+    /// `-mount`, `None` to follow `set -o crossmounts`.
+    pub cross_mounts: Option<bool>,
 }
 
 /// Starting paths are the leading words that cannot begin an expression.
@@ -85,11 +87,11 @@ pub(super) fn split_operands(words: &[String]) -> (&[String], &[String]) {
 /// Errors are the complete text after `find: `.
 pub(super) fn parse(words: &[String]) -> Result<Parsed, String> {
     let mut parser = Parser {
-        words, at: 0, depth: DepthOptions::default(), cross_mounts: false,
+        words, at: 0, depth: DepthOptions::default(), cross_mounts: None,
         nodes_remaining: MAX_EXPRESSION_NODES, nesting: 0,
     };
     if words.is_empty() {
-        return Ok(Parsed { expr: Expr::True, depth: parser.depth, cross_mounts: false });
+        return Ok(Parsed { expr: Expr::True, depth: parser.depth, cross_mounts: None });
     }
     let expr = parser.or_expression()?;
     if let Some(word) = parser.peek() {
@@ -106,7 +108,7 @@ struct Parser<'a> {
     words: &'a [String],
     at: usize,
     depth: DepthOptions,
-    cross_mounts: bool,
+    cross_mounts: Option<bool>,
     nodes_remaining: usize,
     nesting: usize,
 }
@@ -274,11 +276,15 @@ impl Parser<'_> {
                 }
                 Ok(Expr::True)
             }
-            "-cross-mounts" if inline.is_some() => {
-                Err(format!("{word} does not take a value; use --cross-mounts"))
+            "-cross-mounts" | "-xdev" | "-mount" if inline.is_some() => {
+                Err(format!("{word} does not take a value"))
             }
-            "-cross-mounts" => {
-                self.cross_mounts = true;
+            "-cross-mounts" | "-xdev" | "-mount" => {
+                let cross = name == "-cross-mounts";
+                if self.cross_mounts == Some(!cross) {
+                    return Err("-xdev and --cross-mounts conflict; use one".to_string());
+                }
+                self.cross_mounts = Some(cross);
                 Ok(Expr::True)
             }
             "-print" if inline.is_some() => Err(format!("{word} does not take a value; use -print")),
@@ -438,9 +444,24 @@ mod tests {
     #[test]
     fn cross_mounts_is_an_option_that_reads_as_true() {
         let parsed = parse(&words("--cross-mounts -name a")).unwrap();
-        assert!(parsed.cross_mounts);
+        assert_eq!(parsed.cross_mounts, Some(true));
         assert_eq!(parsed.expr, and(Expr::True, name("a")));
-        assert!(!parse(&words("-name a")).unwrap().cross_mounts);
+    }
+
+    #[test]
+    fn xdev_and_mount_keep_the_walk_in_its_region() {
+        for word in ["-xdev", "-mount"] {
+            let parsed = parse(&words(&format!("{word} -name a"))).unwrap();
+            assert_eq!(parsed.cross_mounts, Some(false), "{word}");
+            assert_eq!(parsed.expr, and(Expr::True, name("a")));
+        }
+        assert_eq!(parse(&words("-name a")).unwrap().cross_mounts, None);
+    }
+
+    #[test]
+    fn xdev_with_cross_mounts_is_refused() {
+        let error = parse(&words("-xdev --cross-mounts")).unwrap_err();
+        assert!(error.contains("-xdev") && error.contains("--cross-mounts"), "{error}");
     }
 
     #[test]

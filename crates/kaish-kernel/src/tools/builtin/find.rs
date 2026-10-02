@@ -86,6 +86,11 @@ struct FindArgs {
     #[arg(id = "cross-mounts", long = "cross-mounts")]
     _cross_mounts: bool,
 
+    /// Stay in the mount region where the walk starts, even under
+    /// `set -o crossmounts`. Also spelled -mount.
+    #[arg(id = "xdev", long = "xdev", visible_alias = "mount")]
+    _xdev: bool,
+
     #[command(flatten)]
     _global: GlobalFlags,
 
@@ -208,7 +213,7 @@ impl Tool for Find {
                 } else {
                     false
                 },
-                cross_mounts: ctx.walk_crosses_mounts(parsed.cross_mounts),
+                cross_mounts: parsed.cross_mounts.unwrap_or_else(|| ctx.walk_crosses_mounts(false)),
                 ..WalkOptions::default()
             };
 

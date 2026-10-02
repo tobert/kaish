@@ -1571,6 +1571,7 @@ find / -name '*.log'            # prints /v and /tmp themselves, nothing below
 echo /tmp/*.log                  # a pattern's literal directories are named too
 grep -r --cross-mounts TODO /   # this call only: cross every mount
 set -o crossmounts              # this session: walks cross every mount
+find / -xdev -name '*.log'      # stays in its mount even under crossmounts
 ```
 
 Mounts nested inside the one a walk starts in belong to it, so a walk from

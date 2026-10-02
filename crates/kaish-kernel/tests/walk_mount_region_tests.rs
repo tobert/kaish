@@ -311,3 +311,13 @@ async fn walk_that_finds_nothing_keeps_its_exit_status() {
     assert_eq!(code, 1, "{out:?} {err}");
     assert_eq!(err, format!("grep: {SKIP_NOTE}\n"));
 }
+
+#[tokio::test]
+async fn find_xdev_stays_in_the_region_under_crossmounts() {
+    let kernel = isolated().await;
+    let (out, err, code) =
+        run_err(&kernel, "set -o crossmounts; find / -xdev -name '*.txt'").await;
+    assert_eq!(code, 0, "{out:?} {err}");
+    assert_eq!(out, ["/data/a.txt"]);
+    assert_eq!(err, format!("find: {SKIP_NOTE}\n"));
+}
