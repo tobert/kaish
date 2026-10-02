@@ -786,15 +786,16 @@ let result = kernel.execute_argv("my-tool", &[Value::Bytes(blob)]).await?;
 Semantics:
 
 - **Tokens are literal.** No glob expansion, no `$VAR` interpolation, no command
-  substitution, no word splitting — the "single-quoted word" rule taken to its
-  end. `execute_argv("echo", &[Value::String("*.txt".into())])` emits `*.txt`.
-  And no **number coercion**: a `Value::String("00")` stays `"00"` (the string
-  door's lexer would coerce the bare word `00` to an integer and print `0`). Pass
-  a `Value::Int`/`Value::Float` when you mean a number — the type is yours to
-  choose, which is the point of the typed door. **Exception:** a leading `~` is
-  expanded against the session `HOME`, matching the string door (kaish expands
-  `~` uniformly, even in quotes — so the doors agree); pass a pre-resolved path
-  if you need it byte-literal.
+  substitution, no word splitting, and no tilde expansion — the "single-quoted
+  word" rule taken to its end. `execute_argv("echo", &[Value::String("*.txt"
+  .into())])` emits `*.txt`; `execute_argv("echo", &[Value::String("~/a".into())
+  ])` emits `~/a` unexpanded, same as `execute("echo '~/a'")` — an argv token
+  carries no quoting, so it is treated the same as a quoted source word. Pass
+  an already-expanded path if you need one resolved. And no **number
+  coercion**: a `Value::String("00")` stays `"00"` (the string door's lexer
+  would coerce the bare word `00` to an integer and print `0`). Pass a
+  `Value::Int`/`Value::Float` when you mean a number — the type is yours to
+  choose, which is the point of the typed door.
 - **One simple command only.** Pipelines, `&&`/`||`, control flow, and `$()` have
   no argv encoding — use `execute(&str)` for those. The two are *peers*: argv is
   not a subset that drops expressiveness, it's a different door that converges with
@@ -1125,12 +1126,13 @@ match arg {
 }
 ```
 
-`Literal` means no variable, `$(...)`, `$((...))`, glob, or leading `~`
-appears anywhere in the word. Its `value` is the source word with its quoting
-removed, which is the argument an external command receives. A builtin may
+`Literal` means no variable, `$(...)`, `$((...))`, glob, or unquoted leading `~`
+expands anywhere in the word. Quoted tilde words such as `'~/x'` are literal.
+Its `value` is the source word after quotes and literal escapes are decoded,
+which is the argument an external command receives. A builtin may
 bind that word as a typed value. A redirect target's `value` is a path as
-written, resolved against the working directory and mounts, so it is not an
-absolute path. `text` is the display rendering and may quote the word (`'0'`),
+written; execution resolves it against the working directory and mounts.
+The planned path is not necessarily absolute. `text` is the display rendering and may quote the word (`'0'`),
 so never strip quotes from it. A flag or `--` is `Literal` with
 `value == text`. `--tail="5"` and `KEY=1` are `Literal` with the whole joined
 word as `value` (`--tail=5`, `KEY=1`). `--tail "5"` is two arguments, the
@@ -1444,12 +1446,15 @@ fn myapp_data_dir() -> PathBuf {
 }
 ```
 
-For user-facing path handling, use `expand_tilde`:
+For user-facing path handling, use `expand_tilde`. It takes the home
+directory explicitly — the kernel is hermetic and never reads the host
+`$HOME` on its own — so pass the session's `HOME` (or `None`, which leaves
+`~` unexpanded rather than guessing):
 
 ```rust
 use kaish_kernel::expand_tilde;
 
-let path = expand_tilde("~/projects/myrepo");
+let path = expand_tilde("~/projects/myrepo", Some("/home/username"));
 // → /home/username/projects/myrepo
 ```
 

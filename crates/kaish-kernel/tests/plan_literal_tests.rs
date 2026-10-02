@@ -53,7 +53,6 @@ fn an_expansion_anywhere_in_the_word_stays_plain() {
         "cmd *.rs",
         "cmd ~/x",
         r#"cmd "a$x""#,
-        r#"cmd "~/x""#,
         "cmd --key=$x",
         "cmd KEY=$x",
         "cmd --key=~/x",
@@ -142,7 +141,7 @@ fn external_kernel(cwd: Option<&std::path::Path>) -> kaish_kernel::Kernel {
     let mut vars = HashMap::new();
     vars.insert(
         "PATH".to_string(),
-        kaish_kernel::ast::Value::String(std::env::var("PATH").unwrap_or_default()),
+        kaish_kernel::ast::Value::String(std::env::var("PATH").expect("PATH is configured")),
     );
     let mut config = kaish_kernel::KernelConfig::repl().with_initial_vars(vars);
     if let Some(cwd) = cwd {
@@ -180,15 +179,21 @@ async fn literal_values_match_the_argv_an_external_command_receives() {
         r#""\$x""#,
         "'*.rs'",
         "'$x'",
+        "'~/x'",
+        r#""~/x""#,
         "'a\nb'",
         "-n",
         "--force",
-        "--",
         "--tail=\"5\"",
         "--name=a",
-        "--key=",
+        r#"--key="""#,
+        "--tail=0.10",
+        "--name=1e3",
+        "--zero=-0",
         "KEY=1",
         "KEY=\"a b\"",
+        "KEY=0.10",
+        "--",
     ];
     let source = format!(
         "/bin/sh -c 'for a; do printf \"%s\\0\" \"$a\"; done' sh {}",
@@ -223,6 +228,7 @@ async fn literal_values_match_the_argv_an_external_command_receives() {
 #[case::negative_zero("-0", "-0")]
 #[case::trailing_zero("0.10", "0.10")]
 #[case::quoted_space("\"out 1\"", "out 1")]
+#[case::quoted_tilde("'~'", "~")]
 #[tokio::test]
 async fn a_literal_redirect_target_is_the_file_created(#[case] word: &str, #[case] expected: &str) {
     let dir = tempfile::Builder::new()
@@ -244,4 +250,17 @@ async fn a_literal_redirect_target_is_the_file_created(#[case] word: &str, #[cas
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(names, vec![expected.to_string()]);
+}
+
+#[rstest::rstest]
+#[case("cmd '~'", "~")]
+#[case("cmd '~/x'", "~/x")]
+#[case(r#"cmd "~/x""#, "~/x")]
+#[case("cmd --key='~/x'", "--key=~/x")]
+#[case("cmd KEY='~/x'", "KEY=~/x")]
+#[test]
+fn a_quoted_tilde_is_a_known_literal_word(#[case] source: &str, #[case] expected: &str) {
+    let args = args_of(source);
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].literal_value(), Some(expected), "{source}");
 }

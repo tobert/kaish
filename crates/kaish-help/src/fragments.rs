@@ -452,6 +452,11 @@ push services[web][tags] canary   # bracket-path target
 ~/src/project             # tilde expands to $HOME
 cd                        # bare cd goes to $HOME
 cd -                      # previous directory
+
+# Tilde expansion applies only to an unquoted ~ at the start of a word —
+# a quoted "~" or '~' is a literal path, never $HOME:
+echo ~/x                  # /home/amy/x
+echo '~/x'                # ~/x
 ```"#,
     ),
     syntax_section(
@@ -530,6 +535,8 @@ A redirect target is a single word: quote it when it interpolates
 target (`> $(cmd)`) works; bare text-plus-interpolation does not.
 
 One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
+A redirect's input belongs to its command: `seq 3 | jq . < f` reads `f`, and
+the session's stdin is unchanged afterward.
 jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
 without a subprocess. jq also accepts real jq's `--arg NAME VALUE`,
 `--argjson NAME VALUE`, and `-n` / `--null-input` flags for binding

@@ -41,7 +41,7 @@ impl PlanDigest {
 #[serde(rename_all = "snake_case")]
 pub enum PlannedValue {
     /// Text that contains an expansion or is not a single known word: a
-    /// variable, `$(...)`, `$((...))`, a glob, a leading `~`, a
+    /// variable, `$(...)`, `$((...))`, a glob, an unquoted leading `~`, a
     /// double-quoted string with an interpolation, a list or record. The
     /// text is exactly as it would render on the command line, and the word
     /// the command receives is not known until the statement runs.
@@ -50,12 +50,13 @@ pub enum PlannedValue {
     /// glob, tilde, or other expansion appears anywhere in it, so the word
     /// the command receives is known before the statement runs.
     ///
-    /// `value` is the source word with its quoting removed. An external
+    /// `value` is the source word after quotes and literal escapes are decoded.
+    /// An external
     /// command receives exactly that word in its argument list. A builtin
     /// may bind the word as a typed value (`5` as an integer) instead of
     /// text. A redirect target's `value` is a path as written: kaish
-    /// resolves it against the working directory and its mounts, so it is
-    /// not an absolute path. `text` is the rendering for display, which may
+    /// resolves it against the working directory and its mounts at execution.
+    /// It is not necessarily absolute. `text` is the rendering for display, which may
     /// quote the word (`'0'` for the string `0`) so that it reads back as
     /// the same string. Read `value` to classify an argument and never
     /// strip quotes from `text`.
@@ -71,8 +72,8 @@ pub enum PlannedValue {
     ///   same argument an external command receives
     /// - a redirect target path (`> "out 1"`): the path (`out 1`)
     ///
-    /// A word that begins with `~` is never `Literal`, because the kernel
-    /// expands it to the home directory.
+    /// An unquoted leading `~` expands at runtime and stays `Plain`.
+    /// Quoted `~` is literal, as in `'~/x'`.
     Literal {
         /// The rendering, as for `Plain`: quoted where a shell reader needs
         /// the quotes.
