@@ -86,6 +86,7 @@ async fn an_ordinary_loop_count_still_parses() {
 }
 
 /// A loop count below 1 is refused, as in bash ("loop count out of range").
+/// `-0` lexes as a numeric literal, not a leading zero, and gets this refusal.
 /// A negative count used to wrap through `as usize` and break every loop.
 #[rstest::rstest]
 #[case("break", "0")]
@@ -93,6 +94,7 @@ async fn an_ordinary_loop_count_still_parses() {
 #[case("continue", "0")]
 #[case("continue", "-1")]
 #[case("break", "-0")]
+#[case("continue", "-0")]
 #[tokio::test]
 async fn a_loop_count_below_one_is_refused(#[case] keyword: &str, #[case] count: &str) {
     let source = format!("for i in 1 2; do for j in a b; do {keyword} {count}; done; done; echo done");
