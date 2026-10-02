@@ -115,6 +115,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **`readonly X=1` is reported as an unknown command** by validation and
+  `kaish --plan`, like any other missing command. kaish has no `readonly`
+  builtin, so it exits 127; the validator no longer treats it as known.
 - `exit` inside a function or a sourced file ends the script, as in bash;
   it returned to the caller. `return` still stops at the function, `$( )`
   absorbs the exit, and a pipeline stage ends only itself.

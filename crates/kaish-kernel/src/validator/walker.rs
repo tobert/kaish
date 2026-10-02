@@ -916,11 +916,10 @@ pub(crate) fn is_static_command_name(name: &str) -> bool {
 ///
 /// This set is deliberately **narrower** than `is_special_command` below: that
 /// set is a validator warning heuristic (it suppresses "command not found" for
-/// names like `readonly`/`:` that the validator chooses not to flag), whereas
+/// names such as `local` that the validator chooses not to flag), whereas
 /// this reflects what the interpreter *actually* short-circuits. Keeping them
 /// separate avoids `classify_command` mislabelling a name as internal when it
-/// would in fact escape to `PATH` (e.g. `readonly` resolves to an external
-/// command at runtime). See `Kernel::classify_command`.
+/// would in fact escape to `PATH`. See `Kernel::classify_command`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpecialForm {
     /// `true` and its other spelling `:` — always succeed (exit 0).
@@ -984,8 +983,9 @@ fn is_special_command(name: &str) -> bool {
     // `test`/`[`/`[[`/`:` are intentionally absent: `test` and `:` are real
     // builtins now (they validate via the registry like any other), and
     // `[`/`[[` parse as `[[ … ]]` test expressions, never reaching here as a
-    // command name.
-    matches!(name, "true" | "false" | "readonly" | "local")
+    // command name. `readonly` is absent too: kaish has no such builtin, so
+    // it exits 127 and the validator reports it like any unknown command.
+    matches!(name, "true" | "false" | "local")
 }
 
 /// Bind `args` as plain words in source order over placeholders, mirroring
