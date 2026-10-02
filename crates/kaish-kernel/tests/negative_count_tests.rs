@@ -16,7 +16,7 @@ const PATCH: &str = "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-one\n+two\n";
 
 #[rstest]
 #[case::xxd_length("xxd -l -1 f.txt", "xxd: -l -1: length must be 0 or more")]
-#[case::xxd_length_equals("xxd -l=-1 f.txt", "xxd: -l -1: length must be 0 or more")]
+#[case::xxd_length_equals("xxd --length=-1 f.txt", "xxd: -l -1: length must be 0 or more")]
 #[case::xxd_length_long("xxd --length -1 f.txt", "xxd: -l -1: length must be 0 or more")]
 #[case::xxd_seek("xxd -s -1 f.txt", "xxd: -s -1: seeking from the end is not supported")]
 #[case::base64_wrap("base64 -w -1 f.txt", "base64: -w -1: wrap width must be 0 or more")]
