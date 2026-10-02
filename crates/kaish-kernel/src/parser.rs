@@ -1529,6 +1529,22 @@ where
         .map(|statements| Program { statements })
 }
 
+/// Convert a `break`/`continue` count to a level count, refusing anything
+/// below 1. `raw` is the count as typed, for the message.
+fn loop_count_levels(keyword: &str, raw: &str, n: i64) -> Result<usize, String> {
+    if n < 1 {
+        return Err(format!(
+            "{keyword} {raw}: loop count must be at least 1; write `{keyword}` or `{keyword} 1`"
+        ));
+    }
+    usize::try_from(n).map_err(|_| {
+        format!(
+            "{keyword} {raw}: loop count is too large; the limit is {}",
+            usize::MAX
+        )
+    })
+}
+
 /// Statement parser - dispatches based on leading token.
 /// Supports statement-level chaining with && and ||.
 fn statement_parser<'tokens, I>(
@@ -1540,27 +1556,40 @@ where
         let terminator = choice((just(Token::Newline), just(Token::Semi))).repeated();
 
         // A loop count is an integer. `NumericLiteral` is here because `-0` is
-        // one — a valid count whose source text does not round-trip, so it
-        // lexes as that variant rather than `Int` and would otherwise stop
-        // parsing.
+        // one — its source text does not round-trip, so it lexes as that
+        // variant rather than `Int`. It is still out of range (below 1).
         let loop_count = select! {
-            Token::Int(n) => n as usize,
+            Token::Int(n) => (n, n.to_string()),
             Token::NumericLiteral(data) if matches!(data.value, Value::Int(_)) => {
                 match data.value {
-                    Value::Int(n) => n as usize,
+                    Value::Int(n) => (n, data.raw),
                     _ => unreachable!("guarded by the select! pattern above"),
                 }
             },
         };
 
+        // The count must be at least 1, as in bash. Checked here, where the
+        // literal is known, so a negative count never reaches `as usize`.
+        let checked_count = |keyword: &'static str| {
+            loop_count
+                .map_with(|(n, raw), e| (n, raw, e.span()))
+                .validate(move |(n, raw, span), _, emitter| match loop_count_levels(keyword, &raw, n) {
+                    Ok(levels) => levels,
+                    Err(message) => {
+                        emitter.emit(Rich::custom(span, message));
+                        1
+                    }
+                })
+        };
+
         // break [N] - break out of N levels of loops (default 1)
         let break_stmt = just(Token::Break)
-            .ignore_then(loop_count.or_not())
+            .ignore_then(checked_count("break").or_not())
             .map(Stmt::Break);
 
         // continue [N] - continue to next iteration, skipping N levels (default 1)
         let continue_stmt = just(Token::Continue)
-            .ignore_then(loop_count.or_not())
+            .ignore_then(checked_count("continue").or_not())
             .map(Stmt::Continue);
 
         // return [expr] - return from a tool
@@ -1701,12 +1730,25 @@ where
         // separate alternatives is what produced "found '|' expected '&&'":
         // `for_parser` sat ahead of the pipeline, consumed through `done`, and
         // the `&&`/`||` fold below then met the `|`.
+        //
+        // Redirects after the closing word wrap the compound in
+        // `Stmt::Redirected`; the runner never opens them, so `exit` inside
+        // the body still leaves the script.
         let compound = choice((
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
             while_parser(stmt.clone()).map(Stmt::While),
             case_parser(stmt.clone()).map(Stmt::Case),
+            brace_block_parser(stmt.clone()).map(Stmt::Group),
         ))
+        .then(redirect_parser(primary_expr_parser()).repeated().collect::<Vec<_>>())
+        .map(|(body, redirects)| {
+            if redirects.is_empty() {
+                body
+            } else {
+                Stmt::Redirected { body: Box::new(body), redirects }
+            }
+        })
         .boxed();
 
         // `!` negates a pipeline (spec: bash's reading) — the statement-level
@@ -1891,17 +1933,31 @@ where
     ident_parser()
         .then_ignore(just(Token::LParen))
         .then_ignore(just(Token::RParen))
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
+        .then(brace_block_parser(stmt))
+        .map(|(name, body)| ToolDef { name, params: vec![], body })
+        .labelled("POSIX function")
+        .boxed()
+}
+
+/// A braced statement list, `{ stmt; stmt; }`: a function body, and a brace
+/// group. A `}` right after a word closes the block, so `{ echo a }` reads
+/// as `{ echo a; }`.
+fn brace_block_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, Vec<Stmt>, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    just(Token::LBrace)
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(
             stmt.repeated()
                 .collect::<Vec<_>>()
                 .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
         )
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::RBrace))
-        .map(|(name, body)| ToolDef { name, params: vec![], body })
-        .labelled("POSIX function")
         .boxed()
 }
 
@@ -1917,15 +1973,7 @@ where
 {
     just(Token::Function)
         .ignore_then(ident_parser())
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
-            stmt.repeated()
-                .collect::<Vec<_>>()
-                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
-        )
-        .then_ignore(just(Token::Newline).repeated())
-        .then_ignore(just(Token::RBrace))
+        .then(brace_block_parser(stmt))
         .map(|(name, body)| ToolDef { name, params: vec![], body })
         .labelled("bash function")
         .boxed()
@@ -2387,11 +2435,11 @@ fn pipeline_into_stmt(p: Pipeline) -> Stmt {
     }
 }
 
-/// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
-/// command would silently depend on redirect ordering at execution time
-/// (`open_redirects` is last-wins), so `parse()` rejects it loudly.
-fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
-    cmd.redirects
+/// True if `redirects` hold more than one stdin source (`<`, `<<`, `<<<`).
+/// Such a command or compound would silently depend on redirect ordering at
+/// execution time (`open_redirects` is last-wins), so `parse()` refuses it.
+fn redirects_have_ambiguous_stdin(redirects: &[Redirect]) -> bool {
+    redirects
         .iter()
         .filter(|r| {
             matches!(
@@ -2401,6 +2449,10 @@ fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
         })
         .count()
         > 1
+}
+
+fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
+    redirects_have_ambiguous_stdin(&cmd.redirects)
 }
 
 /// Find the first command anywhere in `stmts` (recursing into pipelines,
@@ -2426,6 +2478,10 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
         Stmt::For(f) => first_ambiguous_stdin(&f.body),
         Stmt::While(w) => first_ambiguous_stdin(&w.body),
         Stmt::Case(c) => c.branches.iter().any(|b| first_ambiguous_stdin(&b.body)),
+        Stmt::Group(body) => first_ambiguous_stdin(body),
+        Stmt::Redirected { body, redirects } => {
+            redirects_have_ambiguous_stdin(redirects) || stmt_has_ambiguous_stdin(body)
+        }
         Stmt::ToolDef(t) => first_ambiguous_stdin(&t.body),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)
@@ -4279,23 +4335,28 @@ fn validate_leading_zero_counts(
         if !error_starts.contains(&pair[1].1.start) {
             continue;
         }
-        // Keep the sign: `break -022` is not fixed by writing `break 22`.
-        let sign = if word.starts_with('-') { "-" } else { "" };
-        let digits = word.trim_start_matches('-').trim_start_matches('0');
-        let count = format!("{sign}{}", if digits.is_empty() { "0" } else { digits });
-        // The count grammar takes only a whole number — `007.5` trims to
-        // `7.5`, which is itself a parse error, so the fix cannot be the
-        // trimmed value. Name the integer part instead.
-        let message = if let Some((int_part, _)) = count.split_once('.') {
-            let int_part = if int_part.is_empty() || int_part == "-" { "0" } else { int_part };
+        // The count grammar takes a whole number of at least 1. Suggest the
+        // zero-trimmed integer part only when it is positive; otherwise the
+        // trimmed value is itself refused, so name the count-free fix.
+        let negative = word.starts_with('-');
+        let integer_part = word.trim_start_matches('-').split('.').next().unwrap_or("");
+        let digits = integer_part.trim_start_matches('0');
+        let has_fraction = word.contains('.');
+        let message = if negative || digits.is_empty() {
+            let shape = if has_fraction { "whole-number loop count of at least 1" } else { "loop count of at least 1" };
+            format!(
+                "`{keyword}` takes a {shape} and `{word}` is text (leading zero) — write \
+                 `{keyword}` or `{keyword} 1`"
+            )
+        } else if has_fraction {
             format!(
                 "`{keyword}` takes a whole-number loop count and `{word}` is text (leading \
-                 zero) — write a whole number such as `{keyword} {int_part}`"
+                 zero) — write a whole number such as `{keyword} {digits}`"
             )
         } else {
             format!(
                 "`{keyword}` takes a loop count and `{word}` is text (leading zero) — write \
-                 `{keyword} {count}`"
+                 `{keyword} {digits}`"
             )
         };
         return Err(vec![ParseError { span: pair[1].1, message }]);
@@ -4501,6 +4562,19 @@ where
 mod tests {
     use super::*;
     use proptest::strategy::Strategy;
+
+    #[test]
+    fn loop_count_levels_names_the_rule_that_failed() {
+        let low = loop_count_levels("break", "-0", 0).unwrap_err();
+        assert!(low.starts_with("break -0:") && low.contains("at least 1"), "{low}");
+        assert_eq!(loop_count_levels("continue", "2", 2), Ok(2));
+        // `usize::try_from` cannot fail for a positive i64 on 64-bit, so the
+        // too-large arm is reached only where usize is narrower.
+        if usize::BITS < 64 {
+            let high = loop_count_levels("break", "9999999999", i64::MAX).unwrap_err();
+            assert!(high.contains("too large") && !high.contains("at least 1"), "{high}");
+        }
+    }
 
     /// The commands of a command-only pipeline. Panics on a compound stage —
     /// every assertion below is about a pipeline of plain commands, and a

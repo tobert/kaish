@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, PipelineStage, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{apply_output_format, ExecResult, OutputFormat, PathError};
+use crate::interpreter::{apply_output_format, ControlFlow, ExecResult, OutputFormat, PathError};
 use crate::tools::StdinState;
 use crate::tools::{global_flag_value_is_truthy, ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
@@ -69,7 +69,7 @@ fn has_json_flag(args: &[Arg]) -> bool {
 /// (GH #222). Every early return in `run_scatter_gather` funnels through this
 /// one function, so it is the single place the format gets applied — not
 /// three separate copies threaded through each `return` site.
-fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
+pub(super) fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
     match format {
         Some(format) => apply_output_format(result, format),
         None => result,
@@ -230,6 +230,14 @@ impl RedirectOpenError {
         let in_effect = self.in_effect(redirects);
         apply_redirects(ExecResult::failure(1, self.message), in_effect, &self.opened, ctx).await
     }
+
+    /// The failed command's result before any redirect applies, the
+    /// redirects in effect, and the targets they opened: what
+    /// [`finish_redirects`] takes.
+    pub(crate) fn into_parts(self, redirects: &[Redirect]) -> (ExecResult, &[Redirect], OpenedRedirects) {
+        let in_effect = self.in_effect(redirects);
+        (ExecResult::failure(1, self.message), in_effect, self.opened)
+    }
 }
 
 /// Evaluate and open every redirect target, left to right, before the
@@ -387,25 +395,39 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
     let missing_directory = |directory: Option<&Path>| match directory {
         Some(directory) => format!(
             "redirect: {path}: no such file or directory; create the directory first: mkdir -p {}",
-            directory.display()
+            crate::backend::write_parent::hint_path(directory)
         ),
         None => format!("redirect: {path}: no such file or directory"),
     };
     let canonical = match ctx.backend.canonicalize(&resolved, true).await {
         Ok(canonical) => canonical,
         Err(BackendError::NotFound(_)) => {
-            let directory = missing_directory_of(ctx, path, &resolved).await;
+            if let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await {
+                return Err(hint);
+            }
+            let directory = missing_directory_of(ctx, path, &resolved).await
+                .map_err(|error| redirect_error(path, &error))?;
             return Err(missing_directory(directory.as_deref()));
         }
         Err(e) => return Err(redirect_error(path, &e)),
     };
     // A dangling symlink's target can sit in a missing directory too.
     if let Some(parent) = canonical.parent() {
-        match ctx.backend.stat(parent).await {
+        match ctx.backend.stat_write_parent(parent).await {
             Ok(entry) if entry.is_dir() => {}
             Ok(_) => return Err(format!("redirect: {path}: not a directory")),
-            Err(BackendError::NotFound(_)) => return Err(missing_directory(Some(parent))),
-            Err(e) => return Err(redirect_error(path, &e)),
+            Err(BackendError::NotFound(_)) => {
+                if let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await {
+                    return Err(hint);
+                }
+                return Err(missing_directory(Some(parent)));
+            }
+            Err(error) => {
+                if let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await {
+                    return Err(hint);
+                }
+                return Err(redirect_error(path, &error));
+            }
         }
     }
     let opened = if append {
@@ -413,27 +435,56 @@ async fn open_output(ctx: &ExecContext, path: &str, append: bool) -> Result<Open
     } else {
         ctx.backend.write(&resolved, b"", WriteMode::Overwrite).await
     };
-    opened.map_err(|e| redirect_error(path, &e))?;
+    if let Err(error) = opened {
+        if matches!(error, BackendError::NotFound(_))
+            && let Some(hint) = unmounted_write_hint(ctx, path, &resolved).await
+        {
+            return Err(hint);
+        }
+        return Err(redirect_error(path, &error));
+    }
     Ok(OpenedFile { path: path.to_string(), resolved, append })
+}
+
+/// Name an actual writable mount when no mount covers the failed target.
+async fn unmounted_write_hint(ctx: &ExecContext, path: &str, resolved: &Path) -> Option<String> {
+    let mounts = ctx.backend.mounts();
+    if mounts.is_empty() || mounts.iter().any(|mount| resolved.starts_with(&mount.path)) {
+        return None;
+    }
+    Some(format!("redirect: {path}: outside a mounted filesystem; {}",
+        crate::backend::write_parent::mounted_path_hint(ctx.backend.as_ref(), resolved).await))
 }
 
 /// The directory `mkdir -p` must create for `path` to open, or `None` when
 /// it cannot be named with certainty. Checks the spelled parent, then one
-/// symlink hop at `path`; a name is returned only once `stat` confirms it is
-/// missing, so the hint never names a directory that exists.
-async fn missing_directory_of(ctx: &ExecContext, path: &str, resolved: &Path) -> Option<PathBuf> {
+/// symlink hop at `path`; a name is returned only once `stat_write_parent`
+/// confirms it is missing, so the hint never names a directory that exists.
+async fn missing_directory_of(
+    ctx: &ExecContext, path: &str, resolved: &Path,
+) -> crate::backend::BackendResult<Option<PathBuf>> {
+    use crate::backend::BackendError;
     let is_missing = |directory: PathBuf| async move {
-        let found = ctx.backend.stat(&ctx.resolve_path(&directory.to_string_lossy())).await;
-        matches!(found, Err(crate::backend::BackendError::NotFound(_))).then_some(directory)
+        match ctx.backend.stat_write_parent(&ctx.resolve_path(&directory.to_string_lossy())).await {
+            Ok(_) => Ok(None),
+            Err(BackendError::NotFound(_)) => Ok(Some(directory)),
+            Err(error) => Err(error),
+        }
     };
     let spelled_parent = Path::new(path).parent().filter(|parent| !parent.as_os_str().is_empty());
-    if let Some(parent) = spelled_parent
-        && let Some(directory) = is_missing(parent.to_path_buf()).await
+    if let Some(parent) = spelled_parent.or_else(|| resolved.parent())
+        && let Some(directory) = is_missing(parent.to_path_buf()).await?
     {
-        return Some(directory);
+        return Ok(Some(directory));
     }
-    let link_target = ctx.backend.read_link(resolved).await.ok()?;
-    let target_parent = link_target.parent().filter(|parent| !parent.as_os_str().is_empty())?;
+    let link_target = match ctx.backend.read_link(resolved).await {
+        Ok(target) => target,
+        // No readable link target: keep the canonicalization failure.
+        Err(_) => return Ok(None),
+    };
+    let Some(target_parent) = link_target.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        return Ok(None);
+    };
     let directory = if target_parent.is_absolute() {
         target_parent.to_path_buf()
     } else {
@@ -618,21 +669,45 @@ async fn run_opened_stage(
     opened: Result<OpenedRedirects, RedirectOpenError>,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
-) -> ExecResult {
+) -> ControlFlow {
     let redirects = stage.redirects();
-    let (mut result, in_effect, mut opened) = match opened {
+    let (flow, in_effect, opened) = match opened {
         Ok(opened) => (dispatch_redirected(stage, ctx, dispatcher).await, redirects, opened),
         Err(failure) => {
-            let in_effect = failure.in_effect(redirects);
-            (ExecResult::failure(1, failure.message), in_effect, failure.opened)
+            let (result, in_effect, opened) = failure.into_parts(redirects);
+            (ControlFlow::Normal(result), in_effect, opened)
         }
     };
-    // The redirect's input ends with the command; what it left unread is
-    // dropped and the stdin the redirect displaced comes back.
+    // An `exit` stays an exit through the redirects, and its code wins over
+    // a redirect that fails to write (the error text still reaches `err`),
+    // as for a redirected compound statement.
+    let exit_code = match &flow {
+        ControlFlow::Exit { code, .. } => Some(*code),
+        _ => None,
+    };
+    let mut result = finish_redirects(flow.into_absorbed_result(), in_effect, opened, ctx).await;
+    match exit_code {
+        Some(code) => {
+            result.code = code;
+            ControlFlow::Exit { code, result }
+        }
+        None => ControlFlow::Normal(result),
+    }
+}
+
+/// Send a result through the redirects in effect and write each opened
+/// target. The last step for anything `open_redirects` opened for: a
+/// command stage, and a redirected compound statement.
+pub(crate) async fn finish_redirects(
+    mut result: ExecResult,
+    in_effect: &[Redirect],
+    mut opened: OpenedRedirects,
+    ctx: &mut ExecContext,
+) -> ExecResult {
+    // Discard the redirect's remainder and restore the input it displaced.
     if let Some(displaced) = opened.displaced_stdin.take() {
         ctx.restore_stdin_state(*displaced);
     }
-
     // `2>&1` moves this stage's stderr into its stdout, but only once
     // `apply_redirects` runs below — capture what stdout held before
     // that, so only the newly merged bytes get published (whatever was
@@ -653,38 +728,61 @@ async fn run_opened_stage(
     result
 }
 
-/// Dispatch a stage with its output kept off the streams its redirects
-/// replace.
+/// The stream state [`mask_redirected_streams`] replaced, put back by
+/// [`MaskedStreams::restore`].
+pub(crate) struct MaskedStreams {
+    stream_output: bool,
+    stream_stderr: bool,
+    held_pipe: Option<super::pipe_stream::PipeWriter>,
+}
+
+/// Keep output off the streams `redirects` replace until the redirects
+/// apply.
 ///
 /// A redirected stdout or stderr goes to its target, not to a job's stream,
 /// and a redirected stdout does not reach the pipe: both are decided before
-/// dispatch, or an external command or a nested dispatch inside a function
-/// writes live to the wrong place before the redirect applies.
-async fn dispatch_redirected(
-    stage: &PipelineStage,
-    ctx: &mut ExecContext,
-    dispatcher: &dyn CommandDispatcher,
-) -> ExecResult {
-    let redirects = stage.redirects();
-    let stream_output = ctx.background_stream_output;
-    let stream_stderr = ctx.background_stream_stderr;
-    let mut held_pipe = None;
+/// the stage runs, or an external command or a nested dispatch inside a
+/// function writes live to the wrong place before the redirect applies.
+pub(crate) fn mask_redirected_streams(redirects: &[Redirect], ctx: &mut ExecContext) -> MaskedStreams {
+    let mut masked = MaskedStreams {
+        stream_output: ctx.background_stream_output,
+        stream_stderr: ctx.background_stream_stderr,
+        held_pipe: None,
+    };
     if redirects_stdout(redirects) {
         ctx.background_stream_output = false;
-        held_pipe = ctx.pipe_stdout.take();
+        masked.held_pipe = ctx.pipe_stdout.take();
     }
     if redirects_stderr(redirects) {
         ctx.background_stream_stderr = false;
     }
-    let result = match dispatch_stage(stage, ctx, dispatcher).await {
-        Ok(result) => result,
-        Err(e) => fault_result(e),
-    };
-    ctx.background_stream_output = stream_output;
-    ctx.background_stream_stderr = stream_stderr;
-    if held_pipe.is_some() {
-        ctx.pipe_stdout = held_pipe;
+    masked
+}
+
+impl MaskedStreams {
+    /// Put back what [`mask_redirected_streams`] replaced.
+    pub(crate) fn restore(self, ctx: &mut ExecContext) {
+        ctx.background_stream_output = self.stream_output;
+        ctx.background_stream_stderr = self.stream_stderr;
+        if self.held_pipe.is_some() {
+            ctx.pipe_stdout = self.held_pipe;
+        }
     }
+}
+
+/// Dispatch a stage with its output kept off the streams its redirects
+/// replace.
+async fn dispatch_redirected(
+    stage: &PipelineStage,
+    ctx: &mut ExecContext,
+    dispatcher: &dyn CommandDispatcher,
+) -> ControlFlow {
+    let masked = mask_redirected_streams(stage.redirects(), ctx);
+    let result = match dispatch_stage(stage, ctx, dispatcher).await {
+        Ok(flow) => flow,
+        Err(e) => ControlFlow::Normal(fault_result(e)),
+    };
+    masked.restore(ctx);
     result
 }
 
@@ -693,10 +791,11 @@ async fn dispatch_stage(
     stage: &PipelineStage,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
-) -> anyhow::Result<ExecResult> {
+) -> anyhow::Result<ControlFlow> {
     match stage {
-        PipelineStage::Command(cmd) => dispatcher.dispatch(cmd, ctx).await,
-        PipelineStage::Compound(stmt) => dispatcher.dispatch_stmt(stmt, ctx).await,
+        PipelineStage::Command(cmd) => dispatcher.dispatch_flow(cmd, ctx).await,
+        // A compound stage is a subshell: its `exit` ended inside `dispatch_stmt`.
+        PipelineStage::Compound(stmt) => Ok(ControlFlow::Normal(dispatcher.dispatch_stmt(stmt, ctx).await?)),
     }
 }
 
@@ -727,8 +826,22 @@ impl PipelineRunner {
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
+        // This entry point has no script to end: an `exit` stops here.
+        self.run_flow(stages, ctx, dispatcher).await.into_absorbed_result()
+    }
+
+    /// Like [`Self::run`], but a lone command's `exit` (a function or
+    /// `source` that ran it) comes back as `ControlFlow::Exit`. Every other
+    /// shape absorbs it: a multi-stage pipeline's stages and a scatter's
+    /// workers are subshells.
+    pub async fn run_flow(
+        &self,
+        stages: &[PipelineStage],
+        ctx: &mut ExecContext,
+        dispatcher: &dyn CommandDispatcher,
+    ) -> ControlFlow {
         if stages.is_empty() {
-            return ExecResult::success("");
+            return ControlFlow::Normal(ExecResult::success(""));
         }
 
         // Check for scatter/gather pipeline. Scatter splits work across
@@ -743,16 +856,17 @@ impl PipelineRunner {
             {
                 Some(commands) => commands,
                 None => {
-                    return ExecResult::failure(
+                    return ControlFlow::Normal(ExecResult::failure(
                         2,
                         "scatter/gather cannot share a pipeline with an if/for/while/case \
                          stage. Run the compound on its own and pipe its output in.",
-                    )
+                    ))
                 }
             };
-            return self
-                .run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher)
-                .await;
+            return ControlFlow::Normal(
+                self.run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher)
+                    .await,
+            );
         }
 
         self.run_stage_sequence(stages, ctx, dispatcher).await
@@ -773,7 +887,8 @@ impl PipelineRunner {
             .cloned()
             .map(PipelineStage::Command)
             .collect();
-        self.run_stage_sequence(&stages, ctx, dispatcher).await
+        // Scatter workers and their pre/post stages are subshells: an `exit` stops here.
+        self.run_stage_sequence(&stages, ctx, dispatcher).await.into_absorbed_result()
     }
 
     /// Execute pipeline stages sequentially without scatter/gather detection.
@@ -782,24 +897,25 @@ impl PipelineRunner {
         stages: &[PipelineStage],
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
-    ) -> ExecResult {
+    ) -> ControlFlow {
         if stages.is_empty() {
-            return ExecResult::success("");
+            return ControlFlow::Normal(ExecResult::success(""));
         }
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            let result = self.run_single(&stages[0], ctx, dispatcher).await;
+            let mut flow = self.run_single(&stages[0], ctx, dispatcher).await;
+            let result = flow.result_mut();
             // A lone command is a pipeline of one, and bash reports it:
             // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
             // multi-stage case would leave the previous pipeline's codes
             // visible here — stale answers to a question the author just asked.
             ctx.scope.set_pipestatus(&[result.code]);
-            return result;
+            return flow;
         }
 
-        // Multi-stage pipeline
-        self.run_pipeline(stages, ctx, dispatcher).await
+        // Multi-stage pipeline: every stage is a subshell, so an `exit` ends only its stage.
+        ControlFlow::Normal(self.run_pipeline(stages, ctx, dispatcher).await)
     }
 
     /// Run a scatter/gather pipeline.
@@ -915,7 +1031,7 @@ impl PipelineRunner {
         stage: &PipelineStage,
         ctx: &mut ExecContext,
         dispatcher: &dyn CommandDispatcher,
-    ) -> ExecResult {
+    ) -> ControlFlow {
         // Set pipeline position for stdio inheritance decisions
         ctx.pipeline_position = PipelinePosition::Only;
 
@@ -1036,7 +1152,10 @@ impl PipelineRunner {
                 // The stage's own (forked) dispatcher runs it: the borrowed
                 // `dispatcher` can't cross the spawn boundary, and
                 // `stage_ctx.dispatcher` is `None` on a bare kernel (GH #90).
-                let mut result = run_opened_stage(&stage, opened, &mut stage_ctx, &*task_dispatcher).await;
+                // A stage is a subshell: its `exit` ends the stage, not the script.
+                let mut result = run_opened_stage(&stage, opened, &mut stage_ctx, &*task_dispatcher)
+                    .await
+                    .into_absorbed_result();
 
                 // Close the read end now that the stage (redirects included)
                 // is done reading, so the stage writing into it gets a broken

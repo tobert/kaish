@@ -124,6 +124,9 @@ pub struct ExecResult {
     /// the public accessors below hand back plain `OutputData`/`&OutputData`, so
     /// the boxing never leaks (GH #48, item 5).
     output: Option<Box<OutputData>>,
+    // Avoid nesting a JSON failure envelope when a runner forwards it.
+    #[serde(skip)]
+    pub(crate) json_failure_formatted: bool,
     /// True if output was capped and lost data. Either the output limiter
     /// spilled the overflow to disk (the `out` message carries the path),
     /// truncated it in memory (Memory spill mode — head+tail only, no
@@ -172,6 +175,30 @@ pub struct ExecResult {
     pub stderr_published_len: usize,
 }
 
+/// How a tool's run ends: normally, or by ending the script.
+///
+/// `Normal` is the case for nearly every tool. `Exit` is for a tool that runs
+/// a user function or script on the caller's behalf (`timeout` running a
+/// function that calls `exit`): the script stops, and the result's `code` is
+/// its exit status. A tool built on `Tool::execute` alone never produces it.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ToolFlow {
+    /// The tool finished; the script goes on.
+    Normal(ExecResult),
+    /// The tool finished and the script ends with `result.code`.
+    Exit(ExecResult),
+}
+
+impl ToolFlow {
+    /// The result, whichever way the tool ended. An `Exit` keeps its code.
+    pub fn into_result(self) -> ExecResult {
+        match self {
+            ToolFlow::Normal(result) | ToolFlow::Exit(result) => result,
+        }
+    }
+}
+
 impl ExecResult {
     /// End a kaish diagnostic on its own line: empty stays empty; anything
     /// else ends with exactly one `\n`.
@@ -200,6 +227,7 @@ impl ExecResult {
             err: String::new(),
             data: None,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -225,6 +253,7 @@ impl ExecResult {
                 err: String::new(),
                 data: None,
                 output: Some(Box::new(output)),
+                json_failure_formatted: false,
                 did_spill: false,
                 fault: false,
                 original_code: None,
@@ -264,6 +293,7 @@ impl ExecResult {
             err: String::new(),
             data: Some(data),
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -289,6 +319,7 @@ impl ExecResult {
             err: String::new(),
             data: Some(data),
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -318,6 +349,7 @@ impl ExecResult {
             err: Self::terminate_diagnostic(err),
             data: None,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -340,6 +372,7 @@ impl ExecResult {
             err: stderr.into(),
             data: None,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -361,6 +394,7 @@ impl ExecResult {
             err: String::new(),
             data: None,
             output: Some(Box::new(output)),
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -384,6 +418,7 @@ impl ExecResult {
             err: Self::terminate_diagnostic(err),
             data,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,

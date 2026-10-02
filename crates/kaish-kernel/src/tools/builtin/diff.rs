@@ -550,6 +550,9 @@ mod tests {
         let formatted = apply_output_format(result, OutputFormat::Json);
         let json: serde_json::Value =
             serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(json["code"], 1);
+        assert_eq!(json["error"], "");
+        let json = &json["data"];
         assert_eq!(json["old_file"], "file1.txt");
         assert_eq!(json["new_file"], "file2.txt");
         let hunks = json["hunks"].as_array().expect("hunks array");
@@ -581,8 +584,11 @@ mod tests {
         let formatted = apply_output_format(result, OutputFormat::Json);
         let json: serde_json::Value =
             serde_json::from_str(&formatted.text_out()).expect("valid JSON");
-        let hunk = &json["hunks"][0];
         // Default context 3: hunk spans lines 2..6, change at 5.
+        assert_eq!(json["code"], 1);
+        assert_eq!(json["error"], "");
+        let json = &json["data"];
+        let hunk = &json["hunks"][0];
         assert_eq!(hunk["old_start"], 2, "hunk: {hunk}");
         assert!(hunk["changes"].as_array().unwrap().iter()
             .any(|c| c["tag"] == "delete" && c["content"] == "l5"));
@@ -608,6 +614,9 @@ mod tests {
         let formatted = apply_output_format(result, OutputFormat::Json);
         let json: serde_json::Value =
             serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(json["code"], 1);
+        assert_eq!(json["error"], "");
+        let json = &json["data"];
         let hunk = &json["hunks"][0];
         assert_eq!(hunk["old_lines"], 0, "hunk: {hunk}");
         assert_eq!(hunk["old_start"], 0, "count-0 range reports the preceding line: {hunk}");
@@ -636,6 +645,9 @@ mod tests {
         let formatted = apply_output_format(result, OutputFormat::Json);
         let json: serde_json::Value =
             serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(json["code"], 1);
+        assert_eq!(json["error"], "");
+        let json = &json["data"];
         let changes = json["hunks"][0]["changes"].as_array().expect("changes array");
         assert!(
             changes.iter().any(|c| c["tag"] == "delete"
@@ -694,6 +706,9 @@ mod tests {
         let formatted = apply_output_format(result, OutputFormat::Json);
         let json: serde_json::Value =
             serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(json["code"], 1);
+        assert_eq!(json["error"], "");
+        let json = &json["data"];
         assert_eq!(json["differ"], true);
         assert_eq!(json["old_file"], "file1.txt");
     }

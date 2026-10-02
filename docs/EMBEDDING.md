@@ -52,9 +52,19 @@ newline. JSON output keeps its structure.
 
 Output is clean text by default — simple commands return plain text, structured
 builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable tab-separated
-values, and `--json` on any command emits JSON plus a parsed value (`data`) that
+values, and `--json` on a builtin emits JSON plus a parsed value (`data`) that
 builtins set explicitly — kaish never infers it by sniffing stdout. The exit
 code is something agents can branch on:
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+diff --json before after       # exit 1: {"code":1,"error":"","data":{...}}
+```
+
+With `--json`, success keeps the builtin's data unwrapped; an empty success prints nothing. Every nonzero formatted result uses an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The envelope's `error` removes one rendering newline; `err` remains unchanged. Check the exit code first, then the error and any partial data. `data` on the `ExecResult` mirrors the full envelope.
+
+Formatting applies to the final builtin stage and command substitution. Earlier pipeline stages remain input streams for the next stage. External commands receive `--json` as an argv word. Parse/validation refusals (`KernelError`), unresolved commands, and redirect failures before builtin dispatch do not pass through the builtin formatter. Spills are applied after formatting: exit 3 still returns the truncated preview and spill metadata rather than an envelope. Read `did_spill` and `original_code` before parsing that preview as JSON. Custom tools that own their output keep their successful format; nonzero results still use the envelope when they request JSON.
 
 | `code` | Meaning | Recovery |
 |--------|---------|----------|
@@ -363,6 +373,18 @@ let kernel = Kernel::with_backend(
     },
 )?;
 ```
+
+`KernelBackend::stat_write_parent` checks a redirect's parent directory in
+its owning filesystem, without synthesizing mount ancestors. The default
+refuses a read-only backend, then calls `stat`; a backend that synthesizes
+directories must override it. `LocalBackend` and `VirtualOverlayBackend`
+forward the query to the owning filesystem or backend. An uncovered redirect
+target exits 1 and names a mount from `mounts` whose root is writable and
+searchable, or says none is available. A covering filesystem with a missing
+real parent gets a `mkdir -p` hint. A missing immutable ancestor in
+`VirtualOverlayBackend` names a mounted path instead, because its `mkdir`
+cannot create that parent. Ordinary `stat` and directory listings still
+include mount ancestors.
 
 > **Warning:** `with_backend` kernels are **hermetic by construction**:
 > kaish mounts no host filesystem (your backend is the only I/O path),
@@ -879,6 +901,19 @@ Notes:
   automatic (clap emits help on `--help`); a hand-rolled parser must handle it
   explicitly, or `--help` will fall into your default action.
 
+### Ending the script from a tool
+
+`Tool::execute_flow` is the method the kernel calls; its default runs `execute` and returns `ToolFlow::Normal`, which is right for almost every tool. Override it only when your tool runs a user function or script on the caller's behalf and an `exit` there must end the caller's script. Return `ToolFlow::Exit(result)`; the script stops and `result.code` is its exit status.
+
+```rust
+async fn execute_flow(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ToolFlow {
+    let result = self.run_user_function(args, ctx).await;
+    if result.code == 7 { ToolFlow::Exit(result) } else { ToolFlow::Normal(result) }
+}
+```
+
+An `Exit` ends only the stage in a multi-stage pipeline, inside `$( )`, and in a background job, as in bash. A tool reached through `KernelBackend::call_tool` (for example a registry passed to `LocalBackend::with_tools`) has no flow channel, so there an `Exit` becomes the result's status and the script goes on.
+
 ### Verbatim argv: a tool that parses its own grammar
 
 ```rust
@@ -1169,6 +1204,12 @@ redirect target (`> "out 1"`) follows the same rule. Heredoc delimiters,
 here-string targets, and merges (`2>&1`) stay `Plain`.
 
 `Kernel::plan_program(source)` is the same read as a method on a kernel.
+
+Brace groups have statement kind `group`; a redirected compound has kind `redirected`. Each command in that body reports its own redirects followed by enclosing compound redirects, innermost first. A classifier therefore sees the write in `{ cat input; } > output` on the planned `cat` command. The same rule applies to commands in nested branches, loops, groups, and command substitutions. Substitutions retain enclosing redirects even when stdout is captured, so classification refuses hidden writes rather than omitting them. A substitution in a redirect target runs before that compound redirect takes effect, and reports only redirects from any enclosing body.
+
+A redirected compound with no planned body command, or with a here-doc, is a validation refusal (`E024` or `E025`, exit 2). Runtime checks enforce the same rules with validation disabled. Planning alone still returns parse information for those statements; use validation before executing a plan. A brace group runs in the current shell and follows the existing compound-stage session and buffering rules.
+
+The current statement kind names are `assignment`, `command`, `pipeline`, `if`, `for`, `while`, `case`, `group`, `redirected`, `break`, `continue`, `return`, `exit`, `tooldef`, `test`, `arith`, `and_chain`, `or_chain`, `env_scoped`, `not`, and `empty`. These are statement kinds, separate from the live command classification returned by `classify_command`.
 
 Neither returns a version — they hand back statements, not a document. An
 embedder composing its own plan document reads `kaish_kernel::KAISH_VERSION`

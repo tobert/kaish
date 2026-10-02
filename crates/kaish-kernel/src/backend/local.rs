@@ -321,6 +321,13 @@ impl KernelBackend for LocalBackend {
         Ok(self.vfs.stat(path).await?)
     }
 
+    async fn stat_write_parent(&self, path: &Path) -> BackendResult<DirEntry> {
+        if self.vfs.read_only_at(path)? {
+            return Err(BackendError::ReadOnly);
+        }
+        Ok(self.vfs.stat_backing(path).await?)
+    }
+
     async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()> {
         self.vfs.set_mtime(path, mtime).await?;
         Ok(())
@@ -409,8 +416,9 @@ impl KernelBackend for LocalBackend {
             BackendError::ToolNotFound(format!("{}: command not found", name))
         })?;
 
-        // Execute the tool and convert ExecResult to ToolResult
-        let exec_result = tool.execute(args, ctx).await;
+        // The backend seam returns a ToolResult, which has no flow channel:
+        // an `Exit` becomes the result's status here.
+        let exec_result = tool.execute_flow(args, ctx).await.into_result();
         Ok(exec_result.into())
     }
 

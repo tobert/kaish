@@ -11,6 +11,8 @@
 //! - [`Tool`] — the trait every command implements. Its `execute` takes a
 //!   `&mut dyn ToolCtx`, so the concrete kernel context never leaks into the
 //!   public API.
+//!   A tool that must end the caller's script overrides `Tool::execute_flow`
+//!   and returns [`ToolFlow::Exit`]; the default is [`ToolFlow::Normal`].
 //! - [`ToolCtx`] — the **trimmed** execution context. It exposes only what a
 //!   well-behaved, portable tool needs (backend I/O, cwd, variable access,
 //!   output format). Trusted in-tree builtins that need deeper kernel state
@@ -43,5 +45,5 @@ pub use tool::{is_global_output_flag, validate_against_schema, Tool};
 // depend on just `kaish-tool-api` for the common case.
 pub use kaish_types::{
     global_flag_value_is_truthy, ArgBinding, ExecResult, OutputData, OutputFormat, ParamSchema,
-    ToolArgs, ToolSchema, Value,
+    ToolArgs, ToolFlow, ToolSchema, Value,
 };
