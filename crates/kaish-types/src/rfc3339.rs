@@ -253,9 +253,9 @@ mod tests {
 
     #[test]
     fn non_ascii_input_is_an_error_not_a_panic() {
-        // A multi-byte character at every position the parser slices or
-        // indexes: inside the year, at a separator, at the T, in the time
-        // fields, in the fraction, and at the zone.
+        // The first case straddles the end of the seconds slice, the one
+        // edge that used to panic. The rest put a multi-byte character across
+        // the timestamp; each must be an error, whichever check rejects it.
         for text in [
             "2026-08-02T14:29:0\u{e9}.1Z",
             "20\u{e9}6-08-02T14:29:01.1Z",
