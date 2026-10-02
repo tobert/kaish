@@ -581,7 +581,7 @@ pub enum OutputFormat {
 /// Success prints the data unwrapped. Any non-zero exit prints the envelope
 /// `{"code":N,"error":"..."}` instead, including exits that are answers rather
 /// than mistakes (`grep` no-match, `diff` differs). `error` is the stderr text,
-/// empty when the command wrote none. Partial results ride along under `data`
+/// empty when the command wrote none. Partial results stay under `data`
 /// (structured) or `output` (text). Apps check the exit code, then `error`.
 /// An unchanged failure formatted again in-process keeps its existing envelope.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
