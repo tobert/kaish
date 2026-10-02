@@ -30,12 +30,13 @@ pub struct Env;
 /// be reflected as named clap positionals cleanly, so `execute` reads the raw
 /// `ToolArgs` directly: `-0`/`-i`/`-u` off `flags`/`named`, and every
 /// `VAR=value` override off `positional` — `env` is not on
-/// `WORD_ASSIGN_BUILTINS`, so the runtime binder stringifies a `key=value` word
-/// into a positional rather than into `named`.
+/// `WORD_ASSIGN_BUILTINS`, so the binder stringifies a `key=value` word into a
+/// positional rather than into `named`.
 ///
-/// `Tool::validate` sees a different decomposition: the validation binder
-/// routes every `key=value` into `named` regardless of that allowlist. The
-/// check below has to cover both shapes for that reason.
+/// The schema sets `options_end_at_operand`: env's own options end at the
+/// first operand, and every word from there on (flags included) is
+/// `positional` in source order. Both binders do this, so `Tool::validate`
+/// sees what `execute` does.
 #[derive(Parser, Debug)]
 #[command(name = "env", about = "Print environment variables or run command with modified environment")]
 struct EnvArgs {
@@ -54,7 +55,7 @@ struct EnvArgs {
     /// back out). The actual collection uses `collect_unset_vars(&args)` which
     /// reads from the raw ToolArgs — same pattern as sed's `collect_expressions`.
     /// This field is a validation sink only.
-    #[arg(short = 'u', long = "u", action = clap::ArgAction::Append)]
+    #[arg(short = 'u', long = "u", action = clap::ArgAction::Append, allow_hyphen_values = true)]
     u: Vec<String>,
 
     #[command(flatten)]
@@ -78,8 +79,10 @@ impl Tool for Env {
             [
                 ("Print environment", "env"),
                 ("Run with modified env", "env MY_VAR=hello command"),
+                ("Flags belong to the command", "env CC=clang make -C build"),
             ],
         )
+        .with_options_end_at_operand()
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
@@ -87,28 +90,17 @@ impl Tool for Env {
         let mut issues = validate_against_schema(args, &schema);
 
         // `env` names variables in argv words, so no assignment reaches the
-        // walker and the check has to live here.
-        //
-        // Two shapes have to be covered, because the validation binder and the
-        // runtime binder decompose `env` differently. An unquoted `VAR=value`
-        // reaches validate in `named`, alongside env's own flags — so skip the
-        // names the schema declares and judge the rest.
-        let own: std::collections::HashSet<&str> =
-            schema.params.iter().map(|p| p.name.as_str()).collect();
-        issues.extend(
-            args.named
-                .keys()
-                .filter(|key| !own.contains(key.as_str()))
-                .filter_map(|key| super::mixed_script_issue(key)),
-        );
-
-        // A quoted `'VAR=value'` stays one positional word in both binders, and
-        // `execute` applies it as an override all the same — so judging only
-        // `named` would set a variable nobody warned about. Stop at the first
-        // word without `=`, exactly where `execute` stops: past that is the
-        // command, and its arguments are not env's to name.
+        // walker and the check has to live here. The binder keeps every word
+        // from the first operand on in `positional`, in source order, for
+        // both the validation and runtime binders: the words before the
+        // command are the variables `execute` sets, and the words after it
+        // belong to the command. Stop at the first word without `=`, exactly
+        // where `execute` stops.
         for word in &args.positional {
             let Value::String(word) = word else { break };
+            if word == "--" {
+                continue;
+            }
             let Some(eq) = word.find('=') else { break };
             issues.extend(super::mixed_script_issue(&word[..eq]));
         }
@@ -169,6 +161,12 @@ impl Tool for Env {
                 }
             };
 
+            // `env A=1 -- cmd` has always run `cmd`. GNU reads that `--` as
+            // the command's name and fails; kaish skips it.
+            if arg_str == "--" {
+                continue;
+            }
+
             // Check if it's a VAR=value assignment
             if let Some(eq_pos) = arg_str.find('=') {
                 let name = &arg_str[..eq_pos];
@@ -205,9 +203,16 @@ impl Tool for Env {
             other => value_to_string(other),
         };
 
+        // A numeral spelled `-0` or `007` reaches the command as written.
         let cmd_args: Vec<String> = args.positional[cmd_idx + 1..]
             .iter()
-            .map(value_to_string)
+            .enumerate()
+            .map(|(offset, v)| {
+                args.positional_raw
+                    .get(&(cmd_idx + 1 + offset))
+                    .cloned()
+                    .unwrap_or_else(|| value_to_string(v))
+            })
             .collect();
 
         #[cfg(feature = "subprocess")]
