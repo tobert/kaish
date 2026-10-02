@@ -1791,3 +1791,101 @@ shell_compat! {
     script: "echo \"foo~bar\"",
     eq: "foo~bar",
 }
+
+// ---- `exit` inside a function ends the script ------------------------------
+// A function call is not a boundary for `exit`: it ends the whole script,
+// and `return` is what stops at the function.
+
+shell_compat! {
+    name: function_exit_ends_script,
+    script: "f(){ exit 4; }; f; echo after",
+    eq: "",
+    exit: 4,
+}
+
+shell_compat! {
+    name: function_exit_keeps_output_written_before,
+    script: "f(){ echo before; exit 4; }; f; echo after",
+    eq: "before",
+    exit: 4,
+}
+
+shell_compat! {
+    name: function_exit_nested_call_ends_script,
+    script: "g(){ exit 3; }; f(){ g; echo in-f; }; f; echo after",
+    eq: "",
+    exit: 3,
+}
+
+shell_compat! {
+    name: function_exit_inside_brace_group_ends_script,
+    script: "f(){ { exit 4; }; echo in-f; }; f; echo after",
+    eq: "",
+    exit: 4,
+}
+
+shell_compat! {
+    name: function_exit_inside_loop_ends_script,
+    script: "f(){ for i in 1 2 3; do echo $i; exit 5; done; }; f; echo after",
+    eq: "1",
+    exit: 5,
+}
+
+shell_compat! {
+    name: function_exit_inside_if_condition_ends_script,
+    script: "f(){ exit 6; }; if f; then echo yes; else echo no; fi; echo after",
+    eq: "",
+    exit: 6,
+}
+
+shell_compat! {
+    name: function_exit_in_and_chain_ends_script,
+    script: "f(){ exit 7; }; true && f; echo after",
+    eq: "",
+    exit: 7,
+}
+
+shell_compat! {
+    name: function_return_stops_at_the_function,
+    script: "f(){ return 2; }; f; echo $?",
+    eq: "2",
+    exit: 0,
+}
+
+shell_compat! {
+    name: function_return_in_nested_call_does_not_end_caller,
+    script: "g(){ return 3; }; f(){ g; echo in-f $?; }; f; echo after",
+    eq: "in-f 3\nafter",
+    exit: 0,
+}
+
+// `exit` inside `$( )` ends only the substitution.
+shell_compat! {
+    name: function_exit_in_command_substitution_ends_only_the_substitution,
+    script: "f(){ echo hi; exit 4; }; x=$(f); echo \"$x $?\"",
+    eq: "hi 4",
+    exit: 0,
+}
+
+// A pipeline stage is a subshell in bash, so the exit ends only that stage.
+shell_compat! {
+    name: function_exit_as_pipeline_first_stage_ends_only_the_stage,
+    script: "f(){ echo hi; exit 4; }; f | cat; echo after",
+    eq: "hi\nafter",
+    exit: 0,
+}
+
+shell_compat! {
+    name: function_exit_as_pipeline_last_stage_ends_only_the_stage,
+    script: "f(){ cat; exit 4; }; echo hi | f; echo after",
+    eq: "hi\nafter",
+    exit: 0,
+}
+
+// `exit` in a sourced file ends the shell, like inside a function.
+shell_compat! {
+    name: source_exit_ends_script,
+    script: "printf 'echo in-source\\nexit 4\\n' > /tmp/kaish-function-exit-source.sh; source /tmp/kaish-function-exit-source.sh; echo after",
+    eq: "in-source",
+    exit: 4,
+}
