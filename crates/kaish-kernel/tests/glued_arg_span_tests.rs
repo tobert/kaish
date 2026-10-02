@@ -145,6 +145,8 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
         (r"ec\ho\ *", "contains a backslash escape and an unquoted glob"),
         (r"[[ a == a\ * ]]", "contains a backslash escape and an unquoted glob"),
         (r"~/a\ b", "home-relative command paths are not supported"),
+        ("for i in 1; do break -1; done", "loop count must be at least 1"),
+        ("for i in 1; do continue 0; done", "loop count must be at least 1"),
     ];
     for (source, expected) in cases {
         let errors = parse(source).expect_err("must be a parse error");
@@ -180,7 +182,7 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
 fn parser_custom_guard_count_is_pinned() {
     const PARSER_SOURCE: &str = include_str!("../src/parser.rs");
     // Four escaped-word guards: argv, command globs, command tilde, comparison.
-    const EXPECTED: usize = 19;
+    const EXPECTED: usize = 20;
     let found = PARSER_SOURCE.matches("Rich::custom(").count();
     assert_eq!(
         found, EXPECTED,

@@ -175,6 +175,30 @@ pub struct ExecResult {
     pub stderr_published_len: usize,
 }
 
+/// How a tool's run ends: normally, or by ending the script.
+///
+/// `Normal` is the case for nearly every tool. `Exit` is for a tool that runs
+/// a user function or script on the caller's behalf (`timeout` running a
+/// function that calls `exit`): the script stops, and the result's `code` is
+/// its exit status. A tool built on `Tool::execute` alone never produces it.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ToolFlow {
+    /// The tool finished; the script goes on.
+    Normal(ExecResult),
+    /// The tool finished and the script ends with `result.code`.
+    Exit(ExecResult),
+}
+
+impl ToolFlow {
+    /// The result, whichever way the tool ended. An `Exit` keeps its code.
+    pub fn into_result(self) -> ExecResult {
+        match self {
+            ToolFlow::Normal(result) | ToolFlow::Exit(result) => result,
+        }
+    }
+}
+
 impl ExecResult {
     /// End a kaish diagnostic on its own line: empty stays empty; anything
     /// else ends with exactly one `\n`.

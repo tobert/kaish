@@ -416,8 +416,9 @@ impl KernelBackend for LocalBackend {
             BackendError::ToolNotFound(format!("{}: command not found", name))
         })?;
 
-        // Execute the tool and convert ExecResult to ToolResult
-        let exec_result = tool.execute(args, ctx).await;
+        // The backend seam returns a ToolResult, which has no flow channel:
+        // an `Exit` becomes the result's status here.
+        let exec_result = tool.execute_flow(args, ctx).await.into_result();
         Ok(exec_result.into())
     }
 

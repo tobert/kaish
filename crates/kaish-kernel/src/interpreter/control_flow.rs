@@ -100,6 +100,23 @@ impl ControlFlow {
         }
     }
 
+    /// The result at a boundary that ends the signal's reach: a subshell
+    /// (pipeline stage, `$( )`, background job) or a program of its own. An
+    /// `exit` becomes the result's code; the other signals give up their
+    /// result unchanged.
+    pub fn into_absorbed_result(self) -> ExecResult {
+        match self {
+            ControlFlow::Normal(result)
+            | ControlFlow::Break { result, .. }
+            | ControlFlow::Continue { result, .. } => result,
+            ControlFlow::Return { value } => value,
+            ControlFlow::Exit { code, mut result } => {
+                result.code = code;
+                result
+            }
+        }
+    }
+
     /// Get the result if this is normal flow.
     pub fn into_result(self) -> Option<ExecResult> {
         match self {
