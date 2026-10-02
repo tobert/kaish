@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     if result.code != 0 {
         eprintln!("script failed: {}", result.err);
     }
-    println!("{}", result.text_out());
+    print!("{}", result.text_out());
 
     Ok(())
 }
@@ -43,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
 `ExecResult` exposes stdout via the `text_out()` accessor (it materializes
 structured output when a builtin returned a table or tree); `code`, `err`,
 and `data` are public fields.
+
+Print stdout verbatim. Lists, tables, and trees end their last text row with
+a newline; text nodes keep their written bytes, including an absent final
+newline. JSON output keeps its structure.
 
 ## The result contract
 
@@ -935,6 +939,27 @@ Distinct from `.with_raw_argv()`, which also keeps source order but binds into
 `positional` and does not lift the global flags. `raw_argv` serves a
 position-sensitive POSIX command (`test`, `kill`); verbatim serves a tool with
 its own parser.
+
+### Tools that run another command
+
+`.with_options_end_at_operand()` marks a tool that wraps a command, such as
+`timeout`, `env`, and `exec`. The binder reads the tool's own options
+(typed, as for any tool) up to the first operand, then binds every word from
+that operand on as `positional`, in source order, flags included. `timeout 5
+sh -c 'exit 3'` binds `5`, `sh`, `-c`, `exit 3`. An option's value is not an
+operand (`env -u NAME cmd`), and `--` before the first operand ends the
+options. An option consumes its next word even when that word looks like a
+flag or `--`. The validation binder follows the same rule. Verbatim binding
+and `raw_argv` take precedence over this setting.
+
+`ToolArgs::positional_syntax` records the original operator kind for each
+unquoted flag, assignment, or `--` word in the tail. Quoted and computed
+positionals have no entry. Named and assignment values in `ArgumentSyntax`
+are already evaluated. `positional_raw` retains literal numeral spellings.
+A wrapper that dispatches through the kernel must use these fields to keep
+argument kinds and types; reconstructing flags from text would change
+`timeout 5 echo "-n"` into a flag. Forward evaluated values rather than
+original expressions, so substitutions run once.
 
 ### Wrapped commands: an external program as a tool
 

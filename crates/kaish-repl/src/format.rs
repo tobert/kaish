@@ -57,7 +57,13 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
 pub fn format_output_data(output: &OutputData, context: OutputContext) -> String {
     // Non-interactive contexts use canonical string
     if !matches!(context, OutputContext::Interactive) {
-        return output.to_canonical_string();
+        // The canonical form ends its last line with a newline; the caller
+        // adds one when printing, so a list or table drops it here.
+        let mut canonical = output.to_canonical_string();
+        if output.as_text().is_none() && !canonical.is_empty() {
+            assert_eq!(canonical.pop(), Some('\n'), "structured canonical output must end with a newline");
+        }
+        return canonical;
     }
 
     // Simple text output
@@ -320,6 +326,20 @@ fn colorize_entry(name: &str, entry_type: Option<EntryType>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piped_display_removes_only_the_canonical_line_terminator() {
+        let cases = [
+            (OutputData::nodes(vec![OutputNode::new("row\n")]), "row\n"),
+            (OutputData::table(vec!["NAME".into(), "CELL".into()],
+                vec![OutputNode::new("row").with_cells(vec!["cell\n".into()])]), "row\tcell\n"),
+            (OutputData::new(), ""),
+            (OutputData::text("plain\n\n"), "plain\n\n"),
+        ];
+        for (data, expected) in cases {
+            assert_eq!(format_output_data(&data, OutputContext::Piped), expected);
+        }
+    }
 
     /// Line-anchored rows print the builtin's own text, one line per line.
     ///

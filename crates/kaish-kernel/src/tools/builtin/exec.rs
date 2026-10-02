@@ -70,6 +70,7 @@ impl Tool for Exec {
                 ("Replace shell with a command", "exec cargo build --release"),
             ],
         )
+        .with_options_end_at_operand()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

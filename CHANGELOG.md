@@ -12,6 +12,13 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- Backslash quoting outside strings: `a\ b` is one literal word and
+  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
+  match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
+  escapes with unquoted globs is an error that names the quoted form.
+- `jq -R` reads each text line as a string; `-R -s` reads the whole input
+  as one string. A failing input line is reported with exit 1 while other
+  lines still run. `-n -R` is refused with an alternative.
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
@@ -31,6 +38,11 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
+  an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
+  refuse extra operands. `head -c` reads a byte prefix of each file.
+- Lists, tables, and trees end their last text line with a newline, so
+  `ls dir | wc -l` counts every row.
 - Recursive `grep` skips devices, FIFOs, sockets, and discovered symlinks
   under `-r`; `-R` reads file symlinks but does not enter linked
   directories. Errors keep readable matches and exit 2. Recursive and

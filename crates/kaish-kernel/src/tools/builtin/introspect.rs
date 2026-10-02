@@ -220,7 +220,7 @@ impl Tool for Mounts {
         // Build the text-mode budget summary line (appended after the table).
         let budget_summary = budget.map(|b| {
             format!(
-                "\nvfs-memory budget: {} used / {} limit / {} remaining",
+                "vfs-memory budget: {} used / {} limit / {} remaining\n",
                 format_resident(Some(b.used())),
                 format_resident(Some(b.limit())),
                 format_resident(Some(b.remaining())),

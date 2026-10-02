@@ -198,6 +198,9 @@ impl Tool for Ls {
                         }
                     }
                 }
+                if !text.is_empty() {
+                    text.push('\n');
+                }
                 let mut result =
                     ExecResult::with_output_and_text(OutputData::nodes(nodes), text);
                 if !errors.is_empty() {
@@ -655,7 +658,13 @@ impl Ls {
         } else {
             OutputData::nodes(dir_nodes)
         };
-        let mut result = ExecResult::with_output_and_text(output, text_output.trim_end().to_string());
+        let mut result = ExecResult::with_output_and_text(output, {
+            let mut text = text_output.trim_end().to_string();
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text
+        });
         // The readable parts of the walk still print above; a nonzero exit
         // plus the accumulated stderr is what tells the difference between
         // "the tree is genuinely this small" and "part of it was skipped."

@@ -297,6 +297,16 @@ pub struct ToolSchema {
     /// See [`ToolSchema::with_glob_passthrough`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub glob_passthrough: bool,
+    /// The tool wraps another command: the binder reads the tool's own
+    /// options up to the first operand and binds everything from that word on
+    /// as plain `positional` words, in source order.
+    ///
+    /// `timeout 5 sh -c 'exit 3'` binds `5`, `sh`, `-c`, `exit 3`; `-c`
+    /// belongs to `sh`. Default false: every flag-shaped word is the tool's own.
+    /// Verbatim binding and `raw_argv` take precedence over this setting.
+    /// See [`ToolSchema::with_options_end_at_operand`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub options_end_at_operand: bool,
     /// Dotted effect ids this tool declares (`fs.remove`, `fs.overwrite`,
     /// …) — what an embedder reads off `tools --json` to learn a tool's
     /// destructive effects instead of recognizing tool names. Empty for a
@@ -324,6 +334,7 @@ impl ToolSchema {
             raw_argv: false,
             arg_binding: ArgBinding::Typed,
             glob_passthrough: false,
+            options_end_at_operand: false,
             typed_substitution: false,
             operations: Vec::new(),
         }
@@ -391,6 +402,13 @@ impl ToolSchema {
     /// See [`ToolSchema::glob_passthrough`].
     pub fn with_glob_passthrough(mut self) -> Self {
         self.glob_passthrough = true;
+        self
+    }
+
+    /// Declare that this tool wraps another command (`timeout`, `env`, `exec`):
+    /// the tool's own options end at the first operand. See [`ToolSchema::options_end_at_operand`].
+    pub fn with_options_end_at_operand(mut self) -> Self {
+        self.options_end_at_operand = true;
         self
     }
 
@@ -465,10 +483,43 @@ impl ToolSchema {
     }
 }
 
+/// Syntax of an operator word kept in a wrapper's positional arguments.
+/// Data words have no entry in [`ToolArgs::positional_syntax`]. Named values
+/// are already evaluated; forwarding them must not run an expansion again.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ArgumentSyntax {
+    /// An unquoted short flag, without its leading dash.
+    ShortFlag(String),
+    /// An unquoted long flag, without its leading dashes.
+    LongFlag(String),
+    /// An unquoted `--key=value` word and its evaluated value.
+    Named {
+        key: String,
+        value: Value,
+        raw: Option<String>,
+    },
+    /// An unquoted `key=value` word and its evaluated value.
+    WordAssign {
+        key: String,
+        value: Value,
+        raw: Option<String>,
+    },
+    /// An unquoted end-of-options marker.
+    DoubleDash,
+}
+
 /// Parsed arguments ready for tool execution.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ToolArgs {
+    /// Original operator kinds for a wrapper's positional words, keyed by
+    /// index into `positional`. Empty outside `options_end_at_operand` binding.
+    /// Quoted and computed data words have no entry. Use with `positional_raw`
+    /// to forward a command without guessing syntax from its text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub positional_syntax: BTreeMap<usize, ArgumentSyntax>,
     /// Positional arguments in order.
     pub positional: Vec<Value>,
     /// Verbatim source text for a `positional` entry whose typed `Display`
