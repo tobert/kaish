@@ -1889,3 +1889,17 @@ shell_compat! {
     eq: "in-source",
     exit: 4,
 }
+
+shell_compat! {
+    name: function_exit_in_while_condition_ends_script,
+    script: "f(){ echo cond; exit 8; }; while f; do echo body; done; echo after",
+    eq: "cond",
+    exit: 8,
+}
+
+shell_compat! {
+    name: function_exit_in_condition_and_chain_skips_right_side,
+    script: "f(){ exit 0; }; if f && echo right; then echo yes; fi; echo after",
+    eq: "",
+    exit: 0,
+}

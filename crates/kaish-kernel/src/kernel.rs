@@ -2850,8 +2850,18 @@ impl Kernel {
                     stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
                     background: false,
                 };
-                let result = Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await?;
+                let (result, exit_requested) =
+                    Box::pin(self.execute_pipeline_flow(&pipeline, &mut *ctx)).await?;
                 self.update_last_result(&result).await;
+
+                // A function or `source` ran `exit`: end the statement list,
+                // keeping the output written before it.
+                // The code is the result's, not the requested one: the spill
+                // contract may have remapped it to 3 (`original_code` keeps it).
+                if exit_requested.is_some() {
+                    let code = result.code;
+                    return Ok(ControlFlow::Exit { code, result });
+                }
 
                 // Check for error exit mode (set -e)
                 if !result.ok() {
@@ -2869,8 +2879,18 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await?;
+                let (result, exit_requested) =
+                    Box::pin(self.execute_pipeline_flow(pipeline, &mut *ctx)).await?;
                 self.update_last_result(&result).await;
+
+                // A function or `source` ran `exit`: end the statement list,
+                // keeping the output written before it.
+                // The code is the result's, not the requested one: the spill
+                // contract may have remapped it to 3 (`original_code` keeps it).
+                if exit_requested.is_some() {
+                    let code = result.code;
+                    return Ok(ControlFlow::Exit { code, result });
+                }
 
                 // Check for error exit mode (set -e)
                 if !result.ok() {
@@ -2897,6 +2917,10 @@ impl Kernel {
                     .eval_condition_async(&if_stmt.condition, &mut result, &mut *ctx)
                     .await
                     .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
+                if let Some(code) = ctx.exit_requested.take() {
+                    self.drain_stderr_into(&mut result, ctx).await;
+                    return Ok(ControlFlow::Exit { code, result });
+                }
 
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
@@ -3145,6 +3169,10 @@ impl Kernel {
                         .eval_condition_async(&while_loop.condition, &mut result, &mut *ctx)
                         .await
                         .map_err(|error| with_prior_output(std::mem::take(&mut result), error))?;
+                    if let Some(code) = ctx.exit_requested.take() {
+                        self.drain_stderr_into(&mut result, ctx).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
 
                     if !is_truthy(&cond_value) {
                         break;
@@ -3832,6 +3860,7 @@ impl Kernel {
             background_job: ec.background_job,
             background_stream_output: ec.background_stream_output,
             background_stream_stderr: ec.background_stream_stderr,
+            exit_requested: None,
             aliases: ec.aliases.clone(),
             ignore_config: ec.ignore_config.clone(),
             output_limit: ec.output_limit.clone(),
@@ -3851,13 +3880,24 @@ impl Kernel {
 
     /// Execute a pipeline.
     async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ExecResult> {
+        Ok(self.execute_pipeline_flow(pipeline, caller).await?.0)
+    }
+
+    /// Run a pipeline; the second value is the code of an `exit` that a
+    /// single-command pipeline's function or `source` ran, for the caller to
+    /// raise as `ControlFlow::Exit`.
+    async fn execute_pipeline_flow(
+        &self,
+        pipeline: &crate::ast::Pipeline,
+        caller: &mut ExecContext,
+    ) -> Result<(ExecResult, Option<i64>)> {
         if pipeline.stages.is_empty() {
-            return Ok(ExecResult::success(""));
+            return Ok((ExecResult::success(""), None));
         }
 
         // Handle background execution (`&` operator)
         if pipeline.background {
-            return self.execute_background(pipeline, caller).await;
+            return Ok((self.execute_background(pipeline, caller).await?, None));
         }
 
         // All commands go through the runner with the Kernel as dispatcher.
@@ -3906,6 +3946,7 @@ impl Kernel {
         ctx.stdin_data_rx = caller.stdin_data_rx.take();
 
         let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
+        let exit_requested = ctx.exit_requested.take();
 
         // `set -o pipefail`: the pipeline answers with the RIGHTMOST non-zero
         // stage, not the first. bash's `set -o pipefail; (exit 3) | (exit 4) |
@@ -3958,7 +3999,7 @@ impl Kernel {
         caller.pipe_stdout = ctx.pipe_stdout.take();
         caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
-        Ok(result)
+        Ok((result, exit_requested))
     }
 
     /// Execute a pipeline in the background.
@@ -4677,6 +4718,8 @@ impl Kernel {
         Box::pin(async move {
             match expr {
                 Expr::Command(cmd) => {
+                    // A stale request from an earlier site must not read as this command's.
+                    ctx.exit_requested = None;
                     let mut result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
                     // Truthiness comes from the command's OWN code, read before
                     // the spill contract can remap it. A capped `if seq 1
@@ -4711,6 +4754,10 @@ impl Kernel {
                 // side that short-circuits never runs, so it prints nothing.
                 Expr::BinaryOp { left, op, right } => {
                     let left_val = self.eval_condition_async(left, &mut *out, &mut *ctx).await?;
+                    // The left side ran `exit`: the right side must not run.
+                    if ctx.exit_requested.is_some() {
+                        return Ok(left_val);
+                    }
                     let short_circuits = match op {
                         BinaryOp::And => !is_truthy(&left_val),
                         BinaryOp::Or => is_truthy(&left_val),
@@ -5401,6 +5448,7 @@ impl Kernel {
         let mut accumulated = StatementAccumulator::new();
         // Held until the scope is restored, then propagated.
         let mut exec_error: Option<anyhow::Error> = None;
+        let mut exit_code: Option<i64> = None;
 
         for stmt in &def.body {
             match self.execute_stmt_flow(stmt, &mut *ctx).await {
@@ -5421,6 +5469,7 @@ impl Kernel {
                         ControlFlow::Exit { code, result: r } => {
                             accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
+                            exit_code = Some(code);
                             break;
                         }
                     }
@@ -5443,6 +5492,9 @@ impl Kernel {
         if let Some(e) = exec_error {
             return Err(with_prior_output(accumulated.into_prior_output(), e));
         }
+        // `exit` is not a function boundary: hand it to the caller, which
+        // ends the script. `return` stopped at the loop above.
+        ctx.exit_requested = exit_code;
         Ok(accumulated.finish())
     }
 
@@ -5970,6 +6022,8 @@ impl Kernel {
                         ControlFlow::Exit { code, result: r } => {
                             accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
+                            // `exit` in a sourced file ends the shell, as in bash.
+                            ctx.exit_requested = Some(code);
                             return Ok(accumulated.finish());
                         }
                     }
