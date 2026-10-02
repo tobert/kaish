@@ -196,6 +196,18 @@ impl VfsRouter {
             .unwrap_or_else(|| "/".to_string())
     }
 
+    /// Whether the filesystem owning this path refuses writes.
+    pub(crate) fn read_only_at(&self, path: &Path) -> io::Result<bool> {
+        let (fs, _) = self.find_mount(path)?;
+        Ok(fs.read_only())
+    }
+
+    /// Stat the owning filesystem without synthesizing mount ancestors.
+    pub(crate) async fn stat_backing(&self, path: &Path) -> io::Result<DirEntry> {
+        let (fs, relative) = self.find_mount(path)?;
+        fs.stat(&relative).await
+    }
+
     /// Find the mount point for a given path.
     ///
     /// Returns the mount and the path relative to that mount.

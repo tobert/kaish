@@ -22,6 +22,7 @@
 
 mod local;
 mod overlay;
+pub(crate) mod write_parent;
 
 pub use local::LocalBackend;
 pub use overlay::VirtualOverlayBackend;
