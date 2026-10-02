@@ -36,6 +36,13 @@ breaking entries are marked **BREAKING**.
 - **`grep -m` is a short alias for `--max-count`**, matching GNU grep; models
   wrote `grep -m 5 PATTERN file` from habit and got a usage error.
 
+### Changed
+
+- **BREAKING**: Plans report a fully literal argument or file redirect
+  target as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the
+  argument or unresolved path, `text` for display. Expanding words stay
+  `plain`. Job command strings use the plan's renderer.
+
 ### Fixed
 
 - `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after

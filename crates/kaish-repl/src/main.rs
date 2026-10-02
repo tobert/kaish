@@ -409,6 +409,10 @@ Options:
   --plan <command>             Analyze without running: every command, its
                                redirects, the variables it reads and writes,
                                and each heredoc body with its byte offset.
+                               A fully literal argument prints as
+                               {{"literal": {{"text", "value"}}}}, where value
+                               is the word the command receives; any other
+                               argument prints as {{"plain": text}}.
                                Executes nothing and touches no filesystem.
                                Prints {{"statements": [...]}} and exits 0, or
                                {{"errors": [...]}} and exits 2 for a program

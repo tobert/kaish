@@ -1135,6 +1135,37 @@ for planned in plan_program(src).map_err(|_errors| /* parse errors */ ())? {
 }
 ```
 
+#### Arguments: `Literal` and `Plain`
+
+Each entry in `cmd.args`, and each redirect target, is a `PlannedValue`:
+
+```rust
+use kaish_types::plan::PlannedValue;
+
+match arg {
+    // `kj wait --timeout "0"`: text is `'0'`, value is `0`.
+    PlannedValue::Literal { text, value } => { /* classify on value */ }
+    // `${LIMIT}`, `$(date)`, `*.rs`, `~/x`, `"a$x"`: known only at run time.
+    PlannedValue::Plain(text) => { /* contains an expansion */ }
+    _ => { /* a variant added later: treat as unclassified, never as safe */ }
+}
+```
+
+`Literal` means no variable, `$(...)`, `$((...))`, glob, or unquoted leading
+`~` expands anywhere in the word. Quoted tilde words such as `'~/x'` are
+literal. Its `value` is the source word after quotes and literal escapes are
+decoded, which is the argument an external command receives. A builtin may
+bind that word as a typed value. A redirect target's `value` is a path as
+written; execution resolves it against the working directory and mounts, so
+it is not necessarily absolute. `text` is the display rendering and may quote
+the word (`'0'`); never strip quotes from it. A flag or `--` is `Literal`
+with `value == text`. `--tail="5"` and `KEY=1` are `Literal` with the whole
+joined word as `value` (`--tail=5`, `KEY=1`). `--tail "5"` is two arguments,
+the flag and `5`. `arg.literal_value()` returns `Some(value)` for `Literal`
+and `None` for `Plain`; `arg.display()` returns the text for both. A file
+redirect target (`> "out 1"`) follows the same rule. Heredoc delimiters,
+here-string targets, and merges (`2>&1`) stay `Plain`.
+
 `Kernel::plan_program(source)` is the same read as a method on a kernel.
 
 Neither returns a version — they hand back statements, not a document. An
