@@ -1532,7 +1532,6 @@ shell_compat! {
     eq: "</home/t>\n</home/t/x>\n</home/t/a~b>",
 }
 
-
 shell_compat! {
     name: digit_leading_dash_words_are_literal,
     script: "printf '<%s>\\n' 9- 1-3,5- 2,4- 1.5- 1-- -5- -1-3",
