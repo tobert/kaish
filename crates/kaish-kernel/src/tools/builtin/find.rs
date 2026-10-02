@@ -164,11 +164,9 @@ impl Tool for Find {
             // walked entry. A link to a directory is a leaf, not descended.
             let start_stat = match ctx.backend.lstat(Path::new(&resolved_path)).await {
                 Ok(info) => info,
-                Err(_) => {
-                    return ExecResult::failure(
-                        1,
-                        format!("find: '{}': No such file or directory", start_path),
-                    );
+                Err(e) => {
+                    record_walk_error(&walk_errors, start_path, &e.to_string());
+                    continue;
                 }
             };
 
@@ -435,7 +433,7 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(!result.ok());
-        assert!(result.err.contains("No such file or directory"));
+        assert!(result.err.starts_with("find: '/nonexistent': not found"), "{}", result.err);
     }
 
     #[tokio::test]

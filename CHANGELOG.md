@@ -115,9 +115,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
-- `find` reports an entry it cannot read or stat (`find: './d': permission
-  denied`), skips it, keeps walking, and exits 1. `-mtime` and `-size` are
-  false for an entry with no stat data; they passed it and printed it.
+- `find` reports an entry or start path it cannot read or stat (`find: './d':
+  permission denied`), keeps going, and exits 1. `-mtime` and `-size` are false
+  for an entry with no stat data; they passed it and printed it.
 - `exit` inside a function or a sourced file ends the script, as in bash;
   it returned to the caller. `return` still stops at the function, `$( )`
   absorbs the exit, and a pipeline stage ends only itself.
