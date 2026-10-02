@@ -1097,10 +1097,8 @@ impl Grep {
             ExecResult::with_output_and_text(output, total_output)
         };
 
-        // A read error is exit 2 and stderr, overriding the match-based code —
-        // the error must not be swallowed by matches found in the readable
-        // files. (`quiet` keeps a 0 on a match per POSIX; everything else
-        // surfaces the trouble.)
+        // A read error exits 2 and prints to stderr, even when other files
+        // matched. `quiet` keeps exit 0 on a match, as POSIX requires.
         if !error_text.is_empty() {
             result.err.push_str(&error_text);
             if !(quiet && total_matches > 0) {

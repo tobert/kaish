@@ -1408,9 +1408,21 @@ grep -R -l TODO src
 grep -r -m 2 TODO src
 ```
 
-`grep -r` skips symlinks, devices, FIFOs and sockets found inside a directory. `-R` reads symlinks to regular files, reports broken links, and skips linked directories and special files. Neither mode enters a linked directory found inside the walk. A path explicitly given as an operand is read, including a symlink or device; an explicitly named directory is walked.
+`grep -r` skips symlinks, devices, FIFOs and sockets found inside a directory.
+`-R` reads symlinks to regular files, reports broken links, and skips linked
+directories and special files. Neither mode enters a linked directory found
+inside the walk. A path explicitly given as an operand is read, including a
+symlink or device; an explicitly named directory is walked.
 
-Walk and read errors name the path on stderr, retain matches from readable files and exit 2. `-q` exits 0 on a match even after an error. A completed search exits 0 with matches or 1 without matches. Recursive and multi-file searches read 256 KiB chunks; `-q` and `-l` stop on the first match per file, and `-m N` stops after N selected lines per file. Context flags do not force full reads for `-q`, `-l` or `-c`. `-m 0` reads no file contents. Ordinary text scanning retains the unfinished line and output results; context output, multiline matching, explicit encoding and byte-order marks still require whole-file buffering.
+Walk and read errors name the path on stderr, retain matches from readable
+files and exit 2. `-q` exits 0 on a match even after an error. A completed
+search exits 0 with matches or 1 without matches. Recursive and multi-file
+searches read 256 KiB chunks; `-q` and `-l` stop on the first match per file,
+and `-m N` stops after N selected lines per file. Context flags do not force
+full reads for `-q`, `-l` or `-c`. `-m 0` reads no file contents. Ordinary text
+scanning retains the unfinished line and output results; context output,
+multiline matching, explicit encoding and byte-order marks still require
+whole-file buffering.
 
 ### Ignore-aware filtering (`.gitignore`, `kaish-ignore`)
 
