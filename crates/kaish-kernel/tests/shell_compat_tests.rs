@@ -1903,3 +1903,40 @@ shell_compat! {
     eq: "",
     exit: 0,
 }
+
+// `$( )` absorbs the exit wherever it sits: a `for` word list, an `if`
+// condition, a `[[ ]]` operand.
+shell_compat! {
+    name: function_exit_in_for_word_substitution_is_absorbed,
+    script: "f(){ echo a; exit 3; }; for x in $(f); do echo got-$x; done; echo after",
+    eq: "got-a\nafter",
+    exit: 0,
+}
+
+shell_compat! {
+    name: function_exit_in_condition_substitution_is_absorbed,
+    script: "f(){ echo hi; exit 4; }; if [ \"$(f)\" = hi ]; then echo yes; fi; echo after",
+    eq: "yes\nafter",
+    exit: 0,
+}
+
+shell_compat! {
+    name: function_exit_negated_ends_script,
+    script: "f(){ exit 3; }; ! f; echo after",
+    eq: "",
+    exit: 3,
+}
+
+shell_compat! {
+    name: function_exit_negated_in_condition_ends_script,
+    script: "f(){ exit 3; }; if ! f; then echo no; fi; echo after",
+    eq: "",
+    exit: 3,
+}
+
+shell_compat! {
+    name: function_exit_in_or_chain_ends_script,
+    script: "f(){ exit 3; }; false || f; echo after",
+    eq: "",
+    exit: 3,
+}
