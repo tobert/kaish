@@ -506,7 +506,12 @@ async fn exit_sets_the_status_while_the_value_survives() {
         let k = kernel().await;
         let run = define(&k, wrapper, "test 1 -eq abc; exit 0").await;
         let outcome = k.execute(&format!("if {run}; then echo y; else echo n; fi")).await;
-        let decided = matches!(&outcome, Ok(result) if result.text_out() == "y\n");
+        // A function or sourced file's `exit` ends the whole script, as in
+        // bash, so neither branch runs; a script run by name absorbs it.
+        let decided = match wrapper {
+            "script" => matches!(&outcome, Ok(result) if result.text_out() == "y\n"),
+            _ => matches!(&outcome, Ok(result) if result.code == 0 && result.text_out().is_empty()),
+        };
         failures.check(decided, format!("{wrapper}: `exit 0` decides the body: {outcome:?}"));
 
         let k = kernel().await;
