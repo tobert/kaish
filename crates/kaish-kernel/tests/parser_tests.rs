@@ -1520,13 +1520,13 @@ fn glued_positional_after_double_dash_is_rejected() {
     assert!(msg.to_lowercase().contains("quote"), "should hint to quote: {msg}");
 }
 
-/// A spaced (non-glued) positional after `--` is unaffected.
+/// Keep unquoted operator syntax after `--`; the binder gives it operand meaning.
 #[test]
 fn spaced_positional_after_double_dash_still_parses() {
     let sexpr = one_stmt_sexpr("echo hi -- --this-is-data");
     assert!(sexpr.contains("(doubledash)"), "got: {sexpr}");
     assert!(
-        sexpr.contains(r#"(pos (string "--this-is-data"))"#),
+        sexpr.contains(r#"(longflag this-is-data)"#),
         "got: {sexpr}"
     );
 }

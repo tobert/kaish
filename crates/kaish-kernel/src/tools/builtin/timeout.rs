@@ -28,15 +28,17 @@ pub struct Timeout;
 /// clap-derived argv layer for timeout.
 ///
 /// `timeout` wraps a command — its positionals are `DURATION COMMAND ARGS...`.
-/// The inner command tokens may themselves look like flags (e.g. `timeout 5
-/// echo -n hello`), so the sink accepts arbitrary hyphenated values.
+/// The schema sets `options_end_at_operand`, so the binder keeps every word
+/// after the duration (flags included) in `positional`, and clap only sees
+/// them behind the `--` that `to_argv` writes.
 #[derive(Parser, Debug)]
 #[command(name = "timeout", about = "Run a command with a time limit; kills the child on elapsed")]
 struct TimeoutArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Duration (e.g. `5`, `5s`, `2m`) followed by the command and its arguments.
+    /// Duration (`5`, `5s`, `2m`), then the command and its arguments, passed
+    /// on as written: `timeout 5 sh -c 'exit 3'`. Options go before the duration.
     duration_and_command: Vec<String>,
 }
 
@@ -55,8 +57,10 @@ impl Tool for Timeout {
                 ("With seconds", "timeout 5 sleep 10"),
                 ("With duration suffix", "timeout 500ms curl example.com"),
                 ("Minutes", "timeout 2m cargo build"),
+                ("Flags belong to the command", "timeout 10 python3 -c 'print(1)'"),
             ],
         )
+        .with_options_end_at_operand()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -73,14 +77,19 @@ impl Tool for Timeout {
         };
         parsed.global.apply(ctx);
 
-        if args.positional.len() < 2 {
+        // `timeout 5 -- cmd` has always run `cmd`. GNU reads that `--` as the
+        // command's name and fails; kaish skips it.
+        let command_index = if matches!(args.positional.get(1), Some(Value::String(s)) if s == "--") { 2 } else { 1 };
+        let positional = &args.positional;
+
+        if positional.len() <= command_index {
             return ExecResult::failure(
                 2,
                 "timeout: usage: timeout DURATION COMMAND [ARGS...]",
             );
         }
 
-        let duration_str = match &args.positional[0] {
+        let duration_str = match &positional[0] {
             Value::String(s) => s.clone(),
             Value::Int(i) => i.to_string(),
             Value::Float(f) => f.to_string(),
@@ -105,7 +114,7 @@ impl Tool for Timeout {
             }
         };
 
-        let cmd_name = match &args.positional[1] {
+        let cmd_name = match &positional[command_index] {
             Value::String(s) => s.clone(),
             other => {
                 return ExecResult::failure(
@@ -115,10 +124,7 @@ impl Tool for Timeout {
             }
         };
 
-        let inner_args: Vec<Arg> = args.positional[2..]
-            .iter()
-            .map(|v| Arg::Positional(Expr::Literal(v.clone())))
-            .collect();
+        let inner_args = words_to_args(&args, command_index + 1);
 
         let inner_cmd = Command {
             name: cmd_name,
@@ -195,6 +201,38 @@ impl Tool for Timeout {
             Err(e) => crate::scheduler::pipeline::fault_result(e.context("timeout")),
         }
     }
+}
+
+/// Forward evaluated words using their original operator kinds and numeral text.
+fn words_to_args(args: &ToolArgs, start: usize) -> Vec<Arg> {
+    use kaish_types::ArgumentSyntax;
+    let expression = |value: &Value, raw: Option<&String>| match raw {
+        Some(raw) => Expr::NumericLiteral {
+            raw: raw.clone(),
+            value: value.clone(),
+        },
+        None => Expr::Literal(value.clone()),
+    };
+    args.positional
+        .iter()
+        .enumerate()
+        .skip(start)
+        .map(|(index, value)| match args.positional_syntax.get(&index) {
+            Some(ArgumentSyntax::ShortFlag(name)) => Arg::ShortFlag(name.clone()),
+            Some(ArgumentSyntax::LongFlag(name)) => Arg::LongFlag(name.clone()),
+            Some(ArgumentSyntax::Named { key, value, raw }) => Arg::Named {
+                key: key.clone(),
+                value: expression(value, raw.as_ref()),
+            },
+            Some(ArgumentSyntax::WordAssign { key, value, raw }) => Arg::WordAssign {
+                key: key.clone(),
+                value: expression(value, raw.as_ref()),
+            },
+            Some(ArgumentSyntax::DoubleDash) => Arg::DoubleDash,
+            Some(_) => panic!("unsupported forwarded argument syntax"),
+            None => Arg::Positional(expression(value, args.positional_raw.get(&index))),
+        })
+        .collect()
 }
 
 #[cfg(test)]
