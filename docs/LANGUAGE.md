@@ -645,7 +645,7 @@ tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
 tool 1>&2                       # merge stdout into stderr
-{ echo first; echo second; } > log
+{ echo a; echo b; } > log       # redirect the whole group
 while read line; do echo "$line"; done < input
 cmd 2>&1 | tee log.txt          # capture both streams
 
