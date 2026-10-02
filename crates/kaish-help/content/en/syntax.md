@@ -422,6 +422,17 @@ Zero matches is an error (exit code 1). The `glob` builtin receives its
 pattern as written — `glob **/*.rs` needs no quotes, takes multiple patterns,
 and adds `--exclude`, `--ftype`, and depth control.
 
+```sh
+grep -rn TODO src          # skip discovered symlinks, devices, FIFOs and sockets
+grep -R -l TODO src        # read file symlinks; do not enter linked directories
+```
+
+`grep` reads explicitly named paths. Walk and read errors name the path on stderr,
+keep other matches and exit 2; `-q` exits 0 on a match even after an error.
+Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the
+first match per file; `-m N` stops after N selected lines; `-m 0` reads no contents.
+Context output, multiline matching and encoding conversion still buffer whole files.
+
 ## Regex (grep, sed, awk)
 
 ```sh

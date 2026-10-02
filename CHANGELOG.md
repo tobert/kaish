@@ -43,6 +43,10 @@ breaking entries are marked **BREAKING**.
   refuse extra operands. `head -c` reads a byte prefix of each file.
 - Lists, tables, and trees end their last text line with a newline, so
   `ls dir | wc -l` counts every row.
+- Recursive `grep` skips devices, FIFOs, sockets, and discovered symlinks
+  under `-r`; `-R` reads file symlinks but does not enter linked
+  directories. Errors keep readable matches and exit 2. Recursive and
+  multi-file searches read bounded chunks; `-q`, `-l`, and `-m` stop early.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
   `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all

@@ -116,7 +116,7 @@ impl DevFs {
     fn entry(name: &str) -> DirEntry {
         DirEntry {
             name: name.to_string(),
-            kind: DirEntryKind::File,
+            kind: DirEntryKind::CharDevice,
             size: 0,
             modified: None,
             permissions: Some(Self::DEVICE_MODE),
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(fs.stat(Path::new("")).await.unwrap().kind, DirEntryKind::Directory);
         for dev in ["null", "zero", "urandom", "random"] {
             let e = fs.stat(Path::new(dev)).await.unwrap();
-            assert_eq!(e.kind, DirEntryKind::File, "{dev}");
+            assert_eq!(e.kind, DirEntryKind::CharDevice, "{dev} is a character device, as on Linux");
             assert_eq!(e.name, dev, "stat names the device");
         }
         assert_eq!(
