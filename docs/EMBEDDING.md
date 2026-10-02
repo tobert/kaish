@@ -1180,6 +1180,12 @@ here-string targets, and merges (`2>&1`) stay `Plain`.
 
 `Kernel::plan_program(source)` is the same read as a method on a kernel.
 
+Brace groups have statement kind `group`; a redirected compound has kind `redirected`. Each command in that body reports its own redirects followed by enclosing compound redirects, innermost first. A classifier therefore sees the write in `{ cat input; } > output` on the planned `cat` command. The same rule applies to commands in nested branches, loops, groups, and command substitutions. Substitutions retain enclosing redirects even when stdout is captured, so classification refuses hidden writes rather than omitting them. A substitution in a redirect target runs before that compound redirect takes effect, and reports only redirects from any enclosing body.
+
+A redirected compound with no planned body command, or with a here-doc, is a validation refusal (`E024` or `E025`, exit 2). Runtime checks enforce the same rules with validation disabled. Planning alone still returns parse information for those statements; use validation before executing a plan. A brace group runs in the current shell and follows the existing compound-stage session and buffering rules.
+
+The current statement kind names are `assignment`, `command`, `pipeline`, `if`, `for`, `while`, `case`, `group`, `redirected`, `break`, `continue`, `return`, `exit`, `tooldef`, `test`, `arith`, `and_chain`, `or_chain`, `env_scoped`, `not`, and `empty`. These are statement kinds, separate from the live command classification returned by `classify_command`.
+
 Neither returns a version — they hand back statements, not a document. An
 embedder composing its own plan document reads `kaish_kernel::KAISH_VERSION`
 (with `KAISH_GIT_HASH` and `KAISH_BUILD_DATE` beside it) and writes the same

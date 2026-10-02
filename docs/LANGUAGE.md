@@ -690,6 +690,8 @@ tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
 tool 1>&2                       # merge stdout into stderr
+{ echo a; echo b; } > log       # redirect the whole group
+while read line; do echo "$line"; done < input
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -877,6 +879,32 @@ at most N bytes from each file, including binary prefixes.
 > **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
 > its flipped status — see "Shell Options" → "`!` and `set -e`" below for the
 > assertion hazard this creates.
+
+### Brace groups
+
+```sh
+{ echo first; echo second; }
+false || { echo failed; exit 1; }
+{ cd /tmp; x=2; }; echo "$x"       # cwd and variables stay set
+set -e; { false && true; }; echo after
+```
+
+`{ statements; }` groups statements in the current shell. Variable, cwd, and function changes stay set. The group's last statement supplies its status; `return`, `exit`, `break`, and `continue` leave the group and reach the enclosing body. A group can be a pipeline stage or a background statement. Earlier pipeline stages are isolated; the final stage keeps the same session-state behavior as other compound statements. A compound stage buffers its output.
+
+Under `set -e`, a failing command inside a group follows the usual errexit rules. The group adds no check of its own: `false && true` and `! true` inside a group permit the next statement. A redirect open or write failure is a failure of the redirected statement.
+
+Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole body. Targets open left to right before the body runs, even if its condition is false. Input belongs to that body and the displaced session input returns afterward. Control-flow exits and output produced before a runtime fault still finish the opened redirects. Captured stream merges put stdout before stderr; see "Pipes & Redirects".
+
+```sh
+: > log                           # create an empty file
+{ x=1; :; } > log                 # a command anchors a compound redirect
+cat <<EOF | while read line; do echo "$line"; done
+one
+two
+EOF
+```
+
+A redirect on a compound with no planned command is refused with exit 2, naming a command to carry the redirect. Compound here-docs are also refused with exit 2 and a pipe hint. Both have a runtime check when validation is disabled. These are validation refusals; `plan_program` still parses and plans the source.
 
 ## Test Expressions
 

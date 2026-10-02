@@ -1701,12 +1701,25 @@ where
         // separate alternatives is what produced "found '|' expected '&&'":
         // `for_parser` sat ahead of the pipeline, consumed through `done`, and
         // the `&&`/`||` fold below then met the `|`.
+        //
+        // Redirects after the closing word wrap the compound in
+        // `Stmt::Redirected`; the runner never opens them, so `exit` inside
+        // the body still leaves the script.
         let compound = choice((
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
             while_parser(stmt.clone()).map(Stmt::While),
             case_parser(stmt.clone()).map(Stmt::Case),
+            brace_block_parser(stmt.clone()).map(Stmt::Group),
         ))
+        .then(redirect_parser(primary_expr_parser()).repeated().collect::<Vec<_>>())
+        .map(|(body, redirects)| {
+            if redirects.is_empty() {
+                body
+            } else {
+                Stmt::Redirected { body: Box::new(body), redirects }
+            }
+        })
         .boxed();
 
         // `!` negates a pipeline (spec: bash's reading) — the statement-level
@@ -1891,17 +1904,31 @@ where
     ident_parser()
         .then_ignore(just(Token::LParen))
         .then_ignore(just(Token::RParen))
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
+        .then(brace_block_parser(stmt))
+        .map(|(name, body)| ToolDef { name, params: vec![], body })
+        .labelled("POSIX function")
+        .boxed()
+}
+
+/// A braced statement list, `{ stmt; stmt; }`: a function body, and a brace
+/// group. A `}` right after a word closes the block, so `{ echo a }` reads
+/// as `{ echo a; }`.
+fn brace_block_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, Vec<Stmt>, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    just(Token::LBrace)
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(
             stmt.repeated()
                 .collect::<Vec<_>>()
                 .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
         )
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::RBrace))
-        .map(|(name, body)| ToolDef { name, params: vec![], body })
-        .labelled("POSIX function")
         .boxed()
 }
 
@@ -1917,15 +1944,7 @@ where
 {
     just(Token::Function)
         .ignore_then(ident_parser())
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
-            stmt.repeated()
-                .collect::<Vec<_>>()
-                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
-        )
-        .then_ignore(just(Token::Newline).repeated())
-        .then_ignore(just(Token::RBrace))
+        .then(brace_block_parser(stmt))
         .map(|(name, body)| ToolDef { name, params: vec![], body })
         .labelled("bash function")
         .boxed()
@@ -2387,11 +2406,11 @@ fn pipeline_into_stmt(p: Pipeline) -> Stmt {
     }
 }
 
-/// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
-/// command would silently depend on redirect ordering at execution time
-/// (`open_redirects` is last-wins), so `parse()` rejects it loudly.
-fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
-    cmd.redirects
+/// True if `redirects` hold more than one stdin source (`<`, `<<`, `<<<`).
+/// Such a command or compound would silently depend on redirect ordering at
+/// execution time (`open_redirects` is last-wins), so `parse()` refuses it.
+fn redirects_have_ambiguous_stdin(redirects: &[Redirect]) -> bool {
+    redirects
         .iter()
         .filter(|r| {
             matches!(
@@ -2401,6 +2420,10 @@ fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
         })
         .count()
         > 1
+}
+
+fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
+    redirects_have_ambiguous_stdin(&cmd.redirects)
 }
 
 /// Find the first command anywhere in `stmts` (recursing into pipelines,
@@ -2426,6 +2449,10 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
         Stmt::For(f) => first_ambiguous_stdin(&f.body),
         Stmt::While(w) => first_ambiguous_stdin(&w.body),
         Stmt::Case(c) => c.branches.iter().any(|b| first_ambiguous_stdin(&b.body)),
+        Stmt::Group(body) => first_ambiguous_stdin(body),
+        Stmt::Redirected { body, redirects } => {
+            redirects_have_ambiguous_stdin(redirects) || stmt_has_ambiguous_stdin(body)
+        }
         Stmt::ToolDef(t) => first_ambiguous_stdin(&t.body),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)

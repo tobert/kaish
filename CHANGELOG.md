@@ -21,6 +21,9 @@ breaking entries are marked **BREAKING**.
   lines still run. `-n -R` is refused with an alternative.
 - Builtin `find` supports AND, OR, negation, quoted parenthesis groups, and ordered `-print` actions. Expressions are limited to 256 nodes and 64 nested groups or negations.
 - Builtin `cat` supports `-A`, `-v`, `-E`, and `-T`; `ls -d` lists directories themselves, and `grep -x` matches whole lines.
+- **Brace groups `{ a; b; }`** run a statement list in the current shell.
+  Groups, `if`, `for`, `while`, and `case` accept trailing redirects, and
+  planned commands report enclosing redirects so classifiers see the write.
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
