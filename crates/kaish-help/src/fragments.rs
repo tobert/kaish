@@ -151,7 +151,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Depth::Summary,
         None,
         "**Structured output.** Every builtin can emit machine-readable data with \
-         `--json` (`ls --json`, `ps --json`, `kaish-vars --json`).",
+         `--json` (`ls --json`, `ps --json`, `kaish-vars --json`). Success keeps \
+         its value unwrapped; a nonzero formatted result uses \
+         `{\"code\":N,\"error\":\"...\"}`, with partial results under `data` or `output`. \
+         Check the exit code first. A spill keeps its preview and metadata.",
     )
     .ranked(8),
     en(
@@ -541,6 +544,23 @@ A redirect target is a single word: quote it when it interpolates
 (`> "$dir/f"`, not `> $dir/f`). Bare command substitution as the whole
 target (`> $(cmd)`) works; bare text-plus-interpolation does not.
 
+```sh
+{ echo first; echo second; } > log
+while read line; do echo "$line"; done < input
+```
+
+Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole
+body. Targets open before the body runs; input returns to the session
+afterward. A compound with no command inside it exits 2 when redirected;
+use `: > log` to create an empty file. A here-doc cannot feed a compound;
+pipe it in:
+
+```sh
+cat <<EOF | while read line; do echo "$line"; done
+one
+EOF
+```
+
 One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
 A redirect's input belongs to its command: `seq 3 | jq . < f` reads `f`, and
 the session's stdin is unchanged afterward.
@@ -625,6 +645,13 @@ case $VAR in
 esac
 
 break; continue; return [N]; exit [N]
+
+{ echo first; echo second; }       # group in the current shell
+false || { echo failed; exit 1; }  # a fallback with several statements
+
+# A group keeps variable, cwd, and function changes. Its last statement
+# supplies its status; control flow leaves the group for the enclosing body.
+# With set -e, `{ false && true; }` permits the next statement, as in bash.
 
 # A compound statement is a pipeline stage, in any position. It buffers:
 # the whole block runs before the next stage sees a byte.
@@ -740,6 +767,28 @@ keep other matches and exit 2; `-q` exits 0 on a match even after an error.
 Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the
 first match per file; `-m N` stops after N selected lines; `-m 0` reads no contents.
 Context output, multiline matching and encoding conversion still buffer whole files."#,
+    ),
+    syntax_section(
+        "builtin-flags",
+        "Builtin Flags",
+        r#"```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                # show nonprinting bytes, tabs, and line ends
+ls -d directory            # list the directory itself; overrides -R
+grep -x 'ready' file       # match a whole line; overrides -w
+find --help                # print help and exit 0
+```
+
+In `find`, `!` binds before `-a` (also implied between tests), then `-o`.
+Quote parentheses to pass them to `find`. Tests short-circuit; each reached
+`-print` prints once. Without `-print`, matching entries print once.
+Expressions allow at most 256 nodes and 64 nested groups or negations;
+larger expressions exit 2 and name the limit.
+
+`--help` and `--json` used as a declared option value stay data:
+`find . -name --help` searches for that name. Unsupported builtin flags
+exit 2 and name `help` for the builtin's supported flags."#,
     ),
     syntax_section(
         "regex",

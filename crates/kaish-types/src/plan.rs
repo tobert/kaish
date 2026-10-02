@@ -130,7 +130,7 @@ pub struct Plan {
     /// [`PLAN_RENDER_LIMIT`] bytes with a marker naming the limit.
     pub rendered: String,
     /// The statement's kind: `"command"`, `"pipeline"`, `"for"`,
-    /// `"and_chain"`, …
+    /// `"and_chain"`, `"group"`, `"redirected"`, …
     pub statement_kind: String,
     /// Every command the statement contains, control-structure bodies
     /// included.
@@ -201,9 +201,9 @@ pub struct PlannedCommand {
     pub name: String,
     /// The arguments, rendered unexpanded (spec §A.8).
     pub args: Vec<PlannedValue>,
-    /// The redirections this command declares.
+    /// The command's redirects, then enclosing compound redirects, innermost first.
     pub redirects: Vec<PlannedRedirect>,
-    /// Whether the enclosing pipeline was backgrounded with `&`.
+    /// Whether this command or an enclosing statement was backgrounded with `&`.
     pub background: bool,
     /// The heredocs this command reads on stdin, in source order. Empty for
     /// every command that declares none.

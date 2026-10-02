@@ -3264,6 +3264,105 @@ impl Kernel {
                 self.update_last_result(&result).await;
                 Ok(ControlFlow::ok(result))
             }
+            Stmt::Group(body) => {
+                // Runs like an `if` branch: in the current shell, and a
+                // signal from a statement leaves the group for the enclosing
+                // script, function, or loop. No errexit check of its own: a
+                // failing command inside already made that decision, as bash
+                // does (`set -e; { false && true; }` continues).
+                let mut result = ExecResult::success("");
+                for stmt in body {
+                    let flow = match self.execute_stmt_flow(stmt, &mut *ctx).await {
+                        Ok(flow) => flow,
+                        Err(error) => {
+                            self.drain_stderr_into(&mut result, ctx).await;
+                            return Err(with_prior_output(result, error));
+                        }
+                    };
+                    self.drain_stderr_into(&mut result, ctx).await;
+                    match flow {
+                        ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
+                        mut other => {
+                            fold_block_output_into_flow(std::mem::take(&mut result), &mut other);
+                            return Ok(other);
+                        }
+                    }
+                }
+                // An empty group writes `$?` too — see the `Stmt::If` arm.
+                self.update_last_result(&result).await;
+                Ok(ControlFlow::ok(result))
+            }
+            Stmt::Redirected { body, redirects } => {
+                use crate::scheduler::pipeline::{finish_redirects, mask_redirected_streams, open_redirects};
+                // Not through the pipeline runner: a stage boundary would
+                // stop `exit` and `return` here. The redirects open, the body
+                // runs, and the result its flow carries goes through them,
+                // whatever kind of flow it is.
+                //
+                // The validator refuses these first; this holds when it is
+                // skipped.
+                if let Some(refusal) = crate::ast::plan::compound_redirect_refusal(body, redirects) {
+                    return Ok(self.status_flow(ExecResult::failure(2, refusal.message())).await);
+                }
+                let opened = match open_redirects(redirects, &mut *ctx, self).await {
+                    Ok(opened) => opened,
+                    Err(failure) => {
+                        // The body does not run; the open error is the
+                        // statement's status, and trips `set -e` as in bash.
+                        let (result, in_effect, opened) = failure.into_parts(redirects);
+                        let result = finish_redirects(result, in_effect, opened, ctx).await;
+                        return Ok(self.status_flow(result).await);
+                    }
+                };
+                // A `$(…)` in a target wrote its stderr to the stream, and so
+                // may an enclosing `if` condition. That belongs to this
+                // statement, not the body: take it before the body's first
+                // drain puts it behind the redirect.
+                let mut ahead = String::new();
+                let mut ahead_published_len = 0;
+                self.drain_stderr_onto(&mut ahead, &mut ahead_published_len, ctx, false).await;
+                let masked = mask_redirected_streams(redirects, ctx);
+                let flow = self.execute_stmt_flow_dispatch(body, &mut *ctx).await;
+                masked.restore(ctx);
+                match flow {
+                    Ok(mut flow) => {
+                        let carried = flow.result_mut();
+                        let body_ok = carried.ok();
+                        let mut finished = finish_redirects(std::mem::take(carried), redirects, opened, ctx).await;
+                        join_drained_stderr(&ahead, ahead_published_len, &mut finished);
+                        *carried = finished;
+                        match flow {
+                            // A target that opened but could not be written.
+                            ControlFlow::Normal(result) if body_ok && !result.ok() => {
+                                Ok(self.status_flow(result).await)
+                            }
+                            ControlFlow::Normal(result) => {
+                                self.update_last_result(&result).await;
+                                Ok(ControlFlow::ok(result))
+                            }
+                            signal => Ok(signal),
+                        }
+                    }
+                    Err(mut error) => {
+                        // A fault still aborts. What the body printed before
+                        // it goes through the redirects; the fault's own
+                        // message renders where it always does.
+                        let prior = error
+                            .downcast_mut::<crate::error::FaultWithOutput>()
+                            .map(|carrier| std::mem::take(&mut carrier.output))
+                            .unwrap_or_default();
+                        let mut finished = finish_redirects(prior, redirects, opened, ctx).await;
+                        join_drained_stderr(&ahead, ahead_published_len, &mut finished);
+                        match error.downcast_mut::<crate::error::FaultWithOutput>() {
+                            Some(carrier) => {
+                                carrier.output = finished;
+                                Err(error)
+                            }
+                            None => Err(with_prior_output(finished, error)),
+                        }
+                    }
+                }
+            }
             Stmt::Break(levels) => {
                 Ok(ControlFlow::break_n(levels.unwrap_or(1)))
             }
@@ -4034,8 +4133,23 @@ impl Kernel {
         // `/v/bin/` / user-tool / builtin / `PATH` resolution unchanged.
         if let Some(form) = crate::validator::SpecialForm::from_name(name) {
             return match form {
-                crate::validator::SpecialForm::True => Ok(ExecResult::success("")),
-                crate::validator::SpecialForm::False => Ok(ExecResult::failure(1, "")),
+                crate::validator::SpecialForm::True | crate::validator::SpecialForm::False => {
+                    // Boolean forms ignore other argv; only global JSON needs binding.
+                    let format_args: Vec<Arg> = args.iter()
+                        .take_while(|arg| !matches!(arg, Arg::DoubleDash))
+                        .filter(|arg| matches!(arg,
+                            Arg::LongFlag(name) if name == "json"
+                        ) || matches!(arg, Arg::Named { key, .. } if key == "json"))
+                        .cloned().collect();
+                    let bound = self.build_args_async(&format_args, None, ctx).await?;
+                    let format = bound.has_flag("json").then_some(crate::interpreter::OutputFormat::Json);
+                    let result = if matches!(form, crate::validator::SpecialForm::True) {
+                        ExecResult::success("")
+                    } else {
+                        ExecResult::failure(1, "")
+                    };
+                    Ok(finalize_output(result, format, false))
+                }
                 crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args, ctx)).await,
             };
         }
@@ -4238,13 +4352,7 @@ impl Kernel {
             // schema can't express "this leaf claims help" and intercepting here would
             // render top-level help and return before `execute()` ever sees the
             // request (#51). Pass it through and let the tool render its own help.
-            let schema_claims = |flag: &str| -> bool {
-                let bare = flag.trim_start_matches('-');
-                schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
-            };
-            let wants_help = !schema.owns_output
-                && ((tool_args.flags.contains("help") && !schema_claims("help"))
-                    || (tool_args.flags.contains("h") && !schema_claims("-h")));
+            let wants_help = crate::tools::requests_builtin_help(&tool_args, schema);
 
             (tool_args, wants_help, schema.owns_output, schema.raw_argv, schema.typed_substitution)
         };
@@ -4329,6 +4437,11 @@ impl Kernel {
             None => 0,
         };
         let mut result = tool.execute(tool_args, &mut *ctx).await;
+        if result.code == 2
+            && let Some(refusal) = unknown_flag_refusal(name, &result.err)
+        {
+            result.err = refusal;
+        }
         // A command substitution binds `.data` only when it is the result's
         // VALUE. `--json` and the pipeline sideband read `.data` either way,
         // so this marks the ONE consumer whose answer is a matter of taste.
@@ -5164,6 +5277,17 @@ impl Kernel {
     async fn update_last_result(&self, result: &ExecResult) {
         let mut scope = self.scope.write().await;
         scope.set_last_result(result.clone());
+    }
+
+    /// A statement's own status: written to `$?`, and an exit under
+    /// `set -e` when it failed.
+    async fn status_flow(&self, result: ExecResult) -> ControlFlow {
+        self.update_last_result(&result).await;
+        if !result.ok() && self.scope.read().await.error_exit_enabled() {
+            let code = result.code;
+            return ControlFlow::Exit { code, result };
+        }
+        ControlFlow::ok(result)
     }
 
     /// Drain accumulated pipeline stderr into a result.
@@ -7068,8 +7192,13 @@ pub(crate) async fn bind_tool_args(
     if schema.is_some_and(|s| matches!(s.arg_binding, crate::tools::ArgBinding::Verbatim)) {
         let lift_global_flags = !schema.is_some_and(|s| s.owns_output);
         let mut words: Vec<Value> = Vec::new();
-        let mut past_double_dash = false;
+        let mut argument_state = crate::tools::VerbatimArgumentState::default();
+        let schema = match schema {
+            Some(schema) => schema,
+            None => unreachable!("verbatim binding requires a schema"),
+        };
         for arg in args {
+            let words_start = words.len();
             match arg {
                 Arg::Positional(expr) => {
                     let glob = if let Expr::GlobPattern(p) = expr {
@@ -7104,7 +7233,8 @@ pub(crate) async fn bind_tool_args(
                 Arg::ShortFlag(name) => words.push(Value::String(format!("-{name}"))),
                 Arg::LongFlag(name) => {
                     if lift_global_flags
-                        && !past_double_dash
+                        && !argument_state.past_end_marker()
+                        && !argument_state.expects_value()
                         && crate::tools::is_global_output_flag(name)
                     {
                         tool_args.flags.insert(name.clone());
@@ -7117,7 +7247,8 @@ pub(crate) async fn bind_tool_args(
                         anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
                     })?;
                     if lift_global_flags
-                        && !past_double_dash
+                        && !argument_state.past_end_marker()
+                        && !argument_state.expects_value()
                         && crate::tools::is_global_output_flag(key)
                     {
                         // Removed from the words whether or not it is on: the
@@ -7159,9 +7290,12 @@ pub(crate) async fn bind_tool_args(
                     words.push(Value::String(format!("{key}={val_str}")));
                 }
                 Arg::DoubleDash => {
-                    past_double_dash = true;
+                    argument_state.mark_end_marker();
                     words.push(Value::String("--".to_string()));
                 }
+            }
+            for word in &words[words_start..] {
+                argument_state.consume(word, schema);
             }
         }
         tool_args.words = Some(words);
@@ -8661,6 +8795,28 @@ mod argv_classify_tests {
             );
         }
     }
+}
+
+/// Rewrite a builtin's clap "unexpected argument" error for a flag-shaped
+/// word as `ls: -Z is not supported (see `help ls`)`.
+///
+/// clap's text adds a usage block and a tip about passing the word as a
+/// value; for a word the binder already read as a flag, that tip misleads.
+/// Every clap-parsed builtin formats its parse error as `NAME: {clap error}`,
+/// so one rewrite after dispatch covers them all. `None` leaves any other
+/// error, and a stray operand that is not flag-shaped, as the tool wrote it.
+fn unknown_flag_refusal(name: &str, err: &str) -> Option<String> {
+    let rest = err.strip_prefix(name)?.strip_prefix(": error: unexpected argument '")?;
+    let (word, tail) = rest.split_once('\'')?;
+    if !word.starts_with('-') {
+        return None;
+    }
+    let similar = tail
+        .split_once("a similar argument exists: '")
+        .and_then(|(_, after)| after.split_once('\''))
+        .map(|(flag, _)| format!(" (similar: {flag})"))
+        .unwrap_or_default();
+    Some(format!("{name}: {word} is not supported{similar} (see `help {name}`)"))
 }
 
 #[cfg(all(test, feature = "subprocess"))]
@@ -12173,5 +12329,26 @@ AFTER="yes"'"#)
             Some(job_id),
             "a pipeline stage under a background job lost the job id",
         );
+    }
+
+    #[test]
+    fn unknown_flag_refusal_rewrites_clap_text() {
+        let clap = "ls: error: unexpected argument '-Z' found\n\n  tip: to pass '-Z' as a value, use '-- -Z'\n\nUsage: ls [OPTIONS] [PATHS]...\n";
+        assert_eq!(
+            unknown_flag_refusal("ls", clap).as_deref(),
+            Some("ls: -Z is not supported (see `help ls`)")
+        );
+        let similar = "ls: error: unexpected argument '--lon' found\n\n  tip: a similar argument exists: '--long'\n";
+        assert_eq!(
+            unknown_flag_refusal("ls", similar).as_deref(),
+            Some("ls: --lon is not supported (similar: --long) (see `help ls`)")
+        );
+    }
+
+    #[test]
+    fn unknown_flag_refusal_leaves_other_errors_alone() {
+        assert_eq!(unknown_flag_refusal("ls", "ls: error: unexpected argument 'extra' found\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "cat: error: unexpected argument '-Z' found\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "ls: cannot access 'x'\n"), None);
     }
 }

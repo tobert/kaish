@@ -577,8 +577,10 @@ mod overlay_tests {
         let v: serde_json::Value = serde_json::from_str(json_str.trim())
             .unwrap_or_else(|e| panic!("kaish-vfs diff --json must produce valid JSON: {e}\ngot: {json_str:?}"));
 
-        let arr = v.as_array()
-            .unwrap_or_else(|| panic!("kaish-vfs diff --json must be a JSON array, got: {v}"));
+        // Exit 1 puts the array under `data` of the failure envelope.
+        assert_eq!(v["code"], 1, "envelope code: {v}");
+        let arr = v["data"].as_array()
+            .unwrap_or_else(|| panic!("kaish-vfs diff --json must carry a JSON array under data, got: {v}"));
         assert!(!arr.is_empty(), "diff --json must not be empty when changes exist");
 
         // Each entry must have path, kind, base_bytes, current_bytes.

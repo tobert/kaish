@@ -35,6 +35,24 @@ ls --json=$WANT_JSON     # switch it from a variable
 `--json=VALUE` is off for `0`, `false`, and an empty value; on for anything
 else. Every builtin reads it the same way.
 
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+```
+
+Success keeps its JSON value unwrapped; an empty success prints nothing.
+A nonzero formatted result is `{"code":N,"error":"..."}`, even when
+the command answered a question and wrote no error. Partial structured
+results stay under `data`; plain text stays under `output`. Check the exit
+code first. `diff --json` with different files exits 1 and puts its answer
+under `data`.
+
+Only the final builtin stage is formatted; earlier stages feed the next
+stage as streams. External commands receive the flag literally. Refusals
+before builtin dispatch do not use this formatter. A spill still exits 3
+with a truncated preview and spill metadata; the preview may be incomplete
+JSON. See `help limits`.
+
 A row that came from a line of a file carries `line`, a 1-based integer:
 
 ```sh

@@ -661,6 +661,24 @@ including `--json`. The value still expands: `echo -- --greeting=$USER`
 prints `--greeting=` followed by the variable. A short flag with a value
 (`-n=1`) is not a word on either side of `--`; quote it (`echo "-n=1"`).
 
+### Builtin flags and expressions
+
+```sh
+find . -type f '(' -name '*.rs' -o -name '*.md' ')'
+find . ! -name '*.log' -print
+cat -A file                    # same as -vET
+ls -d directory                # list the directory itself; overrides -R
+grep -x 'ready' file           # match a whole line; overrides -w
+find --help                    # print help and exit 0
+find . -name --help            # --help is the name to match
+```
+
+`find` joins tests with `-a` (or `-and`, also implied by adjacency), `-o` (or `-or`), and `!` (or `-not`). Negation binds before AND, then OR. Quote parentheses to group tests. Tests short-circuit; each reached `-print` prints the entry once, so two reached actions print twice. Without an explicit `-print`, a matching entry prints once. An expression allows at most 256 nodes, counting tests, operators, and groups, with at most 64 nested groups or negations. Larger expressions exit 2 with a smaller-expression hint. See `help find` for the supported tests and depth options.
+
+`cat -v` marks control bytes as `^X`, DEL as `^?`, and bytes above 127 with `M-` plus the same notation; tabs and newlines stay. `-T` marks tabs as `^I`; `-E` adds `$` before each newline and marks a preceding carriage return as `^M`. `-A` enables all three. Display modes buffer the input. `-n` numbers the marked lines; with only `-E` or `-T`, non-UTF-8 input exits 1 and names `-v` as the fix.
+
+`NAME --help` prints builtin help to stdout and exits 0. A declared option value shaped like `--help` or `--json` remains data. Expression tools such as `test` recognize only a leading `--help`. Unsupported builtin flags exit 2 and name `help NAME` for the supported flags.
+
 ## Pipes & Redirects
 
 ```sh
@@ -672,6 +690,8 @@ tool 2> file                    # redirect stderr
 tool &> file                    # stdout + stderr
 tool 2>&1                       # merge stderr into stdout
 tool 1>&2                       # merge stdout into stderr
+{ echo a; echo b; } > log       # redirect the whole group
+while read line; do echo "$line"; done < input
 cmd 2>&1 | tee log.txt          # capture both streams
 
 # Redirects apply left to right; `2>&1` copies where stdout points then.
@@ -710,8 +730,11 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > cannot open, the command does not run and exits 1; the error goes where
 > stderr points at that moment (`cmd 2>&1 > /missing/f` sends it to
 > stdout). A missing parent directory is an error, never created — run
-> `mkdir -p` first. `cat f > f` empties `f`, as in bash, because `>`
-> truncates before `cat` reads.
+> `mkdir -p` first. A mount ancestor can be visible with no real directory.
+> When the backend can create that parent, the error names `mkdir -p`.
+> Outside every mount, or under an immutable overlay ancestor, it names a
+> writable mounted path instead, or says none is available. `cat f > f`
+> empties `f`, as in bash, because `>` truncates before `cat` reads.
 >
 > **One file as input and output is refused.** `sort < f > f` exits 1
 > with `redirect: f is both input and output (> empties it before it is
@@ -859,6 +882,32 @@ at most N bytes from each file, including binary prefixes.
 > **`!` and `set -e`:** a negated statement is exempt from errexit, whatever
 > its flipped status — see "Shell Options" → "`!` and `set -e`" below for the
 > assertion hazard this creates.
+
+### Brace groups
+
+```sh
+{ echo first; echo second; }
+false || { echo failed; exit 1; }
+{ cd /tmp; x=2; }; echo "$x"       # cwd and variables stay set
+set -e; { false && true; }; echo after
+```
+
+`{ statements; }` groups statements in the current shell. Variable, cwd, and function changes stay set. The group's last statement supplies its status; `return`, `exit`, `break`, and `continue` leave the group and reach the enclosing body. A group can be a pipeline stage or a background statement. Earlier pipeline stages are isolated; the final stage keeps the same session-state behavior as other compound statements. A compound stage buffers its output.
+
+Under `set -e`, a failing command inside a group follows the usual errexit rules. The group adds no check of its own: `false && true` and `! true` inside a group permit the next statement. A redirect open or write failure is a failure of the redirected statement.
+
+Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole body. Targets open left to right before the body runs, even if its condition is false. Input belongs to that body and the displaced session input returns afterward. Control-flow exits and output produced before a runtime fault still finish the opened redirects. Captured stream merges put stdout before stderr; see "Pipes & Redirects".
+
+```sh
+: > log                           # create an empty file
+{ x=1; :; } > log                 # a command anchors a compound redirect
+cat <<EOF | while read line; do echo "$line"; done
+one
+two
+EOF
+```
+
+A redirect on a compound with no planned command is refused with exit 2, naming a command to carry the redirect. Compound here-docs are also refused with exit 2 and a pipe hint. Both have a runtime check when validation is disabled. These are validation refusals; `plan_program` still parses and plans the source.
 
 ## Test Expressions
 
@@ -1580,6 +1629,19 @@ a `VALUE` that isn't JSON is a flag value the builtin cannot use, also `2`.
 
 `124` (timeout) and `123` (a scatter worker failed) are the documented
 exceptions; see "Cancellation and Timeouts" and "散・集 (San/Shū)".
+
+### Nonzero JSON results
+
+```sh
+echo hi --json                 # "hi\n"
+grep --json nomatch file       # {"code":1,"error":""}
+false --json                   # {"code":1,"error":""}
+diff --json before after       # exit 1, answer under data
+```
+
+`--json` keeps successful data unwrapped. An empty success prints nothing. A nonzero formatted result is an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The error removes one rendering newline and keeps other blank lines. Stderr still carries the same error. Check the exit code before reading the error or answer.
+
+Only the final builtin pipeline stage is formatted; earlier stages feed streams to the next stage. Command substitution captures the formatted result. `true` and `false` honor `--json` and its disabled forms. External commands receive the flag literally. Parse/validation refusals, unresolved commands, and redirect failures before builtin dispatch do not use this formatter. An output spill happens after formatting, so exit 3 keeps the truncated preview and spill metadata; the preview may be incomplete JSON. See "Shell Options".
 
 ## Background Jobs
 

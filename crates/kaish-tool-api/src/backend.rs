@@ -62,6 +62,19 @@ pub trait KernelBackend: Send + Sync {
     /// Stat a path (following symlinks).
     async fn stat(&self, path: &Path) -> BackendResult<DirEntry>;
 
+    /// Check a redirect parent in its owning filesystem, without synthesizing
+    /// mount ancestors. Return its metadata or the error that prevents using it.
+    /// A missing parent must return `NotFound` only when `mkdir` can create it;
+    /// immutable mount ancestors must refuse with a mounted-path hint.
+    /// Backends that synthesize directories must override this method;
+    /// ordinary backends can use the default, which checks `read_only` then `stat`.
+    async fn stat_write_parent(&self, path: &Path) -> BackendResult<DirEntry> {
+        if self.read_only() {
+            return Err(BackendError::ReadOnly);
+        }
+        self.stat(path).await
+    }
+
     /// Create a directory.
     async fn mkdir(&self, path: &Path) -> BackendResult<()>;
 

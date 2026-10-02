@@ -82,6 +82,10 @@ impl Tool for Gather {
             std::iter::once("gather".to_string()).chain(argv),
         ) {
             Ok(p) => p,
+            // `--help` is a request, not a failure.
+            Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
+                return ExecResult::success(e.to_string());
+            }
             Err(e) => return ExecResult::failure(2, format!("gather: {e}")),
         };
         parsed.global.apply(ctx);
