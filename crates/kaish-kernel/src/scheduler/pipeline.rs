@@ -678,14 +678,20 @@ async fn run_opened_stage(
             (ControlFlow::Normal(result), in_effect, opened)
         }
     };
-    // An `exit` stays an exit through the redirects; its code is the
-    // finished result's, which the redirects may have changed.
-    let exited = matches!(flow, ControlFlow::Exit { .. });
-    let result = finish_redirects(flow.into_absorbed_result(), in_effect, opened, ctx).await;
-    if exited {
-        ControlFlow::Exit { code: result.code, result }
-    } else {
-        ControlFlow::Normal(result)
+    // An `exit` stays an exit through the redirects, and its code wins over
+    // a redirect that fails to write (the error text still reaches `err`),
+    // as for a redirected compound statement.
+    let exit_code = match &flow {
+        ControlFlow::Exit { code, .. } => Some(*code),
+        _ => None,
+    };
+    let mut result = finish_redirects(flow.into_absorbed_result(), in_effect, opened, ctx).await;
+    match exit_code {
+        Some(code) => {
+            result.code = code;
+            ControlFlow::Exit { code, result }
+        }
+        None => ControlFlow::Normal(result),
     }
 }
 

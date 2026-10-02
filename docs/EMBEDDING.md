@@ -912,7 +912,7 @@ async fn execute_flow(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ToolFlow 
 }
 ```
 
-An `Exit` ends only the stage in a multi-stage pipeline, inside `$( )`, and in a background job, as in bash.
+An `Exit` ends only the stage in a multi-stage pipeline, inside `$( )`, and in a background job, as in bash. A tool reached through `KernelBackend::call_tool` (for example a registry passed to `LocalBackend::with_tools`) has no flow channel, so there an `Exit` becomes the result's status and the script goes on.
 
 ### Verbatim argv: a tool that parses its own grammar
 

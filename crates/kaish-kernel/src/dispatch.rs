@@ -4,15 +4,16 @@
 //! executed. The Kernel implements this trait with the full dispatch chain:
 //! user tools → builtins → .kai scripts → external commands → backend tools.
 //!
-//! `PipelineRunner` calls `dispatcher.dispatch()` for each command in a
-//! pipeline, handling I/O routing (stdin piping, redirects) around each call.
+//! `PipelineRunner` calls `dispatcher.dispatch_flow()` for each command in a
+//! pipeline (`dispatch()` is the same call with an `exit` folded into the
+//! result's code), handling I/O routing (stdin piping, redirects) around each call.
 //!
 //! ```text
 //! Stmt::Command ──┐
-//!                  ├──▶ execute_pipeline() ──▶ PipelineRunner::run(dispatcher, commands, ctx)
+//!                  ├──▶ execute_pipeline() ──▶ PipelineRunner::run_flow(dispatcher, commands, ctx)
 //! Stmt::Pipeline ──┘                                  │
 //!                                               for each command:
-//!                                                 dispatcher.dispatch(cmd, ctx)
+//!                                                 dispatcher.dispatch_flow(cmd, ctx)
 //!                                                     │
 //!                                               ┌─────┼──────────────┐
 //!                                               │     │              │
