@@ -1,5 +1,5 @@
-//! A builtin that runs another command stops reading its own options where
-//! its first operand, as `timeout`, `env`, and `exec` do:
+//! A builtin that runs another command stops reading its own options at its
+//! first operand, as `timeout`, `env`, and `exec` do:
 //! `timeout 5 python3 -c "..."` hands `-c` to python3.
 //!
 //! Every case runs through `Kernel::execute`, so the validator, the argument
