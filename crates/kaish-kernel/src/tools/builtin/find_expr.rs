@@ -354,7 +354,7 @@ fn test_holds(test: &Test, entry: &EntryView<'_>) -> bool {
             'd' => i.is_dir(),
             _ => i.is_symlink(),
         }),
-        // An entry with no stat answer passes, as it did before expressions.
+        // An entry with no stat answer passes.
         Test::Mtime(cmp) => match entry.info.and_then(|i| i.modified) {
             Some(modified) => {
                 let age_days = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0) / 86400;

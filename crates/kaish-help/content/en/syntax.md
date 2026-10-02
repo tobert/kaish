@@ -413,7 +413,7 @@ find . -type f '(' -name '*.rs' -o -name '*.md' ')'
 find . ! -name '*.log' -print
 cat -A file                # show nonprinting bytes, tabs, and line ends
 ls -d directory            # list the directory itself; overrides -R
-grep -x 'ready' file        # match a whole line; overrides -w
+grep -x 'ready' file       # match a whole line; overrides -w
 find --help                # print help and exit 0
 ```
 

@@ -641,9 +641,9 @@ find . -type f '(' -name '*.rs' -o -name '*.md' ')'
 find . ! -name '*.log' -print
 cat -A file                    # same as -vET
 ls -d directory                # list the directory itself; overrides -R
-grep -x 'ready' file            # match a whole line; overrides -w
+grep -x 'ready' file           # match a whole line; overrides -w
 find --help                    # print help and exit 0
-find . -name --help             # --help is the name to match
+find . -name --help            # --help is the name to match
 ```
 
 `find` joins tests with `-a` (or `-and`, also implied by adjacency), `-o` (or `-or`), and `!` (or `-not`). Negation binds before AND, then OR. Quote parentheses to group tests. Tests short-circuit; each reached `-print` prints the entry once, so two reached actions print twice. Without an explicit `-print`, a matching entry prints once. An expression allows at most 256 nodes, counting tests, operators, and groups, with at most 64 nested groups or negations. Larger expressions exit 2 with a smaller-expression hint. See `help find` for the supported tests and depth options.

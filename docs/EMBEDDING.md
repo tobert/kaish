@@ -923,7 +923,11 @@ as an inert placeholder whose real bytes stay at the same index in `words`.
   owning output: you emit the final bytes, so you parse the flag that asks for
   them. Lifting it would strip it from your argv *and* skip rendering, leaving
   the request handled by nobody.
-- **Standalone `--help` requests generic help.** The kernel skips root-schema-declared option values while checking for help. A flag claimed by your schema stays yours. A `--` word stops generic help detection. Verbatim `-h` stays tool-owned. With `.with_owned_output()`, both help flags reach your parser and handling them is your responsibility.
+- **Standalone `--help` requests generic help.** The kernel skips
+  root-schema-declared option values while checking for help. A flag claimed
+  by your schema stays yours. A `--` word stops generic help detection.
+  Verbatim `-h` stays tool-owned. With `.with_owned_output()`, both help
+  flags reach your parser and handling them is your responsibility.
 - **The schema is unchanged.** It still supplies help, completion and the
   parameter list. Schema-shaped argument validation is skipped, because it
   would judge a decomposition your tool never receives; override
