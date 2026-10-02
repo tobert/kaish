@@ -705,16 +705,14 @@ pub enum Token {
     NumberIdent(String),
 
     /// Numeric word containing a hyphen, or a minus-led numeric word with a
-    /// non-numeric suffix. These are single contiguous shell words the user
-    /// typed — ISO dates (`2024-01-02`), `N-M` ranges (`10-20`, `cut -f 1-3`,
-    /// `tr -d 0-9`), open ranges and field lists (`cut -c 9-`, the `5-` of
-    /// `1-3,5-`), float-dash forms (`1.5-2`), and `find` predicate values like
-    /// `-1k` (smaller than 1k). Without this token they fragment into adjacent
+    /// non-numeric suffix: dates (`2024-01-02`), ranges (`10-20`, `cut -f 1-3`),
+    /// open ranges (`cut -c 9-`, the `5-` of `1-3,5-`), `1.5-2`, and `find`
+    /// values like `-1k`. Without this token they split into adjacent
     /// `Int`/`Float`/flag tokens and trip the no-token-pasting guard, and `1--`
-    /// would lose its tail to the `--` end-of-options marker. The raw slice is
-    /// preserved verbatim (so leading zeros survive). A plain `2024`/`1.5`/`-1`
-    /// stays `Int`/`Float` — the digit-hyphen form requires a `-` after the
-    /// digits, and the minus-led form requires a second `-` or an alpha.
+    /// loses its tail to the `--` end-of-options marker. The raw slice is kept
+    /// verbatim, so leading zeros survive. A plain `2024`, `1.5` or `-1` stays
+    /// `Int`/`Float`: the digit form needs a `-` after the digits, and the
+    /// minus-led form needs a second `-` or a letter.
     #[regex(r"-?[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._@+#^~\u{80}-\u{10FFFF}]*)+", lex_slice_word, priority = 3)]
     #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._@+#^~\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     DashNumWord(String),

@@ -482,8 +482,8 @@ echo $dir/file.txt        # error — quote "$dir/file.txt"
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
 # Literal words keep their complete spelling, without quotes:
-echo HEAD^2 HEAD~1 f.txt~ 9-  # ^ and mid-word ~ stay literal
-printf 'abcdefghijkl\n' | cut -c 9- # open range stays one word
+echo HEAD^2 HEAD~1 f.txt~ # ^ and mid-word ~ stay literal
+printf 'abcdefghijkl\n' | cut -c 9-  # open range stays one word
 echo 123.txt 1.2.3 true:foo a+b .git/HEAD
 p=~/x; echo "$p"          # assignment followed by a home-relative path
 ls 1.0*                  # glob keeps the written numeric prefix
