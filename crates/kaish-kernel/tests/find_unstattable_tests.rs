@@ -30,7 +30,7 @@ async fn run(kernel: &Kernel, script: &str) -> ExecResult {
     kernel.execute(script).await.expect("kernel execute")
 }
 
-/// `ok.txt` is stat-able; `locked/inner.txt` is listed but cannot be stat'ed.
+/// `ok.txt` is readable; `locked/` cannot be listed or stat'ed into.
 /// Returns None when permissions do not restrict this user (root).
 fn fixture(root: &Path) -> Option<std::path::PathBuf> {
     std::fs::write(root.join("ok.txt"), "data").unwrap();
@@ -60,7 +60,7 @@ async fn unstattable_entry_fails_mtime_and_size_tests() {
         let out = r.text_out();
         assert!(!out.contains("inner.txt"), "{test}: unstattable entry printed: {out}");
         assert_eq!(r.code, 1, "{test}: exit code; stderr: {}", r.err);
-        assert!(r.err.contains("inner.txt"), "{test}: stderr must name the entry: {}", r.err);
+        assert!(r.err.contains("'./locked'"), "{test}: stderr must name the unreadable directory: {}", r.err);
         assert!(r.err.starts_with("find: "), "{test}: stderr style: {}", r.err);
     }
 

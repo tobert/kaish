@@ -354,15 +354,15 @@ fn test_holds(test: &Test, entry: &EntryView<'_>) -> bool {
             'd' => i.is_dir(),
             _ => i.is_symlink(),
         }),
-        // An entry with no stat answer passes.
+        // A test that needs stat data is false when the entry has none.
         Test::Mtime(cmp) => match entry.info.and_then(|i| i.modified) {
             Some(modified) => {
                 let age_days = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0) / 86400;
                 cmp.holds(age_days)
             }
-            None => true,
+            None => false,
         },
-        Test::Size(cmp) => entry.info.is_none_or(|i| cmp.holds(i.size)),
+        Test::Size(cmp) => entry.info.is_some_and(|i| cmp.holds(i.size)),
     }
 }
 
