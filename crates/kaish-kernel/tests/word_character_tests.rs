@@ -220,10 +220,9 @@ async fn trailing_dot_numerals_stay_refused(#[case] source: &str) {
 
 // ── A backslash outside quotes makes the next character literal ────────
 //
-// The census: every ASCII punctuation character, a space, and three
-// ordinary characters after a backslash, alone and inside a word. Each row
-// is bash's output for `printf '<%s>\n' WORD`. `\~` alone is pinned in
-// its own test below.
+// Every ASCII punctuation character, a space, and three ordinary characters
+// after a backslash, alone and inside a word. Each row is bash's output for
+// `printf '<%s>\n' WORD`. `\~` alone has its own test below.
 
 #[rstest]
 #[case::space(r"\ ", "< >\n")]
@@ -262,7 +261,7 @@ async fn trailing_dot_numerals_stay_refused(#[case] source: &str) {
 #[case::letter_t(r"\t", "<t>\n")]
 #[case::digit(r"\0", "<0>\n")]
 #[tokio::test]
-async fn backslash_census_alone(#[case] word: &str, #[case] expected: &str) {
+async fn backslash_punctuation_alone(#[case] word: &str, #[case] expected: &str) {
     assert_eq!(printf_words(word).await, expected);
 }
 
@@ -304,7 +303,7 @@ async fn backslash_census_alone(#[case] word: &str, #[case] expected: &str) {
 #[case::letter_t(r"a\tb", "<atb>\n")]
 #[case::digit(r"a\0b", "<a0b>\n")]
 #[tokio::test]
-async fn backslash_census_inside_a_word(#[case] word: &str, #[case] expected: &str) {
+async fn backslash_punctuation_inside_a_word(#[case] word: &str, #[case] expected: &str) {
     assert_eq!(printf_words(word).await, expected);
 }
 

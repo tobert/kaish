@@ -168,8 +168,8 @@ echo '~/x'                # ~/x
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
 printf '<%s>\n' a\ b      # backslash quotes the next character: one argument
-printf '<%s>\n' \( \)    # escaped parentheses are arguments
-find . -name \*.rs       # find receives the pattern *.rs
+printf '<%s>\n' \( \)     # escaped parentheses are arguments
+find . -name \*.rs        # find receives the pattern *.rs
 # Mixed escapes and unquoted globs are errors; quote the whole literal word.
 # Backslash does not join text to an unquoted expansion.
 

@@ -565,10 +565,10 @@ variable nothing can reference.
 
 ```sh
 printf '<%s>\n' a\ b          # one literal argument: a b
-printf '<%s>\n' \( \)        # literal parentheses
-find . -name \*.rs           # find receives the pattern *.rs
+printf '<%s>\n' \( \)         # literal parentheses
+find . -name \*.rs            # find receives the pattern *.rs
 case '*' in \*) echo hit;; esac
-[[ a.b =~ ^a\.b ]]           # the escaped dot matches a literal dot
+[[ a.b =~ ^a\.b ]]            # the escaped dot matches a literal dot
 ```
 
 Outside quotes, a backslash makes the next character literal. It can join

@@ -13,9 +13,9 @@ breaking entries are marked **BREAKING**.
 ### Added
 
 - Backslash quoting outside strings: `a\ b` is one literal word and
-  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped
-  characters match literally in `case` and `[[ =~ ]]` patterns. Ordinary
-  arguments mixing escapes and unquoted globs fail with a quoted fix.
+  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
+  match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
+  escapes with unquoted globs is an error that names the quoted form.
 
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
