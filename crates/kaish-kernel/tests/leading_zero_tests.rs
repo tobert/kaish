@@ -85,20 +85,33 @@ async fn an_ordinary_loop_count_still_parses() {
     assert_eq!(out, "done");
 }
 
-/// `-0` is a valid count and a valid JSON number, but its source text does not
-/// round-trip, so it lexes as `NumericLiteral` rather than `Int`. The count
-/// grammar matched only `Int`, which turned `break -0` into a parse error --
-/// a regression this rule introduced and nothing else caught.
+/// A loop count below 1 is refused, as in bash ("loop count out of range").
+/// A negative count used to wrap through `as usize` and break every loop.
+#[rstest::rstest]
+#[case("break", "0")]
+#[case("break", "-1")]
+#[case("continue", "0")]
+#[case("continue", "-1")]
+#[case("break", "-0")]
 #[tokio::test]
-async fn a_negative_zero_count_still_parses() {
-    for source in [
-        "for i in 1 2 3; do break -0; done; echo done",
-        "for i in 1 2 3; do continue -0; done; echo done",
-    ] {
-        let (code, out, err) = run(source).await;
-        assert_eq!(code, 0, "-0 is a number, not a leading zero: {source} {err:?}");
-        assert_eq!(out, "done", "{source}");
-    }
+async fn a_loop_count_below_one_is_refused(#[case] keyword: &str, #[case] count: &str) {
+    let source = format!("for i in 1 2; do for j in a b; do {keyword} {count}; done; done; echo done");
+    let text = err_of(&source).await;
+    assert!(text.contains("loop count"), "must name the rule: {text:?}");
+    assert!(text.contains(&format!("{keyword} {count}")), "must name the value: {text:?}");
+    assert!(text.contains(&format!("`{keyword} 1`")), "must name the fix: {text:?}");
+    assert!(!text.contains("done\n") && text.trim() != "done", "script must not run: {text:?}");
+}
+
+#[rstest::rstest]
+#[case("break 2", "done")]
+#[case("break 5", "done")]
+#[tokio::test]
+async fn a_loop_count_of_one_or_more_runs(#[case] stmt: &str, #[case] expected: &str) {
+    let source = format!("for i in 1 2; do for j in a b; do {stmt}; done; echo no; done; echo done");
+    let (code, out, err) = run(&source).await;
+    assert_eq!(code, 0, "{stmt}: {err:?}");
+    assert_eq!(out, expected, "{stmt}");
 }
 
 /// The message may reword a diagnosis and must never author one. `break` is
