@@ -1544,6 +1544,36 @@ shell_compat! {
     eq: "ijkl\nb,d,e",
 }
 
+shell_compat! {
+    name: backslash_escapes_are_literal,
+    script: r"printf '<%s>\n' \( a \) \; \! \| \& \< \> \$HOME \* \# \\ a\ b",
+    eq: "<(>\n<a>\n<)>\n<;>\n<!>\n<|>\n<&>\n<<>\n<>>\n<$HOME>\n<*>\n<#>\n<\\>\n<a b>",
+}
+
+shell_compat! {
+    name: backslash_escape_in_assignment_and_flag_value,
+    script: r#"x=a\ b; printf '<%s>\n' "$x"; printf 'a b\n' | cut -d\  -f2"#,
+    eq: "<a b>\nb",
+}
+
+shell_compat! {
+    name: backslash_escape_in_regex_operand_is_literal,
+    script: r"[[ a.b =~ ^a\.b ]] && echo dot; [[ axb =~ ^a\.b ]] || echo not-any",
+    eq: "dot\nnot-any",
+}
+
+shell_compat! {
+    name: backslash_quoted_heredoc_delimiter_is_literal,
+    script: "HOME=/h; cat <<\\EOF\n$HOME\nEOF",
+    eq: "$HOME",
+}
+
+shell_compat! {
+    name: backslash_escaped_case_pattern_is_literal,
+    script: r"case x in \*) echo star;; *) echo other;; esac; case x in '*') echo star;; *) echo other;; esac",
+    eq: "other\nother",
+}
+
 // ---- Tilde expansion: only an UNQUOTED source word expands ----------------
 //
 // `shell_compat!`'s kaish side always runs `KernelConfig::transient()`,

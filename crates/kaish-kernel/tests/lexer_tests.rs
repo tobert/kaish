@@ -113,6 +113,7 @@ fn format_token(token: &Token) -> String {
         // Literals
         Token::String(s) => format!("STRING({})", escape_for_display(s)),
         Token::SingleString(s) => format!("SINGLESTRING({})", s),
+        Token::EscapedWord(word) => format!("ESCAPED({})", word.literal),
         Token::HereDoc(d) => format!("HEREDOC({}, literal={})", escape_for_display(&d.content), d.literal),
         Token::VarRef(s) => format!("VARREF({})", s),
         Token::SimpleVarRef(s) => format!("SIMPLEVARREF({})", s),
@@ -315,6 +316,42 @@ fn lexer_tilde_inside_words(#[case] input: &str, #[case] expected: &[&str]) {
 #[case::dashnum_range_unchanged("1-3", &["DASHNUM(1-3)"])]
 fn lexer_digit_leading_dash_words(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
+}
+
+// A backslash outside quotes makes the next character literal. The escaped
+// character and its plain neighbors fold into one quoted word; a flag, its
+// `=`, and an assignment key stay structure.
+#[rstest]
+#[case::escape_alone(r"\(", &["ESCAPED(()"])]
+#[case::escape_space(r"a\ b", &["ESCAPED(a b)"])]
+#[case::escape_backslash(r"\\", &[r"ESCAPED(\)"])]
+#[case::escape_dollar(r"\$HOME", &["ESCAPED($HOME)"])]
+#[case::escape_star(r"\*.txt", &["ESCAPED(*.txt)"])]
+#[case::escape_hash_run(r"\##", &["ESCAPED(##)"])]
+#[case::escape_then_comment(r"a\ #b", &["ESCAPED(a #b)"])]
+#[case::escape_separate_words(r"\( a \)", &["ESCAPED(()", "IDENT(a)", "ESCAPED())"])]
+#[case::escape_long_flag_value(r"--opt=a\ b", &["LONGFLAG(opt)", "EQ", "ESCAPED(a b)"])]
+#[case::escape_short_flag_value(r"-F\;", &["SHORTFLAG(F)", "ESCAPED(;)"])]
+#[case::escape_assignment_value(r"x=a\ b", &["IDENT(x)", "EQ", "ESCAPED(a b)"])]
+#[case::escape_in_assignment_key(r"a\=b", &["ESCAPED(a=b)"])]
+#[case::escape_tilde_path(r"~/a\ b", &["ESCAPED(~/a b)"])]
+#[case::escape_tilde_prefix(r"~\ b", &["ESCAPED(~ b)"])]
+#[case::escape_then_continuation_untouched("a \\\nb", &["IDENT(a)", "IDENT(b)"])]
+fn lexer_backslash_escapes(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+#[rstest]
+#[case::star(r"a\ *.txt")]
+#[case::question(r"a\ ?")]
+#[case::bracket_pair(r"a\ [bc]")]
+fn lexer_backslash_words_retain_unquoted_globs(#[case] input: &str) {
+    let tokens = tokenize(input).expect("word remains data until its parser context is known");
+    let [token] = tokens.as_slice() else { panic!("expected one word: {tokens:?}") };
+    let Token::EscapedWord(word) = &token.token else { panic!("expected escaped word: {token:?}") };
+    assert!(word.has_unquoted_glob, "the ordinary-word parser must refuse: {word:?}");
+    assert_eq!(word.source, input);
+    assert_eq!(&input[token.span.clone()], input);
 }
 
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
@@ -1267,4 +1304,18 @@ fn line_continuation_stays_out_of_token_spans(#[case] source: &str) {
         );
         assert_ne!(t.token, Token::LineContinuation, "{source:?}: leaked {tokens:?}");
     }
+}
+
+#[rstest]
+#[case("café")]
+#[case("名前")]
+#[case("😁")]
+fn escaped_suffix_keeps_the_complete_variable_name(#[case] name: &str) {
+    let source = format!("${name}\\ suffix");
+    let tokens = tokenize(&source).expect("tokenize");
+    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].token, Token::SimpleVarRef(name.to_string()));
+    assert_eq!(tokens[0].span, 0..name.len() + 1);
+    assert!(matches!(&tokens[1].token, Token::EscapedWord(word) if word.literal == " suffix"));
+    assert_eq!(tokens[1].span, name.len() + 1..source.len());
 }
