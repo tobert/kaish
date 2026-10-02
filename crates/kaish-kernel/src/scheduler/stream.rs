@@ -284,16 +284,53 @@ pub async fn drain_to_stream_teed<R>(
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
-    drain_to_stream_teed_until(reader, stream, tee, &tokio_util::sync::CancellationToken::new()).await
+    drain_to_stream_teed_until(reader, stream, tee, None, &tokio_util::sync::CancellationToken::new()).await
+}
+
+/// The order chunks were read from a command's stdout and stderr pipes.
+///
+/// Both drain tasks record into one list. A number is taken under the lock,
+/// so the list is in number order.
+pub(crate) struct ReadOrder {
+    sequence: kaish_types::OutputSequence,
+    spans: std::sync::Mutex<Vec<kaish_types::OutputSpan>>,
+}
+
+// Only external commands build one; the drain that records into it is shared.
+#[cfg_attr(not(feature = "subprocess"), allow(dead_code))]
+impl ReadOrder {
+    pub(crate) fn new(sequence: kaish_types::OutputSequence) -> Self {
+        Self { sequence, spans: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    fn record(&self, stream: kaish_types::StreamKind, len: usize) {
+        // Nothing in this critical section can panic, so a poisoned lock
+        // still holds a complete list.
+        let mut spans = self.spans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        spans.push(kaish_types::OutputSpan::new(self.sequence.next(), stream, len as u64));
+    }
+
+    /// The recorded reads as a stream order.
+    pub(crate) fn order(&self) -> kaish_types::StreamOrder {
+        let spans = self.spans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut order = kaish_types::StreamOrder::new();
+        for span in spans.iter() {
+            order.push_span(*span, &self.sequence);
+        }
+        order
+    }
 }
 
 /// [`drain_to_stream_teed`] that also stops when `stop` fires. It stops only
 /// between chunks, so a chunk in `stream` is always in `tee` too — unlike
 /// aborting the task, which can land between the two writes.
+///
+/// `order` records each read as a span of its stream, numbered at read time.
 pub(crate) async fn drain_to_stream_teed_until<R>(
     mut reader: R,
     stream: Arc<BoundedStream>,
     tee: Option<Arc<BoundedStream>>,
+    order: Option<(kaish_types::StreamKind, Arc<ReadOrder>)>,
     stop: &tokio_util::sync::CancellationToken,
 ) where
     R: tokio::io::AsyncRead + Unpin,
@@ -310,6 +347,9 @@ pub(crate) async fn drain_to_stream_teed_until<R>(
         match read {
             Ok(0) => break, // EOF
             Ok(n) => {
+                if let Some((kind, order)) = &order {
+                    order.record(*kind, n);
+                }
                 stream.write(&buf[..n]).await;
                 if let Some(tee) = &tee {
                     tee.write(&buf[..n]).await;
@@ -419,7 +459,7 @@ mod tests {
         let stop = tokio_util::sync::CancellationToken::new();
         let task = {
             let (primary, tee, stop) = (primary.clone(), tee.clone(), stop.clone());
-            tokio::spawn(async move { drain_to_stream_teed_until(reader, primary, Some(tee), &stop).await })
+            tokio::spawn(async move { drain_to_stream_teed_until(reader, primary, Some(tee), None, &stop).await })
         };
         while primary.read().await.is_empty() {
             tokio::task::yield_now().await;

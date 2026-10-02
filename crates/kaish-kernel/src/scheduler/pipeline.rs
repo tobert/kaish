@@ -1142,9 +1142,15 @@ impl PipelineRunner {
                 // stderr goes through the pipe as expected.
                 if !result.err.is_empty() {
                     if let Some(ref stderr) = stage_ctx.stderr {
-                        stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
+                        // Numbered first, so the stage's stdout and the
+                        // stderr it hands the channel keep their order.
+                        result.stamp_stream_order(&stage_ctx.output_sequence);
+                        stderr.write_result_stderr(&result);
                         result.err.clear();
                         result.stderr_published_len = 0;
+                        let mut order = kaish_types::StreamOrder::recorded(&result, &stage_ctx.output_sequence);
+                        order.remove_stream(kaish_types::StreamKind::Stderr);
+                        result.set_stream_order(order);
                     } else {
                         // Only a hand-built context lacks the stream.
                         tracing::warn!("pipeline stage stderr dropped: no stderr stream");

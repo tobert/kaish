@@ -218,9 +218,10 @@ impl ScatterGatherRunner {
             ctx.publish_job_stderr(&mut result).await;
             match &ctx.stderr {
                 Some(stderr) => {
-                    stderr.write_partly_published(result.err.as_bytes(), result.stderr_published_len);
+                    stderr.write_result_stderr(&result);
                     result.err.clear();
                     result.stderr_published_len = 0;
+                    result.clear_stream_order();
                 }
                 // Only a hand-built context lacks the stream; the kernel
                 // always seeds one.

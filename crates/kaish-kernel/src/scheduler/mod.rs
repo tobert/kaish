@@ -55,10 +55,10 @@ mod stream;
 
 pub use job::{Job, JobId, JobInfo, JobManager, JobStatus, JobStreams};
 pub use pipe_stream::{pipe_stream, pipe_stream_default, PipeReader, PipeWriter, PIPE_BUFFER_SIZE};
-pub use stderr_stream::{stderr_stream, StderrReceiver, StderrStream};
-pub(crate) use stderr_stream::lossy_text;
+pub use stderr_stream::{numbered_stderr_stream, stderr_stream, StderrReceiver, StderrStream};
+pub(crate) use stderr_stream::{drained_order, lossy_text};
 #[cfg(feature = "subprocess")]
-pub(crate) use stream::drain_to_stream_teed_until;
+pub(crate) use stream::{drain_to_stream_teed_until, ReadOrder};
 pub use stream::{
     drain_to_stream, drain_to_stream_teed, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE,
 };

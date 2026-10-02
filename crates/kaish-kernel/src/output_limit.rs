@@ -294,6 +294,8 @@ pub async fn apply_spill_contract(result: &mut ExecResult, config: &OutputLimitC
         let _ = spill_if_needed(result, config).await;
     }
     if result.did_spill {
+        // The spans counted bytes that are gone or moved to a file.
+        result.clear_stream_order();
         // Idempotent: only capture `original_code` the first time. A result can
         // arrive already remapped — backend conversions preserve both fields
         // (`kaish-types/src/backend.rs`), so a pre-remapped result is supported
@@ -829,6 +831,30 @@ mod tests {
         assert!(result.did_spill);
         assert_eq!(result.code, 3, "a spill must remap to exit 3");
         assert_eq!(result.original_code, Some(0), "original exit code preserved");
+    }
+
+    #[tokio::test]
+    async fn a_spill_drops_the_stream_order() {
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+            spill_mode: SpillMode::Memory,
+        };
+        let sequence = kaish_types::OutputSequence::new();
+        let mut result = ExecResult::from_output(0, "x".repeat(200), "err\n");
+        result.stamp_stream_order(&sequence);
+        assert!(result.stream_order().is_some());
+        apply_spill_contract(&mut result, &config).await;
+        assert!(result.did_spill);
+        assert_eq!(result.stream_order(), None);
+
+        // A result that arrives spilled, its payloads untouched here.
+        let mut result = ExecResult::from_output(0, "head\n", "err\n");
+        result.stamp_stream_order(&sequence);
+        result.did_spill = true;
+        apply_spill_contract(&mut result, &OutputLimitConfig::none()).await;
+        assert_eq!(result.stream_order(), None);
     }
 
     #[tokio::test]

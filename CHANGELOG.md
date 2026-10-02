@@ -12,6 +12,18 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **`ExecResult::stream_order()` and `ExecResult::chunks()`** record how
+  stdout and stderr interleave: `OutputSpan { seq, stream, len }` runs
+  numbered by a counter shared across a kernel and its forks. Statements in
+  functions, loops, groups, and chains keep their order; an external
+  command's chunks are ordered as kaish read them; stderr from pipeline
+  stages and substitutions keeps the number it was written under; a single
+  builtin is its stdout, then its stderr. Payloads and merges (`2>&1`) are
+  unchanged. `scheduler::numbered_stderr_stream` creates a stderr stream
+  that numbers writes in a kernel's sequence.
+  `ToolResult` carries the spans, and serialized results include
+  `stream_order` only when it is set.
+
 - Backslash quoting outside strings: `a\ b` is one literal word and
   `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
   match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
