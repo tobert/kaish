@@ -365,6 +365,10 @@ impl BackendDispatcher {
                     Expr::Literal(Value::String(s)) => argv.push(format!("--{key}={s}")),
                     _ => argv.push(format!("--{key}=")),
                 },
+                Arg::ShortNamed { key, value } => match value {
+                    Expr::Literal(Value::String(s)) => argv.push(format!("-{key}={s}")),
+                    _ => argv.push(format!("-{key}=")),
+                },
                 Arg::WordAssign { key, value } => match value {
                     Expr::Literal(Value::String(s)) => argv.push(format!("{key}={s}")),
                     _ => argv.push(format!("{key}=")),

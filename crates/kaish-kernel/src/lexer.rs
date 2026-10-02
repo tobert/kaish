@@ -3289,7 +3289,7 @@ fn split_tilde_assignments(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spa
         let assignment_key = index.checked_sub(1).map(|previous| &tokens[previous]);
         let after_key = assignment_key.is_some_and(|previous| {
             previous.span.end == token.span.start
-                && (matches!(previous.token, Token::Ident(_) | Token::LongFlag(_))
+                && (matches!(previous.token, Token::Ident(_) | Token::LongFlag(_) | Token::ShortFlag(_))
                     || (matches!(previous.token, Token::RBracket) && contexts[index].after_lvalue)
                     || previous.token.is_keyword() || previous.token.is_type())
         });
@@ -3484,20 +3484,17 @@ fn is_flag_list_part(token: &Token) -> bool {
     )
 }
 
-/// Merge span-adjacent metacharacters onto a short flag token.
+/// Merge a span-adjacent `:` or `,` list onto a short flag token.
 ///
-/// Handles the `awk -F:` idiom: the lexer emits `-F` as `ShortFlag("F")`
-/// and `:` as `Token::Colon`. When span-adjacent, the `:` is part of the
-/// flag value, not a shell operator, so they fuse into `ShortFlag("F:")`
-/// for the arg-binding layer (the same mechanism used for `cut -f1`).
-/// Consecutive colons are all absorbed (`-F::` → `ShortFlag("F::")`).
-///
-/// A glued `,` starts a comma list that runs to the next gap or to a token
-/// [`is_flag_list_part`] refuses: `-Wl,-rpath,/opt/lib` → one
-/// `ShortFlag("Wl,-rpath,/opt/lib")`, `-k2,2n` → `ShortFlag("k2,2n")`, and
-/// `-d,` → `ShortFlag("d,")`. The text is the verbatim source slice. `=` is
-/// not absorbed; `-Wl,-rpath=/x` reaches the parser as a flag, `=`, and a
-/// value, the same as `-std=c11`.
+/// The lexer emits `-F` as `ShortFlag("F")` and `:` / `,` as their own
+/// tokens. A glued `:` or `,` starts a list that runs to the next gap or to
+/// a token [`is_flag_list_part`] refuses, and the whole run becomes one
+/// short flag for the arg-binding layer (the same mechanism used for
+/// `cut -f1`): `awk -F:` → `ShortFlag("F:")`, `-F:a` → `ShortFlag("F:a")`,
+/// `-Wl,-rpath,/opt/lib` → `ShortFlag("Wl,-rpath,/opt/lib")`, `-k2,2n` →
+/// `ShortFlag("k2,2n")`, `-d,` → `ShortFlag("d,")`. The text is the verbatim
+/// source slice. `=` is not absorbed; `-Wl,-rpath=/x` reaches the parser as
+/// a flag, `=`, and a value, the same as `-std=c11`.
 ///
 /// `;` (Semi) and `|` (Pipe) are shell operators and must NOT be fused
 /// even when span-adjacent — in bash, `-F;` and `-F|` require quoting
@@ -3518,19 +3515,9 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Ve
             let mut end_span = token.span.end;
             let mut j = i + 1;
 
-            while let Some(next) = tokens.get(j) {
-                if next.span.start == end_span && matches!(next.token, Token::Colon) {
-                    end_span = next.span.end;
-                    j += 1;
-                    continue;
-                }
-                break;
-            }
-
-            if tokens
-                .get(j)
-                .is_some_and(|next| next.span.start == end_span && matches!(next.token, Token::Comma))
-            {
+            if tokens.get(j).is_some_and(|next| {
+                next.span.start == end_span && matches!(next.token, Token::Colon | Token::Comma)
+            }) {
                 while let Some(next) = tokens.get(j) {
                     if next.span.start == end_span && is_flag_list_part(&next.token) {
                         end_span = next.span.end;

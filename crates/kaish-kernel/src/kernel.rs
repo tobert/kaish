@@ -4618,6 +4618,18 @@ impl Kernel {
                     let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
                     argv.push(format!("--{key}={val_str}"));
                 }
+                Arg::ShortNamed { key, value } => {
+                    if let Expr::NumericLiteral { raw, .. } = value {
+                        argv.push(format!("-{key}={raw}"));
+                        continue;
+                    }
+                    let val = self.eval_expr_async(value, &mut *ctx).await?;
+                    if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    argv.push(format!("-{key}={val_str}"));
+                }
                 Arg::WordAssign { key, value } => {
                     if let Expr::NumericLiteral { raw, .. } = value {
                         argv.push(format!("{key}={raw}"));
@@ -6914,7 +6926,8 @@ async fn consume_flag_positionals(
             .find(|idx| {
                 **idx > current_idx
                     && !consumed.contains(idx)
-                    && (allow_word_assign || matches!(args[**idx], Arg::Positional(_)))
+                    && (allow_word_assign
+                        || matches!(args[**idx], Arg::Positional(_) | Arg::ShortNamed { .. }))
             })
             .copied();
         match next_pos {
@@ -6922,6 +6935,21 @@ async fn consume_flag_positionals(
                 Arg::Positional(expr) => match source.eval(expr).await? {
                     Some(value) => {
                         collected.push(value);
+                        consumed.insert(pos_idx);
+                    }
+                    None if collected.is_empty() => {
+                        tool_args.flags.insert(flag_name.to_string());
+                        return Ok(());
+                    }
+                    None => anyhow::bail!(
+                        "--{flag_name}: could not evaluate argument {} in this context",
+                        collected.len() + 1
+                    ),
+                },
+                // `grep -e -n=5`: the one word `-n=5` is the flag's value.
+                Arg::ShortNamed { key, value } => match source.eval(value).await? {
+                    Some(val) => {
+                        collected.push(Value::String(short_named_word(key, value, &val)?));
                         consumed.insert(pos_idx);
                     }
                     None if collected.is_empty() => {
@@ -7074,6 +7102,13 @@ async fn bind_raw_words(
                     );
                 }
                 tool_args.positional.push(Value::String(format!("--{name}")));
+            }
+            Arg::ShortNamed { key, value } => {
+                let val = source
+                    .eval(value)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("raw-argv -key=value could not be evaluated in this context"))?;
+                tool_args.positional.push(Value::String(short_named_word(key, value, &val)?));
             }
             Arg::Named { key, value } => {
                 let val = source
@@ -7242,6 +7277,12 @@ pub(crate) async fn bind_tool_args(
                     }
                     words.push(Value::String(format!("--{name}")));
                 }
+                Arg::ShortNamed { key, value } => {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("verbatim -key=value could not be evaluated in this context")
+                    })?;
+                    words.push(Value::String(short_named_word(key, value, &val)?));
+                }
                 Arg::Named { key, value } => {
                     let val = source.eval(value).await?.ok_or_else(|| {
                         anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
@@ -7379,7 +7420,7 @@ pub(crate) async fn bind_tool_args(
         .iter()
         .enumerate()
         .filter_map(|(i, a)| {
-            let consumable = matches!(a, Arg::Positional(_))
+            let consumable = matches!(a, Arg::Positional(_) | Arg::ShortNamed { .. })
                 || (!accepts_word_assign && matches!(a, Arg::WordAssign { .. }));
             consumable.then_some(i)
         })
@@ -7417,6 +7458,15 @@ pub(crate) async fn bind_tool_args(
                         }
                         tool_args.positional.push(value);
                     }
+                }
+            }
+            Arg::ShortNamed { key, value } => {
+                // Already taken as a preceding value flag's argument.
+                if !consumed.contains(&i) {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("-{key}=value could not be evaluated in this context")
+                    })?;
+                    tool_args.positional.push(Value::String(short_named_word(key, value, &val)?));
                 }
             }
             Arg::Named { key, value } => {
@@ -7689,12 +7739,13 @@ pub(crate) async fn bind_tool_args(
                                 }
                                 break;
                             }
-                            _ if key == "," => {
-                                // `-l,a`: no value flag before the comma owns
-                                // the list. Never bind `,` as a flag.
+                            _ if key == "," || key == ":" => {
+                                // `-l,a`, `-l:a`: no value flag before the
+                                // separator owns the list. Never bind `,` or
+                                // `:` as a flag.
                                 let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
                                 anyhow::bail!(
-                                    "{tool}: -{name}: no flag before the comma takes a value; \
+                                    "{tool}: -{name}: no flag before `{key}` takes a value; \
                                      quote the word to pass it as text"
                                 );
                             }
@@ -8339,7 +8390,7 @@ fn classify_argv_token(token: &Value) -> Arg {
         }
     } else if let Some(rest) = s.strip_prefix('-') {
         // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`,
-        // plus a glued `:` run or comma list (`-F:`, `-d,`, `-Wl,-rpath,/x`). A
+        // plus a glued `:` or `,` list (`-F:`, `-d,`, `-Wl,-rpath,/x`). A
         // token carrying `=` (`-k=v` is one positional word in the string door
         // too) or a leading digit (`-1` lexes as a number) is not a short-flag
         // word, so it falls through to a literal positional instead of a
@@ -8385,10 +8436,23 @@ fn classify_alias_word(word: &str) -> Expr {
     Expr::Literal(Value::String(word.to_string()))
 }
 
+/// The one word an [`Arg::ShortNamed`] becomes: `-key=` and the value's
+/// text. A numeral keeps its source text; binary is refused, as for every
+/// composed argument.
+fn short_named_word(key: &str, value: &Expr, val: &Value) -> Result<String> {
+    let text = if let Expr::NumericLiteral { raw, .. } = value {
+        raw.clone()
+    } else {
+        crate::interpreter::value_to_text_sink_named(val, "a -key=value argument")
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
+    Ok(format!("-{key}={text}"))
+}
+
 /// A short-flag word, as `merge_flag_metachar_adjacent` builds one: a leading
 /// ASCII letter, then ASCII letters/digits/`-` (the lexer's base
-/// `-[a-zA-Z][a-zA-Z0-9-]*` regex) or `:` (the `awk -F:` idiom), then
-/// optionally a comma list (`-d,`, `-k2,2n`, `-Wl,-rpath,/x`). The list takes
+/// `-[a-zA-Z][a-zA-Z0-9-]*` regex), then optionally a list opened by `:` or
+/// `,` (`-F:`, `-F:a`, `-d,`, `-k2,2n`, `-Wl,-rpath,/x`). The list takes
 /// bareword and path characters, including non-ASCII; `=`, `$`, quotes,
 /// backslashes, globs, whitespace, and operators end it in the lexer, so a
 /// word holding one is not a short flag here either. `-la`, `-A1`, `-a:`,
@@ -8396,12 +8460,12 @@ fn classify_alias_word(word: &str) -> Expr {
 /// door too), and `-d,$x` do not, so they fall through to a literal
 /// positional instead of a malformed `ShortFlag`.
 fn is_short_flag_body(s: &str) -> bool {
-    let (letters, list) = match s.split_once(',') {
-        Some((letters, list)) => (letters, Some(list)),
+    let (letters, list) = match s.find([',', ':']) {
+        Some(at) => (&s[..at], Some(&s[at..])),
         None => (s, None),
     };
     s.starts_with(|c: char| c.is_ascii_alphabetic())
-        && letters.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':')
+        && letters.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         && list.is_none_or(|list| {
             list.chars().all(|c| {
                 c.is_ascii_alphanumeric()
@@ -8662,6 +8726,7 @@ mod argv_classify_tests {
             Arg::LongFlag(s) => ("long", s.clone(), String::new()),
             Arg::Positional(e) => ("pos", String::new(), lit(e)?),
             Arg::Named { key, value } => ("named", key.clone(), lit(value)?),
+            Arg::ShortNamed { key, value } => ("pos", String::new(), format!("-{key}={}", lit(value)?)),
             Arg::WordAssign { key, value } => ("pos", String::new(), format!("{key}={}", lit(value)?)),
         })
     }
@@ -8702,6 +8767,8 @@ mod argv_classify_tests {
             assert_eq!(classify(word), Arg::Positional(Expr::Literal(Value::String(word.into()))), "{word}");
         }
         assert_eq!(classify("-Wl,-rpath,/opt/日本"), Arg::ShortFlag("Wl,-rpath,/opt/日本".into()));
+        assert_eq!(classify("-F:a"), Arg::ShortFlag("F:a".into()));
+        assert_eq!(classify("-F:$x"), Arg::Positional(Expr::Literal(Value::String("-F:$x".into()))));
         // Leading-digit dash is a number to the lexer, not a flag → positional.
         assert_eq!(classify("-1"), Arg::Positional(Expr::Literal(Value::String("-1".into()))));
         // Numeric strings keep their literal text — `execute_argv` does NOT

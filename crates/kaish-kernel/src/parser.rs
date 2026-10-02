@@ -2484,8 +2484,12 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
 fn is_glue_candidate(arg: &Arg, flags_are_data: bool) -> bool {
     matches!(
         arg,
-        Arg::Positional(_) | Arg::LongFlag(_) | Arg::Named { .. } | Arg::WordAssign { .. }
-    ) || matches!(arg, Arg::ShortFlag(name) if name.contains(','))
+        Arg::Positional(_)
+            | Arg::LongFlag(_)
+            | Arg::Named { .. }
+            | Arg::ShortNamed { .. }
+            | Arg::WordAssign { .. }
+    ) || matches!(arg, Arg::ShortFlag(name) if name.contains([',', ':']))
         || (flags_are_data && matches!(arg, Arg::ShortFlag(_) | Arg::DoubleDash))
 }
 
@@ -2915,6 +2919,16 @@ where
     .map(|s| Arg::Positional(Expr::Literal(Value::String(s.to_string()))))
 }
 
+/// A flag name, `=`, and a value, each with its span.
+type SpannedFlagValue = (((String, Span), Span), (Expr, Span));
+
+/// True when nothing but line continuations separates the flag name, `=`,
+/// and the value.
+fn flag_value_parts_touch((((_, name_span), eq_span), (_, value_span)): &SpannedFlagValue) -> bool {
+    gap_is_only_continuations(name_span.end, eq_span.start)
+        && gap_is_only_continuations(eq_span.end, value_span.start)
+}
+
 /// A bare `...` argument is the literal word `...` (`echo ...`). Spread
 /// (`[...$xs]`) exists only inside a list literal, which never reaches here.
 fn ellipsis_word<'tokens, I>(
@@ -2925,59 +2939,26 @@ where
     just(Token::DotDotDot).to(Arg::Positional(Expr::Literal(Value::String("...".to_string()))))
 }
 
-/// `-name=value` with no space on either side of `=` is one literal word,
-/// like `--name=value`: `gcc -std=c11`, `pdflatex -interaction=nonstopmode`,
-/// `-Dkey='a b'`, `-Wl,-rpath=/x`. The command receives `-name=value`
-/// verbatim; a builtin sees it as a positional, as the argv door classifies
-/// it.
-///
-/// The value is one literal or quoted word. An unquoted `$var`, `$(...)`, or
-/// glob after `=` fails this production, and the word is refused as
-/// pasting; quoting the whole word is the fix.
+/// `-name=value` with no space on either side of `=` is one word, like
+/// `--name=value`: `gcc -std=c11`, `pdflatex -interaction=nonstopmode`,
+/// `-Dkey='a b'`, `-Wl,-rpath=$dir`. The value slot takes what
+/// `--name=`'s does, substitutions and `~` included; text glued after the
+/// value is refused as pasting, as it is there. The command receives the one
+/// word `-name=value` ([`Arg::ShortNamed`]); a builtin sees an operand, as
+/// the argv door classifies it.
 fn short_flag_value_word_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // `filter`, not `try_map`: a non-match is an ordinary expected-token
-    // miss that the next alternative answers, never a diagnosis of its own.
+    // `filter`, not `try_map`: a spaced `-a = b` is an ordinary miss that the
+    // next alternative answers as three words, never a diagnosis of its own.
     select! { Token::ShortFlag(name) => name }
         .map_with(|s, e| -> (String, Span) { (s, e.span()) })
         .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
         .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
-        .map(
-            |(((name, name_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span))| {
-                let glued = gap_is_only_continuations(name_span.end, eq_span.start)
-                    && gap_is_only_continuations(eq_span.end, value_span.start);
-                glued.then(|| short_flag_value_word(&name, value)).flatten()
-            },
-        )
-        .filter(Option::is_some)
-        .map(|word| {
-            let Some(word) = word else {
-                unreachable!("filtered to Some above")
-            };
-            Arg::Positional(word)
-        })
-}
-
-/// The expression for the word `-{name}={value}`, or `None` when `value` is
-/// not a literal or a quoted string.
-fn short_flag_value_word(name: &str, value: Expr) -> Option<Expr> {
-    let prefix = format!("-{name}=");
-    let text = match value {
-        Expr::Literal(Value::String(s)) => s,
-        Expr::Literal(Value::Int(n)) => n.to_string(),
-        Expr::Literal(Value::Float(f)) => f.to_string(),
-        Expr::Literal(Value::Bool(b)) => b.to_string(),
-        Expr::NumericLiteral { raw, .. } => raw,
-        Expr::Interpolated(mut parts) => {
-            parts.insert(0, StringPart::Literal(prefix));
-            return Some(Expr::Interpolated(parts));
-        }
-        _ => return None,
-    };
-    Some(Expr::Literal(Value::String(format!("{prefix}{text}"))))
+        .filter(flag_value_parts_touch)
+        .map(|(((key, _), _), (value, _))| Arg::ShortNamed { key, value })
 }
 
 /// Argument parser for arguments before `--` (normal flag handling).
@@ -2986,13 +2967,16 @@ fn arg_before_double_dash_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Long flag with value: --name=value
+    // Long flag with value: --name=value. A spaced `--name = value` is
+    // three words, as in bash.
     let long_flag_with_value = select! {
         Token::LongFlag(name) => name,
     }
-    .then_ignore(just(Token::Eq))
-    .then(primary_expr_parser())
-    .map(|(key, value)| Arg::Named { key, value });
+    .map_with(|s, e| -> (String, Span) { (s, e.span()) })
+    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
+    .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
+    .filter(flag_value_parts_touch)
+    .map(|(((key, _), _), (value, _))| Arg::Named { key, value });
 
     // Boolean long flag: --name
     let long_flag = select! {

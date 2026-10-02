@@ -667,15 +667,18 @@ prints `--greeting=` followed by the variable.
 
 `-name=value` is one word when nothing separates the `=` from either side:
 `pdflatex -interaction=nonstopmode`, `java -Dkey='a b'`,
-`gs -sOutputFile="$out/p.png"`. The command receives `-name=value`; a builtin
-reads it as an operand, not as the `-n` flag. The value is one literal or
-quoted word. Quote the whole word to put an expansion in it:
-`"-Dout=$dir"`, not `-Dout=$dir`.
+`gcc -Wl,-rpath=$dir`, `-I=~/include`. The value takes what `--name=`'s
+value takes — `$var`, `${var}`, `$(cmd)`, `$(( ))`, `~`, a quoted string —
+and text glued after it is refused, as for `--name=`: write
+`"-Dout=$dir.txt"`, not `-Dout=$dir.txt`. The command receives the one word
+`-name=value`; a builtin reads it as an operand, not as the `-n` flag. With
+a space, `-a = b` and `--a = b` are three words.
 
-A comma glued to a short flag continues the word to the next space:
-`-Wl,-rpath,/opt/lib` and `-Wl,-rpath=/x` are one word each. A builtin reads
-`cut -d, -f1,3` as `-d ,` and `-f 1,3`. An expansion inside the list is
-refused; quote the whole word (`"-Wl,-rpath,$dir"`).
+A `:` or `,` glued to a short flag continues the word to the next space:
+`awk -F:`, `-F:a`, `-Wl,-rpath,/opt/lib`, and `-Wl,-rpath=/x` are one word
+each. A builtin reads `cut -d, -f1,3` as `-d ,` and `-f 1,3`, and refuses
+`ls -l,a`, where no flag before the `,` takes a value. An expansion inside
+the list is refused; quote the whole word (`"-Wl,-rpath,$dir"`).
 
 `+x` and `...` are literal words: `chmod +x run.sh`, `echo ...`. Spread
 (`[...$xs]`) exists only inside a list literal.

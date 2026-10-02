@@ -18,7 +18,7 @@ use common::{kernel_at, run};
 use kaish_kernel::ast::plan::plan_program;
 use rstest::rstest;
 
-/// The argv words of the only command `source` plans: a literal's value, or
+/// The argv words of the first command `source` plans: a literal's value, or
 /// a non-literal's rendered text.
 fn planned_args(source: &str) -> Vec<String> {
     let plans = plan_program(source).unwrap_or_else(|errors| {
@@ -27,7 +27,8 @@ fn planned_args(source: &str) -> Vec<String> {
     });
     let json = serde_json::to_value(&plans).expect("plan serializes");
     let commands = json[0]["plan"]["commands"].as_array().expect("commands");
-    assert_eq!(commands.len(), 1, "{source:?} must plan one command: {json}");
+    // A substitution in an argument plans its own command after this one.
+    assert!(!commands.is_empty(), "{source:?} must plan a command: {json}");
     commands[0]["args"]
         .as_array()
         .expect("args")
@@ -68,6 +69,9 @@ fn parse_error(source: &str) -> String {
 #[case::linker_long("gcc -Wl,--as-needed main.o", &["-Wl,--as-needed", "main.o"])]
 #[case::linker_non_ascii("gcc -Wl,-rpath,/opt/日本 main.o", &["-Wl,-rpath,/opt/日本", "main.o"])]
 #[case::sort_key("sort -k2,2n f", &["-k2,2n", "f"])]
+#[case::colon_list("awk -F:a f", &["-F:a", "f"])]
+#[case::colon_then_comma("x -F:a,b", &["-F:a,b"])]
+#[case::spaced_long_flag("x --a = b", &["--a", "=", "b"])]
 #[case::cut_fields("cut -d, -f1,3 f", &["-d,", "-f1,3", "f"])]
 #[case::plus_mode("chmod +x file", &["+x", "file"])]
 #[case::plus_echo("echo +x +rw", &["+x", "+rw"])]
@@ -97,15 +101,14 @@ fn spaced_equals_is_not_fused(#[case] source: &str, #[case] expected: &[&str]) {
     assert_eq!(planned_args(source), expected, "{source}");
 }
 
-/// Substitution glued to text is still pasting, and is still refused.
+/// Text glued to a substitution, or to a quoted fragment, is still pasting.
 #[rstest]
-#[case::unquoted_var("x -a=$y")]
-#[case::unquoted_subst("x -a=$(echo b)")]
 #[case::var_after_value("x -a=b$y")]
+#[case::text_after_var("x -a=$y.txt")]
+#[case::colon_list_var("awk -F:$y f")]
 #[case::quoted_then_bare(r#"x -a="b"c"#)]
 #[case::bare_then_quoted(r#"x -a=b"c""#)]
 #[case::second_equals("x -a=b=c")]
-#[case::glob_value("x -a=*.c")]
 #[case::linker_var("gcc -Wl,-rpath,$dir main.o")]
 #[case::linker_quoted(r#"gcc -Wl,-rpath,"$dir" main.o"#)]
 #[case::plus_var("echo +x$y")]
@@ -165,11 +168,13 @@ async fn cut_and_sort_take_comma_lists_glued_to_the_flag() {
 async fn comma_list_on_a_bool_flag_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel = kernel_at(tmp.path());
-    for source in ["ls -l,a", "ls -l,é", "set -e,", "set -o,trash"] {
+    for (source, separator) in
+        [("ls -l,a", ","), ("ls -l,é", ","), ("set -e,", ","), ("set -o,trash", ","), ("ls -l:a", ":")]
+    {
         let result = kernel.execute(source).await.expect("execute");
         assert_ne!(result.code, 0, "{source} must fail: {}", result.text_out());
         assert!(
-            result.err.contains("no flag before the comma takes a value"),
+            result.err.contains(&format!("no flag before `{separator}` takes a value")),
             "{source}: {}",
             result.err
         );
@@ -195,4 +200,84 @@ async fn external_argv_keeps_flag_shaped_words_whole() {
         result.text_out(),
         "<-std=c11><-interaction=non stop><-Wl,-rpath,/x><-Wl,-rpath=/y><-k2,2n><+x><...>"
     );
+}
+
+/// The value slot of `-name=` follows the rules of `--name=`: the same
+/// substitutions, the same rendering, the same refusals.
+#[rstest]
+#[case::variable("$y")]
+#[case::braced_variable("${y}")]
+#[case::command_substitution("$(echo b)")]
+#[case::arithmetic("$((1 + 2))")]
+#[case::tilde("~/f")]
+#[case::bare_tilde("~")]
+#[case::glob("*.c")]
+#[case::double_quoted(r#""$y z""#)]
+#[case::literal("b")]
+fn short_flag_value_slot_matches_long_flag(#[case] value: &str) {
+    for after_dash in ["", "-- "] {
+        let short = planned_args(&format!("x {after_dash}-a={value}"));
+        let long = planned_args(&format!("x {after_dash}--a={value}"));
+        let long_as_short: Vec<String> = long.iter().map(|word| word.replacen("--a=", "-a=", 1)).collect();
+        assert_eq!(short, long_as_short, "value {value:?} after {after_dash:?}");
+    }
+}
+
+#[tokio::test]
+async fn short_flag_value_slot_expands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let (out, code) = run(
+        &kernel,
+        "HOME=/h; y=v; printf '<%s>' -a=$y -b=${y} -c=$(echo s) -d=$((1 + 2)) -e=~/f -- -f=$y",
+    )
+    .await;
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out, "<-a=v><-b=v><-c=s><-d=3><-e=/h/f><-f=v>");
+}
+
+/// A builtin reads `-n=5` as an operand and names the word in its error.
+#[tokio::test]
+async fn builtin_error_names_the_flag_value_word() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let result = kernel.execute("head -n=5 missing.txt").await.expect("execute");
+    assert_ne!(result.code, 0);
+    assert!(result.err.contains("-n=5"), "{}", result.err);
+}
+
+/// A list or record in the value slot is refused for an external command,
+/// as `--a=$x` is.
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn external_short_flag_value_refuses_a_list_like_the_long_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let long = kernel.execute("x=[1,2]; /usr/bin/printf '%s' --a=$x").await.expect("execute");
+    let short = kernel.execute("x=[1,2]; /usr/bin/printf '%s' -a=$x").await.expect("execute");
+    assert_ne!(long.code, 0, "{}", long.text_out());
+    assert_eq!((short.code, short.err.clone()), (long.code, long.err.clone()));
+}
+
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn external_argv_gets_expanded_short_flag_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let result = kernel
+        .execute("HOME=/h; d=/opt/lib; /usr/bin/printf '<%s>' -Wl,-rpath=$d -I=~/inc -F:a --a = b")
+        .await
+        .expect("execute");
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out(), "<-Wl,-rpath=/opt/lib><-I=/h/inc><-F:a><--a><=><b>");
+}
+
+/// A value flag takes a following `-name=value` word as its value, as it
+/// takes any operand: `seq -s -n=5` separates with `-n=5`.
+#[tokio::test]
+async fn value_flag_takes_a_short_flag_value_word() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+    let (out, code) = run(&kernel, "seq -s -n=5 1 3; echo; seq -s -e=1.50 1 2").await;
+    assert_eq!((out.as_str(), code), ("1-n=52-n=53\n1-e=1.502", 0));
 }

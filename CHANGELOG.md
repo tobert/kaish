@@ -43,6 +43,8 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- `Arg::ShortNamed { key, value }` is the parsed `-key=value` word. Every
+  command receives it as the one word `-key=value`.
 - **BREAKING**: Plans report a fully literal argument or file redirect
   target as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the
   argument or unresolved path, `text` for display. Expanding words stay
@@ -51,11 +53,14 @@ breaking entries are marked **BREAKING**.
 ### Fixed
 
 - `-name=value` is one word, like `--name=value`: `gcc -std=c11`,
-  `pdflatex -interaction=nonstopmode`, `java -Dkey='a b'`. The value is one
-  literal or quoted word; `-a=$x` is still refused. A comma list glued to a
-  short flag is one word: `-Wl,-rpath,/opt/lib` reaches an external command
-  whole, and `cut -f1,3` and `sort -k2,2n` bind `1,3` and `2,2n` instead
-  of reading `,3` as a file. `chmod +x f` and `echo ...` parse.
+  `pdflatex -interaction=nonstopmode`, `-Wl,-rpath=$dir`, `-I=~/inc`. Its
+  value takes the substitutions and `~` that `--name=`'s takes. A `:` or
+  `,` list glued to a short flag is one word: `-Wl,-rpath,/opt/lib` and
+  `-F:a` reach an external command whole, and `cut -f1,3` and
+  `sort -k2,2n` bind `1,3` and `2,2n` instead of reading `,3` as a file.
+  `chmod +x f` and `echo ...` parse.
+- `--a = b` with spaces is three words, as in bash; it was silently read
+  as `--a=b`.
 - `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
   an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
   refuse extra operands. `head -c` reads a byte prefix of each file.

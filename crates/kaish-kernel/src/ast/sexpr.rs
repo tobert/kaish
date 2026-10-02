@@ -107,6 +107,7 @@ fn format_arg(arg: &Arg) -> String {
     match arg {
         Arg::Positional(expr) => format!("(pos {})", format_expr(expr)),
         Arg::Named { key, value } => format!("(named {} {})", key, format_expr(value)),
+        Arg::ShortNamed { key, value } => format!("(shortnamed {} {})", key, format_expr(value)),
         Arg::WordAssign { key, value } => format!("(wordassign {} {})", key, format_expr(value)),
         Arg::ShortFlag(f) => format!("(shortflag {})", f),
         Arg::LongFlag(f) => format!("(longflag {})", f),
