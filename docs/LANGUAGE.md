@@ -401,13 +401,14 @@ echo "$(echo "$(date +%F)")"
 
 ### Word characters
 
-A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`,
-and **any non-ASCII character** — kaish, like bash, never inspects word bytes
-for alphabetic-ness. Any script lexes unquoted, no quoting needed. (ASCII
-punctuation outside that set is still not a word character: `echo 100%` is an
-error, as it was before.)
+A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`, `^`,
+`~` after the first character, and **any non-ASCII character** — kaish, like
+bash, never inspects word bytes for alphabetic-ness. Any script lexes
+unquoted, no quoting needed. (ASCII punctuation outside that set is still not
+a word character: `echo 100%` is an error, as it was before.)
 
 ```sh
+echo HEAD^2 HEAD~1 f.txt~ 9-    # complete literal words
 echo 123.txt 1.2.3 true:foo a+b # complete literal words
 ls 1.0*                       # glob keeps the written numeric prefix
 p=~/x; echo "$p"               # assignment followed by a home-relative path
@@ -455,13 +456,13 @@ nothing.
 
 `~+` and `~-` are not expanded (bash gives `$PWD` and `$OLDPWD`); write `$PWD` or `$OLDPWD`.
 
-A `~` that is not at the start of a word is never a tilde-prefix: kaish has
-no bareword-pasting rule, so an unquoted `~` glued to a preceding word
-(`foo~bar`, `a/~`) is a parse error (see "Quote to join" below) rather than
-a silently literal concatenation. A heredoc body never expands `~`, even
-when the delimiter is unquoted and the body otherwise interpolates — tilde
-expansion is a source-word operation, and a heredoc body is never split into
-words.
+`echo HEAD~1 foo~bar a/~` prints those three words as written: a `~` after the first character is ordinary text. `^` is ordinary text in a word too (`HEAD^2`); `$(( ))` and `${…}` keep their own operators.
+
+Digit-leading words containing a dash stay text, including open ranges (`9-`, `1-3,5-`) and repeated dashes (`1--`). Complete scalar numerals keep their number rules.
+
+A heredoc body never expands `~`, even when the delimiter is unquoted and
+the body otherwise interpolates — tilde expansion is a source-word operation,
+and a heredoc body is never split into words.
 
 A name holds no ASCII punctuation, even where a *word* may. The `Ident` token
 admits `-`, `@`, `.`, and `#` so that words, paths, hostnames, and ids keep

@@ -259,6 +259,64 @@ fn lexer_number_idents(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// `^` is an ordinary word character, as in bash: `HEAD^`, `a^b`, `^foo`.
+// `$(( ))` and `${…}` never reach these word classes.
+#[rstest]
+#[case::caret_alone("^", &["IDENT(^)"])]
+#[case::caret_infix("a^b", &["IDENT(a^b)"])]
+#[case::caret_git_parent("HEAD^", &["IDENT(HEAD^)"])]
+#[case::caret_git_second_parent("HEAD^2", &["IDENT(HEAD^2)"])]
+#[case::caret_leading("^foo", &["IDENT(^foo)"])]
+#[case::caret_digit_leading("1^2", &["NUMIDENT(1^2)"])]
+#[case::caret_path("/a^b", &["PATH(/a^b)"])]
+#[case::caret_relative_path("a^/b", &["RELPATH(a^/b)"])]
+#[case::caret_dotted(".a^b", &["DOTIDENT(.a^b)"])]
+#[case::caret_tilde_path("~/a^b", &["TILDEPATH(~/a^b)"])]
+#[case::caret_at_word("@a^b", &["ATWORD(@a^b)"])]
+fn lexer_caret_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// A `~` that does not start a word is an ordinary character: `HEAD~1`,
+// `a~b`, `f.txt~`. A word that starts with `~` is still a tilde path.
+#[rstest]
+#[case::tilde_infix("a~b", &["IDENT(a~b)"])]
+#[case::tilde_suffix("x~", &["IDENT(x~)"])]
+#[case::tilde_git_ancestor("HEAD~1", &["IDENT(HEAD~1)"])]
+#[case::tilde_git_mixed("HEAD~1^2", &["IDENT(HEAD~1^2)"])]
+#[case::tilde_digit_leading("1~2", &["NUMIDENT(1~2)"])]
+#[case::tilde_path_word("/tmp/f~", &["PATH(/tmp/f~)"])]
+#[case::tilde_relative_path("a/b~c", &["RELPATH(a/b~c)"])]
+#[case::tilde_dotted(".a~b", &["DOTIDENT(.a~b)"])]
+#[case::tilde_at_word("@a~b", &["ATWORD(@a~b)"])]
+#[case::tilde_inner_tilde("~/a~b", &["TILDEPATH(~/a~b)"])]
+#[case::tilde_long_flag_value("--from=HEAD~1", &["LONGFLAG(from)", "EQ", "IDENT(HEAD~1)"])]
+#[case::tilde_leading_unchanged("~/x", &["TILDEPATH(~/x)"])]
+#[case::tilde_alone_unchanged("~", &["TILDE"])]
+fn lexer_tilde_inside_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// A digit-leading word with a dash is text, including a trailing dash: the
+// `cut -c 9-` and `cut -f 1-3,5-` field lists. A plain numeral stays a number.
+#[rstest]
+#[case::dashnum_open_range("9-", &["DASHNUM(9-)"])]
+#[case::dashnum_double_dash("1--", &["DASHNUM(1--)"])]
+#[case::dashnum_range_then_dash("1-3-", &["DASHNUM(1-3-)"])]
+#[case::dashnum_float_then_dash("1.5-", &["DASHNUM(1.5-)"])]
+#[case::dashnum_minus_led_open("-5-", &["DASHNUM(-5-)"])]
+#[case::dashnum_minus_led_range("-1-3", &["DASHNUM(-1-3)"])]
+#[case::dashnum_field_list("1-3,5-", &["IDENT(1-3,5-)"])]
+#[case::dashnum_field_list_short("2,4-", &["IDENT(2,4-)"])]
+#[case::dashnum_segment_punctuation("1-a@b+c", &["DASHNUM(1-a@b+c)"])]
+#[case::dashnum_glob_class("[0-9-]*", &["GLOB([0-9-]*)"])]
+#[case::dashnum_int_unchanged("5", &["INT(5)"])]
+#[case::dashnum_negative_unchanged("-5", &["INT(-5)"])]
+#[case::dashnum_range_unchanged("1-3", &["DASHNUM(1-3)"])]
+fn lexer_digit_leading_dash_words(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
 // Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
 // lex as a single token, not Dot + Ident, so they are not misparsed as the
 // POSIX `.` (source) command followed by an argument.
