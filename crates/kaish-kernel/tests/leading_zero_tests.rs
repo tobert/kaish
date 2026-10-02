@@ -159,11 +159,42 @@ done",
     }
 }
 
-/// `break -022` is not fixed by writing `break 22`.
+/// A suggestion must never itself be refused. `-022`, `00` and `-007.5` have
+/// no positive reading, so the fix is the count-free form, not a trimmed count.
+#[rstest::rstest]
+#[case("-022")]
+#[case("00")]
+#[case("-007.5")]
+#[case("000.5")]
 #[tokio::test]
-async fn the_suggested_count_keeps_its_sign() {
-    let text = err_of("for i in 1 2; do break -022; done").await;
-    assert!(text.contains("write `break -22`"), "the sign must survive: {text:?}");
+async fn a_count_with_no_positive_reading_suggests_plain_break(#[case] count: &str) {
+    for keyword in ["break", "continue"] {
+        let text = err_of(&format!("for i in 1 2; do {keyword} {count}; done")).await;
+        assert!(
+            text.contains(&format!("write `{keyword}` or `{keyword} 1`")),
+            "{keyword} {count}: must name the working fix: {text:?}"
+        );
+        for bad in ["-22", "-7", " 0`", " 0;", "-0"] {
+            assert!(
+                !text.contains(&format!("write `{keyword}{bad}")) && !text.contains(&format!("write `{keyword} {}`", bad.trim())),
+                "{keyword} {count}: suggestion must not be refused itself: {text:?}"
+            );
+        }
+    }
+}
+
+/// The refusal names the count as typed, not as parsed.
+#[tokio::test]
+async fn the_refusal_names_the_count_as_typed() {
+    for (source, typed) in [
+        ("for i in 1 2; do break -0; done", "break -0"),
+        ("for i in 1 2; do continue -0; done", "continue -0"),
+        ("for i in 1 2; do break -1; done", "break -1"),
+    ] {
+        let errors = kaish_kernel::parser::parse(source).expect_err("must be refused");
+        let message = errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(message.contains(&format!("{typed}:")), "{source}: {message:?}");
+    }
 }
 
 /// `break 007.5` used to suggest `break 7.5` — the fraction survives the
