@@ -32,8 +32,8 @@ breaking entries are marked **BREAKING**.
 ### Fixed
 
 - **BREAKING:** `--json` prints `{"code":N,"error":"..."}` for every nonzero
-  formatted result, including `grep` no-match, `false`, differing `diff`, and
-  failed scatter workers. Partial results stay under `data` or `output`;
+  formatted result, including `grep` no-match, `false`, differing `diff` or
+  overlay results, and failed scatter workers. Partial results stay under `data` or `output`;
   success stays unwrapped.
 - `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
   digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
