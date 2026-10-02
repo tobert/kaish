@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::output::OutputData;
+use crate::stream_order::{OutputChunk, OutputSequence, OutputSpan, StreamKind, StreamOrder};
 use crate::value::Value;
 
 /// A command's stdout payload: text, or raw bytes.
@@ -173,6 +174,13 @@ pub struct ExecResult {
     /// Internal plumbing, not part of the wire contract: never serialized.
     #[serde(skip)]
     pub stderr_published_len: usize,
+    /// How stdout and stderr interleave; see [`Self::stream_order`].
+    ///
+    /// Boxed so a result without spans pays 8 bytes. Held as a
+    /// [`StreamOrder`] so a loop that takes it, appends, and puts it back
+    /// keeps its merge progress and grows in amortized time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stream_order: Option<Box<StreamOrder>>,
 }
 
 impl ExecResult {
@@ -210,6 +218,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -236,6 +245,7 @@ impl ExecResult {
                 content_type: None,
                 baggage: BTreeMap::new(),
                 stderr_published_len: 0,
+                stream_order: None,
             },
         }
     }
@@ -276,6 +286,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -302,6 +313,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -332,6 +344,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -355,6 +368,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -377,6 +391,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -401,6 +416,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
+            stream_order: None,
         }
     }
 
@@ -478,13 +494,19 @@ impl ExecResult {
     // ── Mutation accessors ──
 
     /// Replace `.out` with text.
+    ///
+    /// Drops the stdout spans of [`Self::stream_order`].
     pub fn set_out(&mut self, s: String) {
         self.out = OutputPayload::Text(s);
+        self.remove_stream_spans(StreamKind::Stdout);
     }
 
     /// Replace `.out` with raw bytes (binary payload).
+    ///
+    /// Drops the stdout spans of [`Self::stream_order`].
     pub fn set_out_bytes(&mut self, b: Vec<u8>) {
         self.out = OutputPayload::Bytes(b);
+        self.remove_stream_spans(StreamKind::Stdout);
     }
 
     /// Append text to `.out`. A binary payload is appended to as raw UTF-8 bytes.
@@ -495,9 +517,10 @@ impl ExecResult {
         }
     }
 
-    /// Clear `.out` back to empty text.
+    /// Clear `.out` back to empty text, with its stdout spans.
     pub fn clear_out(&mut self) {
         self.out = OutputPayload::Text(String::new());
+        self.remove_stream_spans(StreamKind::Stdout);
     }
 
     /// Drop every representation of stdout: the text `.out`, the structured
@@ -516,15 +539,28 @@ impl ExecResult {
         self.out = OutputPayload::Text(String::new());
         self.output = None;
         self.data = None;
+        self.remove_stream_spans(StreamKind::Stdout);
     }
 
     /// Replace `.output`.
+    ///
+    /// When `.out` is empty text, `.output` is the stdout, so its stdout
+    /// spans are dropped.
     pub fn set_output(&mut self, o: Option<OutputData>) {
         self.output = o.map(Box::new);
+        if self.out_is_empty_text() {
+            self.remove_stream_spans(StreamKind::Stdout);
+        }
     }
 
     /// Take `.output`, leaving None.
+    ///
+    /// When `.out` is empty text, `.output` was the stdout, so its stdout
+    /// spans are dropped.
     pub fn take_output(&mut self) -> Option<OutputData> {
+        if self.out_is_empty_text() {
+            self.remove_stream_spans(StreamKind::Stdout);
+        }
         self.output.take().map(|o| *o)
     }
 
@@ -542,7 +578,8 @@ impl ExecResult {
     /// Take `.output` only if `.out` is empty (no custom text),
     /// so caller can stream directly without materializing.
     pub fn take_output_for_stream(&mut self) -> Option<OutputData> {
-        if matches!(&self.out, OutputPayload::Text(s) if s.is_empty()) {
+        if self.out_is_empty_text() {
+            self.remove_stream_spans(StreamKind::Stdout);
             self.output.take().map(|o| *o)
         } else {
             None
@@ -560,6 +597,151 @@ impl ExecResult {
         self
     }
 
+    // ── Stream order ──
+
+    /// How this result's stdout and stderr bytes interleave, in the order
+    /// kaish saw them.
+    ///
+    /// Each span consumes the next `len` bytes of its stream: stdout is
+    /// [`Self::text_out`] (or [`Self::out_bytes`] for a binary payload), and
+    /// stderr is `err`. Sequence numbers strictly increase down the list.
+    ///
+    /// `None` means the order is the stdout block followed by the stderr
+    /// block. That is the case for a result with no spans, and for one whose
+    /// spans no longer match its payloads because `err` or stdout was
+    /// changed after they were recorded. A spilled or truncated result has
+    /// no spans.
+    ///
+    /// Exactness depends on the producer: a builtin reads as its whole
+    /// stdout, then its whole stderr; an external command's chunks are
+    /// ordered by when kaish read them from its two pipes; and statements in
+    /// a function, loop, or group are ordered statement by statement.
+    /// Numbers come from one counter per kernel (shared with its forks), so
+    /// they order spans across results from the same kernel only.
+    pub fn stream_order(&self) -> Option<&[OutputSpan]> {
+        let spans = self.stream_order.as_deref()?.spans();
+        crate::stream_order::spans_describe(spans, self.stdout_len(), self.err.len() as u64)
+            .then_some(spans)
+    }
+
+    /// Stdout and stderr as runs of bytes in the order of
+    /// [`Self::stream_order`], or the stdout block then the stderr block when
+    /// that is `None`. Empty streams contribute no chunk.
+    ///
+    /// Concatenating the chunks gives what a terminal shows when both streams
+    /// write to it. A chunk boundary can split a UTF-8 character.
+    pub fn chunks(&self) -> Vec<OutputChunk<'_>> {
+        let stdout = self.stdout_bytes();
+        let stderr = self.err.as_bytes();
+        let spans = self.stream_order.as_deref().map(StreamOrder::spans).filter(|spans| {
+            crate::stream_order::spans_describe(spans, stdout.len() as u64, stderr.len() as u64)
+        });
+        let slice_stdout = |start: usize, end: usize| -> Cow<'_, [u8]> {
+            match &stdout {
+                Cow::Borrowed(bytes) => Cow::Borrowed(&bytes[start..end]),
+                Cow::Owned(bytes) => Cow::Owned(bytes[start..end].to_vec()),
+            }
+        };
+        let Some(spans) = spans else {
+            let mut chunks = Vec::with_capacity(2);
+            if !stdout.is_empty() {
+                chunks.push(OutputChunk { stream: StreamKind::Stdout, seq: None, bytes: slice_stdout(0, stdout.len()) });
+            }
+            if !stderr.is_empty() {
+                chunks.push(OutputChunk { stream: StreamKind::Stderr, seq: None, bytes: Cow::Borrowed(stderr) });
+            }
+            return chunks;
+        };
+        let mut stdout_at = 0usize;
+        let mut stderr_at = 0usize;
+        let mut chunks = Vec::with_capacity(spans.len());
+        for span in spans {
+            // spans_describe bounded every sum by a payload length, a usize.
+            let len = span.len as usize;
+            let bytes = match span.stream {
+                StreamKind::Stdout => {
+                    stdout_at += len;
+                    slice_stdout(stdout_at - len, stdout_at)
+                }
+                StreamKind::Stderr => {
+                    stderr_at += len;
+                    Cow::Borrowed(&stderr[stderr_at - len..stderr_at])
+                }
+            };
+            chunks.push(OutputChunk { stream: span.stream, seq: Some(span.seq), bytes });
+        }
+        chunks
+    }
+
+    /// Record how stdout and stderr interleave. An empty order clears it.
+    ///
+    /// The order is stored as given; [`Self::stream_order`] reports it only
+    /// while it matches the payloads.
+    pub fn set_stream_order(&mut self, order: StreamOrder) {
+        self.stream_order = if order.is_empty() { None } else { Some(Box::new(order)) };
+    }
+
+    /// Take the order out, with every byte numbered (see
+    /// [`StreamOrder::of`]), leaving none. Putting it back with
+    /// [`Self::set_stream_order`] after appending costs only what was
+    /// appended.
+    pub fn take_stream_order(&mut self, sequence: &OutputSequence) -> StreamOrder {
+        let mut order = self.stream_order.take().map_or_else(StreamOrder::new, |order| *order);
+        order.cover(self.stdout_len(), self.err.len() as u64, sequence);
+        order
+    }
+
+    /// Forget how stdout and stderr interleave.
+    pub fn clear_stream_order(&mut self) {
+        self.stream_order = None;
+    }
+
+    /// Number every byte not yet in a span, so [`Self::stream_order`]
+    /// describes the whole result. See [`StreamOrder::of`].
+    ///
+    /// Stdout held only as structured output is rendered to measure it.
+    pub fn stamp_stream_order(&mut self, sequence: &OutputSequence) {
+        let order = StreamOrder::of(self, sequence);
+        self.set_stream_order(order);
+    }
+
+    /// The spans as stored, whether or not they match the payloads.
+    pub(crate) fn recorded_spans(&self) -> &[OutputSpan] {
+        self.stream_order.as_deref().map_or(&[], StreamOrder::spans)
+    }
+
+    /// Length in bytes of the stdout that spans describe.
+    pub(crate) fn stdout_len(&self) -> u64 {
+        match &self.out {
+            OutputPayload::Bytes(bytes) => bytes.len() as u64,
+            OutputPayload::Text(text) if !text.is_empty() => text.len() as u64,
+            OutputPayload::Text(_) => {
+                self.output.as_ref().map_or(0, |output| output.to_canonical_string().len() as u64)
+            }
+        }
+    }
+
+    /// Stdout as bytes: a binary payload unchanged, text as `text_out`.
+    fn stdout_bytes(&self) -> Cow<'_, [u8]> {
+        match &self.out {
+            OutputPayload::Bytes(bytes) => Cow::Borrowed(bytes),
+            OutputPayload::Text(_) => match self.text_out() {
+                Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+                Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+            },
+        }
+    }
+
+    fn out_is_empty_text(&self) -> bool {
+        matches!(&self.out, OutputPayload::Text(s) if s.is_empty())
+    }
+
+    fn remove_stream_spans(&mut self, stream: StreamKind) {
+        if let Some(mut order) = self.stream_order.take() {
+            order.remove_stream(stream);
+            self.set_stream_order(*order);
+        }
+    }
 }
 
 /// Convert serde_json::Value to our AST Value.
@@ -978,6 +1160,148 @@ mod tests {
         let mut result = ExecResult::success_data(Value::Json(serde_json::json!([1, 2, 3])));
         result.clear_stdout();
         assert!(result.data.is_none(), "data-plane .data must clear");
+    }
+
+    fn interleaved(sequence: &OutputSequence) -> ExecResult {
+        // out, err, out2 — the payloads hold them as two blocks.
+        let mut order = StreamOrder::new();
+        order.push(StreamKind::Stdout, 4, sequence);
+        order.push(StreamKind::Stderr, 4, sequence);
+        order.push(StreamKind::Stdout, 5, sequence);
+        let mut result = ExecResult::from_output(0, "out\nout2\n", "err\n");
+        result.set_stream_order(order);
+        result
+    }
+
+    fn joined(result: &ExecResult) -> String {
+        let bytes: Vec<u8> = result.chunks().iter().flat_map(|chunk| chunk.bytes.iter().copied()).collect();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn a_result_without_spans_reads_as_two_blocks() {
+        let result = ExecResult::from_output(0, "out\n", "err\n");
+        assert_eq!(result.stream_order(), None);
+        let chunks = result.chunks();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!((chunks[0].stream, chunks[0].seq), (StreamKind::Stdout, None));
+        assert_eq!((chunks[1].stream, chunks[1].seq), (StreamKind::Stderr, None));
+        assert_eq!(joined(&result), "out\nerr\n");
+        assert!(ExecResult::success("").chunks().is_empty());
+    }
+
+    #[test]
+    fn chunks_follow_the_recorded_order() {
+        let sequence = OutputSequence::new();
+        let result = interleaved(&sequence);
+        let spans = result.stream_order().unwrap();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(joined(&result), "out\nerr\nout2\n");
+        // The payloads themselves are unchanged.
+        assert_eq!(&*result.text_out(), "out\nout2\n");
+        assert_eq!(result.err, "err\n");
+        let seqs: Vec<Option<u64>> = result.chunks().iter().map(|chunk| chunk.seq).collect();
+        assert_eq!(seqs, spans.iter().map(|span| Some(span.seq)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn spans_that_no_longer_match_the_payloads_are_not_reported() {
+        let sequence = OutputSequence::new();
+        let mut result = interleaved(&sequence);
+        result.err.push_str("more\n");
+        assert_eq!(result.stream_order(), None);
+        assert_eq!(joined(&result), "out\nout2\nerr\nmore\n");
+        // Stamping numbers the new bytes after the old ones.
+        result.stamp_stream_order(&sequence);
+        assert_eq!(joined(&result), "out\nerr\nout2\nmore\n");
+    }
+
+    #[test]
+    fn replacing_stdout_drops_only_its_spans() {
+        let sequence = OutputSequence::new();
+        for replace in [
+            (|r: &mut ExecResult| r.set_out("new\n".into())) as fn(&mut ExecResult),
+            |r| r.set_out_bytes(b"new\n".to_vec()),
+            |r| r.clear_out(),
+            |r| r.clear_stdout(),
+        ] {
+            let mut result = interleaved(&sequence);
+            replace(&mut result);
+            let order = StreamOrder::of(&result, &sequence);
+            let kinds: Vec<StreamKind> = order.spans().iter().map(|span| span.stream).collect();
+            let stdout = result.stdout_len() > 0;
+            let expected = if stdout {
+                vec![StreamKind::Stderr, StreamKind::Stdout]
+            } else {
+                vec![StreamKind::Stderr]
+            };
+            assert_eq!(kinds, expected, "stderr span kept, stdout renumbered after it");
+        }
+    }
+
+    #[test]
+    fn appending_to_stdout_keeps_the_recorded_prefix() {
+        let sequence = OutputSequence::new();
+        let mut result = interleaved(&sequence);
+        result.push_out("tail\n");
+        result.stamp_stream_order(&sequence);
+        assert_eq!(joined(&result), "out\nerr\nout2\ntail\n");
+    }
+
+    #[test]
+    fn clearing_stderr_cuts_its_spans_when_stamped() {
+        let sequence = OutputSequence::new();
+        let mut result = interleaved(&sequence);
+        result.err.clear();
+        result.stamp_stream_order(&sequence);
+        assert_eq!(result.stream_order().map(<[_]>::len), Some(2));
+        assert_eq!(joined(&result), "out\nout2\n");
+    }
+
+    #[test]
+    fn stamping_structured_output_measures_its_rendering() {
+        use crate::output::{OutputData, OutputNode};
+        let sequence = OutputSequence::new();
+        let mut result = ExecResult::with_output(OutputData::nodes(vec![OutputNode::new("a"), OutputNode::new("b")]));
+        result.err = "warn\n".into();
+        result.stamp_stream_order(&sequence);
+        let spans = result.stream_order().unwrap();
+        assert_eq!(spans[0].len, 4, "rendered as a\\nb\\n");
+        assert_eq!(joined(&result), "a\nb\nwarn\n");
+        // Taking the structured output takes the stdout with it.
+        result.take_output_for_stream();
+        assert_eq!(result.stream_order().map(<[_]>::len), Some(1));
+    }
+
+    #[test]
+    fn binary_stdout_chunks_are_raw_bytes() {
+        let sequence = OutputSequence::new();
+        let mut result = ExecResult::success_bytes(vec![0xff, 0x00]);
+        result.err = "e".into();
+        let mut order = StreamOrder::new();
+        order.push(StreamKind::Stdout, 1, &sequence);
+        order.push(StreamKind::Stderr, 1, &sequence);
+        order.push(StreamKind::Stdout, 1, &sequence);
+        result.set_stream_order(order);
+        let bytes: Vec<u8> = result.chunks().iter().flat_map(|chunk| chunk.bytes.iter().copied()).collect();
+        assert_eq!(bytes, vec![0xff, b'e', 0x00]);
+    }
+
+    #[test]
+    fn stream_order_stays_off_the_wire_when_absent() {
+        let json = serde_json::to_string(&ExecResult::from_output(0, "out\n", "err\n")).unwrap();
+        assert!(!json.contains("stream_order"), "{json}");
+    }
+
+    #[test]
+    fn stream_order_round_trips_through_serde() {
+        let sequence = OutputSequence::new();
+        let result = interleaved(&sequence);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["stream_order"][1]["stream"], "stderr");
+        let back: ExecResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.stream_order(), result.stream_order());
+        assert_eq!(joined(&back), "out\nerr\nout2\n");
     }
 
     #[test]

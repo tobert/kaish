@@ -19,6 +19,7 @@ pub mod path_access;
 pub mod plan;
 pub mod result;
 pub mod rfc3339;
+pub mod stream_order;
 pub mod tool;
 pub mod value;
 
@@ -32,5 +33,6 @@ pub use kernel::*;
 pub use output::*;
 pub use path_access::*;
 pub use result::*;
+pub use stream_order::{OutputChunk, OutputSequence, OutputSpan, StreamKind, StreamOrder};
 pub use tool::*;
 pub use value::*;
