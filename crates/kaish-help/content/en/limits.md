@@ -40,6 +40,8 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `ls`/`find`/`glob` | A name containing a newline is **refused** in text output (exit 2), naming the path and `--json`. One newline is one path boundary in text, so reporting such a name would split it into two paths that name no file. `--json` reads it losslessly. |
 | `ps` | Linux-only (reads `/proc`) |
+| `find` expressions | At most 256 expression nodes (tests, operators, and groups), with at most 64 nested groups or negations. Larger expressions exit 2; split the expression into smaller searches. No `-exec` or `-delete`. |
+| `cat -A/-v/-E/-T` | Buffers input before marking bytes. `-A` is `-vET`; `-n` with `-E` or `-T` needs UTF-8 text unless `-v` is also given. |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
 | `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
@@ -48,11 +50,12 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 ## Execution
 
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
-- **A compound pipeline stage buffers.** `for`/`while`/`if`/`case` may sit in any pipeline position, but such a stage runs to completion before the next stage sees a byte — `for f in $(seq 1 100000); do echo $f; done | head -n 1` runs every iteration where `sh` stops at the first line. Same answer, more work. Command stages still stream.
+- **A compound pipeline stage buffers.** Brace groups and `for`/`while`/`if`/`case` may sit in any pipeline position, but such a stage runs to completion before the next stage sees a byte — `for f in $(seq 1 100000); do echo $f; done | head -n 1` runs every iteration where `sh` stops at the first line. Same answer, more work. Command stages still stream.
 - **`scatter`/`gather` cannot share a pipeline with a compound stage** — exits 2. Run the compound on its own and pipe its output in.
 - **Scatter results are in item order**, never completion order — a row's position identifies its item.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
-- **Redirect targets open before the command runs** — a target that cannot open (missing directory, read-only mount) exits 1 and the command does not run. A redirect never creates a directory: `mkdir -p` first. A mount ancestor can be visible with no real directory: the error names `mkdir -p` when the backend can create the parent. An uncovered path or immutable ancestor names a writable mounted path, or says none is available. A read-only parent is refused.
+- **Redirect targets open before the command or compound body runs** — a target that cannot open (missing directory, read-only mount) exits 1 and the command does not run. A redirect never creates a directory: `mkdir -p` first. A mount ancestor can be visible with no real directory: the error names `mkdir -p` when the backend can create the parent. An uncovered path or immutable ancestor names a writable mounted path, or says none is available. A read-only parent is refused.
+- **Compound redirects require a planned body command and refuse here-docs** — exit 2. Use `: > file` for an empty file, or pipe a here-doc into the compound. Input returns to the session after the body.
 - **Captured output merges use two blocks** — `2>&1`, `1>&2`, and a shared file join stdout first, then stderr, without preserving interleaved write order. When stderr has already reached a background job stream, `1>&2` keeps published stderr first and appends stdout. See `docs/LANGUAGE.md`, "Pipes & Redirects".
 - **`sort < f > f` and `cat < f >> f` are refused** (exit 1): bash empties `f` or grows it without end. Write to a temp file, then `mv` it over `f` (or append it).
 - **Recursion is depth-capped at 48** — nested `$(...)`, recursive shell functions, and `.kai` scripts sourcing each other are bounded so a runaway (or a missing base case) returns a loud `maximum recursion depth exceeded` error instead of overflowing the stack. Real recursion nests far shallower; this only stops runaways.

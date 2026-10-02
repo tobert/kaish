@@ -69,7 +69,7 @@ fn has_json_flag(args: &[Arg]) -> bool {
 /// (GH #222). Every early return in `run_scatter_gather` funnels through this
 /// one function, so it is the single place the format gets applied — not
 /// three separate copies threaded through each `return` site.
-fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
+pub(super) fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
     match format {
         Some(format) => apply_output_format(result, format),
         None => result,
@@ -229,6 +229,14 @@ impl RedirectOpenError {
         }
         let in_effect = self.in_effect(redirects);
         apply_redirects(ExecResult::failure(1, self.message), in_effect, &self.opened, ctx).await
+    }
+
+    /// The failed command's result before any redirect applies, the
+    /// redirects in effect, and the targets they opened: what
+    /// [`finish_redirects`] takes.
+    pub(crate) fn into_parts(self, redirects: &[Redirect]) -> (ExecResult, &[Redirect], OpenedRedirects) {
+        let in_effect = self.in_effect(redirects);
+        (ExecResult::failure(1, self.message), in_effect, self.opened)
     }
 }
 
@@ -663,19 +671,26 @@ async fn run_opened_stage(
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
     let redirects = stage.redirects();
-    let (mut result, in_effect, mut opened) = match opened {
+    let (result, in_effect, opened) = match opened {
         Ok(opened) => (dispatch_redirected(stage, ctx, dispatcher).await, redirects, opened),
-        Err(failure) => {
-            let in_effect = failure.in_effect(redirects);
-            (ExecResult::failure(1, failure.message), in_effect, failure.opened)
-        }
+        Err(failure) => failure.into_parts(redirects),
     };
-    // The redirect's input ends with the command; what it left unread is
-    // dropped and the stdin the redirect displaced comes back.
+    finish_redirects(result, in_effect, opened, ctx).await
+}
+
+/// Send a result through the redirects in effect and write each opened
+/// target. The last step for anything `open_redirects` opened for: a
+/// command stage, and a redirected compound statement.
+pub(crate) async fn finish_redirects(
+    mut result: ExecResult,
+    in_effect: &[Redirect],
+    mut opened: OpenedRedirects,
+    ctx: &mut ExecContext,
+) -> ExecResult {
+    // Discard the redirect's remainder and restore the input it displaced.
     if let Some(displaced) = opened.displaced_stdin.take() {
         ctx.restore_stdin_state(*displaced);
     }
-
     // `2>&1` moves this stage's stderr into its stdout, but only once
     // `apply_redirects` runs below — capture what stdout held before
     // that, so only the newly merged bytes get published (whatever was
@@ -696,38 +711,61 @@ async fn run_opened_stage(
     result
 }
 
-/// Dispatch a stage with its output kept off the streams its redirects
-/// replace.
+/// The stream state [`mask_redirected_streams`] replaced, put back by
+/// [`MaskedStreams::restore`].
+pub(crate) struct MaskedStreams {
+    stream_output: bool,
+    stream_stderr: bool,
+    held_pipe: Option<super::pipe_stream::PipeWriter>,
+}
+
+/// Keep output off the streams `redirects` replace until the redirects
+/// apply.
 ///
 /// A redirected stdout or stderr goes to its target, not to a job's stream,
 /// and a redirected stdout does not reach the pipe: both are decided before
-/// dispatch, or an external command or a nested dispatch inside a function
-/// writes live to the wrong place before the redirect applies.
+/// the stage runs, or an external command or a nested dispatch inside a
+/// function writes live to the wrong place before the redirect applies.
+pub(crate) fn mask_redirected_streams(redirects: &[Redirect], ctx: &mut ExecContext) -> MaskedStreams {
+    let mut masked = MaskedStreams {
+        stream_output: ctx.background_stream_output,
+        stream_stderr: ctx.background_stream_stderr,
+        held_pipe: None,
+    };
+    if redirects_stdout(redirects) {
+        ctx.background_stream_output = false;
+        masked.held_pipe = ctx.pipe_stdout.take();
+    }
+    if redirects_stderr(redirects) {
+        ctx.background_stream_stderr = false;
+    }
+    masked
+}
+
+impl MaskedStreams {
+    /// Put back what [`mask_redirected_streams`] replaced.
+    pub(crate) fn restore(self, ctx: &mut ExecContext) {
+        ctx.background_stream_output = self.stream_output;
+        ctx.background_stream_stderr = self.stream_stderr;
+        if self.held_pipe.is_some() {
+            ctx.pipe_stdout = self.held_pipe;
+        }
+    }
+}
+
+/// Dispatch a stage with its output kept off the streams its redirects
+/// replace.
 async fn dispatch_redirected(
     stage: &PipelineStage,
     ctx: &mut ExecContext,
     dispatcher: &dyn CommandDispatcher,
 ) -> ExecResult {
-    let redirects = stage.redirects();
-    let stream_output = ctx.background_stream_output;
-    let stream_stderr = ctx.background_stream_stderr;
-    let mut held_pipe = None;
-    if redirects_stdout(redirects) {
-        ctx.background_stream_output = false;
-        held_pipe = ctx.pipe_stdout.take();
-    }
-    if redirects_stderr(redirects) {
-        ctx.background_stream_stderr = false;
-    }
+    let masked = mask_redirected_streams(stage.redirects(), ctx);
     let result = match dispatch_stage(stage, ctx, dispatcher).await {
         Ok(result) => result,
         Err(e) => fault_result(e),
     };
-    ctx.background_stream_output = stream_output;
-    ctx.background_stream_stderr = stream_stderr;
-    if held_pipe.is_some() {
-        ctx.pipe_stdout = held_pipe;
-    }
+    masked.restore(ctx);
     result
 }
 
@@ -1354,6 +1392,65 @@ pub fn schema_param_lookup(schema: &ToolSchema) -> HashMap<String, (&str, &str, 
         }
     }
     map
+}
+
+/// Index of the first operand in `args`, for a tool whose schema sets
+/// [`ToolSchema::options_end_at_operand`]; `None` when every word is an option
+/// or an option's value.
+///
+/// The operand is the first positional or `key=value` word that is not the
+/// value of a value-taking option. The tool's own options sit before it and
+/// the wrapped command starts at it. The runtime and validation binders both
+/// call this, so they cannot disagree about where the command begins.
+pub fn operand_boundary(args: &[Arg], schema: &ToolSchema) -> Option<usize> {
+    wrapper_option_layout(args, schema).0
+}
+
+/// Return the first operand and the words consumed by preceding options.
+/// Every word shape can be an option value; an unconsumed `--` ends options.
+pub(crate) fn wrapper_option_layout(args: &[Arg], schema: &ToolSchema) -> (Option<usize>, Vec<usize>) {
+    let lookup = schema_param_lookup(schema);
+    let mut owed = 0usize;
+    let mut values = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if owed > 0 {
+            values.push(index);
+            owed -= 1;
+            continue;
+        }
+        match arg {
+            Arg::Positional(_) | Arg::WordAssign { .. } => return (Some(index), values),
+            Arg::DoubleDash => return ((index + 1 < args.len()).then_some(index + 1), values),
+            Arg::Named { .. } => {}
+            Arg::ShortFlag(name) => owed = short_flag_values_owed(name, &lookup),
+            Arg::LongFlag(name) => {
+                owed = match lookup.get(name.as_str()) {
+                    Some(&(_, kind, consumes, _)) if !is_bool_type(kind) => consumes.max(1),
+                    _ => 0,
+                };
+            }
+        }
+    }
+    (None, values)
+}
+
+/// How many following words a short-flag token takes as values, by the rules
+/// the binders use: a whole-name match, else the first value-taking letter,
+/// which takes the rest of the token (glued) or, as the last letter, the next
+/// word.
+fn short_flag_values_owed(name: &str, lookup: &HashMap<String, (&str, &str, usize, bool)>) -> usize {
+    if let Some(&(_, kind, consumes, _)) = lookup.get(name) {
+        return if is_bool_type(kind) { 0 } else { consumes.max(1) };
+    }
+    let letters: Vec<char> = name.chars().collect();
+    for (position, letter) in letters.iter().enumerate() {
+        if let Some(&(_, kind, consumes, _)) = lookup.get(letter.to_string().as_str()) {
+            if !is_bool_type(kind) {
+                return if position + 1 == letters.len() { consumes.max(1) } else { 0 };
+            }
+        }
+    }
+    0
 }
 
 /// Check if a type is considered boolean.

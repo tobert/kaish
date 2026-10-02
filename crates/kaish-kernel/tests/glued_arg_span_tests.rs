@@ -141,6 +141,10 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
         (r#"x={"$(": 1}"#, "unterminated command substitution"),
         (r#"echo "$(""#, "unterminated command substitution"),
         ("echo ${x:-$(}", "unterminated command substitution"),
+        (r"echo a\ *", "contains a backslash escape and an unquoted glob"),
+        (r"ec\ho\ *", "contains a backslash escape and an unquoted glob"),
+        (r"[[ a == a\ * ]]", "contains a backslash escape and an unquoted glob"),
+        (r"~/a\ b", "home-relative command paths are not supported"),
     ];
     for (source, expected) in cases {
         let errors = parse(source).expect_err("must be a parse error");
@@ -175,9 +179,8 @@ fn purpose_built_diagnoses_are_never_replaced_by_the_paste_message() {
 #[test]
 fn parser_custom_guard_count_is_pinned() {
     const PARSER_SOURCE: &str = include_str!("../src/parser.rs");
-    // 15: `bang_prefixed`'s glued-`!` guard (BANG_GLUED_MESSAGE) is new —
-    // see the `"!true"` row above.
-    const EXPECTED: usize = 15;
+    // Four escaped-word guards: argv, command globs, command tilde, comparison.
+    const EXPECTED: usize = 19;
     let found = PARSER_SOURCE.matches("Rich::custom(").count();
     assert_eq!(
         found, EXPECTED,

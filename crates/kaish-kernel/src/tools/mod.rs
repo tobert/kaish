@@ -52,3 +52,77 @@ pub const WORD_ASSIGN_BUILTINS: &[&str] = &["export", "alias", "unalias"];
 pub fn accepts_word_assign(name: &str) -> bool {
     WORD_ASSIGN_BUILTINS.contains(&name)
 }
+
+/// Recognize generic help without consuming a tool-owned flag or an option value.
+pub(crate) fn requests_builtin_help(args: &ToolArgs, schema: &ToolSchema) -> bool {
+    if schema.owns_output {
+        return false;
+    }
+    let claims = |flag: &str| schema.params.iter().any(|parameter| {
+        !parameter.positional && (parameter.name == flag
+            || parameter.aliases.iter().any(|alias| alias.trim_start_matches('-') == flag))
+    });
+    if (args.flags.contains("help") && !claims("help"))
+        || (args.flags.contains("h") && !claims("h"))
+    {
+        return true;
+    }
+    let is_help = |value: &crate::ast::Value| {
+        matches!(value, crate::ast::Value::String(word) if word == "--help")
+    };
+    if schema.raw_argv {
+        return !claims("help") && args.positional.first().is_some_and(is_help);
+    }
+    if !matches!(schema.arg_binding, ArgBinding::Verbatim) || claims("help") {
+        return false;
+    }
+    let Some(words) = args.words.as_deref() else { return false; };
+    let mut state = VerbatimArgumentState::default();
+    for value in words {
+        // Help keeps the end-marker rule even when the tool consumes that word.
+        if matches!(value, crate::ast::Value::String(word) if word == "--") { return false; }
+        if !state.expects_value() && !state.past_end_marker() && is_help(value) {
+            return true;
+        }
+        state.consume(value, schema);
+    }
+    false
+}
+
+/// Track schema-declared value words before interpreting generic flags.
+#[derive(Default)]
+pub(crate) struct VerbatimArgumentState {
+    remaining_values: usize,
+    past_end_marker: bool,
+}
+
+impl VerbatimArgumentState {
+    pub(crate) fn expects_value(&self) -> bool { self.remaining_values > 0 }
+    pub(crate) fn past_end_marker(&self) -> bool { self.past_end_marker }
+    pub(crate) fn mark_end_marker(&mut self) { self.past_end_marker = true; }
+
+    pub(crate) fn consume(&mut self, value: &crate::ast::Value, schema: &ToolSchema) {
+        if self.remaining_values > 0 {
+            self.remaining_values -= 1;
+            return;
+        }
+        if self.past_end_marker { return; }
+        let crate::ast::Value::String(word) = value else { return; };
+        if word == "--" {
+            self.past_end_marker = true;
+            return;
+        }
+        let (flag, attached) = match word.split_once('=') {
+            Some((flag, _)) => (flag, true),
+            None => (word.as_str(), false),
+        };
+        if !flag.starts_with('-') { return; }
+        let bare = flag.trim_start_matches('-');
+        if let Some(parameter) = schema.params.iter().find(|parameter| {
+            !parameter.positional && (parameter.name == bare
+                || parameter.aliases.iter().any(|alias| alias.trim_start_matches('-') == bare))
+        }) && !crate::scheduler::is_bool_type(&parameter.param_type) {
+            self.remaining_values = parameter.consumes.saturating_sub(usize::from(attached));
+        }
+    }
+}

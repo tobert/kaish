@@ -1462,9 +1462,19 @@ fn parse_tokens(
             return specific;
         }
         errs.into_iter()
-            .map(|e| ParseError {
-                span: *e.span(),
-                message: e.to_string(),
+            .map(|e| {
+                // Recover only the rejected word at this error's position;
+                // escaped patterns in earlier valid clauses remain valid.
+                let message = tokens.iter().find_map(|(token, span)| {
+                    if span != e.span() {
+                        return None;
+                    }
+                    match token {
+                        Token::EscapedWord(word) if word.has_unquoted_glob => Some(word.glob_error()),
+                        _ => None,
+                    }
+                }).unwrap_or_else(|| e.to_string());
+                ParseError { span: *e.span(), message }
             })
             .collect::<Vec<_>>()
     })?;
@@ -1691,12 +1701,25 @@ where
         // separate alternatives is what produced "found '|' expected '&&'":
         // `for_parser` sat ahead of the pipeline, consumed through `done`, and
         // the `&&`/`||` fold below then met the `|`.
+        //
+        // Redirects after the closing word wrap the compound in
+        // `Stmt::Redirected`; the runner never opens them, so `exit` inside
+        // the body still leaves the script.
         let compound = choice((
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
             while_parser(stmt.clone()).map(Stmt::While),
             case_parser(stmt.clone()).map(Stmt::Case),
+            brace_block_parser(stmt.clone()).map(Stmt::Group),
         ))
+        .then(redirect_parser(primary_expr_parser()).repeated().collect::<Vec<_>>())
+        .map(|(body, redirects)| {
+            if redirects.is_empty() {
+                body
+            } else {
+                Stmt::Redirected { body: Box::new(body), redirects }
+            }
+        })
         .boxed();
 
         // `!` negates a pipeline (spec: bash's reading) — the statement-level
@@ -1881,17 +1904,31 @@ where
     ident_parser()
         .then_ignore(just(Token::LParen))
         .then_ignore(just(Token::RParen))
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
+        .then(brace_block_parser(stmt))
+        .map(|(name, body)| ToolDef { name, params: vec![], body })
+        .labelled("POSIX function")
+        .boxed()
+}
+
+/// A braced statement list, `{ stmt; stmt; }`: a function body, and a brace
+/// group. A `}` right after a word closes the block, so `{ echo a }` reads
+/// as `{ echo a; }`.
+fn brace_block_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, Vec<Stmt>, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    just(Token::LBrace)
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(
             stmt.repeated()
                 .collect::<Vec<_>>()
                 .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
         )
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::RBrace))
-        .map(|(name, body)| ToolDef { name, params: vec![], body })
-        .labelled("POSIX function")
         .boxed()
 }
 
@@ -1907,15 +1944,7 @@ where
 {
     just(Token::Function)
         .ignore_then(ident_parser())
-        .then_ignore(just(Token::LBrace))
-        .then_ignore(just(Token::Newline).repeated())
-        .then(
-            stmt.repeated()
-                .collect::<Vec<_>>()
-                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
-        )
-        .then_ignore(just(Token::Newline).repeated())
-        .then_ignore(just(Token::RBrace))
+        .then(brace_block_parser(stmt))
         .map(|(name, body)| ToolDef { name, params: vec![], body })
         .labelled("bash function")
         .boxed()
@@ -2131,8 +2160,11 @@ where
         select! { Token::DashNumWord(s) => s },
         select! { Token::AtWord(s) => s },
         select! { Token::DottedIdent(s) => s },
-        select! { Token::String(s) => s },
-        select! { Token::SingleString(s) => s },
+        select! {
+            Token::String(s) => lexer::literal_glob_pattern(&s),
+            Token::SingleString(s) => lexer::literal_glob_pattern(&s),
+        },
+        select! { Token::EscapedWord(word) => word.glob_pattern },
         select! { Token::Int(n) => n.to_string() },
         select! { Token::Star => "*".to_string() },
         select! { Token::Question => "?".to_string() },
@@ -2295,6 +2327,16 @@ where
     let command_name = choice((
         ident_parser().map(|name| (name, true)),
         path_parser().map(|name| (name, false)),
+        select! { Token::EscapedWord(word) => word }.validate(|word, extra, emitter| {
+            if word.has_unquoted_glob {
+                emitter.emit(Rich::custom(extra.span(), word.glob_error()));
+            }
+            if word.expands_tilde {
+                emitter.emit(Rich::custom(extra.span(), "home-relative command paths are not supported; write an absolute path"));
+            }
+            // Emitted errors reject the program before execution.
+            (word.literal, false)
+        }),
         select! { Token::DotSlashPath(s) => (s, false) },
         select! { Token::RelativePath(s) => (s, false) },
         just(Token::True).to(("true".to_string(), false)),
@@ -2364,11 +2406,11 @@ fn pipeline_into_stmt(p: Pipeline) -> Stmt {
     }
 }
 
-/// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
-/// command would silently depend on redirect ordering at execution time
-/// (`open_redirects` is last-wins), so `parse()` rejects it loudly.
-fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
-    cmd.redirects
+/// True if `redirects` hold more than one stdin source (`<`, `<<`, `<<<`).
+/// Such a command or compound would silently depend on redirect ordering at
+/// execution time (`open_redirects` is last-wins), so `parse()` refuses it.
+fn redirects_have_ambiguous_stdin(redirects: &[Redirect]) -> bool {
+    redirects
         .iter()
         .filter(|r| {
             matches!(
@@ -2378,6 +2420,10 @@ fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
         })
         .count()
         > 1
+}
+
+fn command_has_ambiguous_stdin(cmd: &Command) -> bool {
+    redirects_have_ambiguous_stdin(&cmd.redirects)
 }
 
 /// Find the first command anywhere in `stmts` (recursing into pipelines,
@@ -2403,6 +2449,10 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
         Stmt::For(f) => first_ambiguous_stdin(&f.body),
         Stmt::While(w) => first_ambiguous_stdin(&w.body),
         Stmt::Case(c) => c.branches.iter().any(|b| first_ambiguous_stdin(&b.body)),
+        Stmt::Group(body) => first_ambiguous_stdin(body),
+        Stmt::Redirected { body, redirects } => {
+            redirects_have_ambiguous_stdin(redirects) || stmt_has_ambiguous_stdin(body)
+        }
         Stmt::ToolDef(t) => first_ambiguous_stdin(&t.body),
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)
@@ -2431,11 +2481,11 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
 /// `Named`/`WordAssign` ARE candidates: their own fusion covers the boundaries
 /// inside the word, not a fragment glued to the END of the value, and
 /// `--a=1--b=2` is pasting by any other name.
-fn is_glue_candidate(arg: &Arg) -> bool {
+fn is_glue_candidate(arg: &Arg, flags_are_data: bool) -> bool {
     matches!(
         arg,
         Arg::Positional(_) | Arg::LongFlag(_) | Arg::Named { .. } | Arg::WordAssign { .. }
-    )
+    ) || (flags_are_data && matches!(arg, Arg::ShortFlag(_) | Arg::DoubleDash))
 }
 
 /// The exact, unprocessed source text of `arg` at `span`, when `arg` is
@@ -2447,11 +2497,11 @@ fn is_glue_candidate(arg: &Arg) -> bool {
 ///
 /// `None` for everything else: a quoted string (its source carries quote
 /// marks the value lacks), `VarRef`, `CommandSubst`, `Arithmetic`,
-/// `GlobPattern`, and flags (`LongFlag`/`ShortFlag`) all keep the run
-/// un-fusable. A quoted prefix (`"foo"bar`) or a substitution
+/// `GlobPattern` all keep the run un-fusable. Flag words are plain data
+/// only in the post-`--` grammar. A quoted prefix (`"foo"bar`) or a substitution
 /// (`/tmp/$(echo x).txt`) is exactly the case an implicit join must not
 /// hide: the value boundary there is real.
-fn plain_literal_source_text<'src>(arg: &Arg, span: Span, source: &'src str) -> Option<&'src str> {
+fn plain_literal_source_text<'src>(arg: &Arg, span: Span, source: &'src str, flags_are_data: bool) -> Option<&'src str> {
     let slice = source.get(span.start..span.end)?;
     match arg {
         Arg::Positional(Expr::Literal(Value::String(s))) => (slice == s).then_some(slice),
@@ -2459,6 +2509,9 @@ fn plain_literal_source_text<'src>(arg: &Arg, span: Span, source: &'src str) -> 
             Some(slice)
         }
         Arg::Positional(Expr::NumericLiteral { raw, .. }) => (slice == raw).then_some(slice),
+        Arg::ShortFlag(name) if flags_are_data => (slice == format!("-{name}")).then_some(slice),
+        Arg::LongFlag(name) if flags_are_data => (slice == format!("--{name}")).then_some(slice),
+        Arg::DoubleDash if flags_are_data => (slice == "--").then_some(slice),
         _ => None,
     }
 }
@@ -2485,12 +2538,12 @@ fn plain_literal_source_text<'src>(arg: &Arg, span: Span, source: &'src str) -> 
 /// quote.
 ///
 /// Returns `None` when the run is not eligible.
-fn fuse_plain_operator_run(run: &[(Arg, Span)], source: &str) -> Option<Arg> {
+fn fuse_plain_operator_run(run: &[(Arg, Span)], source: &str, flags_are_data: bool) -> Option<Arg> {
     const FUSE_MARKERS: [&str; 3] = ["==", "!=", "!"];
     let mut text = String::new();
     let mut has_marker = false;
     for (arg, span) in run {
-        let slice = plain_literal_source_text(arg, *span, source)?;
+        let slice = plain_literal_source_text(arg, *span, source, flags_are_data)?;
         has_marker |= FUSE_MARKERS.contains(&slice);
         text.push_str(slice);
     }
@@ -2529,6 +2582,7 @@ fn fuse_plain_operator_run(run: &[(Arg, Span)], source: &str) -> Option<Arg> {
 /// there on its own. Every other remaining case is genuine token pasting.
 fn reject_glued_args<'src>(
     args: Vec<(Arg, Span)>,
+    flags_are_data: bool,
 ) -> Result<Vec<Arg>, Rich<'src, Token, Span>> {
     let source = PARSE_SOURCE.with(|s| s.borrow().clone());
     let mut result = Vec::with_capacity(args.len());
@@ -2536,8 +2590,8 @@ fn reject_glued_args<'src>(
     while i < args.len() {
         let mut end = i + 1;
         while end < args.len()
-            && is_glue_candidate(&args[end - 1].0)
-            && is_glue_candidate(&args[end].0)
+            && is_glue_candidate(&args[end - 1].0, flags_are_data)
+            && is_glue_candidate(&args[end].0, flags_are_data)
             && gap_is_only_continuations(args[end - 1].1.end, args[end].1.start)
         {
             end += 1;
@@ -2549,7 +2603,7 @@ fn reject_glued_args<'src>(
                      installed on this thread"
                 );
             };
-            if let Some(fused) = fuse_plain_operator_run(&args[i..end], src) {
+            if let Some(fused) = fuse_plain_operator_run(&args[i..end], src, flags_are_data) {
                 result.push(fused);
                 i = end;
                 continue;
@@ -2658,14 +2712,14 @@ where
         .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
         .repeated()
         .collect::<Vec<(Arg, Span)>>()
-        .try_map(|args, _span| reject_glued_args(args));
+        .try_map(|args, _span| reject_glued_args(args, false));
 
     // The `--` marker itself
     let double_dash = select! {
         Token::DoubleDash => Arg::DoubleDash,
     };
 
-    // Arguments after `--` (flags become positional strings)
+    // Keep operator syntax after `--`; binding decides which command owns it.
     let post_dash_arg = choice((
         // `--flag=value` — one operand, like `name=value` below. Long flags
         // only; see the production's own doc for why `-x=value` is not here.
@@ -2675,10 +2729,11 @@ where
         // simply text; the binders stringify it the way they already
         // stringify a post-`--` `WordAssign`.
         post_dash_flag_value_parser(),
-        // Flags become positional strings
+        // A wrapper's `--` does not end its child command's options.
         select! {
-            Token::ShortFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("-{}", name)))),
-            Token::LongFlag(name) => Arg::Positional(Expr::Literal(Value::String(format!("--{}", name)))),
+            Token::ShortFlag(name) => Arg::ShortFlag(name),
+            Token::LongFlag(name) => Arg::LongFlag(name),
+            Token::DoubleDash => Arg::DoubleDash,
         },
         // `name=value` — same WordAssign production used before `--`. Nothing
         // is special after `--` (standard shell behavior), but the
@@ -2700,7 +2755,7 @@ where
         .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
         .repeated()
         .collect::<Vec<(Arg, Span)>>()
-        .try_map(|args, _span| reject_glued_args(args));
+        .try_map(|args, _span| reject_glued_args(args, true));
 
     // Combine: args_before ++ [--] ++ args_after
     pre_dash
@@ -3143,14 +3198,45 @@ where
             value: Box::new(value),
         });
 
-    // Comparison: $X == "value" or $NUM -gt 5
+    #[derive(Clone)]
+    enum ComparisonOperand {
+        Expression(Expr),
+        Escaped(lexer::EscapedWord),
+    }
+    let right_operand = choice((
+        select! { Token::EscapedWord(word) => ComparisonOperand::Escaped(word) },
+        primary_expr_parser().map(ComparisonOperand::Expression),
+    )).map_with(|operand, extra| -> (ComparisonOperand, Span) { (operand, extra.span()) });
     let comparison = primary_expr_parser()
         .then(cmp_op)
-        .then(primary_expr_parser())
-        .map(|((left, op), right)| TestExpr::Comparison {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
+        .then(right_operand)
+        .validate(|((left, op), (right, right_span)), _extra, emitter| {
+            let right = match right {
+                ComparisonOperand::Expression(expression) => expression,
+                ComparisonOperand::Escaped(word) if matches!(op, TestCmpOp::Match | TestCmpOp::NotMatch) => {
+                    if word.expands_tilde {
+                        Expr::TildePath(word.regex_pattern)
+                    } else {
+                        Expr::Literal(Value::String(word.regex_pattern))
+                    }
+                }
+                ComparisonOperand::Escaped(word) => {
+                    if word.has_unquoted_glob {
+                        emitter.emit(Rich::custom(right_span, word.glob_error()));
+                    }
+                    // Emitted errors reject the program before execution.
+                    if word.expands_tilde {
+                        Expr::TildePath(word.literal)
+                    } else {
+                        Expr::Literal(Value::String(word.literal))
+                    }
+                }
+            };
+            TestExpr::Comparison {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            }
         });
 
     // Collection membership: `e in $coll` / `e not in $coll` (element-in-list,
@@ -4019,7 +4105,7 @@ fn is_word_token(tok: &Token) -> bool {
         | Token::GlobWord(_) | Token::Arithmetic(_) | Token::LongFlag(_)
         | Token::DoubleDashBare(_) | Token::PlusBare(_) | Token::MinusBare(_)
         | Token::JobSpec(_) | Token::MinusAlone | Token::String(_)
-        | Token::SingleString(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
+        | Token::SingleString(_) | Token::EscapedWord(_) | Token::VarRef(_) | Token::SimpleVarRef(_)
         | Token::Positional(_) | Token::AllArgs | Token::ArgCount | Token::LastExitCode
         | Token::CurrentPid | Token::VarLength(_) | Token::Int(_) | Token::Float(_)
         | Token::NumericLiteral(_)
@@ -4327,6 +4413,17 @@ where
         .labelled("command substitution")
 }
 
+fn escaped_word_expression(word: lexer::EscapedWord) -> Result<Expr, String> {
+    if word.has_unquoted_glob {
+        return Err(word.glob_error());
+    }
+    if word.expands_tilde {
+        Ok(Expr::TildePath(word.literal))
+    } else {
+        Ok(Expr::Literal(Value::String(word.literal)))
+    }
+}
+
 /// String parser - handles double-quoted strings (with interpolation) and single-quoted (literal).
 fn interpolated_string_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -4359,7 +4456,10 @@ where
         Token::SingleString(s) => Expr::Literal(Value::String(s)),
     };
 
-    choice((single_quoted, double_quoted)).labelled("string")
+    let escaped = select! { Token::EscapedWord(word) => word }
+        .try_map(|word, span| escaped_word_expression(word)
+            .map_err(|message| Rich::custom(span, message)));
+    choice((single_quoted, double_quoted, escaped)).labelled("string")
 }
 
 /// Literal value parser (excluding strings, which are handled by interpolated_string_parser).

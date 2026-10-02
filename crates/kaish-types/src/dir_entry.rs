@@ -7,9 +7,16 @@ use std::time::SystemTime;
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirEntryKind {
+    /// A regular file.
     File,
     Directory,
     Symlink,
+    /// A character device, such as `/dev/null` or `/dev/zero`.
+    CharDevice,
+    BlockDevice,
+    /// A named pipe. Opening one for reading blocks until a writer appears.
+    Fifo,
+    Socket,
 }
 
 /// A directory entry — the unified file metadata type.
@@ -81,5 +88,17 @@ impl DirEntry {
     /// Returns true if this entry is a symbolic link.
     pub fn is_symlink(&self) -> bool {
         self.kind == DirEntryKind::Symlink
+    }
+
+    /// Returns true for a device, FIFO, or socket: an entry whose read may
+    /// block or never end.
+    pub fn is_special(&self) -> bool {
+        matches!(
+            self.kind,
+            DirEntryKind::CharDevice
+                | DirEntryKind::BlockDevice
+                | DirEntryKind::Fifo
+                | DirEntryKind::Socket
+        )
     }
 }

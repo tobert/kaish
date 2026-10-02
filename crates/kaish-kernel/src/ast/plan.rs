@@ -210,6 +210,11 @@ struct Collected {
     /// heredoc reached only through arithmetic's temporary parse tree still
     /// lands here.
     heredoc_targets: Vec<Expr>,
+    /// The redirects of every compound statement around the walk's current
+    /// position, innermost first. Each command the walk reaches carries them
+    /// after its own, so `{ cat a; } > out` plans `cat` with `> out`: a
+    /// classifier that reads `PlannedCommand::redirects` sees the write.
+    enclosing_redirects: Vec<PlannedRedirect>,
 }
 
 impl Collected {
@@ -392,6 +397,57 @@ pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
     collect(stmt).commands
 }
 
+/// Why kaish refuses the redirects on a compound statement. The validator
+/// reports it with an issue code before anything runs; the runtime refuses
+/// the same statement when validation is skipped.
+pub(crate) enum CompoundRedirectRefusal {
+    /// A here-doc on the compound (E025). No command inside owns the body,
+    /// so no `PlannedHeredoc` could publish it.
+    Heredoc(String),
+    /// No command inside the compound (E024), so no `PlannedCommand` would
+    /// carry the redirect and a plan would hide the write.
+    NoCommand(String),
+}
+
+impl CompoundRedirectRefusal {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            CompoundRedirectRefusal::Heredoc(message) | CompoundRedirectRefusal::NoCommand(message) => message,
+        }
+    }
+}
+
+/// The refusal for `body` with `redirects` attached, or `None` when it may
+/// run. "No command" is decided by the plan's own walk, so the rule and the
+/// pushdown in `collect_stmt` cannot disagree.
+pub(crate) fn compound_redirect_refusal(body: &Stmt, redirects: &[Redirect]) -> Option<CompoundRedirectRefusal> {
+    if let Some(RedirectKind::HereDoc(meta)) = redirects.iter().map(|r| &r.kind).find(|k| matches!(k, RedirectKind::HereDoc(_))) {
+        let dash = if meta.strip_tabs { "-" } else { "" };
+        let quote = if meta.literal { "'" } else { "" };
+        let operator = format!("<<{dash}{quote}{}{quote}", meta.delimiter);
+        let shape = match body {
+            Stmt::While(_) => "while …; done",
+            Stmt::For(_) => "for …; done",
+            Stmt::If(_) => "if …; fi",
+            Stmt::Case(_) => "case … esac",
+            _ => "{ …; }",
+        };
+        return Some(CompoundRedirectRefusal::Heredoc(format!(
+            "here-doc `{operator}` cannot feed a compound statement; pipe it in: `cat {operator} | {shape}`"
+        )));
+    }
+    if planned_commands(body).is_empty() {
+        let redirects: Vec<String> = redirects.iter().map(render_redirect).collect();
+        let redirects = redirects.join(" ");
+        return Some(CompoundRedirectRefusal::NoCommand(format!(
+            "`{} {redirects}`: a redirect on a compound statement applies to the commands inside it, \
+             and this one has none; put the redirect on a command, e.g. `: {redirects}`",
+            render_stmt(body)
+        )));
+    }
+    None
+}
+
 fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
     match stmt {
         Stmt::Assignment(a) => {
@@ -435,6 +491,24 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
             collect_expr(&s.expr, background, out);
             for branch in &s.branches {
                 collect_block(&branch.body, background, out);
+            }
+        }
+        Stmt::Group(body) => collect_block(body, background, out),
+        Stmt::Redirected { body, redirects } => {
+            // The compound's redirects go on every command inside it, ahead
+            // of any compound further out. Fails closed: a `$(…)` inside the
+            // body carries them too, though only its stderr can reach them.
+            let outer = std::mem::replace(
+                &mut out.enclosing_redirects,
+                redirects.iter().map(plan_redirect).collect(),
+            );
+            out.enclosing_redirects.extend(outer.iter().cloned());
+            collect_stmt(body, background, out);
+            out.enclosing_redirects = outer;
+            // A `$(…)` in a target runs in the enclosing context, before the
+            // body.
+            for redirect in redirects {
+                collect_expr(&redirect.target, background, out);
             }
         }
         Stmt::Return(e) | Stmt::Exit(e) => {
@@ -483,7 +557,8 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     let redirects = cmd
         .redirects
         .iter()
-        .map(|r| PlannedRedirect::new(r.kind.to_string(), plan_redirect_target(r)))
+        .map(plan_redirect)
+        .chain(out.enclosing_redirects.iter().cloned())
         .collect();
     let heredocs = out.take_heredocs(cmd);
     out.commands.push(
@@ -629,6 +704,15 @@ pub(crate) fn render_stmt(stmt: &Stmt) -> String {
         Stmt::For(s) => render_for(s),
         Stmt::While(s) => render_while(s),
         Stmt::Case(s) => render_case(s),
+        Stmt::Group(body) => {
+            let rendered = render_block(body);
+            if rendered.is_empty() { "{ }".to_string() } else { format!("{{ {rendered}; }}") }
+        }
+        Stmt::Redirected { body, redirects } => {
+            let mut parts = vec![render_stmt(body)];
+            parts.extend(redirects.iter().map(render_redirect));
+            parts.join(" ")
+        }
         Stmt::Break(n) => render_keyword("break", n.map(|n| n.to_string())),
         Stmt::Continue(n) => render_keyword("continue", n.map(|n| n.to_string())),
         Stmt::Return(e) => render_keyword("return", e.as_ref().map(|e| render_expr(e))),
@@ -688,22 +772,76 @@ pub(crate) fn render_command(cmd: &Command) -> String {
     parts.join(" ")
 }
 
+/// One argument rendered back to shell text, unexpanded: the same text a
+/// plan shows for it. A job's command string uses this too, so a command
+/// reads one way everywhere.
+pub(crate) fn render_arg(arg: &Arg) -> String {
+    plan_arg(arg).0
+}
+
 /// Plan one argument: its flat text (for [`render_command`]) and its
 /// [`PlannedValue`] (for [`PlannedCommand::args`]), derived together so the
 /// two representations cannot disagree about what this argument was.
 fn plan_arg(arg: &Arg) -> (String, PlannedValue) {
-    let text = match arg {
-        Arg::Positional(e) => render_expr(e),
-        Arg::Named { key, value } => format!("--{key}={}", render_expr(value)),
-        Arg::WordAssign { key, value } => format!("{key}={}", render_expr(value)),
-        Arg::ShortFlag(f) => format!("-{f}"),
-        Arg::LongFlag(f) => format!("--{f}"),
-        Arg::DoubleDash => "--".to_string(),
+    let (text, value) = match arg {
+        Arg::Positional(e) => (render_expr(e), literal_word(e)),
+        Arg::Named { key, value } => (
+            format!("--{key}={}", render_expr(value)),
+            literal_word(value).map(|word| format!("--{key}={word}")),
+        ),
+        Arg::WordAssign { key, value } => (
+            format!("{key}={}", render_expr(value)),
+            literal_word(value).map(|word| format!("{key}={word}")),
+        ),
+        Arg::ShortFlag(f) => (format!("-{f}"), Some(format!("-{f}"))),
+        Arg::LongFlag(f) => (format!("--{f}"), Some(format!("--{f}"))),
+        Arg::DoubleDash => ("--".to_string(), Some("--".to_string())),
     };
-    (text.clone(), PlannedValue::Plain(text))
+    let planned = match value {
+        Some(value) => PlannedValue::literal(text.clone(), value),
+        None => PlannedValue::Plain(text.clone()),
+    };
+    (text, planned)
 }
 
-/// Plan one redirect's target: rendered unexpanded, always plain.
+/// Plan one redirect: its operator and its target, unexpanded.
+fn plan_redirect(redirect: &Redirect) -> PlannedRedirect {
+    PlannedRedirect::new(redirect.kind.to_string(), plan_redirect_target(redirect))
+}
+
+/// The word a command receives for `expr`, when no expansion can change it.
+///
+/// Mirrors the argv build in `Kernel::build_args_flat`: a numeral with
+/// source text passes `raw`, other scalars pass their `value_to_string`
+/// form. Unquoted tilde paths keep their own expanding AST variant.
+/// Lists, records, bytes, and JSON values are not single known words.
+fn literal_word(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(Value::String(s)) => Some(s.clone()),
+        Expr::Literal(
+            scalar @ (Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null),
+        ) => Some(crate::interpreter::value_to_string(scalar)),
+        Expr::NumericLiteral { raw, .. } => Some(raw.clone()),
+        Expr::Interpolated(parts) => {
+            let mut word = String::new();
+            for part in parts {
+                match part {
+                    StringPart::Literal(s) => word.push_str(s),
+                    _ => return None,
+                }
+            }
+            Some(word)
+        }
+        _ => None,
+    }
+}
+
+/// Plan one redirect's target: rendered unexpanded.
+///
+/// A file target (`>`, `>>`, `<`, `2>`, `&>`) with no expansion in it is a
+/// [`PlannedValue::Literal`] path. A merge, a here-string, and a heredoc
+/// target stay plain: a merge target is a placeholder, a here-string target
+/// is stdin text rather than a path, and a heredoc target is a delimiter.
 ///
 /// A heredoc's target is its delimiter word, which is what stands after `<<`
 /// in the source. Rendering the *body* here would repeat what
@@ -717,6 +855,17 @@ fn plan_redirect_target(redirect: &Redirect) -> PlannedValue {
         RedirectKind::HereDoc(meta) => {
             let quote = if meta.literal { "'" } else { "" };
             PlannedValue::Plain(format!("{quote}{}{quote}", meta.delimiter))
+        }
+        RedirectKind::StdoutOverwrite
+        | RedirectKind::StdoutAppend
+        | RedirectKind::Stdin
+        | RedirectKind::Stderr
+        | RedirectKind::Both => {
+            let text = render_expr(&redirect.target);
+            match literal_word(&redirect.target) {
+                Some(path) => PlannedValue::literal(text, path),
+                None => PlannedValue::Plain(text),
+            }
         }
         _ => PlannedValue::Plain(render_expr(&redirect.target)),
     }
@@ -1083,7 +1232,7 @@ mod tests {
         assert_eq!(kinds, vec![">", "2>", "<"]);
         assert_eq!(
             plan.commands[0].redirects[0].target,
-            PlannedValue::Plain("out.txt".to_string())
+            PlannedValue::literal("out.txt", "out.txt")
         );
         assert!(plan.rendered.contains("> out.txt"), "got: {}", plan.rendered);
     }
@@ -1114,12 +1263,12 @@ mod tests {
         assert_eq!(
             args,
             &vec![
-                PlannedValue::Plain("-v".to_string()),
-                PlannedValue::Plain("--force".to_string()),
-                PlannedValue::Plain("--key=value".to_string()),
-                PlannedValue::Plain("word".to_string()),
-                PlannedValue::Plain("--".to_string()),
-                PlannedValue::Plain("--after".to_string()),
+                PlannedValue::literal("-v", "-v"),
+                PlannedValue::literal("--force", "--force"),
+                PlannedValue::literal("--key=value", "--key=value"),
+                PlannedValue::literal("word", "word"),
+                PlannedValue::literal("--", "--"),
+                PlannedValue::literal("--after", "--after"),
             ]
         );
     }
@@ -1208,8 +1357,8 @@ mod tests {
         assert_eq!(
             plan.commands[0].args,
             vec![
-                PlannedValue::Plain("--confirm=deadbeef".to_string()),
-                PlannedValue::Plain("target.txt".to_string()),
+                PlannedValue::literal("--confirm=deadbeef", "--confirm=deadbeef"),
+                PlannedValue::literal("target.txt", "target.txt"),
             ]
         );
     }

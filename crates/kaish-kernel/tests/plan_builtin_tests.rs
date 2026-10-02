@@ -217,13 +217,13 @@ async fn noncanonical_numeric_argv_words_round_trip_in_rendered() {
 /// `Plan.rendered` is a flat string a classifier might not re-split, but
 /// `PlannedCommand::args` is what a hook is meant to read argument-by-argument.
 #[tokio::test]
-async fn noncanonical_numeric_argv_words_round_trip_in_args_plain() {
+async fn noncanonical_numeric_argv_words_round_trip_in_args() {
     let doc = plan_json("plan 'xargs -0 rm -f' --json").await;
     let args: Vec<&str> = doc["statements"][0]["plan"]["commands"][0]["args"]
         .as_array()
         .expect("args")
         .iter()
-        .map(|a| a["plain"].as_str().unwrap_or_default())
+        .map(|a| a["literal"]["value"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(
         args,

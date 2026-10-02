@@ -77,6 +77,15 @@ pub struct WalkOptions {
     /// When false, symlink directories are yielded as files rather than recursed.
     /// When true, cycle detection prevents infinite loops.
     pub follow_symlinks: bool,
+    /// Yield a symlink that is not followed as an entry of its own (default
+    /// `true`). `grep -r` sets `false`: GNU grep skips the symlinks it finds
+    /// while recursing.
+    pub yield_symlinks: bool,
+    /// Yield entries that are not a directory, a regular file, or a symlink —
+    /// devices, FIFOs, and sockets (default `true`). A walk whose results
+    /// get read sets `false`: opening a FIFO blocks, and a device such as
+    /// `/dev/zero` never ends.
+    pub yield_special: bool,
     /// Optional callback for non-fatal errors (unreadable dirs, bad .gitignore).
     /// Default `None` silently skips errors (preserving original behavior).
     pub on_error: Option<ErrorCallback>,
@@ -97,6 +106,8 @@ impl fmt::Debug for WalkOptions {
             .field("include_hidden", &self.include_hidden)
             .field("filter", &self.filter)
             .field("follow_symlinks", &self.follow_symlinks)
+            .field("yield_symlinks", &self.yield_symlinks)
+            .field("yield_special", &self.yield_special)
             .field("on_error", &self.on_error.as_ref().map(|_| "..."))
             .field("types", &self.types.as_ref().map(|_| "..."))
             .finish()
@@ -114,6 +125,8 @@ impl Clone for WalkOptions {
             include_hidden: self.include_hidden,
             filter: self.filter.clone(),
             follow_symlinks: self.follow_symlinks,
+            yield_symlinks: self.yield_symlinks,
+            yield_special: self.yield_special,
             on_error: self.on_error.clone(),
             types: self.types.clone(),
         }
@@ -131,6 +144,8 @@ impl Default for WalkOptions {
             include_hidden: false,
             filter: IncludeExclude::new(),
             follow_symlinks: false,
+            yield_symlinks: true,
+            yield_special: true,
             on_error: None,
             types: None,
         }
@@ -247,7 +262,8 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     let name = e.name().to_string();
                     let is_dir = e.is_dir();
                     let is_symlink = e.is_symlink();
-                    (name, is_dir, is_symlink)
+                    let is_special = !is_dir && !is_symlink && !e.is_file();
+                    (name, is_dir, is_symlink, is_special)
                 })
                 .collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -256,7 +272,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             // directories are popped first from the LIFO stack.
             let mut dirs_to_push = Vec::new();
 
-            for (entry_name, entry_is_dir, entry_is_symlink) in entries {
+            for (entry_name, entry_is_dir, entry_is_symlink, entry_is_special) in entries {
                 let full_path = dir.join(&entry_name);
 
                 // Hidden-file rule (bash, no `dotglob`). With a glob pattern the
@@ -308,7 +324,8 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     // Symlink directory handling
                     if entry_is_symlink && !self.options.follow_symlinks {
                         // Don't recurse into symlink dirs — yield as a file entry
-                        if self.options.entry_types.files
+                        if self.options.yield_symlinks
+                            && self.options.entry_types.files
                             && self.matches_pattern(&full_path)
                             && self.depth_yields(depth)
                             && self.size_within_limit(self.fs, &full_path).await
@@ -383,6 +400,12 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                         results.push(full_path);
                     }
                 } else {
+                    if entry_is_symlink && !self.options.yield_symlinks {
+                        continue;
+                    }
+                    if entry_is_special && !self.options.yield_special {
+                        continue;
+                    }
                     // Yield file if wanted
                     if self.options.entry_types.files
                         && self.matches_pattern(&full_path)
@@ -1310,5 +1333,78 @@ mod tests {
         );
 
         // Walk should terminate (not infinite loop) — the fact we got here proves it
+    }
+
+    /// One flat directory whose entries report fixed kinds.
+    struct FlatFs(Vec<(&'static str, FlatKind)>);
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum FlatKind {
+        File,
+        Symlink,
+        Special,
+    }
+
+    struct FlatEntry(&'static str, FlatKind);
+
+    impl WalkerDirEntry for FlatEntry {
+        fn name(&self) -> &str { self.0 }
+        fn is_dir(&self) -> bool { false }
+        fn is_file(&self) -> bool { self.1 == FlatKind::File }
+        fn is_symlink(&self) -> bool { self.1 == FlatKind::Symlink }
+    }
+
+    #[async_trait::async_trait]
+    impl WalkerFs for FlatFs {
+        type DirEntry = FlatEntry;
+        async fn list_dir(&self, path: &Path) -> Result<Vec<FlatEntry>, WalkerError> {
+            if path == Path::new("/d") {
+                Ok(self.0.iter().map(|(name, kind)| FlatEntry(name, *kind)).collect())
+            } else {
+                Err(WalkerError::NotFound(path.display().to_string()))
+            }
+        }
+        async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
+            Err(WalkerError::NotFound(path.display().to_string()))
+        }
+        async fn is_dir(&self, path: &Path) -> bool {
+            path == Path::new("/d")
+        }
+        async fn exists(&self, path: &Path) -> bool {
+            path == Path::new("/d")
+        }
+    }
+
+    fn flat_fs() -> FlatFs {
+        FlatFs(vec![
+            ("a.txt", FlatKind::File),
+            ("link", FlatKind::Symlink),
+            ("pipe", FlatKind::Special),
+        ])
+    }
+
+    #[tokio::test]
+    async fn symlinks_and_special_entries_are_yielded_by_default() {
+        let fs = flat_fs();
+        let files = FileWalker::new(&fs, "/d").collect().await.unwrap();
+        assert_eq!(
+            files,
+            vec![PathBuf::from("/d/a.txt"), PathBuf::from("/d/link"), PathBuf::from("/d/pipe")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reading_walk_can_skip_symlinks_and_special_entries() {
+        let fs = flat_fs();
+        let files = FileWalker::new(&fs, "/d")
+            .with_options(WalkOptions {
+                yield_symlinks: false,
+                yield_special: false,
+                ..Default::default()
+            })
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(files, vec![PathBuf::from("/d/a.txt")]);
     }
 }

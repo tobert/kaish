@@ -124,6 +124,9 @@ pub struct ExecResult {
     /// the public accessors below hand back plain `OutputData`/`&OutputData`, so
     /// the boxing never leaks (GH #48, item 5).
     output: Option<Box<OutputData>>,
+    // Avoid nesting a JSON failure envelope when a runner forwards it.
+    #[serde(skip)]
+    pub(crate) json_failure_formatted: bool,
     /// True if output was capped and lost data. Either the output limiter
     /// spilled the overflow to disk (the `out` message carries the path),
     /// truncated it in memory (Memory spill mode — head+tail only, no
@@ -200,6 +203,7 @@ impl ExecResult {
             err: String::new(),
             data: None,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -225,6 +229,7 @@ impl ExecResult {
                 err: String::new(),
                 data: None,
                 output: Some(Box::new(output)),
+                json_failure_formatted: false,
                 did_spill: false,
                 fault: false,
                 original_code: None,
@@ -264,6 +269,7 @@ impl ExecResult {
             err: String::new(),
             data: Some(data),
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -289,6 +295,7 @@ impl ExecResult {
             err: String::new(),
             data: Some(data),
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -318,6 +325,7 @@ impl ExecResult {
             err: Self::terminate_diagnostic(err),
             data: None,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -340,6 +348,7 @@ impl ExecResult {
             err: stderr.into(),
             data: None,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -361,6 +370,7 @@ impl ExecResult {
             err: String::new(),
             data: None,
             output: Some(Box::new(output)),
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -384,6 +394,7 @@ impl ExecResult {
             err: Self::terminate_diagnostic(err),
             data,
             output: None,
+            json_failure_formatted: false,
             did_spill: false,
             fault: false,
             original_code: None,
@@ -846,7 +857,7 @@ mod tests {
         assert!(matches!(&result.out, OutputPayload::Text(s) if s.is_empty()));
         assert!(result.has_output());
         result.materialize();
-        assert_eq!(&*result.text_out(),"a\nb");
+        assert_eq!(&*result.text_out(),"a\nb\n");
         assert!(result.output.is_none());
     }
 
