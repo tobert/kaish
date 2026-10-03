@@ -487,6 +487,21 @@ impl KernelBackend for VirtualOverlayBackend {
         mounts
     }
 
+    /// The embedder's boundaries, kaish's mounts, and `/v` when it is a
+    /// synthesized shared ancestor. kaish always mounts `/v/jobs`, `/v/blobs`,
+    /// and `/v/bin` there, so `/v` is one region: a walk from `/` does not
+    /// enter it, and a walk from `/v` walks every mount under it, the
+    /// embedder's included.
+    fn walk_boundaries(&self) -> Vec<PathBuf> {
+        let mut points = self.inner.walk_boundaries();
+        points.extend(self.vfs.list_mounts().into_iter().map(|mount| mount.path));
+        let v = Path::new("/v");
+        if self.is_shared_ancestor(v) {
+            points.push(v.to_path_buf());
+        }
+        points
+    }
+
     fn resolve_real_path(&self, path: &Path) -> Option<PathBuf> {
         if self.is_virtual_path(path) {
             // Virtual paths don't map to real filesystem

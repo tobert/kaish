@@ -26,6 +26,16 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 Git is an ordinary external command (`git status`, `git log`, `git diff`) — it
 runs via the `subprocess` capability against your system `git`, not a VFS mount.
 
+## Walks stay in one mount
+
+`grep -r`, `find`, `ls -R`, `tree`, `glob`, and `**` stay in the mount where
+the walk starts. From `/` they list `/v`, `/dev`, and `/tmp` but do not
+descend into them. Name a mount to walk it: `grep -r x /v` walks `/v` and every
+mount nested under it. `--cross-mounts` (one command) or `set -o crossmounts`
+(the session) crosses. A walk that skipped mounts says so once on stderr,
+`grep: skipped mounts /dev /tmp /v (use --cross-mounts to enter)`, and keeps
+its exit status.
+
 ## /v/jobs — Job Observability
 
 Each background job gets a directory:

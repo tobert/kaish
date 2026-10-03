@@ -17,6 +17,7 @@ mod cp;
 mod cut;
 mod date;
 mod dd;
+mod command;
 mod diff;
 mod dirname;
 mod patch;
@@ -377,8 +378,10 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(tojsonl::ToJsonl);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
+    registry.register(command::CommandBuiltin);
     registry.register(tree::Tree);
     registry.register(true_false::True);
+    registry.register(command::Type);
     registry.register(true_false::False);
     registry.register(true_false::Colon);
     registry.register(type_of::TypeOf);

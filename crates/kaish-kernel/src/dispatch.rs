@@ -183,6 +183,13 @@ pub trait CommandDispatcher: Send + Sync {
         false
     }
 
+    /// Whether `name` is a function defined in this dispatcher's shell, for
+    /// `command -v` and `type`. The default is `false`: a dispatcher without
+    /// a function table (the test-only `BackendDispatcher`) has none.
+    async fn has_function(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Fork the dispatcher for concurrent execution (detached).
     ///
     /// Returns a subsidiary dispatcher with independent mutable state, safe
@@ -378,6 +385,10 @@ impl BackendDispatcher {
                 Arg::Named { key, value } => match value {
                     Expr::Literal(Value::String(s)) => argv.push(format!("--{key}={s}")),
                     _ => argv.push(format!("--{key}=")),
+                },
+                Arg::ShortNamed { key, value } => match value {
+                    Expr::Literal(Value::String(s)) => argv.push(format!("-{key}={s}")),
+                    _ => argv.push(format!("-{key}=")),
                 },
                 Arg::WordAssign { key, value } => match value {
                     Expr::Literal(Value::String(s)) => argv.push(format!("{key}={s}")),
