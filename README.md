@@ -7,22 +7,18 @@
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
-**kaish** is a predictable shell for AI agents delivered as an embeddable Rust
-library with a reference REPL. The language is inspired by POSIX `sh` and bash
-and informed by ShellCheck's lints. What it keeps is `sh`-shaped, so most muscle
-memory and model training transfers. What it drops — word splitting, `eval`,
-backticks, process substitution — is the part that makes shell unpredictable.
-Typed data is added on top.
+**kaish** is a shell for AI agents delivered as an embeddable Rust
+library with a reference REPL. The language is inspired by Bourne shells,
+following an 80/20 rule on selecting the most useful features, and dropping
+dangerous ones. It also adds a JSON data model. The resulting language is
+basically plain shell for simple things, while having direct support for
+JSON manipulation.
 
 The builtins — grep, sed, awk, find, and ninety-odd more — run in-process, so most
 text processing never needs `fork()` or `exec()`. All file I/O goes through a
 virtual filesystem that can pass through, stay in memory, or overlay the two.
 An embedded kaish gives an agent a complete scripting environment that can be
 constrained naturally.
-
-**Status:** pre-1.0 (current version on the badge above). The language has
-settled; what remains before 1.0 is ergonomics and correctness polish.
-Everything ships through [CHANGELOG.md](CHANGELOG.md).
 
 **Try it now:** [tobert.github.io/kaish-extras](https://tobert.github.io/kaish-extras/) —
 the kernel compiled to wasm, running entirely in your browser tab. No install,
@@ -35,7 +31,7 @@ Agents need to compose operations such as filtering output, transforming data,
 and iterating over results. They are already good at Bourne shell idioms, and
 shell is already an ideal language for text processing. kaish inherits all of
 that, so piping, redirecting, and composing commands works like it always has,
-with just a couple changes.
+with a few changes.
 
 ```sh
 # Filter and transform in one script
@@ -51,24 +47,25 @@ seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
 
 Handing an agent `bash -c` is dangerous on many levels. It comes with
-word-splitting surprises, tools that vary by platform and version, and full host
-access by default. kaish keeps the language the models already know and swaps out
-the implementation: strict parsing with pre-execution validation, builtins that
-behave identically everywhere, and a filesystem boundary the embedder controls.
+word-splitting surprises, tools that vary by platform and version, and is
+difficult to sandbox. Most importantly, it lacks a way to validate the program
+before execution.
 
-Underneath, kaish's data model is JSON. A variable holds an array or a record as
-naturally as a string, and `$(cmd)` binds a typed value when the command's
-output *is* a value — `x=$(fromjson <<< '[1,2]')` binds a list, as `jq`, `keys`,
-and `values` do. A builtin with a POSIX counterpart binds text instead, so it
-reads as its POSIX self: `$(grep …)`, `$(ls …)`, and `$(find …)` are text, one
-line per result. Ask any command for its structure with `--json`, which emits
-the same typed data the language works with internally. Structured results flow
-through pipes, subscripts, and iteration without extra serialization /
-deserialization steps.
+kaish provides a shell that just works for 80% of the scripts agents generate. The 20%
+that might be rejected come with educational error messages, so models get immediate
+feedback and can try something else. kaish validates the program before running it
+so the rejections come before any code runs.
+
+kaish's data model is JSON. A variable holds an array or a record as naturally
+as a string. `$(cmd)` binds a typed value when the command's output is a value,
+so `x=$(fromjson <<< '[1,2]')` binds a list. A builtin with a POSIX counterpart
+binds text instead, so grep, etc. will return text as anyone would expect. All
+builtins support `--json`. When specified, the command returns JSON instead
+of the usual bare text.
 
 ## What's Different About kaish?
 
-Kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
+kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the
 language that comes naturally, while providing better pre-execution
 syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 
@@ -94,9 +91,8 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# bare *.log recurses too with **; reach for the glob builtin for options
-# like --exclude. glob has a POSIX counterpart (find), so $(glob ...) binds
-# text, one path per line, same as $(find ...) or $(ls ...).
+# ** recurses; the glob builtin adds options such as --exclude.
+# Like $(find ...), $(glob ...) binds text, one path per line.
 for file in $(glob **/*.log --exclude="*.tmp.log"); do
     echo "logfile: $file"
 done
@@ -199,8 +195,8 @@ async fn main() -> anyhow::Result<()> {
 
 The kernel is hermetic by default — it never reads the OS environment (the
 frontend supplies vars), and the OS-touching capability features (`subprocess`,
-`host`, `os-integration`, `tokens`) are opt-in cargo features, so the dangerous
-surface is explicit. Every `execute()` returns an `ExecResult` with
+`host`, `os-integration`, `tokens`) are opt-in cargo features, so every way to
+reach the host is explicit. Every `execute()` returns an `ExecResult` with
 clean text output, an optional typed `data` payload (`--json` on any command),
 and an exit code agents can branch on: `2` is a usage error or a refusal that
 names what to do instead (e.g. `kaish-trash empty` without `--confirm`), `3`
@@ -210,8 +206,8 @@ means output was truncated, `124` is a timeout.
 capability features, `ExecuteOptions`, custom tools, the exit-code contract, and
 thread stack sizing.
 
-**Using kaish over MCP?** kaish core doesn't ship an MCP server — that surface
-lives in the embedders. [**kaibo**](https://github.com/tobert/kaibo) is the
+**Using kaish over MCP?** kaish core doesn't ship an MCP server — MCP servers
+live in the embedders. [**kaibo**](https://github.com/tobert/kaibo) is the
 showcase: agents with kaish powers in an MCP (or CLI). Kaibo agents have a kaish
 shell tool for exploring filesystems and text.
 
@@ -221,20 +217,17 @@ try it at [tobert.github.io/kaish-extras](https://tobert.github.io/kaish-extras/
 
 ## Builtins
 
-kaish builtins run in-process — no subprocesses, no PATH lookups, no platform
-variance. They exist because agents need tools they can verify: a `grep` that
-behaves identically everywhere, a `sed` whose dialect doesn't depend on the host,
-an `awk` that never surprises.
+kaish builtins run in-process, and replace calls to the host OS tools.
 
 **Design principles:**
 
 - **Verifiable** — each builtin has a schema (params, types, examples) exposed via `help <tool>`.
-  Agents can introspect before calling.
+  This enables validation ahead of runtime and eases the building of static checks.
 - **Convention-following** — flags and behavior match the patterns deeply embedded in training data
   and decades of existing scripts. `grep -rn`, `sed 's/old/new/g'`, `awk '{print $1}'` all work
   as expected.
 - **80/20** — implement the features used 80% of the time, deliberately omit the 20% that add
-  complexity without proportional value. Missing features compose via pipes.
+  complexity without proportional value.
 - **GNU regex, exactly** — `grep` and `sed` read GNU BRE by default, exactly as GNU grep and GNU
   sed do: `grep 'fn consult('`/`sed -n '/fn consult(/p'` match a literal paren, `grep 'a\|b'`/
   `sed 's/a\|b/x/'` alternate, and `-E`/`-r` takes strict ERE. `awk` has no BRE — it reads gawk's
@@ -288,12 +281,13 @@ git clone https://github.com/tobert/kaish
 cd kaish
 cargo build --release
 cargo test --all
-cargo clippy --all --all-targets   # must be warning-free
+cargo clippy --all --all-targets -- -D warnings
 ```
 
-CI runs the test and clippy gates on every PR and push to `main` — plus a
-no-default-features check of the kernel (the capability-feature sandbox) and a
-`wasm32-wasip1` build of `kaish-wasi`. See
+CI runs five gates on every PR and push to `main`: tests, clippy, rustdoc, a
+no-default-features test run of the kernel (the capability-feature sandbox), and a
+`wasm32-wasip1` build of `kaish-wasi`. [AGENTS.md](AGENTS.md), "Gates" lists the
+commands. See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml); releases to crates.io
 are cut manually, so that one workflow is the whole CI story.
 
@@ -303,7 +297,7 @@ Agent-generated PRs are welcome! 🤖 This project is built with AI agents and w
 love seeing what other agents come up with. **All changes go through a PR.**
 
 Be sure to have your agent read [AGENTS.md](AGENTS.md). Most of what we do for
-kaish is standard open source process.
+kaish is a standard open source process.
 
 Please review your code before submitting PRs. [kaibo](https://github.com/tobert/kaibo)
 subagents use kaish as their read-only shell and it does a great job of finding defects
