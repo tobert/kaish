@@ -985,3 +985,41 @@ fn e020_still_fires_through_test_when_the_operands_are_dynamic() {
         );
     }
 }
+
+// ── readonly: no builtin, so the validator reports it like any unknown command
+
+/// `readonly X=1` exits 127 at runtime (kaish has no `readonly`), so the
+/// validator must report it the way it reports any other missing command.
+#[test]
+fn readonly_is_reported_as_an_undefined_command() {
+    use kaish_kernel::validator::{IssueCode, Severity};
+    let undefined = |source: &str| -> Vec<kaish_kernel::validator::ValidationIssue> {
+        kaish_kernel::validator::validate_program(source)
+            .expect("parses")
+            .into_iter()
+            .filter(|i| i.code == IssueCode::UndefinedCommand)
+            .collect()
+    };
+
+    // Control: the same report for a name that is plainly missing.
+    assert_eq!(undefined("nosuchcommand_xyz X=1").len(), 1);
+
+    let reported = undefined("readonly X=1");
+    assert_eq!(reported.len(), 1, "readonly X=1 must be flagged: {reported:?}");
+    assert_eq!(reported[0].severity, Severity::Warning);
+    assert!(reported[0].message.contains("readonly"), "{:?}", reported[0]);
+}
+
+/// Names the interpreter resolves itself stay quiet.
+#[test]
+fn real_special_commands_are_not_reported_as_undefined() {
+    for source in ["true", "false", ":", "local X=1", "f() { local X=1; }"] {
+        let issues = kaish_kernel::validator::validate_program(source).expect("parses");
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.code == kaish_kernel::validator::IssueCode::UndefinedCommand),
+            "{source}: {issues:?}"
+        );
+    }
+}

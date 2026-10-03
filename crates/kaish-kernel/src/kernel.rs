@@ -1786,7 +1786,8 @@ impl Kernel {
                 let scope = self.scope.read().await;
                 self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel.clone())
             };
-            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await;
+            // The embedder door runs one command: there is no script for an `exit` to end.
+            let result = self.execute_pipeline(&pipeline, &mut root_ctx).await.map(ControlFlow::into_absorbed_result);
             // The door runs one command the same way a statement does, so a
             // `cd` or an `alias` through it outlives the call. Published
             // before the error is propagated, because a command that faults
@@ -2864,7 +2865,15 @@ impl Kernel {
                     stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
                     background: false,
                 };
-                let result = Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await?;
+                let result = match Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await? {
+                    ControlFlow::Exit { code, result } => {
+                        // A function or `source` ran `exit`: end the statement
+                        // list, keeping the output written before it.
+                        self.update_last_result(&result).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                    flow => flow.into_absorbed_result(),
+                };
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2883,7 +2892,15 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
-                let result = Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await?;
+                let result = match Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await? {
+                    ControlFlow::Exit { code, result } => {
+                        // A function or `source` ran `exit`: end the statement
+                        // list, keeping the output written before it.
+                        self.update_last_result(&result).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                    flow => flow.into_absorbed_result(),
+                };
                 self.update_last_result(&result).await;
 
                 // Check for error exit mode (set -e)
@@ -2907,10 +2924,17 @@ impl Kernel {
                 // see `eval_condition_async`. (An `elif` is a nested `Stmt::If`
                 // in `else_branch`, so it takes this same path.)
                 let mut result = ExecResult::success("");
-                let cond_value = self
+                let cond_value = match self
                     .eval_condition_async(&if_stmt.condition, &mut result, &mut *ctx)
                     .await
-                    .map_err(|error| with_prior_output(std::mem::take(&mut result), error, &self.output_sequence))?;
+                    .map_err(|error| with_prior_output(std::mem::take(&mut result), error, &self.output_sequence))?
+                {
+                    Condition::Value(value) => value,
+                    Condition::Exit(code) => {
+                        self.drain_stderr_into(&mut result, ctx).await;
+                        return Ok(ControlFlow::Exit { code, result });
+                    }
+                };
 
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
@@ -3156,10 +3180,17 @@ impl Kernel {
 
                     // Per iteration, so the condition's stdout interleaves with
                     // the body's rather than arriving in one block up front.
-                    let cond_value = self
+                    let cond_value = match self
                         .eval_condition_async(&while_loop.condition, &mut result, &mut *ctx)
                         .await
-                        .map_err(|error| with_prior_output(std::mem::take(&mut result), error, &self.output_sequence))?;
+                        .map_err(|error| with_prior_output(std::mem::take(&mut result), error, &self.output_sequence))?
+                    {
+                        Condition::Value(value) => value,
+                        Condition::Exit(code) => {
+                            self.drain_stderr_into(&mut result, ctx).await;
+                            return Ok(ControlFlow::Exit { code, result });
+                        }
+                    };
 
                     if !is_truthy(&cond_value) {
                         break;
@@ -3871,14 +3902,15 @@ impl Kernel {
     }
 
     /// Execute a pipeline.
-    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline, caller: &mut ExecContext) -> Result<ControlFlow> {
         if pipeline.stages.is_empty() {
-            return Ok(ExecResult::success(""));
+            return Ok(ControlFlow::Normal(ExecResult::success("")));
         }
 
-        // Handle background execution (`&` operator)
+        // Handle background execution (`&` operator). A job is its own
+        // subshell: an `exit` in it ends the job, not the script.
         if pipeline.background {
-            return self.execute_background(pipeline, caller).await;
+            return Ok(ControlFlow::Normal(self.execute_background(pipeline, caller).await?));
         }
 
         // All commands go through the runner with the Kernel as dispatcher.
@@ -3926,7 +3958,8 @@ impl Kernel {
         ctx.pipe_stdout = caller.pipe_stdout.take();
         ctx.stdin_data_rx = caller.stdin_data_rx.take();
 
-        let mut result = self.runner.run(&pipeline.stages, &mut ctx, self).await;
+        let mut flow = self.runner.run_flow(&pipeline.stages, &mut ctx, self).await;
+        let result = flow.result_mut();
 
         // `set -o pipefail`: the pipeline answers with the RIGHTMOST non-zero
         // stage, not the first. bash's `set -o pipefail; (exit 3) | (exit 4) |
@@ -3951,7 +3984,11 @@ impl Kernel {
         // flipped `did_spill` even when the limit itself is disabled, GH
         // #191). This is the shared contract every execution surface must
         // apply — see `apply_spill_contract`'s doc comment (GH #212).
-        crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
+        crate::output_limit::apply_spill_contract(result, &ctx.output_limit).await;
+        // An exit's code is the finished result's: the spill remap to 3 may have changed it.
+        if let ControlFlow::Exit { code, result } = &mut flow {
+            *code = result.code;
+        }
 
         // Session changes go back to the CALLER, not the slot: a `cd` or a
         // `kaish-ignore` inside this pipeline belongs to the enclosing run,
@@ -3979,7 +4016,7 @@ impl Kernel {
         caller.pipe_stdout = ctx.pipe_stdout.take();
         caller.stdin_data_rx = ctx.stdin_data_rx.take();
 
-        Ok(result)
+        Ok(flow)
     }
 
     /// Execute a pipeline in the background.
@@ -4133,11 +4170,11 @@ impl Kernel {
     }
 
     /// Execute a single command.
-    async fn execute_command(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_command(&self, name: &str, args: &[Arg], ctx: &mut ExecContext) -> Result<ControlFlow> {
         self.execute_command_depth(name, args, 0, ctx).await
     }
 
-    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8, ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8, ctx: &mut ExecContext) -> Result<ControlFlow> {
         // Dispatch breadcrumb instead of an `#[instrument]` span: this is the
         // most-recursed function on the ring, so wrapping its future in
         // `Instrumented<Span>` (plus the `err` recorder) cost native stack at
@@ -4167,7 +4204,7 @@ impl Kernel {
                     } else {
                         ExecResult::failure(1, "")
                     };
-                    Ok(finalize_output(result, format, false))
+                    Ok(ControlFlow::Normal(finalize_output(result, format, false)))
                 }
                 crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args, ctx)).await,
             };
@@ -4194,7 +4231,7 @@ impl Kernel {
         if let Some(builtin_name) = name.strip_prefix("/v/bin/") {
             return match self.tools.get(builtin_name) {
                 Some(_) => Box::pin(self.execute_command_depth(builtin_name, args, alias_depth, ctx)).await,
-                None => Ok(ExecResult::failure(127, format!("command not found: {}", name))),
+                None => Ok(ControlFlow::Normal(ExecResult::failure(127, format!("command not found: {}", name)))),
             };
         }
 
@@ -4213,8 +4250,9 @@ impl Kernel {
             Some(t) => t,
             None => {
                 // Try executing as .kai script from PATH
+                // A `.kai` script is its own program: its `exit` ends the script, not the caller.
                 if let Some(result) = Box::pin(self.try_execute_script(name, args, ctx)).await? {
-                    return Ok(result);
+                    return Ok(ControlFlow::Normal(result));
                 }
                 // Try executing as external command from PATH — boxed because its
                 // future is the heaviest branch here (holds a `tokio::process::Command`,
@@ -4230,7 +4268,7 @@ impl Kernel {
                 // fallthrough re-deriving the wrong "command not found".
                 let mut unavailable = None;
                 match Box::pin(self.try_execute_external(name, args, &mut *ctx)).await? {
-                    ExternalCommandOutcome::Ran(result) => return Ok(*result),
+                    ExternalCommandOutcome::Ran(result) => return Ok(ControlFlow::Normal(*result)),
                     ExternalCommandOutcome::NotFound => {}
                     ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
                 }
@@ -4312,7 +4350,7 @@ impl Kernel {
                         // No builtin or external command produced this output,
                         // so nothing else publishes it to a background job.
                         ctx.publish_job_stdout(&result).await;
-                        return Ok(result);
+                        return Ok(ControlFlow::Normal(result));
                     }
                     Err(BackendError::ToolNotFound(_)) => {
                         // The backend confirms no such tool exists — fall
@@ -4323,14 +4361,14 @@ impl Kernel {
                         // execution) but running it failed — a genuine
                         // execution error, not "command not found". Surface
                         // it loudly instead of masking it as exit-127.
-                        return Ok(ExecResult::failure(1, format!("{}: {}", name, e)));
+                        return Ok(ControlFlow::Normal(ExecResult::failure(1, format!("{}: {}", name, e))));
                     }
                 }
 
-                return Ok(match unavailable {
+                return Ok(ControlFlow::Normal(match unavailable {
                     Some(reason) => external_commands_unavailable_error(name, reason),
                     None => ExecResult::failure(127, format!("command not found: {}", name)),
-                });
+                }));
             }
         };
 
@@ -4383,7 +4421,7 @@ impl Kernel {
             let result = ExecResult::with_output(crate::interpreter::OutputData::text(content));
             // The tool never runs, so no builtin publish reaches a background job.
             ctx.publish_job_stdout(&result).await;
-            return Ok(result);
+            return Ok(ControlFlow::Normal(result));
         }
 
         // Snapshot exec_ctx into a local context and release the lock before
@@ -4455,7 +4493,14 @@ impl Kernel {
             Some(stdout) => stdout.stats().await.total_written,
             None => 0,
         };
-        let mut result = tool.execute(tool_args, &mut *ctx).await;
+        let flow = tool.execute_flow(tool_args, &mut *ctx).await;
+        let (mut result, exited) = match flow {
+            kaish_types::ToolFlow::Normal(result) => (result, false),
+            kaish_types::ToolFlow::Exit(result) => (result, true),
+            other => panic!(
+                "tool `{name}` returned a ToolFlow variant this kernel does not know: {other:?}"
+            ),
+        };
         if result.code == 2
             && let Some(refusal) = unknown_flag_refusal(name, &result.err)
         {
@@ -4525,7 +4570,11 @@ impl Kernel {
             }
         }
 
-        Ok(result)
+        // The tool ended the script; its result's code is the exit status.
+        if exited {
+            return Ok(ControlFlow::Exit { code: result.code, result });
+        }
+        Ok(ControlFlow::Normal(result))
     }
 
     /// The session `HOME` from the kernel scope, if set. Tilde expansion reads
@@ -4637,6 +4686,18 @@ impl Kernel {
                     let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
                     argv.push(format!("--{key}={val_str}"));
                 }
+                Arg::ShortNamed { key, value } => {
+                    if let Expr::NumericLiteral { raw, .. } = value {
+                        argv.push(format!("-{key}={raw}"));
+                        continue;
+                    }
+                    let val = self.eval_expr_async(value, &mut *ctx).await?;
+                    if let Some(msg) = crate::interpreter::structured_boundary_error("a command argument", &val) {
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    let val_str = value_to_text_sink(&val).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    argv.push(format!("-{key}={val_str}"));
+                }
                 Arg::WordAssign { key, value } => {
                     if let Expr::NumericLiteral { raw, .. } = value {
                         argv.push(format!("{key}={raw}"));
@@ -4692,11 +4753,13 @@ impl Kernel {
         expr: &'a Expr,
         out: &'a mut ExecResult,
         ctx: &'a mut ExecContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Condition>> + Send + 'a>> {
         Box::pin(async move {
             match expr {
                 Expr::Command(cmd) => {
-                    let mut result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                    let flow = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                    let exited = matches!(flow, ControlFlow::Exit { .. });
+                    let mut result = flow.into_absorbed_result();
                     // Truthiness comes from the command's OWN code, read before
                     // the spill contract can remap it. A capped `if seq 1
                     // 100000` succeeded; only its output was too big to keep,
@@ -4726,19 +4789,26 @@ impl Kernel {
                     let limit = ctx.output_limit.clone();
                     crate::output_limit::apply_spill_contract(&mut result, &limit).await;
                     push_stdout_in_order(out, &result, &self.output_sequence);
-                    Ok(Value::Bool(truthy))
+                    // A function in the condition ran `exit`: the statement ends.
+                    if exited {
+                        return Ok(Condition::Exit(result.code));
+                    }
+                    Ok(Condition::Value(Value::Bool(truthy)))
                 }
                 // Short-circuits exactly as the `eval_expr_async` arm does, and
                 // yields the operand's own value rather than a coerced bool. A
                 // side that short-circuits never runs, so it prints nothing.
                 Expr::BinaryOp { left, op, right } => {
-                    let left_val = self.eval_condition_async(left, &mut *out, &mut *ctx).await?;
+                    let left_val = match self.eval_condition_async(left, &mut *out, &mut *ctx).await? {
+                        Condition::Value(value) => value,
+                        exit @ Condition::Exit(_) => return Ok(exit),
+                    };
                     let short_circuits = match op {
                         BinaryOp::And => !is_truthy(&left_val),
                         BinaryOp::Or => is_truthy(&left_val),
                     };
                     if short_circuits {
-                        return Ok(left_val);
+                        return Ok(Condition::Value(left_val));
                     }
                     self.eval_condition_async(right, out, ctx).await
                 }
@@ -4746,10 +4816,12 @@ impl Kernel {
                 // statement exactly as an un-negated one's does. Routing this
                 // through `eval_expr_async` would drop it.
                 Expr::Not(inner) => {
-                    let value = self.eval_condition_async(inner, out, ctx).await?;
-                    Ok(Value::Bool(!is_truthy(&value)))
+                    match self.eval_condition_async(inner, out, ctx).await? {
+                        Condition::Value(value) => Ok(Condition::Value(Value::Bool(!is_truthy(&value)))),
+                        exit @ Condition::Exit(_) => Ok(exit),
+                    }
                 }
-                other => self.eval_expr_async(other, ctx).await,
+                other => Ok(Condition::Value(self.eval_expr_async(other, ctx).await?)),
             }
         })
     }
@@ -4940,7 +5012,15 @@ impl Kernel {
                 // a substitution's stderr. Dropping the `ExecResult` here made
                 // `if cat /nonexistent; then …` print nothing at all, so every
                 // condition that failed for a reason failed silently.
-                let result = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                let flow = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                // The parser makes `Expr::Command` only as a condition, and
+                // conditions run through `eval_condition_async`, which raises
+                // an `exit`. A value cannot carry one, so refuse rather than
+                // swallow it.
+                if matches!(flow, ControlFlow::Exit { .. }) {
+                    anyhow::bail!("{}: `exit` is not supported where only a value is wanted", cmd.name);
+                }
+                let result = flow.into_absorbed_result();
                 self.emit_cmdsubst_stderr(&result, ctx).await;
                 Ok(Value::Bool(result.code == 0))
             }
@@ -5401,7 +5481,7 @@ impl Kernel {
     /// Functions push a new scope frame for local variables. Variables declared
     /// with `local` are scoped to the function; other assignments modify outer
     /// scopes (or create in root if new).
-    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg], ctx: &mut ExecContext) -> Result<ControlFlow> {
         let _depth = self.enter_recursion("a shell function")?;
 
         // 1. Build function args from AST args (async to support command substitution)
@@ -5441,6 +5521,7 @@ impl Kernel {
         let mut accumulated = StatementAccumulator::new(&self.output_sequence);
         // Held until the scope is restored, then propagated.
         let mut exec_error: Option<anyhow::Error> = None;
+        let mut exited = false;
 
         for stmt in &def.body {
             match self.execute_stmt_flow(stmt, &mut *ctx).await {
@@ -5462,6 +5543,7 @@ impl Kernel {
                         ControlFlow::Exit { code, result: r } => {
                             accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
+                            exited = true;
                             break;
                         }
                     }
@@ -5484,7 +5566,13 @@ impl Kernel {
         if let Some(e) = exec_error {
             return Err(with_prior_output(accumulated.into_prior_output(), e, &self.output_sequence));
         }
-        Ok(accumulated.finish())
+        let result = accumulated.finish();
+        // `return` stopped at this function; `exit` is not a function boundary
+        // and goes on to end the script.
+        if exited {
+            return Ok(ControlFlow::Exit { code: result.code, result });
+        }
+        Ok(ControlFlow::Normal(result))
     }
 
     fn enter_recursion(&self, what: &str) -> Result<RecursionGuard<'_>> {
@@ -5920,7 +6008,7 @@ impl Kernel {
     ///
     /// Unlike regular tool execution, `source` executes in the CURRENT scope,
     /// allowing the sourced script to set variables and modify shell state.
-    async fn execute_source(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn execute_source(&self, args: &[Arg], ctx: &mut ExecContext) -> Result<ControlFlow> {
         // `source`/`.` is the fourth dynamic re-entry point: it runs the
         // sourced file's statements inline via `execute_stmt_flow`, so a file
         // that sources itself recurses unbounded just like a runaway function
@@ -5934,7 +6022,7 @@ impl Kernel {
             Some(Value::String(s)) => s.clone(),
             Some(v) => value_to_string(v),
             None => {
-                return Ok(ExecResult::failure(1, "source: missing filename"));
+                return Ok(ControlFlow::Normal(ExecResult::failure(1, "source: missing filename")));
             }
         };
 
@@ -5959,10 +6047,10 @@ impl Kernel {
                     })?
                 }
                 Err(e) => {
-                    return Ok(ExecResult::failure(
+                    return Ok(ControlFlow::Normal(ExecResult::failure(
                         1,
                         format!("source: {}: {}", path, e),
-                    ));
+                    )));
                 }
             }
         };
@@ -5976,7 +6064,7 @@ impl Kernel {
                     .map(|e| format!("{}:{}: {}", path, e.span.start, e.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Ok(ExecResult::failure(1, format!("source: {}", msg)));
+                return Ok(ControlFlow::Normal(ExecResult::failure(1, format!("source: {}", msg))));
             }
         };
 
@@ -6009,12 +6097,14 @@ impl Kernel {
                         }
                         ControlFlow::Return { value } => {
                             accumulated.add_signal(value);
-                            return Ok(accumulated.finish());
+                            return Ok(ControlFlow::Normal(accumulated.finish()));
                         }
                         ControlFlow::Exit { code, result: r } => {
                             accumulated.add_signal(r);
                             accumulated.set_exit_code(code);
-                            return Ok(accumulated.finish());
+                            // `exit` in a sourced file ends the shell, as in bash.
+                            let result = accumulated.finish();
+                            return Ok(ControlFlow::Exit { code: result.code, result });
                         }
                     }
                 }
@@ -6025,7 +6115,7 @@ impl Kernel {
             }
         }
 
-        Ok(accumulated.finish())
+        Ok(ControlFlow::Normal(accumulated.finish()))
     }
 
     /// Try to execute a script from PATH directories.
@@ -6784,7 +6874,7 @@ impl Kernel {
     /// the context. Everything per-invocation — the stdin family, the cancel
     /// token, the watchdog, the session fields — travels on `ctx` and never
     /// touches the slot here.
-    async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+    async fn dispatch_command(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
         // Ensure nested dispatch (e.g. the `timeout` builtin re-dispatching
         // its inner command via ctx.dispatcher) routes through THIS kernel,
         // not a stale parent. Critical for forks: the fork's builtins must
@@ -6959,7 +7049,8 @@ async fn consume_flag_positionals(
             .find(|idx| {
                 **idx > current_idx
                     && !consumed.contains(idx)
-                    && (allow_word_assign || matches!(args[**idx], Arg::Positional(_)))
+                    && (allow_word_assign
+                        || matches!(args[**idx], Arg::Positional(_) | Arg::ShortNamed { .. }))
             })
             .copied();
         match next_pos {
@@ -6967,6 +7058,21 @@ async fn consume_flag_positionals(
                 Arg::Positional(expr) => match source.eval(expr).await? {
                     Some(value) => {
                         collected.push(value);
+                        consumed.insert(pos_idx);
+                    }
+                    None if collected.is_empty() => {
+                        tool_args.flags.insert(flag_name.to_string());
+                        return Ok(());
+                    }
+                    None => anyhow::bail!(
+                        "--{flag_name}: could not evaluate argument {} in this context",
+                        collected.len() + 1
+                    ),
+                },
+                // `grep -e -n=5`: the one word `-n=5` is the flag's value.
+                Arg::ShortNamed { key, value } => match source.eval(value).await? {
+                    Some(val) => {
+                        collected.push(Value::String(short_named_word(key, value, &val)?));
                         consumed.insert(pos_idx);
                     }
                     None if collected.is_empty() => {
@@ -7119,6 +7225,13 @@ async fn bind_raw_words(
                     );
                 }
                 tool_args.positional.push(Value::String(format!("--{name}")));
+            }
+            Arg::ShortNamed { key, value } => {
+                let val = source
+                    .eval(value)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("raw-argv -key=value could not be evaluated in this context"))?;
+                tool_args.positional.push(Value::String(short_named_word(key, value, &val)?));
             }
             Arg::Named { key, value } => {
                 let val = source
@@ -7287,6 +7400,12 @@ pub(crate) async fn bind_tool_args(
                     }
                     words.push(Value::String(format!("--{name}")));
                 }
+                Arg::ShortNamed { key, value } => {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("verbatim -key=value could not be evaluated in this context")
+                    })?;
+                    words.push(Value::String(short_named_word(key, value, &val)?));
+                }
                 Arg::Named { key, value } => {
                     let val = source.eval(value).await?.ok_or_else(|| {
                         anyhow::anyhow!("verbatim --key=value could not be evaluated in this context")
@@ -7424,7 +7543,7 @@ pub(crate) async fn bind_tool_args(
         .iter()
         .enumerate()
         .filter_map(|(i, a)| {
-            let consumable = matches!(a, Arg::Positional(_))
+            let consumable = matches!(a, Arg::Positional(_) | Arg::ShortNamed { .. })
                 || (!accepts_word_assign && matches!(a, Arg::WordAssign { .. }));
             consumable.then_some(i)
         })
@@ -7462,6 +7581,15 @@ pub(crate) async fn bind_tool_args(
                         }
                         tool_args.positional.push(value);
                     }
+                }
+            }
+            Arg::ShortNamed { key, value } => {
+                // Already taken as a preceding value flag's argument.
+                if !consumed.contains(&i) {
+                    let val = source.eval(value).await?.ok_or_else(|| {
+                        anyhow::anyhow!("-{key}=value could not be evaluated in this context")
+                    })?;
+                    tool_args.positional.push(Value::String(short_named_word(key, value, &val)?));
                 }
             }
             Arg::Named { key, value } => {
@@ -7597,9 +7725,8 @@ pub(crate) async fn bind_tool_args(
                     // space-form value (`-t explorer`) from a bool flag
                     // sitting before a real positional (`-f file.txt`).
                     // Unlike `--flag`, there is no `-f=value` escape hatch to
-                    // suggest: a glued `-f=val` is two tokens with a dangling
-                    // `=` that the parser's no-token-pasting guard already
-                    // rejects — the only fix is declaring the flag.
+                    // suggest: a glued `-f=val` is one positional word, not a
+                    // flag — the only fix is declaring the flag.
                     let ambiguous_value = (lookup.is_none()
                         && leaf.is_some_and(|s| s.map_positionals)
                         && !consumed.contains(&(i + 1)))
@@ -7671,9 +7798,9 @@ pub(crate) async fn bind_tool_args(
                     // Glued short-flag value: `cut -f1`, `head -c5`, `cut -f1-3`,
                     // `grep -A1`, `sed -e1d`. The first char is a declared
                     // value-taking short flag, so the rest of the token is its
-                    // value — the coreutils idiom. The lexer's flag char class is
-                    // `[a-zA-Z][a-zA-Z0-9-]*`, so the first byte is always ASCII
-                    // (safe to slice) and the tail is a plain literal.
+                    // value — the coreutils idiom. Every short-flag name starts
+                    // with an ASCII letter (later merges only append to it), so
+                    // the first byte is safe to slice.
                     bind_glued_short_value(
                         &mut tool_args,
                         &name[..1],
@@ -7693,18 +7820,19 @@ pub(crate) async fn bind_tool_args(
                     // error). Undeclared/bool chars stay bare flags, so a
                     // schemaless tool keeps the old all-boolean behavior.
                     // The first char being value-taking is handled by the
-                    // glued arm above, so it never reaches here. The flag
-                    // char class is ASCII, so byte indexing is char indexing
-                    // (no `Vec<char>` allocation needed).
+                    // glued arm above, so it never reaches here.
                     let bytes = name.as_bytes();
                     let mut p = 0;
                     while p < bytes.len() {
-                        let key = &name[p..p + 1];
+                        // A comma list (`-l,é`) can carry non-ASCII text
+                        // after the flag letters.
+                        let width = name[p..].chars().next().map_or(1, char::len_utf8);
+                        let key = &name[p..p + width];
                         match param_lookup.get(key) {
                             Some(&(canonical, typ, consumes, repeatable))
                                 if !is_bool_type(typ) =>
                             {
-                                let glued = name[p + 1..].to_string();
+                                let glued = name[p + width..].to_string();
                                 if glued.is_empty() {
                                     // Value flag is the last char: take the
                                     // next positional. `consume_flag_positionals`
@@ -7734,9 +7862,19 @@ pub(crate) async fn bind_tool_args(
                                 }
                                 break;
                             }
+                            _ if key == "," || key == ":" => {
+                                // `-l,a`, `-l:a`: no value flag before the
+                                // separator owns the list. Never bind `,` or
+                                // `:` as a flag.
+                                let tool = leaf.map(|s| s.name.as_str()).unwrap_or("command");
+                                anyhow::bail!(
+                                    "{tool}: -{name}: no flag before `{key}` takes a value; \
+                                     quote the word to pass it as text"
+                                );
+                            }
                             _ => {
                                 tool_args.flags.insert(key.to_string());
-                                p += 1;
+                                p += width;
                             }
                         }
                     }
@@ -7880,6 +8018,14 @@ impl CommandDispatcher for Kernel {
     /// the pipeline runner. It provides the full dispatch chain:
     /// user tools → builtins → .kai scripts → external commands → backend tools.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult> {
+        // The caller of `dispatch` has no way to end a script, so an `exit`
+        // stops at this call: its code becomes the result's.
+        Ok(self.dispatch_command(cmd, ctx).await?.into_absorbed_result())
+    }
+
+    /// Like `dispatch`, but an `exit` run by a function or `source` comes
+    /// back as `ControlFlow::Exit` for the caller to raise.
+    async fn dispatch_flow(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
         self.dispatch_command(cmd, ctx).await
     }
 
@@ -7907,6 +8053,10 @@ impl CommandDispatcher for Kernel {
     /// awareness kaish's own interpreter loops have had all along.
     fn is_cancelled(&self) -> bool {
         Kernel::is_cancelled(self)
+    }
+
+    async fn has_function(&self, name: &str) -> bool {
+        Kernel::has_function(self, name).await
     }
 
     /// Produce a forked dispatcher with independent mutable state (detached).
@@ -8388,6 +8538,13 @@ fn is_valueless(signal: &ExecResult) -> bool {
         }
 }
 
+/// What a condition produced: its truth value, or an `exit` that a function
+/// in it ran, which ends the statement.
+enum Condition {
+    Value(Value),
+    Exit(i64),
+}
+
 /// Check if a value is truthy.
 fn is_truthy(value: &Value) -> bool {
     match value {
@@ -8460,11 +8617,12 @@ fn classify_argv_token(token: &Value) -> Arg {
             };
         }
     } else if let Some(rest) = s.strip_prefix('-') {
-        // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`. A
-        // token carrying any other char — notably `=` (`-k=v` is a parse error in
-        // the string door) — or a leading digit (`-1` lexes as a number) is not a
-        // short-flag word, so it falls through to a literal positional instead of
-        // a `ShortFlag("k=v")` the binder would mangle into a stray `=` flag.
+        // Short flag: the lexer's flag char class is `[a-zA-Z][a-zA-Z0-9-]*`,
+        // plus a glued `:` or `,` list (`-F:`, `-d,`, `-Wl,-rpath,/x`). A
+        // token carrying `=` (`-k=v` is one positional word in the string door
+        // too) or a leading digit (`-1` lexes as a number) is not a short-flag
+        // word, so it falls through to a literal positional instead of a
+        // `ShortFlag("k=v")` the binder would mangle into a stray `=` flag.
         if is_short_flag_body(rest) {
             return Arg::ShortFlag(rest.to_string());
         }
@@ -8506,17 +8664,43 @@ fn classify_alias_word(word: &str) -> Expr {
     Expr::Literal(Value::String(word.to_string()))
 }
 
-/// A short-flag word: a leading ASCII letter, then only ASCII
-/// letters/digits/`-` (the lexer's base `-[a-zA-Z][a-zA-Z0-9-]*` regex) or `:`
-/// (which `merge_flag_metachar_adjacent` glues onto a `ShortFlag` for the
-/// `awk -F:` idiom). `-la`, `-A1`, `-a:` qualify; `-1` (a number), `-k=v`
-/// (`=` is the assignment operator — a parse error in the string door), and
-/// any non-ASCII tail (never produced by the lexer, and not safe for the
-/// combined-short-flag binder's byte-index slicing) do not, so they fall
-/// through to a literal positional instead of a malformed `ShortFlag`.
+/// The one word an [`Arg::ShortNamed`] becomes: `-key=` and the value's
+/// text. A numeral keeps its source text; binary is refused, as for every
+/// composed argument.
+fn short_named_word(key: &str, value: &Expr, val: &Value) -> Result<String> {
+    let text = if let Expr::NumericLiteral { raw, .. } = value {
+        raw.clone()
+    } else {
+        crate::interpreter::value_to_text_sink_named(val, "a -key=value argument")
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
+    Ok(format!("-{key}={text}"))
+}
+
+/// A short-flag word, as `merge_flag_metachar_adjacent` builds one: a leading
+/// ASCII letter, then ASCII letters/digits/`-` (the lexer's base
+/// `-[a-zA-Z][a-zA-Z0-9-]*` regex), then optionally a list opened by `:` or
+/// `,` (`-F:`, `-F:a`, `-d,`, `-k2,2n`, `-Wl,-rpath,/x`). The list takes
+/// bareword and path characters, including non-ASCII; `=`, `$`, quotes,
+/// backslashes, globs, whitespace, and operators end it in the lexer, so a
+/// word holding one is not a short flag here either. `-la`, `-A1`, `-a:`,
+/// `-d,` qualify; `-1` (a number), `-k=v` (one positional word in the string
+/// door too), and `-d,$x` do not, so they fall through to a literal
+/// positional instead of a malformed `ShortFlag`.
 fn is_short_flag_body(s: &str) -> bool {
+    let (letters, list) = match s.find([',', ':']) {
+        Some(at) => (&s[..at], Some(&s[at..])),
+        None => (s, None),
+    };
     s.starts_with(|c: char| c.is_ascii_alphabetic())
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ':')
+        && letters.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && list.is_none_or(|list| {
+            list.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || !c.is_ascii()
+                    || matches!(c, '-' | ':' | ',' | '.' | '/' | '@' | '+' | '^' | '~' | '_')
+            })
+        })
 }
 
 /// Bash-style assignment-LHS identifier: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -8770,6 +8954,7 @@ mod argv_classify_tests {
             Arg::LongFlag(s) => ("long", s.clone(), String::new()),
             Arg::Positional(e) => ("pos", String::new(), lit(e)?),
             Arg::Named { key, value } => ("named", key.clone(), lit(value)?),
+            Arg::ShortNamed { key, value } => ("pos", String::new(), format!("-{key}={}", lit(value)?)),
             Arg::WordAssign { key, value } => ("pos", String::new(), format!("{key}={}", lit(value)?)),
         })
     }
@@ -8796,6 +8981,22 @@ mod argv_classify_tests {
         // Digits after the first flag char are ordinary (kept verbatim).
         assert_eq!(classify("-A1"), Arg::ShortFlag("A1".into()));
         assert_eq!(classify("--type2"), Arg::LongFlag("type2".into()));
+        // A comma list stays a short flag, as the lexer fuses it.
+        assert_eq!(classify("-d,"), Arg::ShortFlag("d,".into()));
+        assert_eq!(classify("-Wl,-rpath,/x"), Arg::ShortFlag("Wl,-rpath,/x".into()));
+        // `-name=value` is one positional word on both doors.
+        assert_eq!(
+            classify("-Wl,-rpath=/x"),
+            Arg::Positional(Expr::Literal(Value::String("-Wl,-rpath=/x".into())))
+        );
+        assert_eq!(classify("-std=c11"), Arg::Positional(Expr::Literal(Value::String("-std=c11".into()))));
+        // A list holding a character the lexer would stop at is text.
+        for word in ["-d,$x", "-n, a", "-k1,*"] {
+            assert_eq!(classify(word), Arg::Positional(Expr::Literal(Value::String(word.into()))), "{word}");
+        }
+        assert_eq!(classify("-Wl,-rpath,/opt/日本"), Arg::ShortFlag("Wl,-rpath,/opt/日本".into()));
+        assert_eq!(classify("-F:a"), Arg::ShortFlag("F:a".into()));
+        assert_eq!(classify("-F:$x"), Arg::Positional(Expr::Literal(Value::String("-F:$x".into()))));
         // Leading-digit dash is a number to the lexer, not a flag → positional.
         assert_eq!(classify("-1"), Arg::Positional(Expr::Literal(Value::String("-1".into()))));
         // Numeric strings keep their literal text — `execute_argv` does NOT
@@ -8898,14 +9099,14 @@ mod argv_classify_tests {
         fn classifier_matches_parser_on_clean_tokens(
             // No digits: this property tests the *classification* boundary
             // (dash → flag, `--` → marker, `=` → assignment, colon-merge → one
-            // positional), not numeric coercion. The lexer coerces digit runs to
+            // positional, comma list → one flag), not numeric coercion. The lexer coerces digit runs to
             // `Int`/`Float` and drops the literal text (even inside a colon-merged
             // word: `00:` → `0:`); the classifier intentionally preserves the raw
             // string. Those numeric edges are pinned exactly by the unit tests.
             // Non-ASCII is a word character now, so the generator has to
             // reach it — an ASCII-only strategy tests a shrinking slice of
             // what the classifier actually sees.
-            token in "[a-zA-Z_=./@:+\\-\u{00e9}\u{540d}\u{1f600}]{1,8}"
+            token in "[a-zA-Z_=./@:,+\\-\u{00e9}\u{540d}\u{1f600}]{1,8}"
         ) {
             let parsed = match parse(&format!("cmd {token}")) {
                 Ok(p) => p,
@@ -12262,10 +12463,8 @@ AFTER="yes"'"#)
             kernel.classify_command("definitely_not_a_kaish_builtin").await,
             CommandKind::External
         );
-        // `readonly` is *not* a kaish special-form despite the validator's
-        // warning heuristic — at runtime it resolves to an external command, so
-        // a consent gate must see it as External (regression guard against the
-        // validator/runtime divergence).
+        // `readonly` is not a kaish special-form: at runtime it resolves to an
+        // external command, so a consent gate must see it as External.
         assert_eq!(
             kernel.classify_command("readonly").await,
             CommandKind::External

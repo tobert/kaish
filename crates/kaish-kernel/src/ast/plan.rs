@@ -570,7 +570,7 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     for arg in &cmd.args {
         match arg {
             Arg::Positional(e) => collect_expr(e, background, out),
-            Arg::Named { value, .. } | Arg::WordAssign { value, .. } => {
+            Arg::Named { value, .. } | Arg::ShortNamed { value, .. } | Arg::WordAssign { value, .. } => {
                 collect_expr(value, background, out)
             }
             Arg::ShortFlag(_) | Arg::LongFlag(_) | Arg::DoubleDash => {}
@@ -788,6 +788,10 @@ fn plan_arg(arg: &Arg) -> (String, PlannedValue) {
         Arg::Named { key, value } => (
             format!("--{key}={}", render_expr(value)),
             literal_word(value).map(|word| format!("--{key}={word}")),
+        ),
+        Arg::ShortNamed { key, value } => (
+            format!("-{key}={}", render_expr(value)),
+            literal_word(value).map(|word| format!("-{key}={word}")),
         ),
         Arg::WordAssign { key, value } => (
             format!("{key}={}", render_expr(value)),

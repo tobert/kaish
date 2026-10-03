@@ -373,6 +373,29 @@ pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectat
 /// unclaimed `/v/*` to the embedder's backend, whose *real* content under `/v`
 /// (a real path like `/v/cas/blob.bin`) must keep the trash safety net; a
 /// `/v` prefix exclusion here would silently strip it.
+/// Append the one stderr line for a walk that reached mount points in
+/// another region without entering them:
+/// `grep: skipped mounts /r /v (use --cross-mounts to enter)`. Adds nothing
+/// when `skipped` is empty. The exit status is unchanged.
+pub(crate) fn note_skipped_mounts(
+    result: &mut ExecResult,
+    tool: &str,
+    skipped: impl IntoIterator<Item = PathBuf>,
+) {
+    let skipped: std::collections::BTreeSet<PathBuf> = skipped.into_iter().collect();
+    if skipped.is_empty() {
+        return;
+    }
+    let points: Vec<String> = skipped.iter().map(|p| p.display().to_string()).collect();
+    if !result.err.is_empty() && !result.err.ends_with('\n') {
+        result.err.push('\n');
+    }
+    result.err.push_str(&format!(
+        "{tool}: skipped mounts {} (use --cross-mounts to enter)\n",
+        points.join(" ")
+    ));
+}
+
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
     matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
 }
@@ -914,6 +937,23 @@ impl ExecContext {
         Ok((None, text))
     }
 
+    /// Whether a recursive walk crosses mount regions: the builtin's own
+    /// `--cross-mounts` flag, or `set -o crossmounts`.
+    pub fn walk_crosses_mounts(&self, flag: bool) -> bool {
+        flag || self.scope.cross_mounts_enabled()
+    }
+
+    /// The mount regions a hand-rolled recursive walk (`ls -R`, `tree`)
+    /// stays in; `FileWalker` asks the backend itself. Empty when the walk
+    /// crosses mounts.
+    pub fn walk_boundaries(&self, flag: bool) -> crate::walker::WalkBoundaries {
+        if self.walk_crosses_mounts(flag) {
+            crate::walker::WalkBoundaries::default()
+        } else {
+            crate::walker::WalkBoundaries::new(self.backend.walk_boundaries())
+        }
+    }
+
     /// Resolve a path relative to cwd, normalizing `.` and `..` components.
     pub fn resolve_path(&self, path: &str) -> PathBuf {
         let raw = if path.starts_with('/') {
@@ -1304,6 +1344,7 @@ impl ExecContext {
         let options = WalkOptions {
             entry_types: EntryTypes::all(),
             respect_gitignore: self.ignore_config.auto_gitignore(),
+            cross_mounts: self.walk_crosses_mounts(false),
             ..WalkOptions::default()
         };
 

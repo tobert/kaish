@@ -22,13 +22,15 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{exec_context, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, WalkOptions};
+use kaish_glob::WalkerError;
 
 use super::find_expr::{self, EntryView};
 
@@ -79,6 +81,17 @@ struct FindArgs {
     /// Whole path matches the glob, ignoring case.
     #[arg(id = "ipath", long = "ipath")]
     _ipath: Option<String>,
+
+    /// Descend into other mounts. By default the walk stays in the mount
+    /// region where it starts and prints a mount point without entering it
+    /// (see `set -o crossmounts`).
+    #[arg(id = "cross-mounts", long = "cross-mounts")]
+    _cross_mounts: bool,
+
+    /// Stay in the mount region where the walk starts, even under
+    /// `set -o crossmounts`. Also spelled -mount.
+    #[arg(id = "xdev", long = "xdev", visible_alias = "mount")]
+    _xdev: bool,
 
     #[command(flatten)]
     _global: GlobalFlags,
@@ -147,10 +160,14 @@ impl Tool for Find {
 
         let mut nodes: Vec<OutputNode> = Vec::new();
         let mut json_array: Vec<serde_json::Value> = Vec::new();
+        // GNU find reports an entry it cannot read or stat, keeps walking,
+        // and exits 1 at the end.
+        let walk_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let mut emit = |display: &str, entry_type: EntryType| {
             nodes.push(OutputNode::new(display).with_entry_type(entry_type));
             json_array.push(serde_json::Value::String(display.to_string()));
         };
+        let mut skipped_mounts: Vec<std::path::PathBuf> = Vec::new();
 
         for start_path in &start_paths {
             let resolved_path = ctx.resolve_path(start_path);
@@ -159,11 +176,9 @@ impl Tool for Find {
             // walked entry. A link to a directory is a leaf, not descended.
             let start_stat = match ctx.backend.lstat(Path::new(&resolved_path)).await {
                 Ok(info) => info,
-                Err(_) => {
-                    return ExecResult::failure(
-                        1,
-                        format!("find: '{}': No such file or directory", start_path),
-                    );
+                Err(e) => {
+                    record_walk_error(&walk_errors, start_path, &e.to_string());
+                    continue;
                 }
             };
 
@@ -201,6 +216,20 @@ impl Tool for Find {
                 } else {
                     false
                 },
+                on_error: Some({
+                    let walk_errors = Arc::clone(&walk_errors);
+                    let start_path = start_path.clone();
+                    let resolved_path = resolved_path.clone();
+                    Arc::new(move |path: &Path, err: &WalkerError| {
+                        let shown = relative_display_path(path, &resolved_path, &start_path);
+                        let reason = match err {
+                            WalkerError::Io(message) => message.clone(),
+                            other => other.to_string(),
+                        };
+                        record_walk_error(&walk_errors, &shown, &reason);
+                    })
+                }),
+                cross_mounts: parsed.cross_mounts.unwrap_or_else(|| ctx.walk_crosses_mounts(false)),
                 ..WalkOptions::default()
             };
 
@@ -213,19 +242,28 @@ impl Tool for Find {
                 }
             }
 
-            let paths = match walker.collect().await {
-                Ok(p) => p,
+            let (paths, skipped) = match walker.walk().await {
+                Ok(walk) => (walk.paths, walk.skipped_mounts),
                 Err(e) => return ExecResult::failure(1, format!("find: {}", e)),
             };
+            skipped_mounts.extend(skipped);
 
             for path in paths {
-                // lstat, not stat: a symlink is classified by its own kind,
-                // never by the kind of what it points to.
-                let info = ctx.backend.lstat(&path).await.ok();
-
                 // The walker returns absolute paths; print them the way the
                 // operand was written, as GNU find does.
                 let display_path = relative_display_path(&path, &resolved_path, start_path);
+
+                // lstat, not stat: a symlink is classified by its own kind,
+                // never by the kind of what it points to. An entry that
+                // cannot be stat'ed is reported and skipped, as GNU find does.
+                let info = match ctx.backend.lstat(&path).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        record_walk_error(&walk_errors, &display_path, &e.to_string());
+                        continue;
+                    }
+                };
+                let info = Some(info);
                 let entry = EntryView { display: &display_path, info: info.as_ref() };
                 let print_count = find_expr::print_count(&parsed, &entry);
                 if print_count == 0 {
@@ -251,6 +289,12 @@ impl Tool for Find {
 
         let output = OutputData::nodes(nodes);
         let mut result = ExecResult::with_output(output);
+        let walk_errors = walk_errors.lock().unwrap_or_else(PoisonError::into_inner);
+        if !walk_errors.is_empty() {
+            result.code = 1;
+            result.err = walk_errors.join("");
+        }
+        drop(walk_errors);
         result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
         // Text is the default here; `--json` serializes each name as its own
         // JSON string and never joins them by newline, so it stays the
@@ -262,8 +306,19 @@ impl Tool for Find {
         {
             return ExecResult::failure(2, e);
         }
+        note_skipped_mounts(&mut result, "find", skipped_mounts);
         result
     }
+}
+
+/// Record `find: 'path': reason` for an entry that could not be read or stat'ed.
+fn record_walk_error(
+    errors: &Mutex<Vec<String>>,
+    shown: &str,
+    reason: &str,
+) {
+    let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
+    errors.push(format!("find: '{shown}': {reason}\n"));
 }
 
 /// Convert an absolute `path` returned by the walker back to the display form
@@ -393,7 +448,7 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(!result.ok());
-        assert!(result.err.contains("No such file or directory"));
+        assert!(result.err.starts_with("find: '/nonexistent': not found"), "{}", result.err);
     }
 
     #[tokio::test]
@@ -484,5 +539,64 @@ mod tests {
         assert!(result.ok());
         assert!(result.text_out().contains("target"), "Enforced but inactive should show target/");
         assert!(result.text_out().contains("node_modules"));
+    }
+
+    /// Lists `ghost.txt` but refuses to stat it, as an entry removed or
+    /// locked after the listing would.
+    struct GhostFs(MemoryFs);
+
+    #[async_trait]
+    impl Filesystem for GhostFs {
+        async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.0.read(path).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.0.write(path, data).await
+        }
+        async fn list(&self, path: &Path) -> std::io::Result<Vec<kaish_types::DirEntry>> {
+            self.0.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> std::io::Result<kaish_types::DirEntry> {
+            self.lstat(path).await
+        }
+        async fn lstat(&self, path: &Path) -> std::io::Result<kaish_types::DirEntry> {
+            if path.ends_with("ghost.txt") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "locked by test",
+                ));
+            }
+            self.0.lstat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> std::io::Result<()> {
+            self.0.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.0.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::mtime(&["/", "-mtime", "-1"][..])]
+    #[case::size(&["/", "-size", "-1M"][..])]
+    #[case::no_test(&["/"][..])]
+    #[tokio::test]
+    async fn test_find_reports_and_skips_unstattable_entry(#[case] words: &[&str]) {
+        let mem = MemoryFs::new();
+        mem.write(Path::new("ok.txt"), b"x").await.unwrap();
+        mem.write(Path::new("ghost.txt"), b"x").await.unwrap();
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", GhostFs(mem));
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let result = Find.execute(verbatim(words), &mut ctx).await;
+        let out = result.text_out();
+        assert!(!out.contains("ghost.txt"), "unstattable entry printed: {out}");
+        assert!(out.contains("ok.txt"), "walk must go on: {out}");
+        assert_eq!(result.code, 1);
+        assert_eq!(result.err, "find: '/ghost.txt': permission denied: locked by test\n");
     }
 }

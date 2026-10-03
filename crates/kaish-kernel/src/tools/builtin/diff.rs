@@ -179,16 +179,18 @@ impl Tool for Diff {
         // Check options
         let quiet = parsed.quiet;
         let colorize = parsed.color;
-        let context_lines = parsed
-            .context
-            .map(|n| n as usize)
-            .or_else(|| {
-                args.get_named("context").and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    _ => None,
-                })
-            })
-            .unwrap_or(3);
+        let context_lines = match parsed.context {
+            Some(n) => match super::non_negative_count(
+                "diff",
+                "-C",
+                n,
+                "context lines must be 0 or more; write `-C 0` for no context",
+            ) {
+                Ok(n) => n,
+                Err(message) => return ExecResult::failure(2, message),
+            },
+            None => 3,
+        };
 
         // Quick check if files are identical. The human/pipe path stays empty
         // (exit 0, no output), but a `--json` consumer still gets a consistent

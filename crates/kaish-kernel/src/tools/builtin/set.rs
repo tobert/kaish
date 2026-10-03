@@ -13,6 +13,7 @@ use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalF
 /// - `-e` / `+e`: Enable/disable error-exit mode (exit on command failure)
 /// - `-o trash` / `+o trash`: Enable/disable trash-on-delete for rm
 /// - `-o glob` / `+o glob`: Enable/disable bare glob expansion
+/// - `-o crossmounts` / `+o crossmounts`: Let recursive walks cross mounts
 /// - `-o output-limit[=SIZE]` / `+o output-limit`: Cap or uncap output size
 ///
 /// An unrecognized bare short flag (`set -q`, `set -v`) is silently ignored
@@ -24,7 +25,7 @@ use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalF
 pub struct Set;
 
 /// The `-o`/`+o` names kaish implements.
-const VALID_SET_O_NAMES: &[&str] = &["glob", "output-limit[=SIZE]", "pipefail", "trash"];
+const VALID_SET_O_NAMES: &[&str] = &["crossmounts", "glob", "output-limit[=SIZE]", "pipefail", "trash"];
 
 /// Applies one `-o NAME` (`enable = true`) or `+o NAME` (`enable = false`).
 ///
@@ -41,6 +42,7 @@ fn apply_set_o(ctx: &mut ExecContext, name: &str, enable: bool) -> Result<(), St
         "trash" => ctx.scope.set_trash_enabled(enable),
         "glob" => ctx.scope.set_glob_enabled(enable),
         "pipefail" => ctx.scope.set_pipefail_enabled(enable),
+        "crossmounts" => ctx.scope.set_cross_mounts_enabled(enable),
         "output-limit" => {
             if enable {
                 if ctx.output_limit.max_bytes().is_none() {
@@ -132,6 +134,9 @@ impl Tool for Set {
             if !ctx.scope.glob_enabled() {
                 output.push_str("set +o glob\n");
             }
+            if ctx.scope.cross_mounts_enabled() {
+                output.push_str("set -o crossmounts\n");
+            }
             if let Some(bytes) = ctx.output_limit.max_bytes() {
                 output.push_str(&format!("set -o output-limit={}\n", format_size_for_set(bytes)));
             }
@@ -180,6 +185,7 @@ impl Tool for Set {
             return ExecResult::with_output(OutputData::table(
                 vec!["OPTION".to_string(), "STATE".to_string()],
                 vec![
+                    option_row("crossmounts", ctx.scope.cross_mounts_enabled()),
                     option_row("errexit", ctx.scope.error_exit_enabled()),
                     option_row("glob", ctx.scope.glob_enabled()),
                     option_row("pipefail", ctx.scope.pipefail_enabled()),

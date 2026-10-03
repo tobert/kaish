@@ -23,45 +23,101 @@ breaking entries are marked **BREAKING**.
   that numbers writes in a kernel's sequence.
   `ToolResult` carries the spans, and serialized results include
   `stream_order` only when it is set.
-
-- Backslash quoting outside strings: `a\ b` is one literal word and
-  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
-  match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
-  escapes with unquoted globs is an error that names the quoted form.
-- `jq -R` reads each text line as a string; `-R -s` reads the whole input
-  as one string. A failing input line is reported with exit 1 while other
-  lines still run. `-n -R` is refused with an alternative.
-- Builtin `find` supports AND, OR, negation, quoted parenthesis groups, and ordered `-print` actions. Expressions are limited to 256 nodes and 64 nested groups or negations.
-- Builtin `cat` supports `-A`, `-v`, `-E`, and `-T`; `ls -d` lists directories themselves, and `grep -x` matches whole lines.
 - **Brace groups `{ a; b; }`** run a statement list in the current shell.
   Groups, `if`, `for`, `while`, and `case` accept trailing redirects, and
   planned commands report enclosing redirects so classifiers see the write.
+- **Statement-level `!`** — `! cmd`, `! a | b` and `! for …; done` negate
+  the whole pipeline, as in bash. A negated statement never trips `set -e`.
+- **Backslash quoting outside strings** — `a\ b` is one literal word and
+  `printf '<%s>\n' \( \)` passes literal parentheses. Escaped characters
+  match literally in `case` and `[[ =~ ]]` patterns. An argument mixing
+  escapes with unquoted globs is an error that names the quoted form.
+- **`find` expressions** — AND, OR, `!`, quoted parenthesis groups, and
+  ordered `-print` actions, up to 256 nodes and 64 nested groups or
+  negations.
+- **`cat -A`, `-v`, `-E`, `-T`**, `ls -d` (list a directory itself), and
+  `grep -x` (match whole lines).
+- **`jq -R`** reads each text line as a string; `-R -s` reads the whole
+  input as one string. A failing line exits 1 while other lines still run.
+  `-n -R` is refused with an alternative.
+- **`grep -m`** is a short alias for `--max-count`, as in GNU grep.
+- **`KernelBackend::walk_boundaries`** and **`WalkerFs::walk_boundaries`** —
+  the mount points a recursive walk stays between. The backend default
+  reports `mounts()`; the `WalkerFs` default reports none (crosses
+  everything). `kaish_glob::WalkBoundaries` holds the rule, and
+  `WalkOptions::cross_mounts` turns it off for one walk.
+- **`set -o crossmounts`** and **`--cross-mounts`** on `grep`, `find`, `ls`,
+  `tree`, and `glob` — let a recursive walk descend into other mounts.
+- **`FileWalker::walk`** — returns the matches and `skipped_mounts`, the mount
+  points a walk reached without entering. Those builtins name them once on
+  stderr: `grep: skipped mounts /dev /v (use --cross-mounts to enter)`. The
+  exit status is unchanged.
+- **`command -v`, `command -V`, and `type`** — name what a command word
+  runs: an alias, function, builtin, `.kai` script, or program on `PATH`.
+  `command -v gcc >/dev/null || echo MISSING` now answers on a shell that
+  only looks programs up. `command NAME ARGS` without `-v`/`-V` is refused
+  with the fix. `CommandDispatcher::has_function` (default `false`) lets the
+  builtins see functions.
+- **`find -xdev`** (also `-mount`) — keeps the walk in its mount region even
+  under `set -o crossmounts`. With `--cross-mounts` it is an error.
+
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
   job stream after each top-level statement.
-- **`JobInfo.did_spill` / `JobInfo.original_code`** — a finished job now says
+- **`JobInfo.did_spill` / `JobInfo.original_code`** — a finished job says
   whether its exit code is its command's own. `failed:3` stays the status
-  string for a spilled job and a real exit 3; these two separate them, in
-  `jobs --json` as well.
-- **`kaish --plan` reports a `warnings` array** when the validator has
-  something to say about a program it will still run. The first entry is
-  W008, a literal operand a `[[ ]]` numeric comparison will refuse.
-- **Statement-level `!`** — `! cmd`, `! a | b` and `! for …; done` negate
-  the whole pipeline, as in bash. A negated statement never trips `set -e`,
-  whatever its status.
-- **`grep -m` is a short alias for `--max-count`**, matching GNU grep; models
-  wrote `grep -m 5 PATTERN file` from habit and got a usage error.
+  string for both a spill and a real exit 3; these fields separate them,
+  in `jobs --json` too.
+- **`kaish --plan` reports a `warnings` array** for a program it will still
+  run. The first entry is W008, a literal operand a `[[ ]]` numeric
+  comparison will refuse.
+- **`Tool::execute_flow` and `ToolFlow`** — a tool that runs a user function
+  for its caller (as `timeout` does) can return `ToolFlow::Exit` to end the
+  script. The default wraps `execute`, so existing tools are unchanged.
+  `CommandDispatcher::dispatch_flow` is the matching defaulted method.
 
 ### Changed
 
+- **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does: bare
+  `( ) { } | + ?` are literal (`grep 'fn consult('` works); use
+  `grep -E '(a|b)'` for ERE.
+- **BREAKING**: `sed` without `-E`/`-r` reads GNU BRE, as GNU sed does:
+  `sed 's/fn main(/x/'` works, and `\(…\)`, `\{n\}`, `\|` are the operators.
+  `awk` reads gawk's ERE, where `\(` is a literal paren.
+- **BREAKING**: `--json` prints `{"code":N,"error":"..."}` for every nonzero
+  formatted result, including `grep` no-match, `false`, differing `diff` or
+  overlay results, and failed scatter workers. Partial results stay under
+  `data` or `output`; success stays unwrapped.
+- `Arg::ShortNamed { key, value }` is the parsed `-key=value` word. Every
+  command receives it as the one word `-key=value`.
 - **BREAKING**: Plans report a fully literal argument or file redirect
   target as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the
   argument or unresolved path, `text` for display. Expanding words stay
   `plain`. Job command strings use the plan's renderer.
+- **BREAKING**: `sort < f > f` (one file as input and output) exits 1 and
+  names the fix: write to a temp file, then `mv` it over `f`. `f` keeps its
+  content; `kaish --plan` reports E023 when both paths are literal.
+- **BREAKING**: A write to a read-only mount reports
+  `ErrorKind::ReadOnlyFilesystem` instead of `PermissionDenied`. An embedder
+  matching `PermissionDenied` on `/v/jobs`, `/v/bin`, or a read-only
+  `LocalFs` mount must also match `ReadOnlyFilesystem`.
+- **BREAKING** (`kaish-kernel`): `KernelConfig::allow_external_commands` and
+  `ExecContext::allow_external_commands` are now `allow_unwrapped_commands`.
+  The switch gates PATH lookup, `exec`, `spawn` and `env CMD`, never wrapped
+  commands.
 
 ### Fixed
 
+- `-name=value` is one word, like `--name=value`: `gcc -std=c11`,
+  `pdflatex -interaction=nonstopmode`, `-Wl,-rpath=$dir`, `-I=~/inc`. Its
+  value takes the substitutions and `~` that `--name=`'s takes. A `:` or
+  `,` list glued to a short flag is one word: `-Wl,-rpath,/opt/lib` and
+  `-F:a` reach an external command whole, and `cut -f1,3` and
+  `sort -k2,2n` bind `1,3` and `2,2n` instead of reading `,3` as a file.
+  `chmod +x f` and `echo ...` parse.
+- `--a = b` with spaces is three words, as in bash; it was silently read
+  as `--a=b`.
 - `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
   an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
   refuse extra operands. `head -c` reads a byte prefix of each file.
@@ -246,6 +302,16 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **BREAKING: recursive walks stay in the mount they start in.** `grep -r`,
+  `find`, `ls -R`, `tree`, `glob`, and bare-glob expansion (`**`) list a
+  mount point they reach but do not descend into it, the reverse of GNU's
+  `-xdev` opt-in: `grep -r x /` no longer searches `/v`, `/dev`, `/tmp`, or an
+  embedder's mounts. Naming a mount walks it and the mounts nested in it
+  (`grep -r x /v`). `--cross-mounts` on those builtins, or
+  `set -o crossmounts`, crosses. A walk over `/` from an embedder whose
+  writable directories are separate mounts no longer reaches them; see
+  `KernelBackend::walk_boundaries`.
+
 - **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does — bare
   `( ) { } | + ?` are literal (`grep 'fn consult('` works); use `grep -E '(a|b)'` for ERE.
 - **BREAKING**: `sed` without `-E`/`-r` reads GNU BRE, as GNU sed does:
@@ -257,35 +323,183 @@ breaking entries are marked **BREAKING**.
 - **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
   `Execution { error, output }`. `output` holds what ran before the fault; a
   `KernelError::Execution(e)` pattern no longer compiles.
-- **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive a
-  `ToolCtx` and never implement one, so this changes no supported use, but an
-  out-of-tree implementation no longer compiles.
 - **BREAKING** (`kaish-kernel`): `CommandDispatcher::eval_expr` takes
   `&mut ExecContext`. It evaluates a redirect operand on the calling
-  command's context now; the old `&ExecContext` was ignored.
-- A kernel builtin dispatched with a context that is not the kernel's now
-  panics instead of returning exit 1 with an internal message. Sealing
-  `ToolCtx` is what makes that branch unreachable: `ToolRegistry::get` and
-  `Tool::execute` are public, so type privacy alone left it open.
-- **BREAKING** (`kaish-kernel`): `KernelConfig::allow_external_commands`
-  and `ExecContext::allow_external_commands` are now
-  `allow_unwrapped_commands`. The switch gates PATH lookup, `exec`, `spawn`
-  and `env CMD`, never wrapped commands. `with_allow_external_commands`
-  stays as a deprecated alias.
+  command's context; the old `&ExecContext` was ignored.
+- **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive
+  a `ToolCtx` and never implement one, so no supported use changes; an
+  out-of-tree implementation no longer compiles.
+- Usage errors exit 2 instead of 1 across the builtins: a missing operand,
+  an unknown subcommand, a flag value the builtin cannot use. What a caller
+  can fix decides the code: `rm` exits 2, `rm missing.txt` exits 1, and bad
+  stdin or file content (`jq`, `base64 -d`) exits 1.
+- `read` exits 1 at end of input, which ends a `while read` loop, and `glob`
+  exits 1 when nothing matched; neither is a usage error.
+- `grep` reserves exit 1 for "no lines matched". An invalid pattern, an
+  unreadable file, or a missing pattern exits 2. `diff` argument errors exit
+  2.
+- A program kaish refuses (lex, parse, or validation) exits 2 from
+  `kaish -c` and from a script file, as `kaish --plan` already documented.
+- `kaish --plan` runs the validator. A program the kernel would reject
+  reports `{"errors": [...]}` and exits 2.
 - `exec` and `spawn` refuse with exit 127 when unwrapped commands are off,
   like PATH lookup and `env CMD`; they returned 1.
+- `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
+  expand paths before passing them in.
 - A `!` glued to its operand at the start of a statement or condition is
   refused: `!true` names `! true`. `! cmd &` is refused with E022, which
   names a form that negates inside the job.
 - `echo a\` with `b` at column 0 on the next line is refused as token
   pasting. It ran as two words; bash reads one word, `ab`.
-- **BREAKING**: `sort < f > f` (one file as input and output) exits 1 and
-  names the fix: write to a temp file, then `mv` it over `f`. `f` keeps its
-  content; `kaish --plan` reports it as E023 when both paths are literal.
-- **BREAKING**: A write to a read-only mount now reports
-  `ErrorKind::ReadOnlyFilesystem` instead of `PermissionDenied`. An embedder
-  matching `PermissionDenied` on `/v/jobs`, `/v/bin`, or a read-only
-  `LocalFs` mount must also match `ReadOnlyFilesystem`.
+- A kernel builtin dispatched with a context that is not the kernel's
+  panics instead of exiting 1 with an internal message. Sealing `ToolCtx`
+  makes that branch unreachable.
+
+### Deprecated
+
+- `KernelConfig::with_allow_external_commands` — use
+  `with_allow_unwrapped_commands`.
+
+### Fixed
+
+- `find` reports an entry or start path it cannot read or stat (`find: './d':
+  permission denied`), keeps going, and exits 1. `-mtime` and `-size` are false
+  for an entry with no stat data; they passed it and printed it.
+- `xxd -l`, `xxd -s`, `base64 -w`, `diff -C`, and `patch -p` refuse a
+  negative value, exit 2, and name the fix. A negative count wrapped to a
+  huge one; `xxd -l -1` dumped the whole input. `xxd -s` has no seek from end.
+- `readonly X=1` is reported as an unknown command by validation and
+  `kaish --plan`, like any other missing command. kaish has no `readonly`
+  builtin, so it exits 127; the validator no longer treats it as known.
+- `exit` inside a function or a sourced file ends the script, as in bash;
+  it returned to the caller. `return` still stops at the function, `$( )`
+  absorbs the exit, and a pipeline stage ends only itself.
+- `break N` and `continue N` refuse a count below 1 (`break -1`, `break 0`)
+  and name the fix. A negative count wrapped and left every enclosing loop.
+- `rfc3339::parse` returns an error for non-ASCII input instead of
+  panicking, so a malformed `JobInfo` timestamp cannot crash an embedder.
+- Recursive `grep` skips devices, FIFOs, sockets, and discovered symlinks
+  under `-r`; `-R` reads file symlinks but does not enter linked
+  directories. Errors keep readable matches and exit 2. Recursive and
+  multi-file searches read bounded chunks; `-q`, `-l`, and `-m` stop early.
+- `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
+  an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
+  refuse extra operands. `head -c` reads a byte prefix of each file.
+- Lists, tables, and trees end their last text line with a newline, so
+  `ls dir | wc -l` counts every row.
+- `NAME --help` exits 0 on every builtin argument binder, including `scatter`
+  and `gather`.
+  An option value shaped like `--help` or `--json` stays data. An
+  unsupported flag gets a short refusal that names the help topic.
+- A redirect into a mount ancestor with no real directory names `mkdir -p`
+  when the backend can create the parent, or a writable mounted path for an
+  uncovered target or an immutable ancestor. It never suggests a read-only
+  mount.
+- Output redirect targets open, left to right, before the command runs. A
+  missing parent directory refuses the command and names `mkdir -p`.
+  `cat f | sort > f` is now racy, as in bash.
+- `cmd > f 2>&1` writes both streams to `f`; stderr went to the terminal.
+  `2>&1 > f` sends stderr to the old stdout, as in bash.
+- A quoted `~` stays `~`: `echo '~'` and `x='~'; echo "$x"` printed `$HOME`.
+  Only an unquoted `~` in the source expands, now also in globs, redirects,
+  `for` items, and alias bodies.
+- A bareword containing `==`, `!=`, or `!` is one literal word: `echo ===`,
+  `export X==1`, and `echo !x` parse, as in bash. A word with a single `=`
+  (`./bin=1`) or a substitution still needs quotes.
+- `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`. An
+  unknown class such as `[[:foo:]]` is refused in `grep`, `sed`, and `awk`.
+- `[[:alpha:]]` and its eleven siblings are Unicode-aware in `grep`, `sed`,
+  and `awk`, as in GNU grep in a UTF-8 locale. `[:digit:]` stays ASCII.
+- `grep -E 'fn main() {'` matches: a `{` that starts no interval is literal,
+  as in GNU grep, and `{,2}` is an interval in `-E`.
+- An invalid `grep -E` pattern names the escape that fixes it (`\[`, `\(`,
+  `\{`). A pattern with two faults gets no hint rather than a wrong one.
+- `grep -w` keeps an alternation inside the word boundaries and accepts a
+  pattern that ends on punctuation (`grep -w 'KjCaller {'`).
+- `grep -o` prints only non-empty matches, as GNU grep does.
+- A pattern from a variable (`p='[cast:'; grep "$p" f`) exits 2 like a
+  literal one.
+- `grep` reading from a pipe reports a read error with exit 2 instead of
+  "no lines matched". A downstream close still keeps the match-based code.
+- `sed` prints a literal `&` for `\&` in a replacement and refuses `\2` past
+  the last group. `awk -v name` without `=` is refused, and a regex built
+  from a string follows gawk's escapes: `p="cat\|dog"` alternates.
+- `spawn --timeout` keeps what the child already wrote: partial stdout and
+  stderr come with the 124, then the timeout line.
+- A child killed by a signal inside `spawn --timeout` is no longer reported
+  as a timeout (124).
+- `spawn` runs its child in its own process group: `--timeout` and a cancel
+  kill a backgrounded grandchild too, and a killed `spawn … &` job reads
+  `killed:130`.
+- `spawn`'s child inherits only the kernel's exported variables, never the
+  host's, and runs in the shell's directory. `spawn`, `exec`, `which` and
+  `env` refuse a bare name with no `PATH` in scope.
+- A background `spawn … &` streams live to `/v/jobs/N/stdout`;
+  `spawn /bin/echo a b c` passes all three arguments; stdin streams to the
+  child instead of buffering to EOF.
+- `exec()` restores the SIGPIPE disposition after a failed exec (such as
+  `exec /nonexistent`), so a later write to a closed pipe no longer kills
+  the process.
+- `timeout` reaches an external command inside a function body, a piped
+  function body, and a `$(...)` in that body's arguments; the command ran to
+  completion.
+- A `$(...)` in a here-string, a heredoc body, or a `< file` target runs
+  under the cancel token and watchdog of the command it feeds.
+- A per-call timeout or an embedder's interrupt stops a busy builtin
+  (`seq 1 50000000`), and a cancelled `seq 1 50000000 | wc -l` exits 130.
+- A cancel that fires before a program's first statement stops it.
+- A cancelled call exits 130 even when it ends a child by signal; a single
+  external command reported 143 or 137.
+- A cancel ends the wait on a pipe a backgrounded grandchild holds open.
+- A pipeline no longer hangs when a stage stops reading before its input
+  ends: `seq 1 100000 | grep --no-such-flag x` exits 2, as in bash.
+- A runtime fault keeps the output that ran before it, and a function that
+  faults exits 1 with what it printed and the full cause.
+- A fault inside a function, `source`, or a script no longer reaches its
+  caller as a plain exit 2 that `if`, `!`, and `&&`/`||` read as false.
+  `exit` and `return` are valueless, so a typed value survives them.
+- A fault inside `$(...)` names each assignment: `y=$(x=$((1/0)))` reported
+  the same message twice.
+- `A=$((1/0)) cmd` names `A` in its error, like a plain assignment.
+- A validation warning survives a later fault in the same program.
+- A failing condition command (`if test 1 -eq abc`) prints its diagnostic
+  once, not three times.
+- A spilled statement no longer masks a later statement's exit:
+  `original_code` belongs to the statement `code` reports. `did_spill`
+  stays true once anything spilled.
+- A function whose body spills reports `did_spill` and its real
+  `original_code`, including after `exit` or a `set -e` abort.
+- A background job's stdout stream (`/v/jobs/N/stdout`) holds only the
+  job's own output, in order; output captured by `$(...)`, redirected with
+  `>`, or read by `scatter` no longer appears in it.
+- A background job's stderr stream fills live, in order and once, from
+  builtins, externals, functions, compounds, and `$(…)`.
+- An embedder tool's stdout and a tool's `--help` text reach a background
+  job's stdout stream.
+- A streaming caller (`kaish -c`, `execute_with_options_streaming`)
+  receives stderr drained during an `exit` and the watchdog's timeout line,
+  after any stderr the program wrote.
+- An embedder tool no longer runs with the kernel's context lock held, so a
+  tool that calls back into the kernel no longer blocks forever.
+- An embedder tool sees the call's cancel token and watchdog, so a request
+  timeout stops it.
+- A command substitution no longer writes into the enclosing pipe and keeps
+  its own stderr: `echo "got [$(cat f)]" | cat` printed only the file.
+- A pipeline's last stage returns its ignore config and output limit, not
+  only scope, cwd, and aliases: `echo x | kaish-output-limit off` turns the
+  limit off.
+- An unquoted heredoc body's `$(...)` finds its closing paren by tokens, so
+  a `case` pattern's `)` inside it no longer ends it early.
+- W008 covers `test abc -eq 1`, and a dynamic operand no longer hides W008
+  or E020 on its literal siblings.
+- A `--plan` rendering re-parses to the same values: `"1"`, `"true"`, and
+  `"1.5"` stay quoted.
+- `patch` refuses a byte offset inside a multi-byte character instead of
+  aborting the kernel, and refuses line 0 instead of editing line 1.
+- A wrapped command refuses `json_output()` on a verb with children; the
+  declaration was accepted and ignored.
+- A gather row keeps the worker's own exit code when its stdout is binary;
+  `ok:false` and `err` carry the refusal, and the aggregate is still 123.
 
 ## [0.17.2] - 2026-09-09
 

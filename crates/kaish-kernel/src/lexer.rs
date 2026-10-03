@@ -3289,7 +3289,7 @@ fn split_tilde_assignments(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spa
         let assignment_key = index.checked_sub(1).map(|previous| &tokens[previous]);
         let after_key = assignment_key.is_some_and(|previous| {
             previous.span.end == token.span.start
-                && (matches!(previous.token, Token::Ident(_) | Token::LongFlag(_))
+                && (matches!(previous.token, Token::Ident(_) | Token::LongFlag(_) | Token::ShortFlag(_))
                     || (matches!(previous.token, Token::RBracket) && contexts[index].after_lvalue)
                     || previous.token.is_keyword() || previous.token.is_type())
         });
@@ -3451,19 +3451,56 @@ fn is_glob_mergeable(token: &Token) -> bool {
     )
 }
 
-/// Merge a span-adjacent metacharacter onto a flag token.
+/// True for a token that can continue a comma list glued to a short flag
+/// (`-Wl,-rpath,/opt/lib`, `-k2,2n`). Quotes, substitutions, globs, `=`, and
+/// operators end the list.
+fn is_flag_list_part(token: &Token) -> bool {
+    token.is_keyword() || token.is_type() || matches!(
+        token,
+        Token::Comma
+            | Token::Colon
+            | Token::Ident(_)
+            | Token::Int(_)
+            | Token::Float(_)
+            | Token::NumberIdent(_)
+            | Token::DashNumWord(_)
+            | Token::AtWord(_)
+            | Token::DottedIdent(_)
+            | Token::Dot
+            | Token::DotDot
+            | Token::Path(_)
+            | Token::RelativePath(_)
+            | Token::DotSlashPath(_)
+            | Token::ShortFlag(_)
+            | Token::LongFlag(_)
+            | Token::DoubleDash
+            | Token::DoubleDashBare(_)
+            | Token::MinusBare(_)
+            | Token::MinusAlone
+            | Token::PlusFlag(_)
+            | Token::PlusBare(_)
+            | Token::True
+            | Token::False
+    )
+}
+
+/// Merge a span-adjacent `:` or `,` list onto a short flag token.
 ///
-/// Handles the `awk -F:` idiom: the lexer emits `-F` as `ShortFlag("F")`
-/// and `:` as `Token::Colon`. When span-adjacent, the `:` is part of the
-/// flag value, not a shell operator, so they fuse into `ShortFlag("F:")`
-/// for the arg-binding layer (the same mechanism used for `cut -f1`).
-/// Consecutive colons are all absorbed (`-F::` → `ShortFlag("F::")`).
+/// The lexer emits `-F` as `ShortFlag("F")` and `:` / `,` as their own
+/// tokens. A glued `:` or `,` starts a list that runs to the next gap or to
+/// a token [`is_flag_list_part`] refuses, and the whole run becomes one
+/// short flag for the arg-binding layer (the same mechanism used for
+/// `cut -f1`): `awk -F:` → `ShortFlag("F:")`, `-F:a` → `ShortFlag("F:a")`,
+/// `-Wl,-rpath,/opt/lib` → `ShortFlag("Wl,-rpath,/opt/lib")`, `-k2,2n` →
+/// `ShortFlag("k2,2n")`, `-d,` → `ShortFlag("d,")`. The text is the verbatim
+/// source slice. `=` is not absorbed; `-Wl,-rpath=/x` reaches the parser as
+/// a flag, `=`, and a value, the same as `-std=c11`.
 ///
 /// `;` (Semi) and `|` (Pipe) are shell operators and must NOT be fused
 /// even when span-adjacent — in bash, `-F;` and `-F|` require quoting
 /// (`-F';'`), and kaish matches that contract. Space-separated `cmd -F :`
 /// leaves a span gap and never reaches this merge.
-fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
     if tokens.len() < 2 {
         return tokens;
     }
@@ -3474,26 +3511,29 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
     while i < tokens.len() {
         let token = &tokens[i];
 
-        if let Token::ShortFlag(flag_name) = &token.token {
-            let mut fused = flag_name.clone();
+        if let Token::ShortFlag(_) = &token.token {
             let mut end_span = token.span.end;
             let mut j = i + 1;
 
-            while let Some(next) = tokens.get(j) {
-                if next.span.start == end_span {
-                    if let Token::Colon = &next.token {
-                        fused.push(':');
+            if tokens.get(j).is_some_and(|next| {
+                next.span.start == end_span && matches!(next.token, Token::Colon | Token::Comma)
+            }) {
+                while let Some(next) = tokens.get(j) {
+                    if next.span.start == end_span && is_flag_list_part(&next.token) {
                         end_span = next.span.end;
                         j += 1;
                         continue;
                     }
+                    break;
                 }
-                break;
             }
 
             if j > i + 1 {
                 let span = token.span.start..end_span;
-                result.push(Spanned::new(Token::ShortFlag(fused), span));
+                let Some(text) = source.get(span.start + 1..span.end) else {
+                    unreachable!("a short flag's span starts with an ASCII `-` and lies inside the source")
+                };
+                result.push(Spanned::new(Token::ShortFlag(text.to_string()), span));
                 i = j;
                 continue;
             }
@@ -3869,7 +3909,7 @@ fn tokenize_impl(
     Ok((
         preserve_numeric_source_text(
             merge_glob_adjacent(
-                merge_colon_adjacent(merge_flag_metachar_adjacent(split_tilde_assignments(mapped, source)), source),
+                merge_colon_adjacent(merge_flag_metachar_adjacent(split_tilde_assignments(mapped, source), source), source),
                 source,
             ),
             source,

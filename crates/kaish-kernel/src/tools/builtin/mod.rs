@@ -17,6 +17,7 @@ mod cp;
 mod cut;
 mod date;
 mod dd;
+mod command;
 mod diff;
 mod dirname;
 mod patch;
@@ -198,6 +199,17 @@ pub(crate) fn extra_operand_error(
     ))
 }
 
+/// Convert a numeric flag value to a count. Below zero is a usage error
+/// message that names the flag, the value, and `advice`; callers exit 2.
+pub(crate) fn non_negative_count(
+    tool: &str,
+    flag: &str,
+    value: i64,
+    advice: &str,
+) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("{tool}: {flag} {value}: {advice}"))
+}
+
 /// Attach the failures of a multi-operand reader to its result: one stderr
 /// line per failed operand, exit code 1. The good operands' output stays.
 pub(crate) fn with_operand_errors(
@@ -377,8 +389,10 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(tojsonl::ToJsonl);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
+    registry.register(command::CommandBuiltin);
     registry.register(tree::Tree);
     registry.register(true_false::True);
+    registry.register(command::Type);
     registry.register(true_false::False);
     registry.register(true_false::Colon);
     registry.register(type_of::TypeOf);
