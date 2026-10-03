@@ -12,8 +12,8 @@ reference REPL. It is stable; changes before 1.0 are limited to ergonomics and c
 
 ## Writing style
 
-Write this way by default: replies to the user, commit messages, PR bodies, code comments,
-help, docs, error messages, and `///` on builtin arguments.
+Write this way by default: commit messages, PR bodies, code comments, help, docs,
+error messages, and `///` on builtin arguments.
 
 kaish keeps a small, predictable subset of `sh`, so existing shell skills transfer. This
 guide keeps a small, predictable subset of English for the same reason.
@@ -21,7 +21,7 @@ guide keeps a small, predictable subset of English for the same reason.
 ### Vocabulary choices
 
 Keep the vocabulary small. This limits the number of distinct words, not the length of the
-text — familiar words may require a longer sentence.
+text. Using familiar words may require a longer sentence.
 
 Use plain words instead of figures of speech. Make the intended meaning available from the
 words themselves, including in second-language or partial-context use.
@@ -30,24 +30,18 @@ Use an established technical term when kaish gives it one meaning. For example:
 
 | Write | Meaning |
 |---|---|
-| affordance | A visible cue for the next available action. An error that names its fix affords that fix. |
+| affordance | A cue for the next available action. An error that names its fix affords that fix. |
 | familiar syntax | Existing `sh` skill transfers because kaish preserves familiar syntax. |
 
 `hazard` and `override` belong to this vocabulary too; they carry guarantees, so their
 definitions live in the Terms table below, with every other term that carries a
 behavioral guarantee.
 
-Use American spelling to match the corpus: `modeled`, not `modelled`.
+Use American spellings.
 
 ### One term, one meaning
 
 Pick one word for each concept and keep it. Do not vary a word for style.
-
-`dialect` is reserved for a ShellCheck language mode or a regex flavor. Do not use it
-about prose.
-
-`surface` can hide the thing it names. In published text, name the tool schema, error
-message, help topic, or API.
 
 Example labels are imperative. Write "Send STOP by name," not "Named shorthand." The
 label sits next to a command, so it should read like one.
@@ -214,14 +208,6 @@ in another base and does checked 64-bit integer arithmetic.
   (`fromjson 1e3`). `printf %x` / `%o` format the other direction; `$(random --max N)`
   replaces `$RANDOM`.
 
-### Test a theory before building it
-
-A claim about what models or users will write is measurable. Before adding syntax, a
-spelling, or a shortcut on their behalf, hand a few cheap kaibo casts or subagents the
-proposed help text and a task list, and count what they produce. Keep one syntax until
-the count says otherwise. The same loop works for an error message: show the message,
-ask for the next command, and see whether it lands.
-
 ### Code style
 
 - Comments are short and direct. Narrative goes in the commit message.
@@ -252,19 +238,19 @@ awaits on embedder code.
 - **PRs land as merge commits** (`gh pr merge --merge`) whose subject and body are the
   PR title and body, so the PR text becomes history. Write it like a commit message.
 - **PR bodies:** one long line per paragraph (GitHub re-wraps merge commits at 72);
-  every example in a ``` fence (indented blocks get re-wrapped); no `##` headings or
+  every example in a code fence (indented blocks get re-wrapped); no `##` headings or
   tables (use a short capitalized line).
 - **Add files by name:** `git add <file>`. Never `git add -A` or `git add .`.
 
 ### Commit messages
 
 Commit and PR bodies summarize the decisions behind the change, **drawn from the
-conversation with the user**. A useful message reminds us how we got to the code; the
-code speaks for itself.
+conversation with the user**.
 
 Write a clinical engineering narrative: the problem, the evidence, the decision, the
 rule now in force. Design stories, plans, review transcripts, and model-panel results
-live in agent memory outside the repo; a commit never references them.
+live in agent memory outside the repo. Do not reference agent memories in code or
+commits.
 
 ## Documentation
 
