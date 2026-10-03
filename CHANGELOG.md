@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-03
+
 ### Added
 
 - **`ExecResult::stream_order()` and `ExecResult::chunks()`** record how
@@ -60,7 +62,6 @@ breaking entries are marked **BREAKING**.
   builtins see functions.
 - **`find -xdev`** (also `-mount`) — keeps the walk in its mount region even
   under `set -o crossmounts`. With `--cross-mounts` it is an error.
-
 - **`Kernel::execute_background_with_options`** — run a whole program as a
   job and get its `JobId`; a program that fails to parse or validate
   registers no job. Stdout streams as the program runs; stderr reaches the
@@ -76,9 +77,27 @@ breaking entries are marked **BREAKING**.
   for its caller (as `timeout` does) can return `ToolFlow::Exit` to end the
   script. The default wraps `execute`, so existing tools are unchanged.
   `CommandDispatcher::dispatch_flow` is the matching defaulted method.
+- **`DirEntryKind::{CharDevice, BlockDevice, Fifo, Socket}`** and
+  `DirEntry::is_special()` — `LocalFs` reports Unix special files as their own
+  kinds. `is_file()` means a regular file, so `test -f /dev/null` is false.
+  `OverlayFs` refuses to remove a lower special file with `Unsupported`.
+- **`WalkOptions::yield_symlinks` and `yield_special`** — both true by
+  default; a walk can leave out symlinks and special files.
+- **`ToolSchema::options_end_at_operand`** — a wrapper tool reads its own
+  options only up to the first operand. `ToolArgs.positional_syntax` keeps the
+  operator kind of each word for the wrapped command.
 
 ### Changed
 
+- **BREAKING: recursive walks stay in the mount they start in.** `grep -r`,
+  `find`, `ls -R`, `tree`, `glob`, and bare-glob expansion (`**`) list a
+  mount point they reach but do not descend into it, the reverse of GNU's
+  `-xdev` opt-in: `grep -r x /` no longer searches `/v`, `/dev`, `/tmp`, or an
+  embedder's mounts. Naming a mount walks it and the mounts nested in it
+  (`grep -r x /v`). `--cross-mounts` on those builtins, or
+  `set -o crossmounts`, crosses. A walk over `/` from an embedder whose
+  writable directories are separate mounts no longer reaches them; see
+  `KernelBackend::walk_boundaries`.
 - **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does: bare
   `( ) { } | + ?` are literal (`grep 'fn consult('` works); use
   `grep -E '(a|b)'` for ERE.
@@ -89,8 +108,6 @@ breaking entries are marked **BREAKING**.
   formatted result, including `grep` no-match, `false`, differing `diff` or
   overlay results, and failed scatter workers. Partial results stay under
   `data` or `output`; success stays unwrapped.
-- `Arg::ShortNamed { key, value }` is the parsed `-key=value` word. Every
-  command receives it as the one word `-key=value`.
 - **BREAKING**: Plans report a fully literal argument or file redirect
   target as `{"literal":{"text":"…","value":"…"}}`. Read `value` for the
   argument or unresolved path, `text` for display. Expanding words stay
@@ -106,220 +123,6 @@ breaking entries are marked **BREAKING**.
   `ExecContext::allow_external_commands` are now `allow_unwrapped_commands`.
   The switch gates PATH lookup, `exec`, `spawn` and `env CMD`, never wrapped
   commands.
-
-### Fixed
-
-- `-name=value` is one word, like `--name=value`: `gcc -std=c11`,
-  `pdflatex -interaction=nonstopmode`, `-Wl,-rpath=$dir`, `-I=~/inc`. Its
-  value takes the substitutions and `~` that `--name=`'s takes. A `:` or
-  `,` list glued to a short flag is one word: `-Wl,-rpath,/opt/lib` and
-  `-F:a` reach an external command whole, and `cut -f1,3` and
-  `sort -k2,2n` bind `1,3` and `2,2n` instead of reading `,3` as a file.
-  `chmod +x f` and `echo ...` parse.
-- `--a = b` with spaces is three words, as in bash; it was silently read
-  as `--a=b`.
-- `cat`, `head`, `tail`, `tac`, `cut`, and `file` print readable files after
-  an unreadable one and exit 1; `sort` exits 2. `uniq`, `base64`, and `xxd`
-  refuse extra operands. `head -c` reads a byte prefix of each file.
-- Lists, tables, and trees end their last text line with a newline, so
-  `ls dir | wc -l` counts every row.
-- Recursive `grep` skips devices, FIFOs, sockets, and discovered symlinks
-  under `-r`; `-R` reads file symlinks but does not enter linked
-  directories. Errors keep readable matches and exit 2. Recursive and
-  multi-file searches read bounded chunks; `-q`, `-l`, and `-m` stop early.
-- `NAME --help` exits 0 across builtin argument binders, including `scatter` and `gather`. Declared option values shaped like `--help` or `--json` stay data. Unsupported builtin flags return a short refusal naming the supported help topic.
-- **BREAKING:** `--json` prints `{"code":N,"error":"..."}` for every nonzero
-  formatted result, including `grep` no-match, `false`, differing `diff` or
-  overlay results, and failed scatter workers. Partial results stay under `data` or `output`;
-  success stays unwrapped.
-- A redirect into a mount ancestor with no real directory names `mkdir -p`
-  when the backend can create the parent. For an uncovered target or an
-  immutable ancestor it names a writable mounted path. It never suggests a
-  read-only mount.
-- `grep -E` and `sed -E` read GNU's escapes: `\d` is a literal `d`, not a
-  digit class. An unknown class such as `[[:foo:]]` is refused in `grep`,
-  `sed`, and `awk` instead of matching; `[[:alpha:]]` is Unicode-aware in all
-  three.
-- `grep -E 'fn main() {'` matches: a `{` that starts no interval is literal,
-  as in GNU grep, and `{,2}` is an interval in `-E`.
-- `sed` prints a literal `&` for `\&` in a replacement and refuses `\2` past
-  the last group. `awk -v name` without `=` is refused, and a regex built from
-  a string follows gawk's escapes: `p="cat\|dog"` alternates.
-- A bareword containing `==`, `!=`, or `!` is one literal word: `echo ===`,
-  `echo ===1.50===`, `export X==1`, and `echo !x` parse, as in a bash script.
-  A word with a single `=` (`./bin=1`) or a substitution still needs quotes.
-- A quoted `~` stays `~`: `echo '~'`, `echo "~"`, and `x='~'; echo "$x"` printed
-  `$HOME`. Only an unquoted `~` in the source expands, as in bash, now also in
-  globs (`ls ~/src/*.rs`), redirects, `for` items, and alias bodies.
-- Usage errors across the builtins now exit 2 instead of 1: a missing operand,
-  an unknown subcommand, a flag value the builtin cannot use. The sweep and a
-  follow-up review together cover 114 sites in 56 builtins. What a caller can
-  fix decides the code — argv is 2, the world is 1, so `rm` exits 2 and
-  `rm missing.txt` still exits 1. A builtin that ingests text draws the same
-  line by where the text came from: a positional argument is argv, but stdin
-  or a file's content is the world even though the file's path is itself an
-  argument, so `jq` and `base64 -d` read 1 on bad content, not 2.
-- `read` and `glob` join the builtins that spend exit 1 on a result. `read`
-  exits 1 at end of input, which is what ends a `while read` loop, and `glob`
-  exits 1 when a pattern matched nothing; neither is a usage error.
-- `spawn --timeout` keeps what the child already wrote. A child that printed
-  a diagnostic and then hung reported 124 and nothing else; the partial
-  stdout and stderr now ride the 124, with the timeout line after them.
-- A child killed by a signal inside its `spawn --timeout` is no longer
-  reported as a timeout. It had returned 124 and a "timed out" line for a
-  segfault, because a signal death and an expiry read the same.
-- `patch` refuses a byte offset inside a multi-byte character instead of
-  aborting the kernel. `Insert { offset: 1 }` into a file starting with `é`
-  took the process down; it names the character the offset splits now.
-- `patch` refuses line 0 rather than editing line 1. `PatchOp`'s line
-  operations are 1-indexed and 0 was silently mapped onto the first line.
-- A wrapped command refuses `json_output()` on a verb with children. A node
-  never runs, so the declaration was accepted at `build()` and ignored
-  everywhere after, while the schema still published `typed_substitution`.
-- A gather row keeps the worker's own exit code when its stdout is binary.
-  The row was forced to a nonzero `code` the worker never returned; `ok:false`
-  and `err` carry the refusal, and the aggregate is still 123.
-- A fault inside `$(...)` names both assignments. `y=$(x=$((1/0)))` reported
-  "failed to evaluate assignment" twice with nothing to tell the two apart;
-  each frame names its target now.
-- A validation advisory survives a fault in the same program. A program that
-  warned and then faulted handed back an error with the warning missing.
-
-- An embedder tool's stdout and a tool's `--help` text now reach a background
-  job's stdout stream. `embedder_tool &` and `ls --help &` left
-  `/v/jobs/N/stdout` empty; the output was only in the job's result.
-- A streaming caller (`kaish -c`, `execute_with_options_streaming`) now
-  receives stderr drained during an `exit` statement and the watchdog's
-  timeout line. The timeout line follows any stderr the program wrote
-  instead of being dropped.
-- A cancel that fires before a program's first statement now stops it. An
-  embedder or job token cancelled that early let the program run to
-  completion.
-- A cancelled call exits 130 even when it ends a child by signal. A single
-  external command reported the child's 143 or 137 instead.
-- A runtime fault keeps the output that ran before it. `echo left &&
-  x=$((1/0))` shows `left`, and a function that faults exits 1 with what it
-  printed and the full cause instead of only the outermost message.
-- A spilled statement no longer masks a later statement's exit.
-  `original_code` belongs to the statement `code` reports, so an embedder
-  reading `original_code.unwrap_or(code)` sees `seq 1 5000; false` exit 1.
-  `did_spill` still stays true once anything spilled.
-- A background job's stdout stream (`/v/jobs/N/stdout`) now holds only the
-  job's own output, in order: builtin output is published when each builtin
-  returns, and output captured by `$(...)`, redirected with `>`, or read by
-  `scatter` no longer appears in it.
-- An embedder tool no longer runs with the kernel's context lock held. A
-  backend tool that called back into the kernel blocked forever; it runs on
-  the calling command's context now, the same as a builtin.
-- `timeout` now reaches an external command inside a function body, inside a
-  piped function body, and inside a `$(...)` in that body's arguments. The
-  timer's cancel token stopped at the function boundary and the command ran
-  to completion.
-- A `$(...)` in a here-string, a heredoc body, or a `< file` target now runs
-  under the cancel token and watchdog of the command being redirected.
-  `f() { cat <<< $(slow); }; timeout 1 f` ran past its deadline.
-- An embedder tool now sees the call's cancel token and watchdog, so a
-  request timeout stops it. It had been receiving the kernel's.
-- A command substitution no longer writes into the enclosing pipe, and keeps
-  its own stderr. `echo "got [$(cat f)]" | cat` printed only the file, and a
-  substitution's stderr in a middle stage was dropped.
-- A pipeline's last stage now returns its ignore config and output limit,
-  not only scope, cwd and aliases. `echo x | kaish-output-limit off` left the
-  limit on, while the same command run on its own turned it off.
-- `grep` now reserves exit 1 for "no lines matched". An invalid pattern, an
-  unreadable file, or a missing pattern argument exits 2, so a caller cannot
-  read a broken search as a negative answer. `diff` argument errors exit 2 to
-  match its neighboring operand checks.
-- A program kaish refuses — lex, parse, or validation — now exits 2 from
-  `kaish -c` and from a script file, matching what `kaish --plan` already
-  documented for the same source.
-- `kaish --plan` now runs the validator. A program that parses but the kernel
-  would reject reports `{"errors": [...]}` and exits 2 instead of printing a
-  clean plan the caller cannot run.
-- An invalid `grep -E` pattern names the escape that fixes it (`\[`, `\(`,
-  `\{` for a literal `[`, `(`, `{`) instead of linking kaish's regex crate. A
-  pattern with two faults gets no hint rather than one that still does not
-  compile.
-- `grep -w` keeps an alternation inside the word boundaries and accepts a
-  pattern that ends on punctuation (`grep -w 'KjCaller {'`), as GNU grep does.
-- `grep -o` prints only non-empty matches, as GNU grep does.
-- `[[:alpha:]]` and its eleven siblings are Unicode-aware in both `grep` and
-  `grep -E`, matching GNU grep in a UTF-8 locale: `grep -o '[[:alpha:]]'`
-  on `héllo 日本語` now prints every letter, not just the ASCII ones.
-  `[:digit:]` stays ASCII-only, as GNU's does.
-- A pattern that arrives through a variable (`p='[cast:'; grep "$p" f`) now
-  exits 2 like a literal one. The validator skips a computed pattern, so the
-  failure surfaced from the regex builders inside `grep` instead.
-- `grep` reading from a pipe no longer discards a read error and reports it as
-  "no lines matched". A read failure exits 2; a downstream close still keeps
-  the match-based code.
-- A background job's stderr stream fills live, in order and once, from
-  builtins, externals, functions, compounds and `$(…)`. It was written at
-  completion and dropped a builtin's stderr after an external's.
-- `cmd > f 2>&1` writes both streams to `f`; stderr went to the terminal.
-  Redirects apply left to right, so `2>&1 > f` sends stderr to the old
-  stdout, as in bash.
-- A failing condition command (`if test 1 -eq abc`) prints its diagnostic
-  once; it printed three copies.
-- A cancel ends the wait on a pipe a backgrounded grandchild holds open; the
-  kernel waited for the grandchild to exit.
-- A function whose body spills reports `did_spill` and its real
-  `original_code`, including after `exit` or a `set -e` abort.
-- `spawn` runs its child in its own process group: `--timeout` and a cancel
-  kill a backgrounded grandchild too, and a killed `spawn … &` job reads
-  `killed:130`.
-- W008 covers `test abc -eq 1`, and a dynamic operand no longer hides W008
-  or E020 on its literal siblings.
-- `A=$((1/0)) cmd` names `A` in its error, like a plain assignment.
-- A `--plan` rendering re-parses to the same values: `"1"`, `"true"` and
-  `"1.5"` stay quoted.
-- Output redirect targets now open, left to right, before the command runs;
-  a missing parent directory refuses the command and names the fix
-  (`mkdir -p` it first), and `cat f | sort > f` is now racy like bash.
-- A fault inside a function, `source`, or a script no longer reaches its
-  caller as a plain exit 2 that `if`, `!` and `&&`/`||` misread as false;
-  `exit` and `return` are now valueless, so a typed value survives them
-  everywhere.
-- An unquoted heredoc body's `$(...)` now finds its closing paren by walking
-  tokens instead of counting raw parentheses, so a `case` pattern's own `)`
-  inside the substitution no longer ends it early.
-- A pipeline no longer hangs when a stage stops reading before its input
-  ends: `seq 1 100000 | grep --no-such-flag x` used to never return; it now
-  exits 2, like bash.
-- A per-call timeout or an embedder's interrupt now stops a busy builtin
-  (`seq 1 50000000` under a 200ms timeout used to run to completion), and a
-  cancelled `seq 1 50000000 | wc -l` reports 130 now, not a truncated count.
-- `spawn`'s child now inherits only the kernel's exported variables, never
-  the host's, and runs in the shell's own directory, not the kaish
-  process's; `spawn`, `exec`, `which` and `env` now refuse a bare name with
-  no `PATH` in scope.
-- A background `spawn … &` now streams live to `/v/jobs/N/stdout`; `spawn
-  /bin/echo a b c` now runs all three arguments instead of just `echo a`;
-  and its stdin streams to the child instead of buffering to EOF first.
-- `exec()`'s SIGPIPE disposition is now restored after a failed underlying
-  exec (such as `exec /nonexistent`), instead of staying defaulted; a later
-  write to a closed pipe no longer kills the process outright.
-
-### Changed
-
-- **BREAKING: recursive walks stay in the mount they start in.** `grep -r`,
-  `find`, `ls -R`, `tree`, `glob`, and bare-glob expansion (`**`) list a
-  mount point they reach but do not descend into it, the reverse of GNU's
-  `-xdev` opt-in: `grep -r x /` no longer searches `/v`, `/dev`, `/tmp`, or an
-  embedder's mounts. Naming a mount walks it and the mounts nested in it
-  (`grep -r x /v`). `--cross-mounts` on those builtins, or
-  `set -o crossmounts`, crosses. A walk over `/` from an embedder whose
-  writable directories are separate mounts no longer reaches them; see
-  `KernelBackend::walk_boundaries`.
-
-- **BREAKING**: `grep` without `-E` reads GNU BRE, as GNU grep does — bare
-  `( ) { } | + ?` are literal (`grep 'fn consult('` works); use `grep -E '(a|b)'` for ERE.
-- **BREAKING**: `sed` without `-E`/`-r` reads GNU BRE, as GNU sed does:
-  `sed 's/fn main(/x/'` works, and `\(…\)`, `\{n\}`, `\|` are the operators.
-  `awk` reads gawk's ERE, where `\(` is a literal paren.
-- `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
-  a token is literal, as it already was for globs and `$VAR`. Expand paths
-  before passing them in.
 - **BREAKING** (`kaish-kernel`): `KernelError::Execution` is now
   `Execution { error, output }`. `output` holds what ran before the fault; a
   `KernelError::Execution(e)` pattern no longer compiles.
@@ -329,6 +132,11 @@ breaking entries are marked **BREAKING**.
 - **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive
   a `ToolCtx` and never implement one, so no supported use changes; an
   out-of-tree implementation no longer compiles.
+- `Arg::ShortNamed { key, value }` is the parsed `-key=value` word. Every
+  command receives it as the one word `-key=value`.
+- `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
+  a token is literal, as it already was for globs and `$VAR`. Expand paths
+  before passing them in.
 - Usage errors exit 2 instead of 1 across the builtins: a missing operand,
   an unknown subcommand, a flag value the builtin cannot use. What a caller
   can fix decides the code: `rm` exits 2, `rm missing.txt` exits 1, and bad
@@ -344,8 +152,6 @@ breaking entries are marked **BREAKING**.
   reports `{"errors": [...]}` and exits 2.
 - `exec` and `spawn` refuse with exit 127 when unwrapped commands are off,
   like PATH lookup and `env CMD`; they returned 1.
-- `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
-  expand paths before passing them in.
 - A `!` glued to its operand at the start of a statement or condition is
   refused: `!true` names `! true`. `! cmd &` is refused with E022, which
   names a form that negates inside the job.
@@ -354,6 +160,9 @@ breaking entries are marked **BREAKING**.
 - A kernel builtin dispatched with a context that is not the kernel's
   panics instead of exiting 1 with an internal message. Sealing `ToolCtx`
   makes that branch unreachable.
+- `scatter` refuses its own redirects with exit 2 and names the fix: pipe the
+  input in. `gather`'s `<` refusal moves from exit 1 to exit 2.
+  `scatter < list | work | gather` ran with no items and exit 0.
 
 ### Deprecated
 
@@ -362,6 +171,15 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- `-name=value` is one word, like `--name=value`: `gcc -std=c11`,
+  `pdflatex -interaction=nonstopmode`, `-Wl,-rpath=$dir`, `-I=~/inc`. Its
+  value takes the substitutions and `~` that `--name=`'s takes. A `:` or
+  `,` list glued to a short flag is one word: `-Wl,-rpath,/opt/lib` and
+  `-F:a` reach an external command whole, and `cut -f1,3` and
+  `sort -k2,2n` bind `1,3` and `2,2n` instead of reading `,3` as a file.
+  `chmod +x f` and `echo ...` parse.
+- `--a = b` with spaces is three words, as in bash; it was silently read
+  as `--a=b`.
 - `find` reports an entry or start path it cannot read or stat (`find: './d':
   permission denied`), keeps going, and exits 1. `-mtime` and `-size` are false
   for an entry with no stat data; they passed it and printed it.
@@ -500,6 +318,40 @@ breaking entries are marked **BREAKING**.
   declaration was accepted and ignored.
 - A gather row keeps the worker's own exit code when its stdout is binary;
   `ok:false` and `err` carry the refusal, and the aggregate is still 123.
+- `timeout 10 python3 -c '…'`, `env X=1 make -C dir`, and `spawn echo -n hi`
+  hand the command its own flags; they failed with `unexpected argument '-c'`.
+  `timeout`, `env`, `exec`, and `spawn` read their options up to the first
+  operand. `timeout` keeps quoted dash operands and numerals as written. (#484)
+- An input redirect's stdin belongs to its command. `seq 1 3 | jq -c length < f`
+  reads `f`, and `read x < g` no longer leaves the rest of `g` as the
+  session's stdin. After `gather`, `… | gather | echo x; cat` no longer prints
+  gather's rows as session stdin.
+- A nested pipeline keeps a typed array typed, and a redirect target computed
+  by `$(cat)` is no longer an empty path.
+- `f | scatter | … | gather` keeps the stderr of the lone stage before
+  `scatter`; it was dropped when the stage exited 0.
+- `sort < nofile > nofile` names the missing input file, not the same-file
+  hazard.
+- A function defined inside `$( )` no longer outlives it:
+  `x=$(f() { echo hi; }); f` exits 127, as in bash. `source` and
+  redefinitions inside `$( )` revert too.
+- `^` is an ordinary word character (`git diff master^ master`, `HEAD^2`), and
+  `~` inside a word is too (`git log HEAD~1`, `--from=HEAD~1`). A leading `~`
+  still expands.
+- A digit-leading word with a trailing dash is one word: `cut -c 9- f` and
+  `cut -f 1-3,5- f` parse, and `printf '%s' 1--` no longer drops a piece.
+- `exit 3` keeps its status through a failing redirect (`exit 3 > /dev/full`);
+  it exited 1.
+- A background job whose task panics closes its streams and writes the
+  reason to `/v/jobs/N/stderr`. A reader waiting on the stream waited forever.
+- `spawn --env '{FOO: bar}'` and `--argv '[1,2]'` run with the values dropped
+  no longer: a malformed value is an error, and a kaish record is accepted.
+- `ls a b c` exits with the worst code across its operands, not the last.
+- `ls /nope` on `MemoryFs` or `OverlayFs` printed `not found: not found:
+  /nope`; `cp` and `DevFs` repeated the phrase too. It prints once.
+- `grep -A`, `-B`, and `-C` search the whole buffer; a match within the
+  context distance of a 256 KiB chunk boundary lost the context lines. A
+  context search over a larger file runs to the end before a timeout lands.
 
 ## [0.17.2] - 2026-09-09
 
@@ -3150,7 +3002,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/tobert/kaish/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/tobert/kaish/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/tobert/kaish/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/tobert/kaish/compare/v0.16.0...v0.17.0
