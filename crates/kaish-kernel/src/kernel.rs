@@ -12332,10 +12332,8 @@ AFTER="yes"'"#)
             kernel.classify_command("definitely_not_a_kaish_builtin").await,
             CommandKind::External
         );
-        // `readonly` is *not* a kaish special-form despite the validator's
-        // warning heuristic — at runtime it resolves to an external command, so
-        // a consent gate must see it as External (regression guard against the
-        // validator/runtime divergence).
+        // `readonly` is not a kaish special-form: at runtime it resolves to an
+        // external command, so a consent gate must see it as External.
         assert_eq!(
             kernel.classify_command("readonly").await,
             CommandKind::External
