@@ -48,10 +48,10 @@ seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 
 Handing an agent `bash -c` is dangerous on many levels. It comes with
 word-splitting surprises, tools that vary by platform and version, and is
-difficult to sandbox. Most importantly, it lacks a way to validate most of the
-program before execution.
+difficult to sandbox. Most importantly, it lacks a way to validate the program
+before execution.
 
-kaish provides a shell that just works for 80% of scripts they generate. The 20%
+kaish provides a shell that just works for 80% of the scripts agents generate. The 20%
 that might be rejected come with educational error messages, so models get immediate
 feedback and can try something else. kaish validates the program before running it
 so the rejections come before any code runs.
@@ -60,7 +60,7 @@ kaish's data model is JSON. A variable holds an array or a record as naturally
 as a string. `$(cmd)` binds a typed value when the command's output is a value,
 so `x=$(fromjson <<< '[1,2]')` binds a list. A builtin with a POSIX counterpart
 binds text instead, so grep, etc. will return text as anyone would expect. All
-builtins support `--json`. When specified the command will return json instead
+builtins support `--json`. When specified, the command returns JSON instead
 of the usual bare text.
 
 ## What's Different About kaish?
