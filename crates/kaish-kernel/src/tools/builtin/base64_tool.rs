@@ -7,7 +7,6 @@ use std::path::Path;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -73,17 +72,18 @@ impl Tool for Base64Tool {
         parsed.global.apply(ctx);
 
         let decode = parsed.decode;
-        let wrap_col = parsed
-            .wrap
-            .map(|n| n as usize)
-            .or_else(|| {
-                args.get("wrap", usize::MAX).and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-            })
-            .unwrap_or(76);
+        let wrap_col = match parsed.wrap {
+            Some(n) => match super::non_negative_count(
+                "base64",
+                "-w",
+                n,
+                "wrap width must be 0 or more; write `-w 0` for no wrapping",
+            ) {
+                Ok(n) => n,
+                Err(message) => return ExecResult::failure(2, message),
+            },
+            None => 76,
+        };
 
         // Get input from file(s) or stdin, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {
@@ -184,6 +184,7 @@ async fn wrap_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
@@ -361,5 +362,28 @@ mod tests {
         let result = Base64Tool.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.text_out().as_ref(), "");
+    }
+
+    #[rstest::rstest]
+    #[case::negative(-1, Err("-w -1"))]
+    #[case::zero(0, Ok("aGVsbG8gd29ybGQ=\n"))]
+    #[case::valid(8, Ok("aGVsbG8g\nd29ybGQ=\n"))]
+    #[tokio::test]
+    async fn test_wrap_width(#[case] width: i64, #[case] expected: Result<&str, &str>) {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello world".to_string());
+        let mut args = ToolArgs::new();
+        args.named.insert("wrap".to_string(), Value::Int(width));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        match expected {
+            Ok(out) => {
+                assert!(result.ok(), "{}", result.err);
+                assert_eq!(result.text_out().as_ref(), out);
+            }
+            Err(named) => {
+                assert_eq!(result.code, 2, "{}", result.text_out());
+                assert!(result.err.contains(named), "{}", result.err);
+            }
+        }
     }
 }

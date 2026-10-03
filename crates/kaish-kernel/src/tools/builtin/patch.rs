@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::operation::KernelOperation;
@@ -107,17 +106,18 @@ impl Tool for Patch {
         }
 
         // Parse options
-        let strip_level = parsed
-            .p
-            .map(|i| i as usize)
-            .or_else(|| {
-                args.get_named("p").and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-            })
-            .unwrap_or(0);
+        let strip_level = match parsed.p {
+            Some(n) => match super::non_negative_count(
+                "patch",
+                "-p",
+                n,
+                "strip count must be 0 or more; write `-p 0` to keep the full path",
+            ) {
+                Ok(n) => n,
+                Err(message) => return ExecResult::failure(2, message),
+            },
+            None => 0,
+        };
 
         let reverse = parsed.reverse || args.has_flag("R");
         let dry_run = parsed.dry_run || args.has_flag("dry-run");
@@ -702,6 +702,7 @@ async fn apply_hunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::tools::ExecContext;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;

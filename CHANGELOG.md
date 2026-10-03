@@ -354,6 +354,9 @@ breaking entries are marked **BREAKING**.
 - `find` reports an entry or start path it cannot read or stat (`find: './d':
   permission denied`), keeps going, and exits 1. `-mtime` and `-size` are false
   for an entry with no stat data; they passed it and printed it.
+- `xxd -l`, `xxd -s`, `base64 -w`, `diff -C`, and `patch -p` refuse a
+  negative value, exit 2, and name the fix. A negative count wrapped to a
+  huge one; `xxd -l -1` dumped the whole input. `xxd -s` has no seek from end.
 - `readonly X=1` is reported as an unknown command by validation and
   `kaish --plan`, like any other missing command. kaish has no `readonly`
   builtin, so it exits 127; the validator no longer treats it as known.

@@ -199,6 +199,17 @@ pub(crate) fn extra_operand_error(
     ))
 }
 
+/// Convert a numeric flag value to a count. Below zero is a usage error
+/// message that names the flag, the value, and `advice`; callers exit 2.
+pub(crate) fn non_negative_count(
+    tool: &str,
+    flag: &str,
+    value: i64,
+    advice: &str,
+) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("{tool}: {flag} {value}: {advice}"))
+}
+
 /// Attach the failures of a multi-operand reader to its result: one stderr
 /// line per failed operand, exit code 1. The good operands' output stays.
 pub(crate) fn with_operand_errors(
