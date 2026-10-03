@@ -307,6 +307,14 @@ pub struct ExecContext {
     /// workers see the same cap as foreground execution.
     pub vfs_budget: Option<Arc<ByteBudget>>,
 
+    /// The kernel's output counter, which numbers runs of stdout and stderr
+    /// for `ExecResult::stream_order`.
+    ///
+    /// Shared like `vfs_budget`: `Kernel::assemble` sets it, and
+    /// `child_for_pipeline` / `fork_inner` pass it on, so forks and pipeline
+    /// stages number output in the kernel's one sequence.
+    pub output_sequence: kaish_types::OutputSequence,
+
     /// The per-execute timeout watchdog, when a script timeout is in effect.
     ///
     /// Populated by the kernel at execute entry (alongside `cancel`) and
@@ -602,6 +610,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
@@ -645,6 +654,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
@@ -685,6 +695,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
@@ -725,6 +736,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
@@ -768,6 +780,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
@@ -808,6 +821,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
@@ -1144,6 +1158,8 @@ impl ExecContext {
             output_format: None,
             // Budget is shared: the child draws from the same pool as the parent.
             vfs_budget: self.vfs_budget.clone(),
+            // The counter is shared: one sequence for the whole kernel.
+            output_sequence: self.output_sequence.clone(),
             // Watchdog is shared: a patient hold in a pipeline stage or fork
             // suspends the same script clock as foreground execution.
             watchdog: self.watchdog.clone(),

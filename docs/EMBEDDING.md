@@ -94,6 +94,60 @@ change that changed no behavior.
 Embedders typically run a fresh kernel per request — variables, functions,
 aliases, `set -o` options, and `cwd` reset each time.
 
+### Interleaving stdout and stderr: `stream_order`
+
+```rust
+let result = kernel.execute("f() { echo out; echo err >&2; echo out2; }; f").await?;
+assert_eq!(result.text_out(), "out\nout2\n");   // stdout block
+assert_eq!(result.err, "err\n");                 // stderr block
+let shown: Vec<u8> = result.chunks().iter().flat_map(|c| c.bytes.iter().copied()).collect();
+assert_eq!(shown, b"out\nerr\nout2\n");          // the order they were produced
+```
+
+An `ExecResult` keeps stdout and stderr as two payloads. `stream_order()`
+says how they interleave: a list of `OutputSpan { seq, stream, len }`, where
+each span consumes the next `len` bytes of its stream's payload (stdout is
+`text_out()`, or `out_bytes()` when binary; stderr is `err`). `chunks()`
+returns the bytes in that order, with each chunk's stream, so a frontend can
+print or color them as a terminal would show them. `ToolResult` carries the
+same spans.
+
+When `stream_order()` is `None`, the order is the stdout block followed by
+the stderr block, and `chunks()` returns those two blocks. A result can also
+report that order as spans. Spans that no longer match the payloads (stdout
+or `err` changed after they were recorded) are not reported.
+
+The order is only as exact as its producer:
+
+- A builtin returns its stdout and stderr whole, with no order inside the
+  command. Its result reads as its stdout, then its stderr: `ls good nosuch`
+  is its listing, then its error, alone or as a pipeline's last stage.
+- An external command writes to two pipes. Its spans are the order kaish
+  read them, 8 KiB at most per read, which is close to but not the same as
+  the order the program wrote them.
+- Statements in a function, script, `$( )` body, group, `if`, loop, or
+  `&&`/`||` chain are ordered statement by statement, so each statement's
+  output keeps its place.
+- Stderr that reaches a statement through the kernel's stderr channel (an
+  earlier pipeline stage, a command substitution, a condition, the last
+  stage's own stderr) carries a number from when it was written, and is
+  placed by that number among the statement's stdout. For a builtin, that is
+  when it returned, after its stdout.
+- The result where a spill or truncation happens (`did_spill`) has no spans.
+  A larger result that contains it still has spans, and the spilled part is
+  one stdout block, then one stderr block. An external command whose capture
+  ring overflowed, or whose stderr was not UTF-8, has no spans either.
+- `seq` numbers come from one counter per kernel, shared with its forks
+  (background jobs, scatter workers) and pipeline stages. They order spans
+  across results from one kernel; they mean nothing between kernels.
+- Adjacent runs on one stream can share one span, which keeps the first
+  run's number.
+
+A redirect that joins the streams (`2>&1`, `1>&2`, `&>`) still writes the
+stdout block, then the stderr block, as `docs/LANGUAGE.md`, "Pipes &
+Redirects" states. The joined result is one stream, so it has no order to
+report.
+
 ### When exit status is a decision: errexit
 
 kaish's default is standard shell behavior: a failing statement does not
@@ -1858,7 +1912,7 @@ The `kaish_kernel` crate root re-exports the embedding surface:
 - **Operations** (module `kaish_kernel::operation`): `KernelOperation` — the
   effect classes a builtin declares through `ToolSchema::with_operations`
 
-Pure data types (`ExecResult`, `OutputData`, `Value`, `ToolSchema`,
+Pure data types (`ExecResult`, `OutputData`, `OutputSpan`, `Value`, `ToolSchema`,
 `ToolArgs`, …) live in the leaf crate `kaish-types`; the tool author API
 (`Tool`, `ToolCtx`, `KernelBackend`) in `kaish-tool-api`. Depend on those
 directly if you're writing tools without linking the whole kernel.

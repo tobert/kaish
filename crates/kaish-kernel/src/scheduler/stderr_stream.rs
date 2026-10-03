@@ -16,6 +16,7 @@
 //!   Stage 3 ──┘
 //! ```
 
+use kaish_types::{ExecResult, OutputSequence, OutputSpan, StreamKind, StreamOrder};
 use tokio::sync::mpsc;
 
 /// Cloneable handle to the kernel's stderr output stream.
@@ -28,14 +29,18 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug)]
 pub struct StderrStream {
     sender: mpsc::UnboundedSender<StderrChunk>,
+    /// Numbers each write, so a drain can place it among the output it
+    /// joins (`ExecResult::stream_order`).
+    sequence: OutputSequence,
 }
 
 /// One write to the stream, with how many of its leading bytes a background
-/// job's stderr stream already holds.
+/// job's stderr stream already holds, and its output sequence number.
 #[derive(Debug)]
 pub(crate) struct StderrChunk {
     pub(crate) bytes: Vec<u8>,
     pub(crate) published_len: usize,
+    pub(crate) seq: u64,
 }
 
 /// Receiving end of the stderr stream.
@@ -47,10 +52,19 @@ pub struct StderrReceiver {
 }
 
 /// Create a new stderr stream pair.
+///
+/// Writes are numbered by a counter of the stream's own; a kernel uses
+/// [`numbered_stderr_stream`] to number them in its output sequence.
 pub fn stderr_stream() -> (StderrStream, StderrReceiver) {
+    numbered_stderr_stream(OutputSequence::new())
+}
+
+/// Create a stderr stream pair whose writes take numbers from `sequence`,
+/// for placing them in `ExecResult::stream_order`.
+pub fn numbered_stderr_stream(sequence: OutputSequence) -> (StderrStream, StderrReceiver) {
     let (sender, receiver) = mpsc::unbounded_channel();
     (
-        StderrStream { sender },
+        StderrStream { sender, sequence },
         StderrReceiver { receiver },
     )
 }
@@ -67,6 +81,38 @@ impl StderrStream {
     /// Write bytes whose first `published_len` already reached the job's
     /// stderr stream, so the drain site publishes only the rest.
     pub(crate) fn write_partly_published(&self, data: &[u8], published_len: usize) {
+        if !data.is_empty() {
+            self.write_numbered(data, published_len, self.sequence.next());
+        }
+    }
+
+    /// Write a result's stderr, one chunk per stderr span of its stream
+    /// order, so each run keeps the number it was produced under. Bytes
+    /// without a span are numbered now.
+    pub(crate) fn write_result_stderr(&self, result: &ExecResult) {
+        let err = result.err.as_bytes();
+        assert!(
+            result.stderr_published_len <= err.len(),
+            "stderr claims {} published bytes of {}",
+            result.stderr_published_len,
+            err.len()
+        );
+        let mut published = result.stderr_published_len;
+        let mut at = 0usize;
+        for span in StreamOrder::of(result, &self.sequence).spans() {
+            if span.stream != StreamKind::Stderr {
+                continue;
+            }
+            // `of` covers exactly `err.len()` stderr bytes.
+            let end = at + span.len as usize;
+            let chunk_published = published.min(end - at);
+            published -= chunk_published;
+            self.write_numbered(&err[at..end], chunk_published, span.seq);
+            at = end;
+        }
+    }
+
+    fn write_numbered(&self, data: &[u8], published_len: usize, seq: u64) {
         assert!(
             published_len <= data.len(),
             "stderr chunk claims {published_len} published bytes of {}",
@@ -74,7 +120,7 @@ impl StderrStream {
         );
         if !data.is_empty() {
             // Ignore send errors — receiver dropped means nobody is listening
-            let _ = self.sender.send(StderrChunk { bytes: data.to_vec(), published_len });
+            let _ = self.sender.send(StderrChunk { bytes: data.to_vec(), published_len, seq });
         }
     }
 
@@ -110,6 +156,31 @@ impl StderrReceiver {
         }
         chunks
     }
+}
+
+/// The stream order of `chunks` decoded into `text` by [`lossy_text`]: one
+/// stderr span per chunk, with the number it was written under. When the
+/// decode changed the bytes, per-chunk lengths no longer apply, and the text
+/// is one span under the earliest number.
+///
+/// `leading` bytes placed before the text (a line separator) join the first
+/// span.
+pub(crate) fn drained_order(chunks: &[StderrChunk], text: &str, leading: usize, sequence: &OutputSequence) -> StreamOrder {
+    let mut order = StreamOrder::new();
+    let unchanged = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>() == text.len()
+        && chunks.iter().flat_map(|chunk| chunk.bytes.iter()).eq(text.as_bytes().iter());
+    if unchanged {
+        // One stream, so the channel's delivery order is the payload order;
+        // a chunk delivered after a later-numbered one is renumbered.
+        let mut leading = leading;
+        for chunk in chunks {
+            let len = chunk.bytes.len() + std::mem::take(&mut leading);
+            order.push_span(OutputSpan::new(chunk.seq, StreamKind::Stderr, len as u64), sequence);
+        }
+    } else if let Some(first) = chunks.iter().map(|chunk| chunk.seq).min() {
+        order.push_span(OutputSpan::new(first, StreamKind::Stderr, (leading + text.len()) as u64), sequence);
+    }
+    order
 }
 
 /// Concatenate chunks and decode once, so a character split across two

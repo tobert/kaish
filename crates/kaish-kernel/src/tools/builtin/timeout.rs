@@ -199,6 +199,8 @@ impl Timeout {
                     // the bytes this adds, so all of `err` is published once.
                     ctx.publish_job_stderr(&mut result).await;
                     let inner_published = result.stderr_published_len == result.err.len();
+                    let sequence = ctx.output_sequence.clone();
+                    let inner_order = kaish_types::StreamOrder::of(&result, &sequence);
                     let inner = std::mem::take(&mut result.err);
                     let mut added = String::new();
                     if !inner.is_empty() && !inner.ends_with('\n') {
@@ -210,6 +212,12 @@ impl Timeout {
                     if !result.err.ends_with('\n') {
                         result.err.push('\n');
                     }
+                    // The note leads stderr, so it leads the order too.
+                    let mut order = kaish_types::StreamOrder::new();
+                    order.push(kaish_types::StreamKind::Stderr, note.len() as u64 + 1, &sequence);
+                    order.extend(inner_order, &sequence);
+                    result.set_stream_order(order);
+                    result.stamp_stream_order(&sequence);
                     result.stderr_published_len = 0;
                     if inner_published && ctx.publishes_job_stderr() {
                         ctx.write_job_stderr(added.as_bytes()).await;

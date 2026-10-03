@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::output::OutputData;
 use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult};
+use crate::stream_order::{OutputSpan, StreamOrder};
 use crate::tool::ToolSchema;
 
 /// Result type for backend operations.
@@ -268,6 +269,10 @@ pub struct ToolResult {
     pub content_type: Option<String>,
     /// Opaque key-value context (propagated from ExecResult).
     pub baggage: BTreeMap<String, String>,
+    /// How `stdout` and `stderr` interleave (propagated from ExecResult).
+    /// See `ExecResult::stream_order`; `None` means the stdout block, then
+    /// the stderr block.
+    pub stream_order: Option<Vec<OutputSpan>>,
 }
 
 impl ToolResult {
@@ -283,6 +288,7 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stream_order: None,
         }
     }
 
@@ -298,6 +304,7 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stream_order: None,
         }
     }
 
@@ -313,6 +320,7 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
+            stream_order: None,
         }
     }
 
@@ -350,6 +358,12 @@ impl ToolResult {
         self.original_code = original_code;
         self
     }
+
+    /// Set how stdout and stderr interleave, returning self for chaining.
+    pub fn with_stream_order(mut self, stream_order: Option<Vec<OutputSpan>>) -> Self {
+        self.stream_order = stream_order;
+        self
+    }
 }
 
 impl From<ExecResult> for ToolResult {
@@ -371,6 +385,12 @@ impl From<ExecResult> for ToolResult {
         // field) rather than changing this `From`'s behavior. See
         // `docs/binary-data.md`.
         let stdout = exec.text_out().into_owned();
+        // Spans count stdout bytes; a lossy decode of binary stdout changes
+        // them, and then the order is not carried.
+        let stream_order = exec
+            .stream_order()
+            .filter(|spans| crate::stream_order::spans_describe(spans, stdout.len() as u64, exec.err.len() as u64))
+            .map(<[OutputSpan]>::to_vec);
         let output = exec.take_output();
 
         // Convert ast::Value to serde_json::Value if present
@@ -386,6 +406,7 @@ impl From<ExecResult> for ToolResult {
             original_code: exec.original_code,
             content_type: exec.content_type,
             baggage: exec.baggage,
+            stream_order,
         }
     }
 }
@@ -410,6 +431,9 @@ impl From<ToolResult> for ExecResult {
         exec.original_code = result.original_code;
         exec.content_type = result.content_type;
         exec.baggage = result.baggage;
+        if let Some(spans) = result.stream_order {
+            exec.set_stream_order(StreamOrder::from_recorded(spans));
+        }
         exec
     }
 }
@@ -490,6 +514,35 @@ mod tests {
         let exec = ExecResult::from(tool_result);
         assert!(exec.did_spill);
         assert_eq!(exec.original_code, Some(5));
+    }
+
+    #[test]
+    fn stream_order_crosses_both_conversions() {
+        let sequence = crate::OutputSequence::new();
+        let mut order = StreamOrder::new();
+        order.push(crate::StreamKind::Stdout, 4, &sequence);
+        order.push(crate::StreamKind::Stderr, 4, &sequence);
+        order.push(crate::StreamKind::Stdout, 5, &sequence);
+        let mut exec = ExecResult::from_output(0, "out\nout2\n", "err\n");
+        exec.set_stream_order(order);
+        let spans = exec.stream_order().map(<[OutputSpan]>::to_vec);
+        assert!(spans.is_some());
+
+        let tool_result = ToolResult::from(exec);
+        assert_eq!(tool_result.stream_order, spans);
+        let back = ExecResult::from(tool_result);
+        assert_eq!(back.stream_order().map(<[OutputSpan]>::to_vec), spans);
+    }
+
+    #[test]
+    fn stream_order_is_not_carried_past_a_lossy_decode() {
+        let sequence = crate::OutputSequence::new();
+        let mut exec = ExecResult::success_bytes(vec![0xff]);
+        exec.err = "e".into();
+        exec.stamp_stream_order(&sequence);
+        assert!(exec.stream_order().is_some());
+        // U+FFFD is three bytes, so the one-byte stdout span no longer fits.
+        assert_eq!(ToolResult::from(exec).stream_order, None);
     }
 
     #[test]

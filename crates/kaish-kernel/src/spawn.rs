@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::{ExecResult, Scope};
 use crate::scheduler::{
-    drain_to_stream_teed_until, BoundedStream, JobId, JobManager, PipeReader, DEFAULT_STREAM_MAX_SIZE,
+    drain_to_stream_teed_until, BoundedStream, JobId, JobManager, PipeReader, ReadOrder, DEFAULT_STREAM_MAX_SIZE,
 };
 use crate::tools::ExecContext;
 
@@ -125,6 +125,8 @@ pub(crate) struct SpawnContext {
     pub background_stream_output: bool,
     /// Whether this command's stderr also tees into its job's stderr stream.
     pub background_stream_stderr: bool,
+    /// The kernel's output counter, for numbering reads from the child's pipes.
+    pub output_sequence: kaish_types::OutputSequence,
 }
 
 impl SpawnContext {
@@ -139,6 +141,7 @@ impl SpawnContext {
             background_job: ctx.background_job,
             background_stream_output: ctx.background_stream_output,
             background_stream_stderr: ctx.background_stream_stderr,
+            output_sequence: ctx.output_sequence.clone(),
         }
     }
 }
@@ -619,17 +622,22 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         // between a chunk's capture write and its tee write, leaving `err`
         // holding bytes counted as published that never reached the stream.
         let drain_stop = tokio_util::sync::CancellationToken::new();
+        // Read order across the two pipes is the closest kaish gets to the
+        // child's write order.
+        let read_order = Arc::new(ReadOrder::new(spawn_ctx.output_sequence.clone()));
         let stdout_task = stdout_pipe.map(|pipe| {
             let stop = drain_stop.clone();
+            let order = Some((kaish_types::StreamKind::Stdout, read_order.clone()));
             tokio::spawn(async move {
-                drain_to_stream_teed_until(pipe, stdout_clone, stdout_tee, &stop).await;
+                drain_to_stream_teed_until(pipe, stdout_clone, stdout_tee, order, &stop).await;
             })
         });
 
         let stderr_task = stderr_pipe.map(|pipe| {
             let stop = drain_stop.clone();
+            let order = Some((kaish_types::StreamKind::Stderr, read_order.clone()));
             tokio::spawn(async move {
-                drain_to_stream_teed_until(pipe, stderr_clone, stderr_tee, &stop).await;
+                drain_to_stream_teed_until(pipe, stderr_clone, stderr_tee, order, &stop).await;
             })
         });
 
@@ -738,8 +746,16 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         // result, so `curl url`, `curl url > file.bin`, etc. keep binary
         // intact. stderr stays text. See docs/binary-data.md.
         let stdout = stdout_stream.read().await;
-        let mut stderr = stderr_stream.read_string().await;
+        let stderr_bytes = stderr_stream.read().await;
+        let stderr_is_text = std::str::from_utf8(&stderr_bytes).is_ok();
+        let mut stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
         let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+        // The spans count raw bytes. A ring that evicted its head, or stderr
+        // that was not UTF-8, no longer has those bytes, so the order goes.
+        let read_order = (stderr_is_text
+            && !stdout_stream.has_overflowed().await
+            && !stderr_stream.has_overflowed().await)
+            .then(|| read_order.order());
 
         // Both streams are fixed-size rings regardless of `ctx.output_limit`
         // (that machinery only runs post-hoc, in `execute_pipeline`, and only
@@ -784,6 +800,11 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
             stderr.push_str(&format!("{label}: {msg}\n"));
         }
         result.err = stderr;
+        if let Some(order) = read_order {
+            result.set_stream_order(order);
+            // Numbers the stdin diagnostic appended above, if any.
+            result.stamp_stream_order(&spawn_ctx.output_sequence);
+        }
         result
     }
 }
