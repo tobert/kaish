@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -78,24 +77,32 @@ impl Tool for Xxd {
 
         let plain = parsed.plain;
         let reverse = parsed.reverse;
-        let length = parsed.length.map(|n| n as usize).or_else(|| {
-            args.get("length", usize::MAX).and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-        });
-        let seek = parsed
-            .seek
-            .map(|n| n as usize)
-            .or_else(|| {
-                args.get("seek", usize::MAX).and_then(|v| match v {
-                    Value::Int(i) => Some(*i as usize),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                })
-            })
-            .unwrap_or(0);
+        let length = match parsed.length {
+            Some(n) => Some(
+                match super::non_negative_count(
+                    "xxd",
+                    "-l",
+                    n,
+                    "length must be 0 or more; write `-l 0` to dump nothing",
+                ) {
+                    Ok(n) => n,
+                    Err(message) => return ExecResult::failure(2, message),
+                },
+            ),
+            None => None,
+        };
+        let seek = match parsed.seek {
+            Some(n) => match super::non_negative_count(
+                "xxd",
+                "-s",
+                n,
+                "seeking from the end is not supported; write a seek of 0 or more, such as `-s 4`",
+            ) {
+                Ok(n) => n,
+                Err(message) => return ExecResult::failure(2, message),
+            },
+            None => 0,
+        };
 
         // Read raw input from file(s) or stdin, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {
@@ -312,6 +319,7 @@ async fn reverse_hex(input: &str, plain: bool, ctx: &mut ExecContext) -> ExecRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::tools::ExecContext;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
@@ -465,5 +473,36 @@ mod tests {
         let result = Xxd.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.text_out().as_ref(), "hello");
+    }
+
+    #[rstest::rstest]
+    #[case::length_negative("length", -1, Err("-l -1"))]
+    #[case::length_zero("length", 0, Ok(""))]
+    #[case::length_valid("length", 2, Ok("6865\n"))]
+    #[case::seek_negative("seek", -1, Err("-s -1"))]
+    #[case::seek_zero("seek", 0, Ok("68656c6c6f\n"))]
+    #[case::seek_valid("seek", 2, Ok("6c6c6f\n"))]
+    #[tokio::test]
+    async fn test_xxd_count_flags(
+        #[case] flag: &str,
+        #[case] value: i64,
+        #[case] expected: Result<&str, &str>,
+    ) {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+        let mut args = ToolArgs::new();
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        args.named.insert(flag.to_string(), Value::Int(value));
+        let result = Xxd.execute(args, &mut ctx).await;
+        match expected {
+            Ok(out) => {
+                assert!(result.ok(), "{}", result.err);
+                assert_eq!(result.text_out().as_ref(), out);
+            }
+            Err(named) => {
+                assert_eq!(result.code, 2, "{}", result.text_out());
+                assert!(result.err.contains(named), "{}", result.err);
+            }
+        }
     }
 }
