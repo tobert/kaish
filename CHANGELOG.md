@@ -130,8 +130,9 @@ breaking entries are marked **BREAKING**.
   `&mut ExecContext`. It evaluates a redirect operand on the calling
   command's context; the old `&ExecContext` was ignored.
 - **BREAKING** (`kaish-tool-api`): `ToolCtx` is sealed. Tool authors receive
-  a `ToolCtx` and never implement one, so no supported use changes; an
-  out-of-tree implementation no longer compiles.
+  a `ToolCtx` and never implement one, so no supported use changes. An
+  out-of-tree implementation needs the hidden `kaish_tool_api::sealed::Sealed`
+  and is unsupported.
 - `Arg::ShortNamed { key, value }` is the parsed `-key=value` word. Every
   command receives it as the one word `-key=value`.
 - `Kernel::execute_argv` no longer expands a leading `~` in an argv token;
@@ -159,7 +160,7 @@ breaking entries are marked **BREAKING**.
   pasting. It ran as two words; bash reads one word, `ab`.
 - A kernel builtin dispatched with a context that is not the kernel's
   panics instead of exiting 1 with an internal message. Sealing `ToolCtx`
-  makes that branch unreachable.
+  makes that branch unreachable for supported use.
 - `scatter` refuses its own redirects with exit 2 and names the fix: pipe the
   input in. `gather`'s `<` refusal moves from exit 1 to exit 2.
   `scatter < list | work | gather` ran with no items and exit 0.
@@ -186,9 +187,9 @@ breaking entries are marked **BREAKING**.
 - `xxd -l`, `xxd -s`, `base64 -w`, `diff -C`, and `patch -p` refuse a
   negative value, exit 2, and name the fix. A negative count wrapped to a
   huge one; `xxd -l -1` dumped the whole input. `xxd -s` has no seek from end.
-- `readonly X=1` is reported as an unknown command by validation and
-  `kaish --plan`, like any other missing command. kaish has no `readonly`
-  builtin, so it exits 127; the validator no longer treats it as known.
+- `readonly X=1` is reported as an unknown command by validation, like any
+  other missing command. kaish has no `readonly` builtin, so it exits 127;
+  the validator no longer treats it as known.
 - `exit` inside a function or a sourced file ends the script, as in bash;
   it returned to the caller. `return` still stops at the function, `$( )`
   absorbs the exit, and a pipeline stage ends only itself.
