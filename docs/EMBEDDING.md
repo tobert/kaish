@@ -507,6 +507,31 @@ reporting a mode, and the failure is a wrong answer rather than an error, so
 your backend's own tests will pass. If you add a writable backend, either
 report a mode or change `resolve` and this table together.
 
+### Where a walk stops (`walk_boundaries`)
+
+Recursive walks stay in the mount region where they start: `grep -r x /` does
+not search `/v`, `/dev`, or another mount below `/`, and `grep -r x /v` walks
+`/v` and every mount nested in it. `KernelBackend::walk_boundaries` reports the
+mount points that start a region; kaish asks once per walk. The rule itself is
+`kaish_glob::WalkBoundaries`. `FileWalker::walk` returns the matches and the
+mount points the walk reached without entering (`Walk::skipped_mounts`); the
+builtins print those once on stderr. A walker of your own should say what it
+skipped too.
+
+The default reports every path from `mounts()`. `VirtualOverlayBackend`
+(`Kernel::with_backend`) adds kaish's own mounts and, when `/v` is a
+synthesized ancestor, `/v` itself, so the embedder's mounts under `/v` and
+kaish's `/v/jobs` form one region.
+
+Override it when some of your mounts are views of one filesystem that a walk
+should pass through. A backend with a read-only host root at `/` and a
+writable host directory mounted at `/home/u/src` reports both through
+`mounts()`, so by default `grep -r x /home/u` stops at `src`. Report only the
+mount points that lead somewhere a walk from `/` should not go (remote shares,
+virtual trees, devices) and the host mounts behave as one tree. A backend that
+reports nothing, and a `WalkerFs` that keeps the trait default, cross
+everything.
+
 ### What a redirect asks of a backend
 
 A redirect opens its target before the command runs, then writes once the

@@ -1457,7 +1457,10 @@ pub(crate) fn wrapper_option_layout(args: &[Arg], schema: &ToolSchema) -> (Optio
             continue;
         }
         match arg {
-            Arg::Positional(_) | Arg::WordAssign { .. } => return (Some(index), values),
+            // `-k=v` is one operand word, never an option of the wrapper.
+            Arg::Positional(_) | Arg::ShortNamed { .. } | Arg::WordAssign { .. } => {
+                return (Some(index), values);
+            }
             Arg::DoubleDash => return ((index + 1 < args.len()).then_some(index + 1), values),
             Arg::Named { .. } => {}
             Arg::ShortFlag(name) => owed = short_flag_values_owed(name, &lookup),
