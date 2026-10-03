@@ -165,7 +165,7 @@ Construct a `Kernel`, point it at a sandbox root, call `execute()`:
 
 ```toml
 [dependencies]
-kaish-kernel = "0.17"
+kaish-kernel = "0.18"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -238,7 +238,7 @@ kaish builtins run in-process, and replace calls to the host OS tools.
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
 | **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
-| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, random, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
+| **System** | alias, bg, command, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, random, read, seq, set, sleep, spawn, timeout, tokens, type, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | `:`, assert, false, test, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-last, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version, kaish-vfs |
