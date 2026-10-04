@@ -536,7 +536,14 @@ impl OverlayFs {
         for change in &changes {
             match change.kind {
                 ChangeKind::Added => {
-                    if target.exists(&change.path).await {
+                    // lstat, not exists(): exists() follows a dangling link
+                    // and answers false, and the write would then go through it.
+                    let occupied = match target.lstat(&change.path).await {
+                        Ok(_) => true,
+                        Err(ref error) if is_not_found(error) => false,
+                        Err(error) => return Err(error),
+                    };
+                    if occupied {
                         // The lead "exists in target" restated
                         // `ErrorKind::AlreadyExists`'s own meaning, and
                         // `BackendError::AlreadyExists`'s Display adds
