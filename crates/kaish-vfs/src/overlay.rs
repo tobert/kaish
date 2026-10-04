@@ -802,10 +802,44 @@ enum UpperWrite {
 }
 
 impl OverlayFs {
+    /// The path a write lands on: every symlink in `path` followed through
+    /// the merged view, as a real filesystem does, so the write reaches the
+    /// link's target and the link stays. Components that do not exist yet
+    /// are kept; the write creates them.
+    ///
+    /// This runs before the caller takes the state lock (`lstat` reads it),
+    /// so a concurrent change to a link between here and the write is not
+    /// seen.
+    async fn resolve_write_path(&self, path: &Path) -> io::Result<PathBuf> {
+        let mut existing = normalize(path);
+        let mut missing = Vec::new();
+        while !existing.as_os_str().is_empty() {
+            match self.lstat(&existing).await {
+                Ok(_) => break,
+                Err(error) if is_not_found(&error) => {
+                    let Some(name) = existing.file_name() else { break };
+                    missing.push(name.to_os_string());
+                    existing.pop();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let mut resolved = if existing.as_os_str().is_empty() {
+            PathBuf::new()
+        } else {
+            // `true`: a dangling link's target is created by the write.
+            self.canonicalize(&existing, true).await?
+        };
+        for name in missing.iter().rev() {
+            resolved.push(name);
+        }
+        Ok(normalize(&resolved))
+    }
+
     /// `write` and `replace`: copy-up bookkeeping, then the upper call
     /// `how` names.
     async fn write_file(&self, path: &Path, data: &[u8], how: UpperWrite) -> io::Result<()> {
-        let path = normalize(path);
+        let path = self.resolve_write_path(path).await?;
         let mut state = self.state.write().await;
 
         // First touch of a lower path: snapshot its content as the base.
@@ -1066,7 +1100,7 @@ impl Filesystem for OverlayFs {
     }
 
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
-        let path = normalize(path);
+        let path = self.resolve_write_path(path).await?;
         let mut state = self.state.write().await;
         if state.whiteouts.contains(&path) {
             return Err(not_found(&path));
@@ -1443,6 +1477,20 @@ mod tests {
             let err = overlay.changes().await.unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{how:?}");
         }
+    }
+
+    /// set_mtime through a lower symlink copies up the target, not the link.
+    #[tokio::test]
+    async fn test_set_mtime_through_lower_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+
+        overlay.set_mtime(Path::new("l.txt"), SystemTime::UNIX_EPOCH).await.unwrap();
+
+        assert!(overlay.lstat(Path::new("l.txt")).await.unwrap().is_symlink());
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].path, Path::new("a.txt"));
     }
 
     /// A lower symlink to a directory in the middle of the path is followed
@@ -1998,30 +2046,26 @@ mod tests {
         assert!(changes[0].current.is_none());
     }
 
-    // Symlink interleaved: remove-then-symlink-then-write is Modified with
-    // original base; dirty_symlinks ends empty (improvement 8).
+    // Symlink interleaved: remove, then symlink, then write. The write
+    // follows the dangling link and creates its target; the link stays, so
+    // changes() still refuses.
     #[tokio::test]
-    async fn test_remove_symlink_write_is_modified_with_original_base() {
+    async fn test_remove_symlink_write_creates_link_target() {
         let lower = Arc::new(MemoryFs::new());
         lower.write(Path::new("f.txt"), b"original").await.unwrap();
         let overlay = OverlayFs::over(lower);
 
-        // Remove the file (records base Some("original") + whiteout).
         overlay.remove(Path::new("f.txt")).await.unwrap();
-        // Create a symlink at the same path (clears whiteout, adds dirty_symlinks entry).
         overlay
             .symlink(Path::new("other.txt"), Path::new("f.txt"))
             .await
             .unwrap();
-        // Write over the symlink (clears dirty_symlinks on success; keeps base Some("original")).
         overlay.write(Path::new("f.txt"), b"replaced").await.unwrap();
 
-        // No dirty symlinks.
-        let changes = overlay.changes().await.unwrap();
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].kind, ChangeKind::Modified);
-        assert_eq!(changes[0].base.as_deref(), Some(b"original" as &[u8]));
-        assert_eq!(changes[0].current.as_deref(), Some(b"replaced" as &[u8]));
+        assert!(overlay.lstat(Path::new("f.txt")).await.unwrap().is_symlink());
+        assert_eq!(overlay.read(Path::new("other.txt")).await.unwrap(), b"replaced");
+        let err = overlay.changes().await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 
     #[tokio::test]
