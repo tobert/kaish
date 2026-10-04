@@ -37,11 +37,22 @@ breaking entries are marked **BREAKING**.
   the file, not the bytes the trash saved. A write between the two was
   replaced with no copy in the trash. They now transform the saved bytes
   and fail with "changed since" if the file no longer holds them.
-- An overlay write, replace, or `touch` through a symlink made a file at
-  the link's path, which hid the link. It now changes the link's target,
-  as on a real filesystem; the link stays and `kaish-vfs commit` still
-  refuses it. `kaish-vfs commit` also refuses a new file whose path holds
-  a dangling symlink in the target, instead of writing through the link.
+- In overlay mode, a path with a symlink in it could name one file for a
+  read and another for a write. A write through a link made a file that
+  hid the link, a read through a link could return a copied-up file's old
+  bytes or a removed file's bytes, and `ls` through a directory link
+  showed removed files. Every overlay operation now follows links the way
+  a real filesystem does: a write changes the link's target and the link
+  stays. A link that leaves the root is refused with "path escapes root",
+  as without the overlay.
+- In overlay mode, `rm` of a file the overlay had already changed did not
+  reach `kaish-vfs commit`. It is now a removal that commit applies.
+- `kaish-vfs commit` refuses a new file whose path holds a dangling symlink
+  in the target, instead of writing through the link.
+- The overwrite conflict error now reads "changed since kaish read it, so
+  it was not overwritten; read it again and retry". Under `set -o trash`,
+  an error reading a target's metadata now fails the command instead of
+  being read as a new file with nothing to snapshot.
 
 ## [0.18.0] - 2026-10-03
 
