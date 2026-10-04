@@ -95,3 +95,45 @@ async fn refused_flag_names_the_reason_and_the_fix(
     assert!(!result.err.contains("similar:"), "{script}: {}", result.err);
     assert_eq!(result.err.trim_end().lines().count(), 1, "{script}: {}", result.err);
 }
+
+/// Every refused flag a builtin declares is still refused, prints its hint,
+/// and is listed in `help limits`. A flag that gains an implementation must
+/// drop its hint, or this fails.
+#[tokio::test]
+async fn every_declared_refusal_is_live_and_documented() {
+    use kaish_kernel::tools::{register_builtins, ToolRegistry};
+
+    let limits = include_str!("../../kaish-help/content/en/limits.md");
+    let mut registry = ToolRegistry::new();
+    register_builtins(&mut registry);
+    let mut declared = 0;
+    for name in registry.names() {
+        let tool = registry.get(name).unwrap();
+        for refused in tool.refused_flags() {
+            let hint = refused.hint;
+            assert!(hint.contains("Run `"), "{name}: hint names no command: {hint}");
+            assert!(hint.ends_with('.'), "{name}: hint is not a sentence: {hint}");
+            assert!(!hint.contains('\n'), "{name}: hint spans lines: {hint}");
+            let first = refused.spellings[0];
+            assert!(
+                limits.contains(&format!("`{name} {first}`")),
+                "help limits does not list `{name} {first}`"
+            );
+            for spelling in refused.spellings {
+                declared += 1;
+                let dir = tempdir().unwrap();
+                fs::write(dir.path().join("f"), "x\n").unwrap();
+                let kernel = kernel_at(dir.path());
+                let script = format!("{name} {spelling} f g");
+                let result = kernel.execute(&script).await.unwrap();
+                assert_eq!(result.code, 2, "{script}: {}", result.err);
+                assert_eq!(
+                    result.err,
+                    format!("{name}: {spelling} is not supported: {hint}\n"),
+                    "{script}"
+                );
+            }
+        }
+    }
+    assert!(declared > 0, "no builtin declares a refused flag");
+}

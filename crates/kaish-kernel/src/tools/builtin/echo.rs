@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema};
 
 /// Echo tool: prints arguments to stdout.
 pub struct Echo;
@@ -24,10 +24,22 @@ struct EchoArgs {
     words: Vec<String>,
 }
 
+/// Flags echo rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-e"],
+        "double-quoted strings already expand escapes like \\n and \\t. Run `echo \"a\\tb\"`, or `printf 'a\\tb\\n'`.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Echo {
     fn name(&self) -> &str {
         "echo"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {

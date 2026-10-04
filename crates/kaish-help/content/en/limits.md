@@ -40,12 +40,38 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
 | `ls`/`find`/`glob` | A name containing a newline is **refused** in text output (exit 2), naming the path and `--json`. One newline is one path boundary in text, so reporting such a name would split it into two paths that name no file. `--json` reads it losslessly. |
 | `ps` | Linux-only (reads `/proc`) |
-| `find` expressions | At most 256 expression nodes (tests, operators, and groups), with at most 64 nested groups or negations. Larger expressions exit 2; split the expression into smaller searches. No `-exec` or `-delete`. |
+| `find` expressions | At most 256 expression nodes (tests, operators, and groups), with at most 64 nested groups or negations. Larger expressions exit 2; split the expression into smaller searches. No `-exec` or `-delete`; see Flags kaish Drops on Purpose. |
 | `cat -A/-v/-E/-T` | Buffers input before marking bytes. `-A` is `-vET`; `-n` with `-E` or `-T` needs UTF-8 text unless `-v` is also given. |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
 | `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
 | `kaish-output-limit` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
+
+## Flags kaish Drops on Purpose
+
+A flag in this table exits 2 with the reason and the command to run instead:
+
+```
+cp -p a.txt b.txt
+cp: -p is not supported: kaish cannot copy a file's mode, owner, or times; no builtin sets them from another file. Run `cp SRC DST`; the copy gets the current time.
+```
+
+Any other unknown flag exits 2 and names `help NAME` for the supported flags.
+
+| Flag | Reason | Use instead |
+|------|--------|-------------|
+| `cp -p`, `--preserve` | kaish cannot copy a file's mode, owner, or times | `cp SRC DST` |
+| `cp -a`, `--archive` | Same as `-p` | `cp -rP SRC DST` |
+| `cp -f`, `--force` | `cp` already replaces an existing destination | `cp SRC DST` |
+| `cp -i`, `--interactive` | kaish never prompts | `cp -n SRC DST` |
+| `mv -f`, `--force` | `mv` already replaces an existing destination | `mv SRC DST` |
+| `mv -i`, `--interactive` | kaish never prompts | `mv -n SRC DST` |
+| `mkdir -m`, `--mode` | kaish cannot set a directory's mode | `mkdir DIR` |
+| `echo -e` | Double-quoted strings already expand `\n` and `\t` | `echo "a\tb"` or `printf 'a\tb\n'` |
+| `printf -v` | Assignment takes command substitution | `NAME=$(printf FORMAT ARGS)` |
+| `grep -P`, `--perl-regexp` | grep reads GNU BRE or ERE; no look-around or back-references | `grep -E '[0-9]+'` for `\d+` |
+| `find -delete` | `find` only prints paths, one per line | `for f in $(find . -name '*.tmp'); do rm "$f"; done` |
+| `find -exec`, `-execdir`, `-ok`, `-okdir` | `find` only prints paths, one per line | `for f in $(find . -name '*.txt'); do wc -l "$f"; done` |
 
 ## Execution
 

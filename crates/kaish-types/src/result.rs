@@ -341,10 +341,6 @@ impl ExecResult {
         }
     }
 
-    /// Create a failed result with an error message.
-    ///
-    /// The message is normalized to the stderr line contract: it ends with
-    /// exactly one newline (unless empty), so renderers print it verbatim.
     /// Mark this result as a fault: it could not decide, rather than
     /// deciding `false`. See [`Self::fault`].
     #[must_use]
@@ -353,6 +349,10 @@ impl ExecResult {
         self
     }
 
+    /// Create a failed result with an error message.
+    ///
+    /// The message is normalized to the stderr line contract: it ends with
+    /// exactly one newline (unless empty), so renderers print it verbatim.
     pub fn failure(code: i64, err: impl Into<String>) -> Self {
         Self {
             code,

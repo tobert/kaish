@@ -10,6 +10,26 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`Tool::refused_flags()`** lets a tool list flags it rejects on purpose,
+  each as a `RefusedFlag` with a reason and the command to run instead. The
+  default is none.
+
+### Changed
+
+- **A flag kaish drops on purpose names the reason and the fix.**
+  `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
+  mode, owner, or times; no builtin sets them from another file. Run
+  `cp SRC DST`; the copy gets the current time.` and exits 2. Covered:
+  `cp -p/-a/-f/-i`, `mv -f/-i`, `mkdir -m`, `echo -e`, `printf -v`,
+  `grep -P`, `find -delete/-exec/-execdir/-ok/-okdir`. See `help limits`.
+
+### Fixed
+
+- **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
+  output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.
+
 ## [0.18.0] - 2026-10-03
 
 ### Added
