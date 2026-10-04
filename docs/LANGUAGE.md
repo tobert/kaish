@@ -768,6 +768,16 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
+> **`>` rewrites in place; `sed -i` and `patch` replace.** `>`, `tee`,
+> and `write` truncate the file and write into it, as bash does, so the
+> file keeps its inode and its hard links. `sed -i`, `patch`, and
+> `kaish-vfs commit` write a new file beside the target and rename it over
+> the old one, as GNU `sed -i` does: a crash leaves the old file or the new
+> one, never a partial file. The new file keeps the old file's mode, is
+> owned by the user kaish runs as, and is not shared with hard links to the
+> old file. The directory must be writable; when it is not, the command
+> exits 1 naming the directory, and the file keeps its content.
+>
 > **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
 > join captured stdout first, then stderr. kaish does not preserve the
 > command's interleaved write order. If stderr has already reached a
