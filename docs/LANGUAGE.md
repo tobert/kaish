@@ -1695,6 +1695,19 @@ diff --json before after       # exit 1, answer under data
 
 Only the final builtin pipeline stage is formatted; earlier stages feed streams to the next stage. Command substitution captures the formatted result. `true` and `false` honor `--json` and its disabled forms. External commands receive the flag literally. Parse/validation refusals, unresolved commands, and redirect failures before builtin dispatch do not use this formatter. An output spill happens after formatting, so exit 3 keeps the truncated preview and spill metadata; the preview may be incomplete JSON. See "Shell Options".
 
+### Line anchors (`--hashline`)
+
+```sh
+cat --hashline main.rs                 # 1:d246:use std::io;
+grep --hashline TODO src/a.rs src/b.rs # src/b.rs:12:5b0b:    // TODO: retry
+grep -o --hashline main main.rs        # 3:1d48:main — the anchor names the whole line
+head -n 1 main.rs --json               # [{"TEXT":"use std::io;","line":1,"hash":"d246"}]
+```
+
+`--hashline` prints each row as `LINE:HASH:TEXT`, after any file name `grep` adds. `LINE:HASH` is the anchor `edit` takes. The hash covers the line without its terminator (`\n` or `\r\n`); a lone `\r` at the end of the file is text. By default it is FNV-1a, 4 hex digits; an embedder can choose another hash. Under `--json`, the same rows carry `"hash"` beside `"line"`, and `--json` wins when both flags are given.
+
+An anchor exists only for a line read from a named file. `cat`, `head`, `tail`, and `grep` produce them; `grep -A/-B/-C` context lines are anchored too. These exit 2 and name the form that works, because their line numbers are not lines of one file: input from stdin (`cat f | grep --hashline x`), more than one file to `cat`, `head`, or `tail` (`grep` takes several and names each), `head -c` and `tail -c`, `cat -v/-E/-T/-A`, and any builtin whose output has no anchors (`ls --hashline`). Under `--json` those rows keep `"line"` and have no `"hash"`.
+
 ## Background Jobs
 
 ```sh

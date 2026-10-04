@@ -9,6 +9,8 @@ pub mod bytes;
 pub mod clock;
 pub mod command;
 pub mod dir_entry;
+// Not flat-re-exported: `lines` would shadow nothing today but is generic.
+pub mod hashline;
 pub mod job;
 pub mod kernel;
 pub mod output;
@@ -28,6 +30,7 @@ pub use backend::*;
 pub use bytes::{bytes_to_envelope, envelope_to_bytes, hex_dump};
 pub use command::*;
 pub use dir_entry::*;
+pub use hashline::LineHasher;
 pub use job::*;
 pub use kernel::*;
 pub use output::*;

@@ -24,6 +24,11 @@ struct HeadArgs {
     #[arg(short = 'c', long = "bytes")]
     bytes: Option<i64>,
 
+    /// Print each line as LINE:HASH:TEXT. `edit` takes LINE:HASH as an
+    /// anchor. Needs exactly one FILE; not with -c.
+    #[arg(long)]
+    hashline: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -87,6 +92,7 @@ impl Tool for Head {
             Err(e) => return ExecResult::failure(2, format!("head: {e}")),
         };
         parsed.global.apply(ctx);
+        let wants_anchors = parsed.global.apply_hashline(parsed.hashline, ctx);
 
         // Collect all file paths, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {
@@ -107,6 +113,22 @@ impl Tool for Head {
             }
             other => other.map(|b| b as usize),
         };
+
+        let hashline = parsed.hashline && !parsed.global.json;
+        if hashline {
+            if bytes.is_some() {
+                return super::hashline::flag("head", "-c", "it counts bytes, not lines");
+            }
+            if paths.len() > 1 {
+                return super::hashline::several_files("head", paths.len());
+            }
+            if paths.is_empty() {
+                return super::hashline::stdin("head", "head --hashline FILE");
+            }
+        }
+        // Rows from one named file are file lines; stdin rows are not.
+        let hasher = (wants_anchors && paths.len() == 1)
+            .then(|| ctx.line_hasher.clone());
 
         // Multiple files: show each with header
         if paths.len() > 1 {
@@ -193,7 +215,7 @@ impl Tool for Head {
         // checkpointed loop rather than `.lines().collect()` so a script
         // timeout can stop it.
         let mut all_lines: Vec<&str> = Vec::new();
-        for line in input.lines() {
+        for line in kaish_types::hashline::lines(&input) {
             if ctx.checkpoint().await.is_err() {
                 return kaish_tool_api::Interrupted.result("head");
             }
@@ -210,11 +232,7 @@ impl Tool for Head {
         } else {
             // The line number is the typed anchor, not a column: `head`
             // starts at line 1, so the index IS the file line number.
-            let nodes: Vec<OutputNode> = output_lines
-                .iter()
-                .enumerate()
-                .map(|(i, line)| OutputNode::new(*line).at_line(i as u64 + 1))
-                .collect();
+            let nodes: Vec<OutputNode> = super::file_line_rows(&output_lines, 1, hasher.as_ref());
 
             let output_data = OutputData::table(vec!["TEXT".to_string()], nodes);
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))

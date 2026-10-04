@@ -160,14 +160,29 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
 }
 
 /// Stripped of trailing `\n` (and one `\r` if it precedes that `\n`).
+///
+/// A lone `\r` at the end of the input stays: it is text, as `str::lines`
+/// and GNU grep both treat it, so a line anchor hashes the same bytes here
+/// as in `cat --hashline`.
 fn trim_line_terminator(bytes: &[u8]) -> &[u8] {
-    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    bytes.strip_suffix(b"\r").unwrap_or(bytes)
+    match bytes.strip_suffix(b"\n") {
+        Some(line) => line.strip_suffix(b"\r").unwrap_or(line),
+        None => bytes,
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_terminator_is_trimmed() {
+        use super::trim_line_terminator;
+        assert_eq!(trim_line_terminator(b"a\r\n"), b"a");
+        assert_eq!(trim_line_terminator(b"a\n"), b"a");
+        assert_eq!(trim_line_terminator(b"a\r"), b"a\r");
+        assert_eq!(trim_line_terminator(b"a"), b"a");
+    }
+
     use super::*;
     use grep_regex::RegexMatcher;
     use grep_searcher::SearcherBuilder;

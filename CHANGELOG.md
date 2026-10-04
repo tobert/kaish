@@ -10,6 +10,36 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
+  print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
+  anchor the coming `edit` builtin takes. `grep` prefixes file names across
+  several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
+  context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
+  `cat -v/-E/-T/-A`, `grep -c/-l`, and other builtins (`ls --hashline`)
+  exit 2 and name the form that works.
+- **`--json` rows carry `hash` beside `line`** when the row is a line of
+  one named file, including `grep --json` match records.
+- **`KernelConfig::with_line_hasher`** chooses the line hash. The default
+  is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
+  holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
+  anchor uses. Builtins hash through `ToolCtx::line_hash`.
+
+### Changed
+
+- **API:** `ToolCtx` has a required `line_hash` method; the trait is
+  sealed, so only the kernel implements it. `OutputFormat` has a
+  `Hashline` variant, `OutputNode` a `hash` field, and `GlobalFlags` an
+  `apply_hashline` method for a tool that declares `--hashline`. Only
+  `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
+  not list it; elsewhere it exits 2 naming those four.
+
+### Fixed
+
+- `grep` dropped a lone `\r` at the end of a file without a final newline.
+  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
+
 ## [0.18.0] - 2026-10-03
 
 ### Added

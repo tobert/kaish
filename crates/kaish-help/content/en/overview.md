@@ -57,7 +57,7 @@ A row that came from a line of a file carries `line`, a 1-based integer:
 
 ```sh
 grep -n fn main.rs --json | jq '.[].line'
-head -n 3 main.rs --json                  # [{"TEXT":"…","line":1}, …]
+head -n 3 main.rs --json                  # [{"TEXT":"…","line":1,"hash":"d246"}, …]
 cat -n main.rs --json | jq 'map(select(.line > 40))'
 ```
 
@@ -66,6 +66,19 @@ whether the anchor exists. `tail` reports the line's position in the file, not
 its position among the rows `tail` printed. A row with no line to point at (a
 file listing, a process) has no `line` key at all, so `has("line")` is a real
 question to ask.
+
+`--hashline` prints the same rows as `LINE:HASH:TEXT`. `LINE:HASH` is the
+anchor `edit` takes:
+
+```sh
+cat --hashline main.rs                    # 1:d246:use std::io;
+grep --hashline TODO src/a.rs src/b.rs    # src/b.rs:12:5b0b:    // TODO: retry
+```
+
+Anchors exist only for lines read from a named file, so `--hashline` exits 2 on
+stdin, on several files to `cat`/`head`/`tail`, and on output without anchors
+(`ls --hashline`). Under `--json` an anchored row also carries `hash`. See
+`docs/LANGUAGE.md`, "Line anchors (`--hashline`)".
 
 ## Quick Examples
 

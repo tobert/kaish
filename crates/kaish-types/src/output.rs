@@ -83,6 +83,13 @@ pub struct OutputNode {
     /// a cell is a rendering choice, positional and per-builtin, and reading
     /// one back is what this field exists to stop.
     pub line: Option<u64>,
+    /// The hash half of the line anchor `42:202b`, computed by the kernel's
+    /// [`LineHasher`](crate::hashline::LineHasher).
+    ///
+    /// Set only when `line` is a line of one named file, so that `line` and
+    /// `hash` together name text `edit` can find. A row from stdin or from a
+    /// concatenation of files has a `line` but no `hash`.
+    pub hash: Option<String>,
 }
 
 impl OutputNode {
@@ -120,6 +127,13 @@ impl OutputNode {
     /// ```
     pub fn at_line(mut self, line: u64) -> Self {
         self.line = Some(line);
+        self
+    }
+
+    /// Set the hash half of the line anchor. Pair it with
+    /// [`at_line`](Self::at_line) and get the hash from the kernel's hasher.
+    pub fn with_hash(mut self, hash: impl Into<String>) -> Self {
+        self.hash = Some(hash.into());
         self
     }
 
@@ -523,6 +537,9 @@ impl OutputData {
                 if let Some(line) = node.line {
                     map.insert("line".to_string(), serde_json::Value::from(line));
                 }
+                if let Some(hash) = &node.hash {
+                    map.insert("hash".to_string(), serde_json::Value::String(hash.clone()));
+                }
                 if !node.children.is_empty() {
                     let children: Vec<serde_json::Value> = node
                         .children
@@ -585,6 +602,51 @@ impl OutputData {
 pub enum OutputFormat {
     /// JSON serialization via OutputData::to_json()
     Json,
+    /// Each row as `LINE:HASH:TEXT`, behind any cells (`FILE:LINE:HASH:TEXT`
+    /// for `grep`). Every row must carry a line anchor.
+    Hashline,
+}
+
+/// What `--hashline` says when the output has no line anchors.
+const NO_ANCHORS: &str = "--hashline: this output has no line anchors. Anchors come from \
+cat, head, tail, and grep reading a named file: cat --hashline FILE";
+
+/// Render every row as `[CELL:...]LINE:HASH:TEXT`, or refuse when a row has
+/// no anchor.
+fn render_hashline(output: &OutputData) -> Result<String, String> {
+    let mut text = String::new();
+    for node in &output.root {
+        let (Some(line), Some(hash)) = (node.line, &node.hash) else {
+            return Err(NO_ANCHORS.to_string());
+        };
+        for cell in &node.cells {
+            text.push_str(cell);
+            text.push(':');
+        }
+        text.push_str(&format!("{line}:{hash}:"));
+        text.push_str(node.display_name());
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+/// `--hashline`: re-render anchored rows; a failure keeps its own output.
+fn apply_hashline(mut result: ExecResult) -> ExecResult {
+    let rendered = match result.output() {
+        Some(output) => render_hashline(output),
+        None if result.is_bytes() || !result.text_out().is_empty() => Err(NO_ANCHORS.to_string()),
+        None => return result,
+    };
+    match rendered {
+        Ok(text) => {
+            result.set_out(text);
+            result.set_output(None);
+            result
+        }
+        // A failed command already says what went wrong; don't bury it.
+        Err(_) if !result.ok() => result,
+        Err(message) => ExecResult::failure(2, message),
+    }
 }
 
 /// Transform an ExecResult into the requested output format.
@@ -596,6 +658,9 @@ pub enum OutputFormat {
 /// (structured) or `output` (text). Apps check the exit code, then `error`.
 /// An unchanged failure formatted again in-process keeps its existing envelope.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
+    if format == OutputFormat::Hashline {
+        return apply_hashline(result);
+    }
     if !result.ok() {
         return failure_envelope(result, format);
     }
@@ -604,6 +669,8 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
     if result.is_bytes() {
         let envelope = crate::bytes::bytes_to_envelope(result.out_bytes().unwrap_or(&[]));
         match format {
+            // `apply_output_format` sends --hashline to `apply_hashline` first.
+            OutputFormat::Hashline => unreachable!("--hashline never reaches JSON formatting"),
             OutputFormat::Json => {
                 result.set_out(
                     serde_json::to_string(&envelope).unwrap_or_else(|_| "null".to_string()),
@@ -619,6 +686,8 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         return result;
     }
     match format {
+        // `apply_output_format` sends --hashline to `apply_hashline` first.
+        OutputFormat::Hashline => unreachable!("--hashline never reaches JSON formatting"),
         OutputFormat::Json => {
             if let Some(output) = result.output() {
                 let json_value = output.to_json();
@@ -655,6 +724,8 @@ fn failure_envelope(mut result: ExecResult, format: OutputFormat) -> ExecResult 
         return result;
     }
     match format {
+        // `apply_output_format` sends --hashline to `apply_hashline` first.
+        OutputFormat::Hashline => unreachable!("--hashline never reaches JSON formatting"),
         OutputFormat::Json => {
             // Remove the single rendering terminator, keeping message blank lines.
             let mut obj = serde_json::json!({
@@ -728,6 +799,73 @@ mod tests {
             {"NAME": "foo.rs", "SIZE": "1024", "TYPE": "file"},
             {"NAME": "bar/", "SIZE": "4096", "TYPE": "dir"},
         ]));
+    }
+
+    #[test]
+    fn to_json_puts_the_hash_beside_the_line() {
+        let output = OutputData::table(
+            vec!["TEXT".into()],
+            vec![
+                OutputNode::new("alpha").at_line(1).with_hash("202b"),
+                OutputNode::new("stdin row").at_line(2),
+            ],
+        );
+        assert_eq!(output.to_json(), serde_json::json!([
+            {"TEXT": "alpha", "line": 1, "hash": "202b"},
+            {"TEXT": "stdin row", "line": 2},
+        ]));
+    }
+
+    #[test]
+    fn hashline_renders_anchor_then_text() {
+        let output = OutputData::table(
+            vec!["TEXT".into()],
+            vec![
+                OutputNode::new("alpha").at_line(1).with_hash("202b"),
+                OutputNode::new("").at_line(2).with_hash("2325"),
+            ],
+        );
+        let result = apply_output_format(
+            ExecResult::with_output_and_text(output, "alpha\n\n"),
+            OutputFormat::Hashline,
+        );
+        assert_eq!(result.code, 0);
+        assert_eq!(result.text_out(), "1:202b:alpha\n2:2325:\n");
+    }
+
+    #[test]
+    fn hashline_puts_cells_before_the_anchor() {
+        let output = OutputData::nodes(vec![
+            OutputNode::new("fn main() {")
+                .with_cells(vec!["src/main.rs".into()])
+                .at_line(3)
+                .with_hash("9f0a"),
+        ]);
+        let result = apply_output_format(ExecResult::with_output(output), OutputFormat::Hashline);
+        assert_eq!(result.text_out(), "src/main.rs:3:9f0a:fn main() {\n");
+    }
+
+    #[test]
+    fn hashline_refuses_rows_without_an_anchor() {
+        let output = OutputData::nodes(vec![OutputNode::new("Cargo.toml")]);
+        let result = apply_output_format(ExecResult::with_output(output), OutputFormat::Hashline);
+        assert_eq!(result.code, 2);
+        assert!(result.err.contains("cat --hashline FILE"), "{}", result.err);
+        assert_eq!(result.text_out(), "");
+    }
+
+    #[test]
+    fn hashline_refuses_plain_text() {
+        let result = apply_output_format(ExecResult::success("hello\n"), OutputFormat::Hashline);
+        assert_eq!(result.code, 2);
+        assert_eq!(result.text_out(), "");
+    }
+
+    #[test]
+    fn hashline_leaves_an_empty_success_alone() {
+        let result = apply_output_format(ExecResult::success(""), OutputFormat::Hashline);
+        assert_eq!(result.code, 0);
+        assert_eq!(result.text_out(), "");
     }
 
     #[test]
