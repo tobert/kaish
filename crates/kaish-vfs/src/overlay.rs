@@ -885,7 +885,15 @@ impl OverlayFs {
         let mut hops = 0;
         while let Some(name) = pending.pop_front() {
             if name == ".." {
-                resolved.pop();
+                // `normalize` already clamped the caller's own `..`, so this
+                // one came from a link target. A link that leaves the root
+                // is refused, as LocalFs refuses it.
+                if !resolved.pop() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("path escapes root: {}", path.display()),
+                    ));
+                }
                 continue;
             }
             if name == "." {
@@ -905,8 +913,14 @@ impl OverlayFs {
                             path.display()
                         )));
                     }
-                    let target = self.layer(layer).read_link(&candidate).await?;
+                    let mut target = self.layer(layer).read_link(&candidate).await?;
                     if target.is_absolute() {
+                        // Only a lower link can be absolute (`symlink`
+                        // refuses one). The lower knows its own namespace
+                        // and root, so it maps the target or refuses it.
+                        if let Layer::Lower = layer {
+                            target = self.lower.canonicalize(&candidate, true).await?;
+                        }
                         resolved = PathBuf::new();
                     }
                     for component in target.components().rev() {
@@ -2272,6 +2286,49 @@ mod tests {
         assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
         assert!(overlay.lstat(Path::new("d/y.txt")).await.unwrap().is_symlink());
         assert_eq!(overlay.read(Path::new("d/y.txt")).await.unwrap(), b"in dir");
+    }
+
+    /// A lower link that leaves the root is refused, as the lower LocalFs
+    /// refuses it, and nothing is written; an absolute link inside the root
+    /// is followed.
+    #[cfg(all(unix, feature = "localfs"))]
+    #[tokio::test]
+    async fn test_lower_link_out_of_the_root_is_refused() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"alpha").unwrap();
+        std::os::unix::fs::symlink("../escape", root.join("dangle")).unwrap();
+        std::os::unix::fs::symlink(root.join("a.txt"), root.join("abs")).unwrap();
+
+        let local: Arc<dyn Filesystem> = Arc::new(crate::local::LocalFs::new(&root));
+        let overlay = OverlayFs::over(local);
+
+        let err = overlay.write(Path::new("dangle"), b"x").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(!overlay.exists(Path::new("escape")).await, "not folded into the root");
+        assert!(overlay.changes().await.unwrap().is_empty());
+
+        assert_eq!(overlay.read(Path::new("abs")).await.unwrap(), b"alpha");
+    }
+
+    /// remove, then symlink, then remove keeps the file's base: the result is
+    /// a Removed change and the base stays charged exactly once.
+    #[tokio::test]
+    async fn test_remove_symlink_remove_keeps_the_base() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("f.txt"), b"original").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+        overlay.symlink(Path::new("other"), Path::new("f.txt")).await.unwrap();
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].kind, ChangeKind::Removed);
+        assert_eq!(changes[0].base.as_deref(), Some(b"original" as &[u8]));
+        assert_eq!(overlay.resident_bytes(), Some(8));
     }
 
     #[tokio::test]
