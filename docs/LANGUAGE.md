@@ -1718,6 +1718,29 @@ head -n 1 main.rs --json               # [{"TEXT":"use std::io;","line":1,"hash"
 
 An anchor exists only for a line read from a named file. `cat`, `head`, `tail`, and `grep` produce them; `grep -A/-B/-C` context lines are anchored too. These exit 2 and name the form that works, because their line numbers are not lines of one file: input from stdin (`cat f | grep --hashline x`), more than one file to `cat`, `head`, or `tail` (`grep` takes several and names each), `head -c` and `tail -c`, `cat -v/-E/-T/-A`, and any builtin whose output has no anchors (`ls --hashline`). Under `--json` those rows keep `"line"` and have no `"hash"`.
 
+
+### Editing by anchor (`edit`)
+
+```sh
+cat --hashline config.toml                        # 3:a8c7:port = 8080
+edit config.toml 3:a8c7 'port = 9090'             # 3:<new hash>:port = 9090
+edit config.toml 3:a8c7..4:45be 'port = 9090
+timeout = 60'                                     # a range; a newline in TEXT makes two lines
+edit config.toml --delete 6:8d62..10:2325         # delete lines 6 to 10
+edit config.toml --after 2:7f4b 'workers = 4'     # insert after line 2
+edit config.toml --before 1:63d0 '# app'          # insert before line 1
+edit config.toml 12:5f5e 'enabled = true' 13:fbb6 'size = 512'   # one batch
+```
+
+`edit FILE ANCHOR TEXT` replaces the anchored line, or the range `ANCHOR..ANCHOR` (both ends included), with TEXT. `--delete`, `--after`, and `--before` delete and insert. Every anchor in one call refers to the file as it was read, so line numbers do not shift between the edits of a batch. Before writing, `edit` hashes each anchored line as it is now. If any anchor no longer matches, it writes nothing, exits 1, and names each line with its current text: `line 12 changed since you read it (now: enabled = maybe); nothing was written. Read it again before editing: cat --hashline config.toml`.
+
+TEXT is the next word after an anchor, even when it starts with `-`. `''` is one empty line, and one trailing newline does not add a line. kaish has no `$'...'` quoting; put a real newline inside the quotes. New lines use the file's line ending (`\r\n` when the file has one), and the file keeps its final newline, or lack of one.
+
+On success, `edit` prints the new and changed lines with their new anchors, ready for the next edit. When more than 40 lines changed, it prints one summary line that names `tail -n +START --hashline FILE | head -n COUNT` instead. Deleted lines print nothing. `-q` prints nothing; `--json` gives the same rows with `line` and `hash`.
+
+Exit 2, writing nothing: a word that is not `LINE:HASH`, an anchor without TEXT (the error names `--delete`), a range given to `--after` or `--before`, two edits that touch the same line, and an insert anchored on a line the same call deletes or replaces. Exit 1, writing nothing: a stale anchor, a missing file, or a file that is not UTF-8 text.
+
+The write is an atomic replace, as for `sed -i` (see "Pipes & Redirects"): after a crash the file is old or new, never partial. `edit` re-reads the file just before replacing it and refuses if it changed since it was read. Under `set -o trash`, the prior content goes to the trash first.
 ## Background Jobs
 
 ```sh

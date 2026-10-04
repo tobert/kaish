@@ -12,6 +12,15 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **`edit` changes lines by anchor.** `edit FILE ANCHOR TEXT` replaces a
+  line or an `A..B` range; `--delete`, `--after`, and `--before` delete
+  and insert. Every anchor in one call refers to the file as read, and
+  nothing is written unless every anchor still matches; a stale anchor
+  exits 1 naming the line's current text and `cat --hashline FILE`. New
+  lines keep the file's line ending and final newline. Success prints the
+  changed lines with their new anchors (a summary past 40 lines; `-q` for
+  none). The write is an atomic replace. `patch` stays a faithful GNU
+  `patch`. (#375)
 - **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
   print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
   anchor the coming `edit` builtin takes. `grep` prefixes file names across

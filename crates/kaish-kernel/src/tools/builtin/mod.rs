@@ -22,6 +22,7 @@ mod diff;
 mod dirname;
 mod patch;
 mod echo;
+mod edit;
 mod env;
 #[cfg(feature = "subprocess")]
 mod exec;
@@ -372,6 +373,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(diff::Diff);
     registry.register(dirname::Dirname);
     registry.register(echo::Echo);
+    registry.register(edit::Edit);
     registry.register(env::Env);
     #[cfg(feature = "subprocess")]
     registry.register(exec::Exec);
