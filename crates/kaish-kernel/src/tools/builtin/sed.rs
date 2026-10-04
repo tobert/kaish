@@ -13,12 +13,11 @@ use regex::{Regex, RegexBuilder};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::backend::PatchOp;
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, translate_strict_ere};
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{cas_replace, exec_context, read_for_replace, schema_from_clap, OverwriteExpectation, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Sed tool: stream editor for text transformations.
@@ -229,13 +228,10 @@ impl Tool for Sed {
                 hint_prefix.push_str(&format!(" -e '{escaped}'"));
             }
             let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
-            if let Err(blocked) = ctx
-                .snapshot_overwrites("sed",
-                    &targets)
-                .await
-            {
-                return blocked;
-            }
+            let mut known = match ctx.snapshot_overwrites("sed", &targets).await {
+                Ok(snapshots) => snapshots,
+                Err(blocked) => return blocked,
+            };
 
             // Apply per file; continue past per-file errors but report every one
             // so a multi-file failure isn't masked down to just the last.
@@ -243,7 +239,7 @@ impl Tool for Sed {
             for path in &files {
                 let resolved = ctx.resolve_path(path);
                 let target = Path::new(&resolved);
-                let content = match ctx.backend.read(target, None).await {
+                let content = match read_for_replace(&*ctx.backend, target, &known).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {
@@ -260,17 +256,15 @@ impl Tool for Sed {
                     Ok(o) => o,
                     Err(i) => return i.result("sed"),
                 };
-                // Whole-file compare-and-swap, matching patch: the `expected`
-                // makes a concurrent change between read and write a loud
-                // Conflict, never a silent clobber.
-                let ops = vec![PatchOp::Replace {
-                    offset: 0,
-                    len: content.len(),
-                    content: output,
-                    expected: Some(content.clone()),
-                }];
-                if let Err(e) = ctx.backend.patch(target, &ops).await {
-                    errors.push(format!("sed: {}: {}", path, e));
+                // The file must still hold the bytes sed read, else a writer
+                // got in between and replacing would lose its change.
+                let expected = OverwriteExpectation::Bytes(content.into_bytes());
+                match cas_replace(&*ctx.backend, target, output.as_bytes(), Some(&expected)).await {
+                    Ok(()) => {
+                        // A repeated operand starts from this output.
+                        known.insert(resolved.clone(), OverwriteExpectation::Bytes(output.into_bytes()));
+                    }
+                    Err(e) => errors.push(format!("sed: {}: {}", path, e)),
                 }
             }
             return if errors.is_empty() {

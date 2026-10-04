@@ -454,6 +454,43 @@ pub(crate) async fn cas_overwrite(
     content: &[u8],
     expected: Option<&OverwriteExpectation>,
 ) -> Result<(), crate::backend::BackendError> {
+    cas_write(backend, resolved, content, expected, crate::backend::WriteMode::Overwrite).await
+}
+
+/// [`cas_overwrite`] for a read-modify-write: the new content replaces the
+/// file atomically (`WriteMode::Replace`), so a crash leaves the old file or
+/// the new one, never a partial file.
+pub(crate) async fn cas_replace(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    content: &[u8],
+    expected: Option<&OverwriteExpectation>,
+) -> Result<(), crate::backend::BackendError> {
+    cas_write(backend, resolved, content, expected, crate::backend::WriteMode::Replace).await
+}
+
+/// The bytes a read-modify-write transforms. A path in `known` (the trash
+/// snapshot, or what this command last wrote there) uses those bytes, so the
+/// trash holds exactly the version that is replaced; any other path is read.
+/// Pass the result to [`cas_replace`] as the expectation.
+pub(crate) async fn read_for_replace(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    known: &GateExpectations,
+) -> Result<Vec<u8>, crate::backend::BackendError> {
+    match known.get(resolved) {
+        Some(OverwriteExpectation::Bytes(bytes)) => Ok(bytes.clone()),
+        None => backend.read(resolved, None).await,
+    }
+}
+
+async fn cas_write(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    content: &[u8],
+    expected: Option<&OverwriteExpectation>,
+    mode: crate::backend::WriteMode,
+) -> Result<(), crate::backend::BackendError> {
     // A re-read or re-digest failure propagates loudly — never
     // `unwrap_or_default()` to empty bytes, which would false-match an empty
     // snapshot (silent overwrite) or report a bogus "file changed" for a real
@@ -467,9 +504,7 @@ pub(crate) async fn cas_overwrite(
         }
         None => {}
     }
-    backend
-        .write(resolved, content, crate::backend::WriteMode::Overwrite)
-        .await
+    backend.write(resolved, content, mode).await
 }
 
 /// One wording for "somebody else wrote this while the write-model gate was
@@ -1191,8 +1226,9 @@ impl ExecContext {
     ///
     /// `Ok(snapshots)` means every snapshot is done and the caller may write
     /// all targets; `snapshots` maps each trash-snapshotted target's resolved
-    /// path to its prior bytes, so a byte-oriented caller can pass them as the
-    /// `expected` to `overwrite_checked` for a binary-safe compare-and-swap.
+    /// path to its prior bytes. A writer passes them as the `expected` to
+    /// `overwrite_checked`; a read-modify-write starts from them through
+    /// `read_for_replace`, so the trash holds the version it replaces.
     /// `Err(result)` is what the caller must return verbatim — a trash failure
     /// is an error, never a fall-through to a destructive overwrite.
     // `ExecResult` IS the error here — `Err(result)` is what the caller

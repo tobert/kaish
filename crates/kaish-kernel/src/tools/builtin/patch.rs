@@ -14,11 +14,10 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
-use crate::tools::{exec_context, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{cas_replace, exec_context, read_for_replace, schema_from_clap, ExecContext, OverwriteExpectation, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
 pub struct Patch;
@@ -150,6 +149,7 @@ impl Tool for Patch {
         // always rewrites an existing file, so every target is a non-append
         // overwrite. The snapshot copies the prior content (it doesn't move
         // the file), so the read below still finds it before the replace.
+        let mut known = crate::tools::GateExpectations::new();
         if !dry_run {
             let targets: Vec<(String, bool)> = groups
                 .iter()
@@ -161,12 +161,9 @@ impl Tool for Patch {
                     (p, false)
                 })
                 .collect();
-            if let Err(blocked) = ctx
-                .snapshot_overwrites("patch",
-                    &targets)
-                .await
-            {
-                return blocked;
+            match ctx.snapshot_overwrites("patch", &targets).await {
+                Ok(snapshots) => known = snapshots,
+                Err(blocked) => return blocked,
             }
         }
 
@@ -185,7 +182,7 @@ impl Tool for Patch {
 
             // Read current file content — patch is a text operation; a binary
             // target is a loud error, not a lossy decode.
-            let current_content = match ctx.backend.read(path, None).await {
+            let current_content = match read_for_replace(&*ctx.backend, path, &known).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(s) => s,
                     Err(_) => {
@@ -232,22 +229,17 @@ impl Tool for Patch {
                     output.push_str(&format!("  {}\n", describe_outcome(h)));
                 }
             } else {
-                // Whole-file compare-and-swap replace: TOCTOU-safe (the CAS
-                // `expected` makes a concurrent change a loud Conflict, never a
-                // silent overwrite) and uniform across local/overlay backends,
-                // which both route `Replace` through `apply_patch_op`.
-                let ops = vec![PatchOp::Replace {
-                    offset: 0,
-                    len: current_content.len(),
-                    content: new_content,
-                    expected: Some(current_content.clone()),
-                }];
-                if let Err(e) = ctx.backend.patch(path, &ops).await {
+                // The file must still hold the bytes patch read, else a
+                // writer got in between and replacing would lose its change.
+                let expected = OverwriteExpectation::Bytes(current_content.into_bytes());
+                if let Err(e) = cas_replace(&*ctx.backend, path, new_content.as_bytes(), Some(&expected)).await {
                     return ExecResult::failure(
                         1,
                         format!("patch: failed to apply to '{}': {}", target_path, e),
                     );
                 }
+                // A later group for the same file starts from this content.
+                known.insert(resolved_path.clone(), OverwriteExpectation::Bytes(new_content.into_bytes()));
                 output.push_str(&format!("patching file {}\n", target_path));
                 // Follow patch(1): stay quiet on a clean apply; report offset/fuzz
                 // loudly when a hunk landed off its header position or needed

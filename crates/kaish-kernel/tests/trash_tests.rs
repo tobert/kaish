@@ -456,6 +456,22 @@ async fn sed_in_place_refuses_a_change_made_after_the_snapshot() {
     );
 }
 
+/// A file named twice is edited twice, the second pass starting from the
+/// first pass's output, not from the snapshot (which would be a conflict).
+#[tokio::test]
+async fn sed_in_place_repeated_operand_edits_twice_under_trash() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "aa\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let session = kernel_with_trash(dir.path(), &mock);
+
+    run(&session, "set -o trash").await;
+    let r = run(&session, "sed -i 's/a/b/' f.txt f.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).expect("read"), "bb\n");
+    assert_eq!(mock.snapshots().len(), 1, "one snapshot for one file");
+}
+
 #[tokio::test]
 async fn sed_in_place_multi_file_and_e_flag_edits_all() {
     let dir = tempdir();
