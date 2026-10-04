@@ -33,6 +33,15 @@ breaking entries are marked **BREAKING**.
 - `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
   did not know as `Overwrite`. They now return `InvalidOperation` naming
   the mode.
+- Under `set -o trash`, `sed -i` and `patch` transformed a second read of
+  the file, not the bytes the trash saved. A write between the two was
+  replaced with no copy in the trash. They now transform the saved bytes
+  and fail with "changed since" if the file no longer holds them.
+- An overlay write, replace, or `touch` through a symlink made a file at
+  the link's path, which hid the link. It now changes the link's target,
+  as on a real filesystem; the link stays and `kaish-vfs commit` still
+  refuses it. `kaish-vfs commit` also refuses a new file whose path holds
+  a dangling symlink in the target, instead of writing through the link.
 
 ## [0.18.0] - 2026-10-03
 
