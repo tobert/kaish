@@ -801,6 +801,36 @@ impl Drop for OverlayFs {
     }
 }
 
+/// Symlink hops `resolve` follows before refusing, matching Linux's
+/// `MAXSYMLINKS`.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// The layer that holds an entry.
+#[derive(Debug, Clone, Copy)]
+enum Layer {
+    Upper,
+    Lower,
+}
+
+/// Whether `resolve` follows a link in the last component.
+#[derive(Debug, Clone, Copy)]
+enum Last {
+    Follow,
+    /// lstat, read_link, remove, and symlink act on the link itself.
+    Keep,
+}
+
+/// What `resolve` does at a component that does not exist.
+#[derive(Debug, Clone, Copy)]
+enum Missing {
+    /// NotFound, as a read reports it.
+    Error,
+    /// Allowed only for the last component (`canonicalize`).
+    Last,
+    /// Kept with everything after it, for a write that creates parents.
+    Create,
+}
+
 /// Which upper call a file write reaches.
 #[derive(Debug, Clone, Copy)]
 enum UpperWrite {
@@ -809,45 +839,108 @@ enum UpperWrite {
 }
 
 impl OverlayFs {
-    /// The path a write lands on: every symlink in `path` followed through
-    /// the merged view, as a real filesystem does, so the write reaches the
-    /// link's target and the link stays. Components that do not exist yet
-    /// are kept; the write creates them.
+    /// The entry at `path` in the merged view, without following a link in
+    /// the last component, and the layer that holds it. Every directory in
+    /// `path` must already be resolved (see `resolve`), so neither layer
+    /// follows a link on the way.
+    async fn entry_at(&self, state: &OverlayState, path: &Path) -> io::Result<(DirEntry, Layer)> {
+        if state.whiteouts.contains(path) {
+            return Err(not_found(path));
+        }
+        match self.upper.lstat(path).await {
+            Ok(entry) => Ok((entry, Layer::Upper)),
+            Err(error) if is_not_found(&error) => {
+                self.lower.lstat(path).await.map(|entry| (entry, Layer::Lower))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn layer(&self, layer: Layer) -> &dyn Filesystem {
+        match layer {
+            Layer::Upper => self.upper.as_ref(),
+            Layer::Lower => self.lower.as_ref(),
+        }
+    }
+
+    /// `path` with its symlinks resolved through the merged view, as a real
+    /// filesystem resolves them: a link in either layer is followed, and its
+    /// target is looked up with whiteouts and the upper first. The result
+    /// names no link except, under `Last::Keep`, the last component.
     ///
-    /// This runs before the caller takes the state lock (`lstat` reads it),
-    /// so a concurrent change to a link between here and the write is not
-    /// seen.
-    async fn resolve_write_path(&self, path: &Path) -> io::Result<PathBuf> {
-        let mut existing = normalize(path);
-        let mut missing = Vec::new();
-        while !existing.as_os_str().is_empty() {
-            match self.lstat(&existing).await {
-                Ok(_) => break,
+    /// Every operation resolves with the state lock held, so reads and
+    /// writes agree on which file a path names.
+    async fn resolve(
+        &self,
+        state: &OverlayState,
+        path: &Path,
+        last: Last,
+        missing: Missing,
+    ) -> io::Result<PathBuf> {
+        let mut pending: std::collections::VecDeque<std::ffi::OsString> = normalize(path)
+            .components()
+            .map(|component| component.as_os_str().to_os_string())
+            .collect();
+        let mut resolved = PathBuf::new();
+        let mut hops = 0;
+        while let Some(name) = pending.pop_front() {
+            if name == ".." {
+                resolved.pop();
+                continue;
+            }
+            if name == "." {
+                continue;
+            }
+            let candidate = resolved.join(&name);
+            let is_last = pending.is_empty();
+            if is_last && matches!(last, Last::Keep) {
+                return Ok(candidate);
+            }
+            match self.entry_at(state, &candidate).await {
+                Ok((entry, layer)) if entry.is_symlink() => {
+                    hops += 1;
+                    if hops > MAX_SYMLINK_HOPS {
+                        return Err(io::Error::other(format!(
+                            "too many levels of symbolic links: {}",
+                            path.display()
+                        )));
+                    }
+                    let target = self.layer(layer).read_link(&candidate).await?;
+                    if target.is_absolute() {
+                        resolved = PathBuf::new();
+                    }
+                    for component in target.components().rev() {
+                        match component {
+                            std::path::Component::RootDir | std::path::Component::Prefix(_) => {}
+                            other => pending.push_front(other.as_os_str().to_os_string()),
+                        }
+                    }
+                }
+                Ok(_) => resolved = candidate,
                 Err(error) if is_not_found(&error) => {
-                    let Some(name) = existing.file_name() else { break };
-                    missing.push(name.to_os_string());
-                    existing.pop();
+                    let allowed = match missing {
+                        Missing::Error => false,
+                        Missing::Last => is_last,
+                        Missing::Create => true,
+                    };
+                    if !allowed {
+                        return Err(not_found(path));
+                    }
+                    resolved = candidate;
+                    resolved.extend(pending.drain(..));
+                    return Ok(normalize(&resolved));
                 }
                 Err(error) => return Err(error),
             }
         }
-        let mut resolved = if existing.as_os_str().is_empty() {
-            PathBuf::new()
-        } else {
-            // `true`: a dangling link's target is created by the write.
-            self.canonicalize(&existing, true).await?
-        };
-        for name in missing.iter().rev() {
-            resolved.push(name);
-        }
-        Ok(normalize(&resolved))
+        Ok(resolved)
     }
 
     /// `write` and `replace`: copy-up bookkeeping, then the upper call
     /// `how` names.
     async fn write_file(&self, path: &Path, data: &[u8], how: UpperWrite) -> io::Result<()> {
-        let path = self.resolve_write_path(path).await?;
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Create).await?;
 
         // First touch of a lower path: snapshot its content as the base.
         // Already-dirty paths keep their first-touch base; a whiteouted path
@@ -909,14 +1002,10 @@ impl OverlayFs {
 #[async_trait]
 impl Filesystem for OverlayFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.read(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
+        let (_, layer) = self.entry_at(&state, &path).await?;
+        self.layer(layer).read(&path).await
     }
 
     async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
@@ -924,14 +1013,10 @@ impl Filesystem for OverlayFs {
         // rides on that backend's own `read_range` (e.g. MemoryFs slices its
         // stored bytes) instead of the default whole-file-read+slice. Without
         // this, chunked streaming over an overlay would be O(n²).
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read_range(&path, range.clone()).await {
-            Err(error) if is_not_found(&error) => self.lower.read_range(&path, range).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
+        let (_, layer) = self.entry_at(&state, &path).await?;
+        self.layer(layer).read_range(&path, range).await
     }
 
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
@@ -943,39 +1028,32 @@ impl Filesystem for OverlayFs {
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
-        let path = normalize(path);
         let state = self.state.read().await;
-        if state.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
         self.merged_list(&path, &state).await
     }
 
     async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.stat(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.stat(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
+        self.entry_at(&state, &path).await.map(|(entry, _)| entry)
     }
 
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.lstat(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.lstat(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Keep, Missing::Error).await?;
+        self.entry_at(&state, &path).await.map(|(entry, _)| entry)
+    }
+
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> io::Result<PathBuf> {
+        let state = self.state.read().await;
+        let missing = if allow_missing_final { Missing::Last } else { Missing::Error };
+        self.resolve(&state, path, Last::Follow, missing).await
     }
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
-        let path = normalize(path);
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Create).await?;
 
         // A visible lower non-directory blocks mkdir; a visible lower
         // directory makes it the usual create-parents `Ok`.
@@ -995,8 +1073,8 @@ impl Filesystem for OverlayFs {
     }
 
     async fn remove(&self, path: &Path) -> io::Result<()> {
-        let path = normalize(path);
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Keep, Missing::Error).await?;
         if state.whiteouts.contains(&path) {
             return Err(not_found(&path));
         }
@@ -1074,13 +1152,14 @@ impl Filesystem for OverlayFs {
                 if let Some(content) = pending_base {
                     self.settle_base(content.len() as u64);
                     state.bases.insert(path.clone(), Some(content));
-                } else {
+                } else if let Some(None) = state.bases.get(&path) {
                     // Removing a path that was Added (bases[path] = None): the net
                     // result is no change relative to lower. Drop the stale Added
                     // entry so changes() does not fabricate a phantom Added entry
                     // with base=None, current=None.
                     state.bases.remove(&path);
                 }
+                // A copied-up file keeps its `Some` base: the remove is Removed.
                 // Clear any stale dirty_symlinks entry before conditionally
                 // re-inserting (the lower-Symlink case re-adds via
                 // pending_dirty_symlink; clearing first avoids stale entries when
@@ -1107,8 +1186,8 @@ impl Filesystem for OverlayFs {
     }
 
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
-        let path = self.resolve_write_path(path).await?;
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
         if state.whiteouts.contains(&path) {
             return Err(not_found(&path));
         }
@@ -1141,19 +1220,15 @@ impl Filesystem for OverlayFs {
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read_link(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.read_link(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Keep, Missing::Error).await?;
+        let (_, layer) = self.entry_at(&state, &path).await?;
+        self.layer(layer).read_link(&path).await
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
-        let link = normalize(link);
         let mut state = self.state.write().await;
+        let link = self.resolve(&state, link, Last::Keep, Missing::Create).await?;
 
         // A visible lower entry blocks creation, matching POSIX symlink(2).
         // The path alone — `ErrorKind::AlreadyExists` already says what
