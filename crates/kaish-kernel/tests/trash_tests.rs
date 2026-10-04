@@ -449,6 +449,8 @@ async fn sed_in_place_refuses_a_change_made_after_the_snapshot() {
     let r = run(&session, "sed -i 's/old/new/' f.txt").await;
     assert_eq!(r.code, 1, "a change after the snapshot is a conflict: {}", r.err);
     assert!(r.err.contains("changed since"), "err names the conflict: {}", r.err);
+    assert!(r.err.contains("read it again and retry"), "err names the fix: {}", r.err);
+    assert!(!r.err.contains("write-model"), "no internal names: {}", r.err);
     assert_eq!(
         std::fs::read_to_string(&file).expect("read"),
         "old racer\n",

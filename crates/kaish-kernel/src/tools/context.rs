@@ -444,10 +444,11 @@ pub(crate) fn decide_mutation_action(
 /// `ExecContext::overwrite_checked` (`tee`/`write`/`dd`) and directly by
 /// `cp`'s free copy path.
 ///
-/// This catches a change between the snapshot and the write. It does not
-/// make the write OS-atomic — a crash mid-write can still truncate (the
-/// atomic write-temp-then-rename primitive is a tracked write-model
-/// residual).
+/// This catches a change between the snapshot and the re-read here. A write
+/// that lands between that re-read and the write below is not caught: no
+/// backend offers compare-and-replace as one step yet. The window is two
+/// backend calls wide. `cas_overwrite` truncates in place, so a crash
+/// mid-write can leave a partial file; [`cas_replace`] cannot.
 pub(crate) async fn cas_overwrite(
     backend: &dyn KernelBackend,
     resolved: &Path,
@@ -511,8 +512,7 @@ async fn cas_write(
 /// deciding".
 fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
     crate::backend::BackendError::InvalidOperation(format!(
-        "{}: changed since the write-model gate checked it (concurrent write); \
-         aborting overwrite",
+        "{}: changed since kaish read it, so it was not overwritten; read it again and retry",
         resolved.display()
     ))
 }
@@ -1268,17 +1268,14 @@ impl ExecContext {
             // `real` is used only for the exclusion decision (/tmp, /v); the
             // snapshot reads bytes through the backend, not the real path.
             let real = self.backend.resolve_real_path(Path::new(&resolved));
-            let exists = self.backend.exists(Path::new(&resolved)).await;
-            // Prior size decides trash eligibility (a file too big to snapshot
-            // can't be backed up). Only stat an existing target.
-            let size = if exists {
-                self.backend
-                    .stat(Path::new(&resolved))
-                    .await
-                    .map(|e| e.size)
-                    .unwrap_or(0)
-            } else {
-                0
+            // One stat decides both whether there is prior content and its
+            // size (a file too big to snapshot can't be backed up). Only
+            // NotFound means a new file; any other error is reported, never
+            // read as "nothing to lose".
+            let (exists, size) = match self.backend.stat(Path::new(&resolved)).await {
+                Ok(entry) => (true, entry.size),
+                Err(crate::backend::BackendError::NotFound(_)) => (false, 0),
+                Err(e) => return Err(ExecResult::failure(1, format!("{command}: {display}: {e}"))),
             };
             let action = decide_mutation_action(
                 trash_enabled,
