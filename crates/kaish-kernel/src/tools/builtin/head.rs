@@ -114,7 +114,8 @@ impl Tool for Head {
             other => other.map(|b| b as usize),
         };
 
-        let hashline = parsed.hashline && !parsed.global.json;
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
         if hashline {
             if bytes.is_some() {
                 return super::hashline::flag("head", "-c", "it counts bytes, not lines");

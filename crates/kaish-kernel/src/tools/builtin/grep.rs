@@ -470,7 +470,27 @@ impl Grep {
             max_count,
             anchors: wants_anchors.then(|| ctx.line_hasher.clone()),
         };
-        let hashline = parsed.hashline && !parsed.global.json;
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
+        if hashline {
+            if multiline {
+                return super::hashline::flag(
+                    "grep",
+                    "-U",
+                    "a match can span lines, and an anchor names one line",
+                );
+            }
+            if encoding.is_some() {
+                return super::hashline::flag(
+                    "grep",
+                    "--encoding",
+                    "the decoded text is not the file's bytes, which an anchor hashes",
+                );
+            }
+            if !recursive && args.positional.len() < 2 {
+                return super::hashline::stdin("grep", "grep --hashline PATTERN FILE");
+            }
+        }
 
         // Validate search options even when -m 0 needs no input.
         if max_count == Some(0) {
@@ -1641,7 +1661,11 @@ impl<'r> GrepLineScanner<'r> {
         // given: the searcher numbers unconditionally and `rich_json` has
         // always reported it that way. `-n` governs the text rendering above,
         // never whether a consumer can find the line.
-        let hash = self.hasher.as_ref().map(|hasher| hasher.hash(line.as_bytes()));
+        // Stdin has no file to anchor to, whatever the caller passed.
+        let hash = match (&self.hasher, &self.path) {
+            (Some(hasher), Some(_)) => Some(hasher.hash(line.as_bytes())),
+            _ => None,
+        };
         let mut node = OutputNode::new(line).at_line(self.line_number);
         if let Some(hash) = &hash {
             node = node.with_hash(hash.clone());
@@ -1966,9 +1990,12 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                 // line carries none rather than claiming line zero.
                 let line_num = m.line_number.unwrap_or(0);
                 let anchor = m.line_number;
-                // Only a named file's lines get a hash; stdin has no file.
+                // Only a line of a named file, kept byte for byte, gets a
+                // hash: stdin has no file, and decoded text is not its bytes.
                 let hash = match (&opts.anchors, filename) {
-                    (Some(hasher), Some(_)) => Some(hasher.hash(m.line_text.as_bytes())),
+                    (Some(hasher), Some(_)) if m.exact && opts.encoding.is_none() => {
+                        Some(hasher.hash(m.line_text.as_bytes()))
+                    }
                     _ => None,
                 };
                 if opts.only_matching && !opts.invert && !m.submatches.is_empty() {
@@ -2034,7 +2061,9 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                 emitted_any = true;
                 // Anchored context rows, so `--hashline` keeps them. Without
                 // anchors, context stays text-only as before.
-                if let (Some(hasher), Some(file), Some(n)) = (&opts.anchors, filename, c.line_number) {
+                if let (Some(hasher), Some(file), Some(n), true) =
+                    (&opts.anchors, filename, c.line_number, c.exact && opts.encoding.is_none())
+                {
                     let mut cells = Vec::new();
                     if opts.show_filename {
                         cells.push(file.to_string());
