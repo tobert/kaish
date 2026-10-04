@@ -2092,6 +2092,32 @@ mod tests {
         assert!(!target.exists(Path::new("x.txt")).await, "nothing written through the link");
     }
 
+    /// commit_into replaces each file: on a LocalFs target the inode changes
+    /// and a reader holding the old file still sees the old bytes.
+    #[cfg(all(unix, feature = "localfs"))]
+    #[tokio::test]
+    async fn test_commit_into_localfs_replaces_the_file() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, b"old\n").unwrap();
+        let old_inode = std::fs::metadata(&path).unwrap().ino();
+        let mut old_handle = std::fs::File::open(&path).unwrap();
+
+        let local: Arc<dyn Filesystem> = Arc::new(crate::local::LocalFs::new(dir.path()));
+        let overlay = OverlayFs::over(local.clone());
+        overlay.write(Path::new("f.txt"), b"new\n").await.unwrap();
+        overlay.commit_into(local.as_ref()).await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), old_inode);
+        let mut seen = Vec::new();
+        old_handle.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"old\n");
+    }
+
     #[tokio::test]
     async fn test_read_range_byte_slice_through_layers() {
         // Lower file, read a mid slice (served from lower).
