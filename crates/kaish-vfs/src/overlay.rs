@@ -2118,6 +2118,87 @@ mod tests {
         assert_eq!(seen, b"old\n");
     }
 
+    /// Removing a copied-up file keeps its base, so the delete is a Removed
+    /// change that commit applies.
+    #[tokio::test]
+    async fn test_remove_after_copy_up_is_removed() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("f.txt"), b"alpha").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+
+        overlay.write(Path::new("f.txt"), b"edited").await.unwrap();
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].kind, ChangeKind::Removed);
+        assert_eq!(changes[0].base.as_deref(), Some(b"alpha" as &[u8]));
+
+        let target = MemoryFs::new();
+        target.write(Path::new("f.txt"), b"alpha").await.unwrap();
+        overlay.commit_into(&target).await.unwrap();
+        assert!(!target.exists(Path::new("f.txt")).await);
+    }
+
+    /// Reads follow a link through the merged view, the same way writes do.
+    #[tokio::test]
+    async fn test_read_through_links_uses_the_merged_view() {
+        // An upper link to a lower-only file reads the file.
+        let (_, overlay) = overlay_with_lower().await;
+        overlay.symlink(Path::new("a.txt"), Path::new("u.txt")).await.unwrap();
+        assert_eq!(overlay.read(Path::new("u.txt")).await.unwrap(), b"alpha");
+
+        // A lower link to a copied-up file reads the upper copy.
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+        overlay.write(Path::new("a.txt"), b"new").await.unwrap();
+        assert_eq!(overlay.read(Path::new("l.txt")).await.unwrap(), b"new");
+        assert_eq!(
+            overlay.read_range(Path::new("l.txt"), Some(ReadRange::bytes(0, 2))).await.unwrap(),
+            b"ne"
+        );
+        assert_eq!(overlay.stat(Path::new("l.txt")).await.unwrap().size, 3);
+
+        // A link to a removed file is dangling.
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+        overlay.remove(Path::new("a.txt")).await.unwrap();
+        assert!(overlay.read(Path::new("l.txt")).await.is_err());
+        assert!(!overlay.exists(Path::new("l.txt")).await);
+
+        // Listing through a directory link hides a removed child.
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+        overlay.remove(Path::new("d/x.txt")).await.unwrap();
+        assert!(overlay.list(Path::new("dl")).await.unwrap().is_empty());
+    }
+
+    /// mkdir through a lower directory link creates inside the target.
+    #[tokio::test]
+    async fn test_mkdir_through_lower_directory_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+
+        overlay.mkdir(Path::new("dl/sub")).await.unwrap();
+
+        assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
+        assert!(overlay.stat(Path::new("d/sub")).await.unwrap().is_dir());
+    }
+
+    /// symlink with a lower directory link in the parent creates the new link
+    /// inside the target; the parent link stays.
+    #[tokio::test]
+    async fn test_symlink_through_lower_directory_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+
+        overlay.symlink(Path::new("x.txt"), Path::new("dl/y.txt")).await.unwrap();
+
+        assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
+        assert!(overlay.lstat(Path::new("d/y.txt")).await.unwrap().is_symlink());
+        assert_eq!(overlay.read(Path::new("d/y.txt")).await.unwrap(), b"in dir");
+    }
+
     #[tokio::test]
     async fn test_read_range_byte_slice_through_layers() {
         // Lower file, read a mid slice (served from lower).
