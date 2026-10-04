@@ -89,8 +89,8 @@ impl Tool for Cat {
             ends: parsed.show_all || parsed.show_ends,
             tabs: parsed.show_all || parsed.show_tabs,
         };
-        // --json already carries the hash, so only a --hashline render refuses.
-        let hashline = parsed.hashline && !parsed.global.json;
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
         if hashline && show.any() {
             return super::hashline::flag(
                 "cat",

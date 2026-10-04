@@ -215,3 +215,47 @@ async fn a_configured_hasher_is_used_everywhere() {
         assert_eq!(result.text_out(), "1:05:alpha\n", "{script}");
     }
 }
+
+// A -U match can span lines; one row would hash several lines as one.
+#[tokio::test]
+async fn grep_multiline_and_transcoding_are_refused() {
+    let dir = fixture();
+    expect_refused(dir.path(), "grep -U --hashline 'alpha.bravo' f.txt", "-U").await;
+    expect_refused(dir.path(), "grep --encoding latin1 --hashline alpha f.txt", "--encoding").await;
+}
+
+// grep's anchors hash the file's bytes, the same ones cat hashes, even for
+// a UTF-8 byte-order mark on line 1.
+#[tokio::test]
+async fn grep_and_cat_agree_on_a_byte_order_mark() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("bom.txt"), "\u{feff}alpha\nbravo\n").unwrap();
+    let (_, cat, _) = run(dir.path(), "cat --hashline bom.txt").await;
+    let first = cat.lines().next().unwrap().to_string();
+    expect_out(dir.path(), "grep --hashline alpha bom.txt", &format!("{first}\n")).await;
+}
+
+// A line grep could only decode lossily is not the file's bytes: no hash.
+#[tokio::test]
+async fn a_lossy_line_gets_no_hash() {
+    let dir = fixture();
+    fs::write(dir.path().join("bad.txt"), b"caf\xe9 alpha\n").unwrap();
+    let (code, out, err) = run(dir.path(), "grep --json alpha f.txt bad.txt").await;
+    assert_eq!(code, 0, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{out}");
+    assert_eq!(rows[0]["hash"], "202b");
+    assert!(rows[1].get("hash").is_none(), "{out}");
+}
+
+// --json wins the render, but asking for --hashline still gets its checks.
+#[tokio::test]
+async fn json_does_not_skip_the_hashline_checks() {
+    let dir = fixture();
+    expect_refused(dir.path(), "cat f.txt | cat --json --hashline", "cat --hashline FILE").await;
+    expect_refused(dir.path(), "head --json --hashline f.txt g.txt", "one file").await;
+    expect_refused(dir.path(), "tail --json --hashline -c 3 f.txt", "-c").await;
+    expect_refused(dir.path(), "cat f.txt | grep --json --hashline a", "grep --hashline PATTERN FILE").await;
+    expect_refused(dir.path(), "cat f.txt | grep -m 0 --hashline a", "grep --hashline PATTERN FILE").await;
+}

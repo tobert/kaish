@@ -25,6 +25,9 @@ pub struct MatchRecord {
     pub absolute_byte_offset: u64,
     /// UTF-8 text of the matched line(s). Lossy-decoded from raw bytes.
     pub line_text: String,
+    /// `line_text` is one line's bytes unchanged: valid UTF-8 with no
+    /// newline inside. Only such a line can carry a line anchor.
+    pub exact: bool,
     /// Byte ranges within `line_text` for each submatch the matcher
     /// reported on this line.
     pub submatches: Vec<Submatch>,
@@ -61,6 +64,8 @@ impl From<&SinkContextKind> for ContextKind {
 pub struct ContextRecord {
     pub line_number: Option<u64>,
     pub line_text: String,
+    /// As [`MatchRecord::exact`].
+    pub exact: bool,
     pub kind: ContextKind,
 }
 
@@ -127,12 +132,14 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
         let bytes = mat.bytes();
         let trimmed = trim_line_terminator(bytes);
         let line_text = trimmed.to_str_lossy().into_owned();
+        let exact = is_exact_line(trimmed);
         let submatches = self.submatches_for(trimmed);
         self.events.push(SearchEvent::Match(MatchRecord {
             path: self.path.clone(),
             line_number: mat.line_number(),
             absolute_byte_offset: mat.absolute_byte_offset(),
             line_text,
+            exact,
             submatches,
         }));
         Ok(true)
@@ -143,11 +150,12 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
         _searcher: &Searcher,
         ctx: &SinkContext<'_>,
     ) -> Result<bool, Self::Error> {
-        let bytes = ctx.bytes();
-        let line_text = trim_line_terminator(bytes).to_str_lossy().into_owned();
+        let trimmed = trim_line_terminator(ctx.bytes());
+        let line_text = trimmed.to_str_lossy().into_owned();
         self.events.push(SearchEvent::Context(ContextRecord {
             line_number: ctx.line_number(),
             line_text,
+            exact: is_exact_line(trimmed),
             kind: ctx.kind().into(),
         }));
         Ok(true)
@@ -157,6 +165,11 @@ impl<M: Matcher> Sink for AccumulatorSink<'_, M> {
         self.events.push(SearchEvent::ContextBreak);
         Ok(true)
     }
+}
+
+/// One line's bytes that decode without loss: valid UTF-8, no newline inside.
+fn is_exact_line(bytes: &[u8]) -> bool {
+    !bytes.contains(&b'\n') && std::str::from_utf8(bytes).is_ok()
 }
 
 /// Stripped of trailing `\n` (and one `\r` if it precedes that `\n`).

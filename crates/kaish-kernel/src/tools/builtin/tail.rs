@@ -86,7 +86,8 @@ impl Tool for Tail {
             Err(e) => return ExecResult::failure(1, format!("tail: {}", e)),
         };
 
-        let hashline = parsed.hashline && !parsed.global.json;
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
         if hashline {
             if parse_byte_spec(&args).is_some() {
                 return super::hashline::flag("tail", "-c", "it counts bytes, not lines");

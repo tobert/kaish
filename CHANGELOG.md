@@ -17,10 +17,11 @@ breaking entries are marked **BREAKING**.
   anchor the coming `edit` builtin takes. `grep` prefixes file names across
   several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
   context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
-  `cat -v/-E/-T/-A`, `grep -c/-l`, and other builtins (`ls --hashline`)
-  exit 2 and name the form that works.
+  `cat -v/-E/-T/-A`, `grep -U`, `grep --encoding`, `grep -c/-l`, and other
+  builtins (`ls --hashline`) exit 2 and name the form that works.
 - **`--json` rows carry `hash` beside `line`** when the row is a line of
-  one named file, including `grep --json` match records.
+  one named file, kept byte for byte, including `grep --json` match
+  records. A line `grep` decoded lossily gets no `hash`.
 - **`KernelConfig::with_line_hasher`** chooses the line hash. The default
   is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
   holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
