@@ -2068,6 +2068,23 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 
+    /// An Added file whose path holds a dangling symlink in the target is a
+    /// conflict. exists() follows the link and says no, so commit used to
+    /// write through it and create the link's target.
+    #[tokio::test]
+    async fn test_commit_added_over_dangling_target_symlink_refuses() {
+        let lower = Arc::new(MemoryFs::new());
+        let overlay = OverlayFs::over(lower);
+        overlay.write(Path::new("n.txt"), b"new").await.unwrap();
+
+        let target = MemoryFs::new();
+        target.symlink(Path::new("x.txt"), Path::new("n.txt")).await.unwrap();
+
+        let err = overlay.commit_into(&target).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert!(!target.exists(Path::new("x.txt")).await, "nothing written through the link");
+    }
+
     #[tokio::test]
     async fn test_read_range_byte_slice_through_layers() {
         // Lower file, read a mid slice (served from lower).
