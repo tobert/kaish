@@ -85,6 +85,20 @@ fn unicode_fixture_kernel(corpus: &[&str]) -> (tempfile::TempDir, Kernel) {
     (dir, kernel)
 }
 
+/// Patterns in the table above that match a `\n`, so `-U` selects more lines.
+const MATCHES_A_NEWLINE: &[&str] = &[r"\s", r"\W", r"[^]a]"];
+
+#[tokio::test]
+async fn multiline_classes_match_the_line_terminator() {
+    let (_dir, kernel) = fixture_kernel();
+    let (all, _) = run(&kernel, "grep '' fx.txt").await;
+    for pattern in MATCHES_A_NEWLINE {
+        let (out, code) = run(&kernel, &format!("grep -U '{pattern}' fx.txt")).await;
+        assert_eq!(code, 0, "pattern {pattern:?}");
+        assert_eq!(lines(&out), lines(&all), "every line ends in a newline, pattern {pattern:?}");
+    }
+}
+
 /// GNU grep's output for `grep FLAGS -e PATTERN fx.txt`, row by row.
 #[rstest]
 #[case(r#""#, r#"fn consult("#, 0, &[r#"fn consult(q)"#])]
@@ -193,7 +207,12 @@ async fn default_mode_matches_gnu_grep(
     assert_eq!(out, gnu_lines.len().to_string(), "-c count, pattern {pattern:?}");
 
     // `-U`: the multiline searcher. No row spans a newline, so it selects the
-    // same lines.
+    // same lines, unless the pattern can match the newline itself: under -U
+    // `\s`, `\W`, and `[^]a]` match each line's terminator, as in `rg -U`.
+    // `multiline_classes_match_the_line_terminator` covers those.
+    if MATCHES_A_NEWLINE.contains(&pattern) {
+        return;
+    }
     let (out, code) = run(&kernel, &format!("grep -U {flags} '{pattern}' fx.txt")).await;
     assert_eq!(lines(&out), gnu_lines, "-U, pattern {pattern:?}");
     assert_eq!(code, gnu_code, "-U exit code, pattern {pattern:?}");

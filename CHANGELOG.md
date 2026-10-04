@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`grep -U` matches across lines on every input path.** A single file
+  searched without `-c`/`-o`/`-l`/`-q`/context and a pipe into a pipe were
+  scanned one line at a time, so a match that spans lines was missed. Large
+  input was searched in 256 KiB windows, so a match that crossed a window
+  boundary was missed. `-U` now searches each input whole, in one call. A
+  pattern that can match a newline (`\s`, `\W`, `[^a]`) now does so under
+  `-U` on these paths too, as it already did for several files.
+
 ## [0.18.0] - 2026-10-03
 
 ### Added
