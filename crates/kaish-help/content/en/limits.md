@@ -42,6 +42,7 @@ when the `sh` habit is faster to type — `test -f x && echo yes`,
 | `ps` | Linux-only (reads `/proc`) |
 | `find` expressions | At most 256 expression nodes (tests, operators, and groups), with at most 64 nested groups or negations. Larger expressions exit 2; split the expression into smaller searches. No `-exec` or `-delete`. |
 | `cat -A/-v/-E/-T` | Buffers input before marking bytes. `-A` is `-vET`; `-n` with `-E` or `-T` needs UTF-8 text unless `-v` is also given. |
+| `edit` | UTF-8 text files only; the file must exist. A TEXT word that is exactly `--json` or `--help` is taken by the kernel; put `--` before the FILE to pass it. |
 | `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
 | `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |

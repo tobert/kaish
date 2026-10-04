@@ -249,3 +249,77 @@ async fn edit_replaces_the_file_atomically() {
     run_ok(dir.path(), &format!("edit config.toml {} 'port = 9090'", anchor(3, "port = 8080"))).await;
     assert_ne!(fs::metadata(&path).unwrap().ino(), before);
 }
+
+// An empty last line exists only with a terminator after it, so the file
+// gains one; edit must not lose the line or panic reporting it.
+#[tokio::test]
+async fn an_empty_last_line_in_a_file_without_a_final_newline() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "alpha").unwrap();
+    let out = run_ok(dir.path(), &format!("edit f.txt {} ''", anchor(1, "alpha"))).await;
+    assert_eq!(fs::read_to_string(dir.path().join("f.txt")).unwrap(), "\n");
+    assert_eq!(out, format!("1:{}:\n", hash("")));
+
+    fs::write(dir.path().join("g.txt"), "alpha").unwrap();
+    let out = run_ok(dir.path(), &format!("edit g.txt --after {} ''", anchor(1, "alpha"))).await;
+    assert_eq!(fs::read_to_string(dir.path().join("g.txt")).unwrap(), "alpha\n\n");
+    assert_eq!(out, format!("2:{}:\n", hash("")));
+}
+
+// Untouched lines keep their own endings; new lines take the file's first.
+#[tokio::test]
+async fn mixed_line_endings_are_kept_line_by_line() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("m.txt"), "a\nb\r\nc\n").unwrap();
+    run_ok(dir.path(), &format!("edit m.txt {} 'A' --after {} 'x'", anchor(1, "a"), anchor(2, "b"))).await;
+    assert_eq!(fs::read_to_string(dir.path().join("m.txt")).unwrap(), "A\nb\r\nx\nc\n");
+}
+
+// The commands edit suggests must run as written, whatever the file is called.
+#[tokio::test]
+async fn suggested_commands_quote_the_path() {
+    let dir = tempdir().unwrap();
+    for name in ["my file.txt", "-q.txt"] {
+        fs::write(dir.path().join(name), "a\nb\n").unwrap();
+        let quoted = format!("'{name}'");
+        let (code, _, err) = run(dir.path(), &format!("edit -- {quoted} 1:0000 x")).await;
+        assert_eq!(code, 1, "{err}");
+        let suggested = err.rsplit("Read it again before editing: ").next().unwrap().trim();
+        let (code, out, err) = run(dir.path(), suggested).await;
+        assert_eq!(code, 0, "{suggested}: {err}");
+        assert!(out.starts_with("1:"), "{suggested}: {out}");
+    }
+
+    let body: Vec<String> = (1..=50).map(|n| format!("line {n}")).collect();
+    let out = run_ok(dir.path(), &format!("edit 'my file.txt' {} '{}'", anchor(1, "a"), body.join("\n"))).await;
+    let suggested = out.rsplit("view them: ").next().unwrap().trim();
+    let (code, view, err) = run(dir.path(), suggested).await;
+    assert_eq!(code, 0, "{suggested}: {err}");
+    assert_eq!(view.lines().count(), 50, "{suggested}");
+}
+
+// A custom hasher may use uppercase; edit compares anchors exactly.
+#[tokio::test]
+async fn anchors_from_a_custom_hasher_round_trip() {
+    use kaish_kernel::{Kernel, KernelConfig};
+    use kaish_types::LineHasher;
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "alpha\n").unwrap();
+    let config = KernelConfig::repl()
+        .with_cwd(dir.path().to_path_buf())
+        .with_trash(false)
+        .with_line_hasher(LineHasher::new(|line| format!("L{}X", line.len())));
+    let kernel = Kernel::new(config).unwrap();
+    let result = kernel.execute("edit f.txt 1:L5X beta").await.unwrap();
+    assert_eq!(result.code, 0, "{}", result.err);
+    assert_eq!(result.text_out(), "1:L4X:beta\n");
+}
+
+// After `--`, a word the kernel would take as its own flag is TEXT.
+#[tokio::test]
+async fn text_that_is_a_kernel_flag_follows_a_double_dash() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("f.txt"), "alpha\n").unwrap();
+    run_ok(dir.path(), &format!("edit -- f.txt {} --json", anchor(1, "alpha"))).await;
+    assert_eq!(fs::read_to_string(dir.path().join("f.txt")).unwrap(), "--json\n");
+}

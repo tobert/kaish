@@ -105,6 +105,12 @@ const CASES: &[Case] = &[
     Case { name: "diff", setup: &[], cmd: "diff tmp/data.json tmp/data.json --json", expect: Expect::Object },
     Case { name: "dirname", setup: &[], cmd: "dirname /a/b.txt --json", expect: Expect::String },
     Case { name: "echo", setup: &[], cmd: "echo hi --json", expect: Expect::String },
+    Case {
+        name: "edit",
+        setup: &["printf 'alpha\\n' > edit.txt"],
+        cmd: "edit edit.txt 1:202b beta --json",
+        expect: Expect::Array,
+    },
     Case { name: "env", setup: &["export FOO=bar"], cmd: "env --json", expect: Expect::String },
     Case { name: "export", setup: &[], cmd: "export FOO=bar --json", expect: Expect::Empty },
     Case { name: "false", setup: &[], cmd: "false --json", expect: Expect::FailsEnvelope(1) },

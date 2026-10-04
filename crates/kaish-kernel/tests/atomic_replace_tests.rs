@@ -1,6 +1,7 @@
 //! Which writes replace a file atomically and which rewrite it in place.
 //!
-//! A read-modify-write (`sed -i`, `patch`) writes a new file beside the
+//! A read-modify-write (`sed -i`, `patch`, and `edit`, tested in
+//! `edit_tests.rs`) writes a new file beside the
 //! target and renames it over, so a crash leaves the old file or the new one,
 //! never a partial file. `>` and `tee` truncate in place and keep the file's
 //! inode, as bash does. The inode is the observable difference.

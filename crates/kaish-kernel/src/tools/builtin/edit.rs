@@ -197,7 +197,8 @@ fn parse_anchor(word: &str) -> Result<Anchor, String> {
     if line == 0 {
         return Err(format!("'{word}': lines are numbered from 1"));
     }
-    Ok(Anchor { line, hash: hash.to_ascii_lowercase() })
+    // Compared exactly: a configured hasher may print uppercase.
+    Ok(Anchor { line, hash: hash.to_string() })
 }
 
 fn parse_span(word: &str) -> Result<Span, String> {
@@ -302,6 +303,8 @@ enum PlanError {
 #[derive(Debug, PartialEq, Eq)]
 struct Plan {
     content: String,
+    /// The new file's lines, as `hashline::lines` splits `content`.
+    lines: Vec<String>,
     /// Inclusive ranges of new lines, in file order.
     changed: Vec<(usize, usize)>,
 }
@@ -309,6 +312,8 @@ struct Plan {
 /// Check every anchor and build the new content. Pure: no I/O.
 fn plan(content: &str, file: &str, changes: &[Change], hasher: &LineHasher) -> Result<Plan, PlanError> {
     let lines: Vec<&str> = hashline::lines(content).collect();
+    let endings = line_endings(content);
+    debug_assert_eq!(lines.len(), endings.len());
 
     let mut stale = Vec::new();
     for change in changes {
@@ -373,7 +378,9 @@ fn plan(content: &str, file: &str, changes: &[Change], hasher: &LineHasher) -> R
         }
     }
 
-    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    // Each output line is text plus the terminator it came with; a new line
+    // has none of its own and takes the file's first terminator.
+    let mut out: Vec<(&str, Option<&str>)> = Vec::with_capacity(lines.len());
     let mut changed: Vec<(usize, usize)> = Vec::new();
     let mut line = 1;
     while line <= lines.len() {
@@ -387,7 +394,7 @@ fn plan(content: &str, file: &str, changes: &[Change], hasher: &LineHasher) -> R
             }
             Some(Change::Delete(span)) => span.end.line,
             _ => {
-                out.push(lines[line - 1]);
+                out.push((lines[line - 1], Some(endings[line - 1])));
                 line
             }
         };
@@ -397,24 +404,67 @@ fn plan(content: &str, file: &str, changes: &[Change], hasher: &LineHasher) -> R
         line = last + 1;
     }
 
-    // Keep the file's own line ending and its final newline, or lack of one.
-    let terminator = if content.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut new_content = out.join(terminator);
+    // Untouched lines keep their own endings; new lines take the file's
+    // first. The file keeps its final newline, or lack of one, except that
+    // an empty last line exists only with a terminator after it.
+    let default = endings.iter().copied().find(|ending| !ending.is_empty()).unwrap_or("\n");
     let had_final_newline = content.ends_with('\n') || content.is_empty();
-    if had_final_newline && !out.is_empty() {
-        new_content.push_str(terminator);
+    let mut new_content = String::with_capacity(content.len());
+    for (index, (text, own)) in out.iter().enumerate() {
+        new_content.push_str(text);
+        let own = own.filter(|ending| !ending.is_empty()).unwrap_or(default);
+        let is_last = index + 1 == out.len();
+        if !is_last || had_final_newline || text.is_empty() {
+            new_content.push_str(own);
+        }
     }
-    Ok(Plan { content: new_content, changed })
+    let lines = out.iter().map(|(text, _)| (*text).to_string()).collect();
+    Ok(Plan { content: new_content, lines, changed })
+}
+
+/// The terminator after each line `hashline::lines` yields: `\r\n`, `\n`,
+/// or `""` for a last line with none.
+fn line_endings(content: &str) -> Vec<&str> {
+    content
+        .split_inclusive('\n')
+        .map(|piece| {
+            if piece.ends_with("\r\n") {
+                "\r\n"
+            } else if piece.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            }
+        })
+        .collect()
+}
+
+/// `file` as a shell word that runs as written: quoted when needed, and
+/// quoted after `--` when it starts with `-`, which kaish reads as a flag.
+fn path_operand(file: &str) -> String {
+    if file.starts_with('-') {
+        format!("-- '{}'", file.replace('\'', "'\\''"))
+    } else {
+        crate::ast::plan::quote_word(file)
+    }
+}
+
+fn reread_hint(file: &str) -> String {
+    format!("Read it again before editing: cat --hashline {}", path_operand(file))
 }
 
 /// Append new lines to `out`, recording them in `changed`; adjacent new
 /// lines join one range.
-fn push_new<'a>(out: &mut Vec<&'a str>, changed: &mut Vec<(usize, usize)>, new: &[&'a str]) {
+fn push_new<'a>(
+    out: &mut Vec<(&'a str, Option<&'a str>)>,
+    changed: &mut Vec<(usize, usize)>,
+    new: &[&'a str],
+) {
     if new.is_empty() {
         return;
     }
     let start = out.len() + 1;
-    out.extend_from_slice(new);
+    out.extend(new.iter().map(|text| (*text, None)));
     match changed.last_mut() {
         Some(last) if last.1 + 1 == start => last.1 = out.len(),
         _ => changed.push((start, out.len())),
@@ -438,7 +488,7 @@ async fn run(ctx: &mut ExecContext, request: Request) -> ExecResult {
         Ok(planned) => planned,
         Err(PlanError::Conflict(message)) => return ExecResult::failure(2, format!("edit: {message}")),
         Err(PlanError::Stale(reasons)) => {
-            let reread = format!("Read it again before editing: cat --hashline {file}");
+            let reread = reread_hint(&file);
             let message = match reasons.as_slice() {
                 [one] => format!("edit: {file}: {one}; nothing was written. {reread}"),
                 many => format!(
@@ -456,13 +506,22 @@ async fn run(ctx: &mut ExecContext, request: Request) -> ExecResult {
         Ok(snapshots) => snapshots,
         Err(blocked) => return blocked,
     };
-    // Compare-and-set against what was planned on: a change since the read
-    // is refused. A write landing between that re-read and the rename is not
-    // detected; LocalFs has no primitive that closes that window.
-    let read_back = crate::tools::OverwriteExpectation::Bytes(content.clone().into_bytes());
-    let expected = snapshots.get(&resolved).unwrap_or(&read_back);
+    // Compare-and-set against the bytes the plan was built on, never the
+    // trash snapshot: a write between the read and the snapshot would match
+    // the snapshot and be overwritten. A write landing between the final
+    // re-read and the rename is not detected; LocalFs has no primitive that
+    // closes that window.
+    let planned_on = crate::tools::OverwriteExpectation::Bytes(content.into_bytes());
+    if let Some(snapshot) = snapshots.get(&resolved)
+        && *snapshot != planned_on
+    {
+        return ExecResult::failure(
+            1,
+            format!("edit: {file}: changed while edit was running; nothing was written. {}", reread_hint(&file)),
+        );
+    }
     if let Err(error) =
-        crate::tools::cas_replace(&*ctx.backend, target, planned.content.as_bytes(), Some(expected)).await
+        crate::tools::cas_replace(&*ctx.backend, target, planned.content.as_bytes(), Some(&planned_on)).await
     {
         return ExecResult::failure(1, format!("edit: {file}: {error}"));
     }
@@ -485,17 +544,17 @@ fn report(ctx: &ExecContext, file: &str, planned: &Plan) -> ExecResult {
         let places = planned.changed.len();
         return ExecResult::success(format!(
             "edit: {file}: changed {count} lines{} (lines {first}-{last}); view them: \
-             tail -n +{first} --hashline {file} | head -n {}\n",
+             tail -n +{first} --hashline {} | head -n {}\n",
             if places == 1 { String::new() } else { format!(" in {places} places") },
+            path_operand(file),
             last - first + 1
         ));
     }
-    let lines: Vec<&str> = hashline::lines(&planned.content).collect();
     let mut rows = Vec::with_capacity(count);
     let mut text = String::new();
     for (start, end) in &planned.changed {
         for line in *start..=*end {
-            let body = lines[line - 1];
+            let body = planned.lines[line - 1].as_str();
             let hash = ctx.line_hasher.hash(body.as_bytes());
             text.push_str(&format!("{line}:{hash}:{body}\n"));
             rows.push(OutputNode::new(body).at_line(line as u64).with_hash(hash));

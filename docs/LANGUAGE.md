@@ -768,10 +768,10 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
-> **`>` rewrites in place; `sed -i` and `patch` replace.** `>`, `tee`,
-> and `write` truncate the file and write into it, as bash does, so the
-> file keeps its inode and its hard links. `sed -i`, `patch`, and
-> `kaish-vfs commit` write a new file beside the target and rename it over
+> **`>` rewrites in place; `sed -i`, `patch`, and `edit` replace.** `>`,
+> `tee`, and `write` truncate the file and write into it, as bash does, so
+> the file keeps its inode and its hard links. `sed -i`, `patch`, `edit`,
+> and `kaish-vfs commit` write a new file beside the target and rename it over
 > the old one, as GNU `sed -i` does: a crash leaves the old file or the new
 > one, never a partial file. The new file keeps the old file's mode, is
 > owned by the user kaish runs as, and is not shared with hard links to the
@@ -1462,7 +1462,7 @@ kaish doesn't implement, with no fixed set to check a typo against the way
 `-o`'s names allow.
 
 With `trash` enabled, `rm` snapshots the file into Trash before removing it,
-and an overwrite (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`,
+and an overwrite (`cp`, `dd`, `edit`, `mv`, `patch`, `sed -i`, `tee`,
 `write`) snapshots the prior content first — both are recoverable with
 `kaish-trash restore`. `tee -a` append, writing a new file, and
 `patch --dry-run` have no prior content to snapshot, so they never trash.
