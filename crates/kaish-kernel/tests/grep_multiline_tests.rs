@@ -86,10 +86,20 @@ const SPAN: &str = "'(?s)foo.*?bar'";
     format!("grep -U -E {SPAN} small.txt other.txt"),
     "small.txt:foo start\nmiddle\nbar end\n"
 )]
+#[case::quiet(format!("grep -qU -E {SPAN} small.txt"), "")]
+#[case::invert(format!("grep -vU -E {SPAN} small.txt"), "alpha\nomega\n")]
+#[case::after_context(format!("grep -A1 -U -E {SPAN} small.txt"), "foo start\nmiddle\nbar end\nomega\n")]
+#[case::max_count(format!("grep -m1 -U -E {SPAN} two.txt"), "foo 1\nbar 1\n")]
+#[case::max_count_unbounded(format!("grep -U -E {SPAN} two.txt"), "foo 1\nbar 1\nfoo 2\nbar 2\n")]
+#[case::recursive(format!("grep -rlU -E {SPAN} ."), "./small.txt\n./two.txt\n")]
 #[tokio::test]
 async fn multiline_match_crosses_lines(#[case] script: String, #[case] expected: &str) {
-    let (out, err, code) =
-        run_with_files(&[("small.txt", SMALL), ("other.txt", "nothing here\n")], &script).await;
+    let files = [
+        ("small.txt", SMALL),
+        ("other.txt", "nothing here\n"),
+        ("two.txt", "foo 1\nbar 1\nbetween\nfoo 2\nbar 2\n"),
+    ];
+    let (out, err, code) = run_with_files(&files, &script).await;
     assert_eq!(code, 0, "script={script:?} err={err:?} out={out:?}");
     assert_eq!(out, expected, "script={script:?}");
 }
