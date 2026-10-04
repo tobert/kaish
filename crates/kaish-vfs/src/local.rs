@@ -239,13 +239,9 @@ fn replace_file(target: &Path, data: &[u8]) -> io::Result<()> {
     let (temp_path, mut file) = create_temp_beside(parent, name)?;
     let written = (|| {
         file.write_all(data)?;
-        // WASI has no mode bits to carry.
-        #[cfg(unix)]
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
-        #[cfg(not(unix))]
-        let _ = permissions;
         file.sync_all()?;
         std::fs::rename(&temp_path, target)
     })();
@@ -258,16 +254,14 @@ fn replace_file(target: &Path, data: &[u8]) -> io::Result<()> {
             ),
         });
     }
-    sync_directory(parent).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "{} was replaced, but syncing {} failed, so the rename may not survive a crash: {error}",
-                target.display(),
-                parent.display()
-            ),
-        )
-    })
+    // The rename already made the swap atomic: after a crash a reader finds
+    // the old file or the new one, whole. Syncing the directory only decides
+    // which of the two survives a power loss. Its error is not returned,
+    // because the content has changed and every caller reads `Err` as "not
+    // applied": overlay accounting and commit's "already committed" list
+    // would both be wrong.
+    let _ = sync_directory(parent);
+    Ok(())
 }
 
 /// Create `.<name>.kaish-<hex>` in `dir`, refusing to reuse an existing file.
@@ -310,7 +304,8 @@ fn sync_directory(dir: &Path) -> io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
 }
 
-/// WASI cannot open a directory as a file to sync it.
+/// Windows cannot open a directory as a file without
+/// `FILE_FLAG_BACKUP_SEMANTICS`; the rename is not synced there.
 #[cfg(not(unix))]
 fn sync_directory(_dir: &Path) -> io::Result<()> {
     Ok(())

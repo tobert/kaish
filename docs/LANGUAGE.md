@@ -1462,7 +1462,7 @@ kaish doesn't implement, with no fixed set to check a typo against the way
 `-o`'s names allow.
 
 With `trash` enabled, `rm` snapshots the file into Trash before removing it,
-and a truncating overwrite (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`,
+and an overwrite (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`,
 `write`) snapshots the prior content first — both are recoverable with
 `kaish-trash restore`. `tee -a` append, writing a new file, and
 `patch --dry-run` have no prior content to snapshot, so they never trash.

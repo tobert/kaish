@@ -1277,9 +1277,9 @@ impl ExecContext {
     /// Copy the prior content of `resolved` into the trash before it's
     /// overwritten, returning those bytes for the caller's compare-and-swap.
     ///
-    /// We **copy** (not move): the builtin overwrites the file in place next,
-    /// and read-modify-write callers (`patch`, `sed -i`) still need to read it —
-    /// the file keeps its identity, only its content changes. (`rm` *moves*
+    /// We **copy** (not move): the builtin still needs the file. `tee`/`write`
+    /// overwrite it in place, and read-modify-write callers (`patch`, `sed -i`)
+    /// read it before replacing it. (`rm` *moves*
     /// because removal is the op; an overwrite backs up the prior bytes.) Reads
     /// through the backend so a real, overlay, or in-memory file is handled the
     /// same way. A missing trash backend or a trash failure is an error — never
