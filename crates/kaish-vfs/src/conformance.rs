@@ -491,6 +491,83 @@ pub async fn write_through_a_file_link_updates_the_target(
     Ok(())
 }
 
+pub async fn replace_through_a_file_link_updates_the_target(
+    fs: &dyn Filesystem,
+) -> Result<(), String> {
+    fs.write(Path::new("target"), b"TARGET")
+        .await
+        .map_err(|e| format!("write target: {e}"))?;
+    fs.symlink(Path::new("target"), Path::new("link"))
+        .await
+        .map_err(|e| format!("symlink: {e}"))?;
+    fs.replace(Path::new("link"), b"VIA LINK")
+        .await
+        .map_err(|e| format!("replace(link): {e}"))?;
+
+    let target_data = fs
+        .read(Path::new("target"))
+        .await
+        .map_err(|e| format!("read(target): {e}"))?;
+    if target_data != b"VIA LINK" {
+        return Err(format!(
+            "expected read(target) == b\"VIA LINK\" (replace follows the link), got {:?}",
+            String::from_utf8_lossy(&target_data)
+        ));
+    }
+
+    let link_entry = fs
+        .lstat(Path::new("link"))
+        .await
+        .map_err(|e| format!("lstat(link): {e}"))?;
+    if !link_entry.is_symlink() {
+        return Err(format!(
+            "expected lstat(link) to still report symlink kind after replace, got {:?}",
+            link_entry.kind
+        ));
+    }
+    Ok(())
+}
+
+pub async fn replace_creates_a_missing_file(fs: &dyn Filesystem) -> Result<(), String> {
+    fs.replace(Path::new("d/new.txt"), b"NEW")
+        .await
+        .map_err(|e| format!("replace(d/new.txt): {e}"))?;
+    let data = fs
+        .read(Path::new("d/new.txt"))
+        .await
+        .map_err(|e| format!("read(d/new.txt): {e}"))?;
+    if data != b"NEW" {
+        return Err(format!(
+            "expected b\"NEW\", got {:?}",
+            String::from_utf8_lossy(&data)
+        ));
+    }
+    Ok(())
+}
+
+pub async fn replace_refuses_a_directory(fs: &dyn Filesystem) -> Result<(), String> {
+    fs.mkdir(Path::new("d"))
+        .await
+        .map_err(|e| format!("mkdir d: {e}"))?;
+    fs.write(Path::new("d/kept.txt"), b"KEPT")
+        .await
+        .map_err(|e| format!("write d/kept.txt: {e}"))?;
+    if fs.replace(Path::new("d"), b"FILE").await.is_ok() {
+        return Err("expected replace(d) on a directory to fail".to_string());
+    }
+    let kept = fs
+        .read(Path::new("d/kept.txt"))
+        .await
+        .map_err(|e| format!("read(d/kept.txt) after the refused replace: {e}"))?;
+    if kept != b"KEPT" {
+        return Err(format!(
+            "expected the directory's contents untouched, got {:?}",
+            String::from_utf8_lossy(&kept)
+        ));
+    }
+    Ok(())
+}
+
 pub async fn stat_on_a_link_loop_errors_instead_of_hanging(
     fs: &dyn Filesystem,
 ) -> Result<(), String> {
@@ -887,6 +964,9 @@ pub const CASES: &[(&str, Case)] = &[
     case!(rename_onto_a_dangling_link_replaces_the_link),
     case!(rename_onto_a_directory_link_replaces_the_link),
     case!(write_through_a_file_link_updates_the_target),
+    case!(replace_through_a_file_link_updates_the_target),
+    case!(replace_creates_a_missing_file),
+    case!(replace_refuses_a_directory),
     case!(stat_on_a_link_loop_errors_instead_of_hanging),
     case!(list_shows_a_link_as_a_link),
     case!(symlink_refuses_an_absolute_target),

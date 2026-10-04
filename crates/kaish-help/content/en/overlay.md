@@ -33,7 +33,9 @@ a clear message.
 
 An overlay session is a **transaction**: every write is virtual until you run
 `kaish-vfs commit`. The commit pre-flights all changes (stale-base check),
-then writes them atomically-ish to the target filesystem.
+then writes each file to the target filesystem. Each file is replaced
+atomically, so a crash leaves it whole, old or new; the commit as a whole is
+not atomic.
 
 After a successful commit the overlay is clean. A failed commit reports which
 paths landed and which did not — use `kaish-vfs status` to see the remaining

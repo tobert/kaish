@@ -869,7 +869,7 @@ approval subsystem and the confirmation latch — fail the same way; they
 turn nothing on. A bare unrecognized short flag (`-u`, `-x`) is still
 silently ignored — there's no fixed set to check it against.
 
-**Trash:** `rm` and a truncating overwrite (`cp`, `dd`, `mv`, `patch`,
+**Trash:** `rm` and an overwrite (`cp`, `dd`, `mv`, `patch`,
 `sed -i`, `tee`, `write`) snapshot the prior content under `set -o trash`
 before they run, so the mistake is recoverable from Trash; `tee -a` append,
 new files, and `patch --dry-run` have no prior content to snapshot. Files

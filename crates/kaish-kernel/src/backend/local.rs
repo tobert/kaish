@@ -15,6 +15,11 @@ use crate::tools::{ToolArgs, ToolCtx, ToolRegistry};
 use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
 use kaish_types::PathAccess;
 
+/// The error for a `WriteMode` added after this backend was written.
+pub(super) fn unsupported_write_mode(mode: WriteMode) -> BackendError {
+    BackendError::InvalidOperation(format!("write mode {mode:?} is not supported by this backend"))
+}
+
 /// Local backend implementation using VfsRouter and ToolRegistry.
 ///
 /// This is the default backend for standalone kaish operation. It:
@@ -274,16 +279,18 @@ impl KernelBackend for LocalBackend {
             WriteMode::Overwrite | WriteMode::Truncate => {
                 self.vfs.write(path, content).await?;
             }
+            WriteMode::Replace => {
+                self.vfs.replace(path, content).await?;
+            }
             WriteMode::UpdateOnly => {
                 if !self.vfs.exists(path).await {
                     return Err(BackendError::NotFound(path.display().to_string()));
                 }
                 self.vfs.write(path, content).await?;
             }
-            // WriteMode is #[non_exhaustive] — treat unknown modes as Overwrite
-            _ => {
-                self.vfs.write(path, content).await?;
-            }
+            // WriteMode is #[non_exhaustive]; a mode this backend predates
+            // must not be guessed at.
+            unknown => return Err(unsupported_write_mode(unknown)),
         }
         Ok(())
     }
@@ -304,8 +311,7 @@ impl KernelBackend for LocalBackend {
             Self::apply_patch_op(&mut content, op)?;
         }
 
-        // Write back
-        self.vfs.write(path, content.as_bytes()).await?;
+        self.vfs.replace(path, content.as_bytes()).await?;
         Ok(())
     }
 
