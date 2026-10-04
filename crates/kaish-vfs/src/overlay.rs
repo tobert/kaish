@@ -1406,6 +1406,61 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }
 
+    /// A write through a lower symlink lands on its target, as on a real
+    /// filesystem; the link stays a link instead of being shadowed by an
+    /// upper file.
+    #[tokio::test]
+    async fn test_write_through_lower_symlink_reaches_target() {
+        for how in [UpperWrite::Write, UpperWrite::Replace] {
+            let (lower, overlay) = overlay_with_lower().await;
+            lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+
+            overlay.write_file(Path::new("l.txt"), b"new", how).await.unwrap();
+
+            assert!(overlay.lstat(Path::new("l.txt")).await.unwrap().is_symlink(), "{how:?}");
+            assert_eq!(overlay.read_link(Path::new("l.txt")).await.unwrap(), Path::new("a.txt"));
+            assert_eq!(overlay.read(Path::new("a.txt")).await.unwrap(), b"new", "{how:?}");
+            assert_eq!(lower.read(Path::new("a.txt")).await.unwrap(), b"alpha");
+            let changes = overlay.changes().await.unwrap();
+            assert_eq!(changes.len(), 1, "{how:?}: {changes:?}");
+            assert_eq!(changes[0].path, Path::new("a.txt"));
+            assert_eq!(changes[0].kind, ChangeKind::Modified);
+        }
+    }
+
+    /// A write through an upper symlink keeps the link tracked, so changes()
+    /// still refuses instead of dropping the link from a commit.
+    #[tokio::test]
+    async fn test_write_through_upper_symlink_keeps_it_dirty() {
+        for how in [UpperWrite::Write, UpperWrite::Replace] {
+            let (_, overlay) = overlay_with_lower().await;
+            overlay.symlink(Path::new("a.txt"), Path::new("u.txt")).await.unwrap();
+
+            overlay.write_file(Path::new("u.txt"), b"new", how).await.unwrap();
+
+            assert!(overlay.lstat(Path::new("u.txt")).await.unwrap().is_symlink(), "{how:?}");
+            assert_eq!(overlay.read(Path::new("a.txt")).await.unwrap(), b"new", "{how:?}");
+            let err = overlay.changes().await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{how:?}");
+        }
+    }
+
+    /// A lower symlink to a directory in the middle of the path is followed
+    /// too; the upper does not grow a real directory that hides the link.
+    #[tokio::test]
+    async fn test_write_through_lower_directory_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+
+        overlay.write(Path::new("dl/x.txt"), b"new").await.unwrap();
+
+        assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
+        assert_eq!(overlay.read(Path::new("d/x.txt")).await.unwrap(), b"new");
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].path, Path::new("d/x.txt"));
+    }
+
     #[tokio::test]
     async fn test_real_path_is_always_none() {
         let (_, overlay) = overlay_with_lower().await;
