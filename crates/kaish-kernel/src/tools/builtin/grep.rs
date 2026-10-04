@@ -206,7 +206,7 @@ fn engine_error(error: &dyn std::fmt::Display, extended: bool) -> String {
 pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
     RefusedFlag::new(
         &["-P", "--perl-regexp"],
-        "grep reads GNU BRE, or ERE with -E, and has no look-around or back-references. Run `grep -E`, with `[0-9]` for `\\d` and `[[:space:]]` for `\\s`.",
+        "kaish grep reads GNU BRE, or ERE with -E, without look-around or back-references. Run `grep -E '[0-9]+' FILE`: write `[0-9]` for `\\d` and `[[:space:]]` for `\\s`.",
     ),
 ];
 

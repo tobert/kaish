@@ -73,9 +73,12 @@ async fn refused_cp_preserve_names_the_reason_and_the_fix() {
 #[case::mv_force("mv -f f g", "mv: -f is not supported: ", "`mv SRC DST`")]
 #[case::mv_interactive("mv -i f g", "mv: -i is not supported: ", "`mv -n SRC DST`")]
 #[case::mkdir_mode("mkdir -m 755 d", "mkdir: -m is not supported: ", "`mkdir DIR`")]
+#[case::mkdir_mode_attached("mkdir -m755 d", "mkdir: -m is not supported: ", "`mkdir DIR`")]
+#[case::printf_variable_attached("printf -vx hi", "printf: -v is not supported: ", "`NAME=$(printf FORMAT ARGS)`")]
 #[case::echo_escapes("echo -e 'a\\tb'", "echo: -e is not supported: ", "`printf 'a\\tb\\n'`")]
 #[case::printf_variable("printf -v x hi", "printf: -v is not supported: ", "`NAME=$(printf FORMAT ARGS)`")]
-#[case::grep_perl("grep -P x f", "grep: -P is not supported: ", "`grep -E`")]
+#[case::grep_perl("grep -P x f", "grep: -P is not supported: ", "`grep -E '[0-9]+' FILE`")]
+#[case::cp_two_refused("cp -pi f g", "cp: -i is not supported: ", "`cp -n SRC DST`")]
 #[case::find_delete("find . -delete", "find: -delete is not supported: ", "do rm \"$f\"; done`")]
 #[case::find_exec("find . -exec cat", "find: -exec is not supported: ", "$(find . -name")]
 #[tokio::test]
@@ -121,6 +124,10 @@ async fn every_declared_refusal_is_live_and_documented() {
             );
             for spelling in refused.spellings {
                 declared += 1;
+                assert!(
+                    limits.contains(&format!("`{spelling}`")) || limits.contains(&format!("`{name} {spelling}`")),
+                    "help limits does not list {name} {spelling}"
+                );
                 let dir = tempdir().unwrap();
                 fs::write(dir.path().join("f"), "x\n").unwrap();
                 let kernel = kernel_at(dir.path());

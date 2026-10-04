@@ -69,7 +69,7 @@ Any other unknown flag exits 2 and names `help NAME` for the supported flags.
 | `mkdir -m`, `--mode` | kaish cannot set a directory's mode | `mkdir DIR` |
 | `echo -e` | Double-quoted strings already expand `\n` and `\t` | `echo "a\tb"` or `printf 'a\tb\n'` |
 | `printf -v` | Assignment takes command substitution | `NAME=$(printf FORMAT ARGS)` |
-| `grep -P`, `--perl-regexp` | grep reads GNU BRE or ERE; no look-around or back-references | `grep -E '[0-9]+'` for `\d+` |
+| `grep -P`, `--perl-regexp` | kaish grep reads GNU BRE or ERE, without look-around or back-references | `grep -E '[0-9]+' FILE` for `\d+` |
 | `find -delete` | `find` only prints paths, one per line | `for f in $(find . -name '*.tmp'); do rm "$f"; done` |
 | `find -exec`, `-execdir`, `-ok`, `-okdir` | `find` only prints paths, one per line | `for f in $(find . -name '*.txt'); do wc -l "$f"; done` |
 

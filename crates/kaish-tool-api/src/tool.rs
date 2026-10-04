@@ -50,8 +50,11 @@ pub trait Tool: Send + Sync {
     ///
     /// When the tool rejects one of these spellings as an unknown flag, the
     /// kernel prints `NAME: FLAG is not supported: HINT` in place of the
-    /// generic ``NAME: FLAG is not supported (see `help NAME`)``. The default
-    /// is none. List a flag only when kaish drops it for a reason and another
+    /// generic ``NAME: FLAG is not supported (see `help NAME`)``. The kernel
+    /// recognizes the refusal by its shape: exit 2 and `err` that starts with
+    /// `NAME: ` followed by clap's `error: unexpected argument '...'` text,
+    /// which is what `ExecResult::failure(2, format!("NAME: {clap_error}"))`
+    /// produces. The default is none. List a flag only when kaish drops it for a reason and another
     /// command does the job, not for a flag that is merely missing.
     fn refused_flags(&self) -> &[RefusedFlag] {
         &[]
@@ -66,7 +69,7 @@ pub struct RefusedFlag {
     /// `--preserve`. A long flag's `=value` is not part of its spelling.
     pub spellings: &'static [&'static str],
     /// The reason and the fix, printed after `NAME: FLAG is not supported: `.
-    /// Lead with the rule; end with `Run` and the command in backticks.
+    /// Lead with the rule, then `Run` and the command in backticks.
     pub hint: &'static str,
 }
 
