@@ -699,7 +699,7 @@ find . -name --help            # --help is the name to match
 
 `cat -v` marks control bytes as `^X`, DEL as `^?`, and bytes above 127 with `M-` plus the same notation; tabs and newlines stay. `-T` marks tabs as `^I`; `-E` adds `$` before each newline and marks a preceding carriage return as `^M`. `-A` enables all three. Display modes buffer the input. `-n` numbers the marked lines; with only `-E` or `-T`, non-UTF-8 input exits 1 and names `-v` as the fix.
 
-`NAME --help` prints builtin help to stdout and exits 0. A declared option value shaped like `--help` or `--json` remains data. Expression tools such as `test` recognize only a leading `--help`. Unsupported builtin flags exit 2 and name `help NAME` for the supported flags.
+`NAME --help` prints builtin help to stdout and exits 0. A declared option value shaped like `--help` or `--json` remains data. Expression tools such as `test` recognize only a leading `--help`. Unsupported builtin flags exit 2 and name `help NAME` for the supported flags. A flag kaish drops on purpose names the reason and the command to run instead: `cp -p a b` prints ``cp: -p is not supported: kaish cannot copy a file's mode, owner, or times; no builtin sets them from another file. Run `cp SRC DST`; the copy gets the current time.`` See `help limits` for every such flag.
 
 ## Pipes & Redirects
 

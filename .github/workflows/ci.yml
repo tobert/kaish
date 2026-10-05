@@ -21,6 +21,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Tests need no debuginfo. With it, the ~240 integration-test binaries fill the
+# runner disk, and rust-lld dies with SIGBUS ("ld terminated with signal 7")
+# while linking the last doctests. Seen on PRs 516 and 517, 2026-10-05.
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 jobs:
   test:
     name: test + clippy
@@ -44,6 +51,10 @@ jobs:
         run: cargo test --all --locked
         env:
           KAISH_BASH_COMPAT: 1
+
+      - name: Disk after tests
+        if: always()
+        run: df -h / && du -sh target
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all --all-targets --locked -- -D warnings

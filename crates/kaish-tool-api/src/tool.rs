@@ -44,6 +44,48 @@ pub trait Tool: Send + Sync {
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
         validate_against_schema(args, &self.schema())
     }
+
+    /// Flags this tool rejects on purpose, each with its reason and the
+    /// command to run instead.
+    ///
+    /// When the tool rejects one of these spellings as an unknown flag, the
+    /// kernel prints `NAME: FLAG is not supported: HINT` in place of the
+    /// generic ``NAME: FLAG is not supported (see `help NAME`)``. The kernel
+    /// recognizes the refusal by its shape: exit 2 and `err` that starts with
+    /// `NAME: ` followed by clap's `error: unexpected argument '...'` text,
+    /// which is what `ExecResult::failure(2, format!("NAME: {clap_error}"))`
+    /// produces. The default is none. List a flag only when kaish drops it for a reason and another
+    /// command does the job, not for a flag that is merely missing.
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        &[]
+    }
+}
+
+/// A flag a tool rejects on purpose. See [`Tool::refused_flags`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefusedFlag {
+    /// Every spelling the hint covers, as the parser reports it: `-p`,
+    /// `--preserve`. A long flag's `=value` is not part of its spelling.
+    pub spellings: &'static [&'static str],
+    /// The reason and the fix, printed after `NAME: FLAG is not supported: `.
+    /// Lead with the rule, then `Run` and the command in backticks.
+    pub hint: &'static str,
+}
+
+impl RefusedFlag {
+    /// A refused flag with its spellings and hint.
+    pub const fn new(spellings: &'static [&'static str], hint: &'static str) -> Self {
+        Self { spellings, hint }
+    }
+
+    /// The hint for `flag` in `refused`, if one of its entries spells it.
+    pub fn hint_for(refused: &[RefusedFlag], flag: &str) -> Option<&'static str> {
+        refused
+            .iter()
+            .find(|entry| entry.spellings.contains(&flag))
+            .map(|entry| entry.hint)
+    }
 }
 
 /// Validate arguments against a tool schema.

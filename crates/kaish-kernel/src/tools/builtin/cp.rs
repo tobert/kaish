@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
 use crate::operation::KernelOperation;
-use crate::tools::{exec_context, cas_overwrite, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, cas_overwrite, schema_from_clap, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
 pub struct Cp;
@@ -40,10 +40,34 @@ struct CpArgs {
     paths: Vec<String>,
 }
 
+/// Flags cp rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-p", "--preserve"],
+        "kaish cannot copy a file's mode, owner, or times; no builtin sets them from another file. Run `cp SRC DST`; the copy gets the current time.",
+    ),
+    RefusedFlag::new(
+        &["-a", "--archive"],
+        "kaish cannot copy a file's mode, owner, or times. Run `cp -rP SRC DST` to copy the tree and keep symlinks as links.",
+    ),
+    RefusedFlag::new(
+        &["-f", "--force"],
+        "cp already replaces an existing destination. Run `cp SRC DST`.",
+    ),
+    RefusedFlag::new(
+        &["-i", "--interactive"],
+        "kaish never prompts. Run `cp -n SRC DST` to keep an existing destination.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Cp {
     fn name(&self) -> &str {
         "cp"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {
@@ -77,9 +101,10 @@ impl Tool for Cp {
 
         let recursive = parsed.recursive;
         let no_clobber = parsed.no_clobber;
-        // `-p`/`--preserve` is intentionally NOT accepted: the VFS has no mode,
-        // mtime, or ownership to preserve, so advertising the flag would be a
-        // silent no-op. clap rejects it loudly as an unknown argument instead.
+        // `-p`/`--preserve` is intentionally NOT accepted: the backend cannot
+        // set mode or owner, and cp writes the copy with a new mtime, so the
+        // flag would be a silent no-op. clap rejects it and REFUSED_FLAGS
+        // names the fix.
 
         if parsed.no_dereference && parsed.dereference {
             return ExecResult::failure(

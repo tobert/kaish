@@ -719,6 +719,9 @@ mod tests {
         async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
             self.inner.write(path, data).await
         }
+        async fn replace(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.replace(path, data).await
+        }
         async fn list(&self, path: &Path) -> std::io::Result<Vec<crate::vfs::DirEntry>> {
             self.inner.list(path).await
         }

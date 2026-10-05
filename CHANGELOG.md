@@ -12,37 +12,15 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
-- **`edit` changes lines by anchor.** `edit FILE ANCHOR TEXT` replaces a
-  line or an `A..B` range; `--delete`, `--after`, and `--before` delete
-  and insert. Every anchor in one call refers to the file as read, and
-  nothing is written unless every anchor still matches; a stale anchor
-  exits 1 naming the line's current text and `cat --hashline FILE`. New
-  lines keep the file's line ending and final newline. Success prints the
-  changed lines with their new anchors (a summary past 40 lines; `-q` for
-  none). The write is an atomic replace. `patch` stays a faithful GNU
-  `patch`. (#375)
-- **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
-  print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
-  anchor the coming `edit` builtin takes. `grep` prefixes file names across
-  several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
-  context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
-  `cat -v/-E/-T/-A`, `grep -U`, `grep --encoding`, `grep -c/-l`, and other
-  builtins (`ls --hashline`) exit 2 and name the form that works.
-- **`--json` rows carry `hash` beside `line`** when the row is a line of
-  one named file, kept byte for byte, including `grep --json` match
-  records. A line `grep` decoded lossily gets no `hash`.
-- **`KernelConfig::with_line_hasher`** chooses the line hash. The default
-  is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
-  holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
-  anchor uses. Builtins hash through `ToolCtx::line_hash`.
-- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
-  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
-  target, and syncs the directory. The trait default calls `write`, which
-  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
-  `replace`. `KernelBackend::patch` on the built-in backends uses it.
-
 ### Changed
 
+- **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
+  They write a new file beside the target and rename it over the old one,
+  as GNU `sed -i` does, so a crash leaves the old file or the new one,
+  never a partial file. The file gets a new inode: it keeps its mode, is
+  owned by the user kaish runs as, and stops sharing content with hard
+  links. The directory must be writable. `>`, `tee`, and `write` still
+  rewrite in place, as bash does. (#486)
 - **API:** `ToolCtx` has a required `line_hash` method; the trait is
   sealed, so only the kernel implements it. `OutputFormat` has a
   `Hashline` variant, `OutputNode` a `hash` field, and `GlobalFlags` an
@@ -57,13 +35,41 @@ breaking entries are marked **BREAKING**.
   links. The directory must be writable. `>`, `tee`, and `write` still
   rewrite in place, as bash does. (#486)
 
+- **A flag kaish drops on purpose names the reason and the fix.**
+  `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
+  mode, owner, or times; no builtin sets them from another file. Run
+  `cp SRC DST`; the copy gets the current time.` and exits 2. Covered:
+  `cp -p/-a/-f/-i`, `mv -f/-i`, `mkdir -m`, `echo -e`, `printf -v`,
+  `grep -P`, `find -delete/-exec/-execdir/-ok/-okdir`. See `help limits`.
+
 ### Fixed
 
-- `grep` dropped a lone `\r` at the end of a file without a final newline.
-  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
 - `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
   did not know as `Overwrite`. They now return `InvalidOperation` naming
   the mode.
+- Under `set -o trash`, `sed -i` and `patch` transformed a second read of
+  the file, not the bytes the trash saved. A write between the two was
+  replaced with no copy in the trash. They now transform the saved bytes
+  and fail with "changed since" if the file no longer holds them.
+- In overlay mode, a path with a symlink in it could name one file for a
+  read and another for a write. A write through a link made a file that
+  hid the link, a read through a link could return a copied-up file's old
+  bytes or a removed file's bytes, and `ls` through a directory link
+  showed removed files. Every overlay operation now follows links the way
+  a real filesystem does: a write changes the link's target and the link
+  stays. A link that leaves the root is refused with "path escapes root",
+  as without the overlay.
+- In overlay mode, `rm` of a file the overlay had already changed did not
+  reach `kaish-vfs commit`. It is now a removal that commit applies.
+- `kaish-vfs commit` refuses a new file whose path holds a dangling symlink
+  in the target, instead of writing through the link.
+- The overwrite conflict error now reads "changed since kaish read it, so
+  it was not overwritten; read it again and retry". Under `set -o trash`,
+  an error reading a target's metadata now fails the command instead of
+  being read as a new file with nothing to snapshot.
+
+- `grep` dropped a lone `\r` at the end of a file without a final newline.
+  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
 
 ## [0.18.0] - 2026-10-03
 

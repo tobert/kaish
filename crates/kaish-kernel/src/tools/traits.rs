@@ -7,7 +7,8 @@
 //! working.
 
 pub use kaish_tool_api::{
-    global_flag_value_is_truthy, is_global_output_flag, validate_against_schema, Tool, ToolCtx,
+    global_flag_value_is_truthy, is_global_output_flag, validate_against_schema, RefusedFlag, Tool,
+    ToolCtx,
 };
 
 // Data types re-exported from kaish-types.

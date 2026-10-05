@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
 use crate::operation::KernelOperation;
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema};
 
 /// Mv tool: move/rename files and directories.
 pub struct Mv;
@@ -28,10 +28,26 @@ struct MvArgs {
     paths: Vec<String>,
 }
 
+/// Flags mv rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-f", "--force"],
+        "mv already replaces an existing destination. Run `mv SRC DST`.",
+    ),
+    RefusedFlag::new(
+        &["-i", "--interactive"],
+        "kaish never prompts. Run `mv -n SRC DST` to keep an existing destination.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Mv {
     fn name(&self) -> &str {
         "mv"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {

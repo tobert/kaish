@@ -58,11 +58,18 @@ struct MockTrash {
     /// the logical path and its captured prior content.
     snapshots: Mutex<Vec<(PathBuf, Vec<u8>)>>,
     fail: bool,
+    /// A concurrent writer: after the snapshot is taken, write these bytes to
+    /// this real path, as another process would between the gate and the write.
+    racer: Option<(PathBuf, Vec<u8>)>,
 }
 
 impl MockTrash {
     fn failing() -> Self {
         Self { fail: true, ..Self::default() }
+    }
+
+    fn racing(path: PathBuf, bytes: &[u8]) -> Self {
+        Self { racer: Some((path, bytes.to_vec())), ..Self::default() }
     }
 
     fn trashed_paths(&self) -> Vec<PathBuf> {
@@ -95,6 +102,9 @@ impl TrashBackend for MockTrash {
             .lock()
             .expect("mock lock")
             .push((original_path.to_path_buf(), bytes.to_vec()));
+        if let Some((path, racing)) = &self.racer {
+            std::fs::write(path, racing).expect("racer write");
+        }
         Ok(())
     }
 
@@ -330,6 +340,27 @@ async fn patch_overwrite_under_trash_snapshots_prior_bytes() {
     );
 }
 
+/// The same race for patch: the hunk still applies to the racer's content
+/// (by offset), so without a check against the snapshot it would succeed.
+#[tokio::test]
+async fn patch_refuses_a_change_made_after_the_snapshot() {
+    let dir = tempdir();
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, "old\n").expect("write");
+    let mock = Arc::new(MockTrash::racing(file.clone(), b"racer\nold\n"));
+    let session = kernel_with_trash(dir.path(), &mock);
+
+    run(&session, "set -o trash").await;
+    let r = run(&session, PATCH_SCRIPT).await;
+    assert_eq!(r.code, 1, "a change after the snapshot is a conflict: {}", r.err);
+    assert!(r.err.contains("changed since"), "err names the conflict: {}", r.err);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        "racer\nold\n",
+        "the racer's content survives untouched"
+    );
+}
+
 #[tokio::test]
 async fn patch_explicit_file_multi_group_diff_snapshots_once() {
     // A multi-group diff applied to one explicit target lists that file once per
@@ -401,6 +432,46 @@ async fn sed_in_place_under_trash_snapshots_prior_bytes() {
         std::fs::read_to_string(dir.path().join("f.txt")).expect("read"),
         "new\n"
     );
+}
+
+/// A write that lands after the trash snapshot must not be transformed and
+/// replaced: the trash would hold the older bytes, and the racer's version
+/// would be lost with no copy anywhere.
+#[tokio::test]
+async fn sed_in_place_refuses_a_change_made_after_the_snapshot() {
+    let dir = tempdir();
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, "old\n").expect("write");
+    let mock = Arc::new(MockTrash::racing(file.clone(), b"old racer\n"));
+    let session = kernel_with_trash(dir.path(), &mock);
+
+    run(&session, "set -o trash").await;
+    let r = run(&session, "sed -i 's/old/new/' f.txt").await;
+    assert_eq!(r.code, 1, "a change after the snapshot is a conflict: {}", r.err);
+    assert!(r.err.contains("changed since"), "err names the conflict: {}", r.err);
+    assert!(r.err.contains("read it again and retry"), "err names the fix: {}", r.err);
+    assert!(!r.err.contains("write-model"), "no internal names: {}", r.err);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        "old racer\n",
+        "the racer's content survives untouched"
+    );
+}
+
+/// A file named twice is edited twice, the second pass starting from the
+/// first pass's output, not from the snapshot (which would be a conflict).
+#[tokio::test]
+async fn sed_in_place_repeated_operand_edits_twice_under_trash() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "aa\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let session = kernel_with_trash(dir.path(), &mock);
+
+    run(&session, "set -o trash").await;
+    let r = run(&session, "sed -i 's/a/b/' f.txt f.txt").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).expect("read"), "bb\n");
+    assert_eq!(mock.snapshots().len(), 1, "one snapshot for one file");
 }
 
 #[tokio::test]

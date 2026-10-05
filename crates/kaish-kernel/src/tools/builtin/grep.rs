@@ -19,7 +19,7 @@ use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::builtin::read_repeatable_strings;
 use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, regex_fix_hint, translate_strict_ere};
-use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{
     build_file_types, list_file_types, ErrorCallback, FileWalker, GlobPath, IncludeExclude,
@@ -208,10 +208,22 @@ fn engine_error(error: &dyn std::fmt::Display, extended: bool) -> String {
     }
 }
 
+/// Flags grep rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-P", "--perl-regexp"],
+        "kaish grep reads GNU BRE, or ERE with -E, without look-around or back-references. Run `grep -E '[0-9]+' FILE`: write `[0-9]` for `\\d` and `[[:space:]]` for `\\s`.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Grep {
     fn name(&self) -> &str {
         "grep"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {

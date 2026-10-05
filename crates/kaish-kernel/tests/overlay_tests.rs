@@ -49,6 +49,38 @@ mod overlay_tests {
         panic!("kaish-vfs status: field '{}' not found in:\n{}", key, status_out);
     }
 
+    /// `sed -i` through a link edits the file the link names in the overlay:
+    /// the copied-up version, not the one on disk below it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sed_in_place_through_a_link_edits_the_copied_up_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("f.txt"), "alpha\n").unwrap();
+        std::os::unix::fs::symlink("f.txt", root.join("l")).unwrap();
+        let kernel = overlay_kernel(root);
+
+        let (_, code) = run(&kernel, "echo new > f.txt; sed -i 's/new/NEW/' l").await;
+        assert_eq!(code, 0);
+        let (out, _) = run(&kernel, "cat f.txt; cat l").await;
+        assert_eq!(out, "NEW\nNEW");
+        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "alpha\n");
+    }
+
+    /// Removing a file the overlay already changed is a removal that commit
+    /// applies.
+    #[tokio::test]
+    async fn commit_applies_rm_of_a_changed_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("f.txt"), "alpha\n").unwrap();
+        let kernel = overlay_kernel(root);
+
+        let (_, code) = run(&kernel, "echo edited > f.txt; rm f.txt; kaish-vfs commit").await;
+        assert_eq!(code, 0);
+        assert!(!root.join("f.txt").exists(), "commit removed the file");
+    }
+
     // ------------------------------------------------------------------
     // Test 1: overlay end-to-end (write, diff, commit, verify)
     // ------------------------------------------------------------------
