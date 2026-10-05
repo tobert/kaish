@@ -23,6 +23,11 @@ struct TailArgs {
     #[arg(short = 'c', long = "bytes")]
     bytes: Option<i64>,
 
+    /// Print each line as LINE:HASH:TEXT, numbered by its line in the file.
+    /// `edit` takes LINE:HASH as an anchor. Needs exactly one FILE; not with -c.
+    #[arg(long)]
+    hashline: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -73,12 +78,30 @@ impl Tool for Tail {
             Err(e) => return ExecResult::failure(2, format!("tail: {e}")),
         };
         parsed.global.apply(ctx);
+        let wants_anchors = parsed.global.apply_hashline(parsed.hashline, ctx);
 
         // Collect all file paths, expanding globs
         let paths = match ctx.expand_paths(&args.positional).await {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("tail: {}", e)),
         };
+
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
+        if hashline {
+            if parse_byte_spec(&args).is_some() {
+                return super::hashline::flag("tail", "-c", "it counts bytes, not lines");
+            }
+            if paths.len() > 1 {
+                return super::hashline::several_files("tail", paths.len());
+            }
+            if paths.is_empty() {
+                return super::hashline::stdin("tail", "tail --hashline FILE");
+            }
+        }
+        // Rows from one named file are file lines; stdin rows are not.
+        let hasher = (wants_anchors && paths.len() == 1)
+            .then(|| ctx.line_hasher.clone());
 
         // Multiple files: show each with header
         if paths.len() > 1 {
@@ -151,7 +174,7 @@ impl Tool for Tail {
         // checkpointed loop rather than `.lines().collect()` so a script
         // timeout can stop it.
         let mut all_lines: Vec<&str> = Vec::new();
-        for line in input.lines() {
+        for line in kaish_types::hashline::lines(&input) {
             if ctx.checkpoint().await.is_err() {
                 return kaish_tool_api::Interrupted.result("tail");
             }
@@ -171,11 +194,8 @@ impl Tool for Tail {
         } else {
             // The anchor is the line's position in the FILE, not among the
             // rows `tail` emitted — `skip_count` is what makes the difference.
-            let nodes: Vec<OutputNode> = output_lines
-                .iter()
-                .enumerate()
-                .map(|(i, line)| OutputNode::new(*line).at_line((skip_count + i + 1) as u64))
-                .collect();
+            let nodes: Vec<OutputNode> =
+                super::file_line_rows(&output_lines, skip_count as u64 + 1, hasher.as_ref());
 
             let output_data = OutputData::table(vec!["TEXT".to_string()], nodes);
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))

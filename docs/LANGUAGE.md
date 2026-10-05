@@ -768,6 +768,16 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > are literals, the validator reports E023 before anything runs, so
 > `kaish --plan` shows it.
 >
+> **`>` rewrites in place; `sed -i` and `patch` replace.** `>`, `tee`,
+> and `write` truncate the file and write into it, as bash does, so the
+> file keeps its inode and its hard links. `sed -i`, `patch`, and
+> `kaish-vfs commit` write a new file beside the target and rename it over
+> the old one, as GNU `sed -i` does: a crash leaves the old file or the new
+> one, never a partial file. The new file keeps the old file's mode, is
+> owned by the user kaish runs as, and is not shared with hard links to the
+> old file. The directory must be writable; when it is not, the command
+> exits 1 naming the directory, and the file keeps its content.
+>
 > **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
 > join captured stdout first, then stderr. kaish does not preserve the
 > command's interleaved write order. If stderr has already reached a
@@ -1452,7 +1462,7 @@ kaish doesn't implement, with no fixed set to check a typo against the way
 `-o`'s names allow.
 
 With `trash` enabled, `rm` snapshots the file into Trash before removing it,
-and a truncating overwrite (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`,
+and an overwrite (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`,
 `write`) snapshots the prior content first — both are recoverable with
 `kaish-trash restore`. `tee -a` append, writing a new file, and
 `patch --dry-run` have no prior content to snapshot, so they never trash.
@@ -1694,6 +1704,19 @@ diff --json before after       # exit 1, answer under data
 `--json` keeps successful data unwrapped. An empty success prints nothing. A nonzero formatted result is an object with `code` and `error`, including a negative answer with an empty error. Structured or binary partial results stay under `data`; text without structured data stays under `output`. The error removes one rendering newline and keeps other blank lines. Stderr still carries the same error. Check the exit code before reading the error or answer.
 
 Only the final builtin pipeline stage is formatted; earlier stages feed streams to the next stage. Command substitution captures the formatted result. `true` and `false` honor `--json` and its disabled forms. External commands receive the flag literally. Parse/validation refusals, unresolved commands, and redirect failures before builtin dispatch do not use this formatter. An output spill happens after formatting, so exit 3 keeps the truncated preview and spill metadata; the preview may be incomplete JSON. See "Shell Options".
+
+### Line anchors (`--hashline`)
+
+```sh
+cat --hashline main.rs                 # 1:d246:use std::io;
+grep --hashline TODO src/a.rs src/b.rs # src/b.rs:12:5b0b:    // TODO: retry
+grep -o --hashline main main.rs        # 3:1d48:main — the anchor names the whole line
+head -n 1 main.rs --json               # [{"TEXT":"use std::io;","line":1,"hash":"d246"}]
+```
+
+`--hashline` prints each row as `LINE:HASH:TEXT`, after any file name `grep` adds. `LINE:HASH` is the anchor `edit` takes. The hash covers the line without its terminator (`\n` or `\r\n`); a lone `\r` at the end of the file is text. By default it is FNV-1a, 4 hex digits; an embedder can choose another hash. Under `--json`, the same rows carry `"hash"` beside `"line"`, and `--json` wins when both flags are given.
+
+An anchor exists only for a line read from a named file. `cat`, `head`, `tail`, and `grep` produce them; `grep -A/-B/-C` context lines are anchored too. These exit 2 and name the form that works, because their line numbers are not lines of one file: input from stdin (`cat f | grep --hashline x`), more than one file to `cat`, `head`, or `tail` (`grep` takes several and names each), `head -c` and `tail -c`, `cat -v/-E/-T/-A`, `grep -U` (a match can span lines) and `grep --encoding` (decoded text is not the file's bytes), and any builtin whose output has no anchors (`ls --hashline`). These checks apply with `--json` too. Under `--json` a row that is not a line of one file, or a line `grep` could only decode lossily, keeps `"line"` and has no `"hash"`.
 
 ## Background Jobs
 

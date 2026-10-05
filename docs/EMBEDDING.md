@@ -392,7 +392,28 @@ failure instead of continuing — off by default, see
 ["When exit status is a decision"](#when-exit-status-is-a-decision-errexit)
 above), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
 in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
-(below).
+(below), `.with_line_hasher(hasher)` (below).
+
+#### Choosing the line hash (`with_line_hasher`)
+
+```rust
+use kaish_types::LineHasher;
+
+// Anchors print as 42:<your hash>:text; `edit` checks with the same function.
+let config = KernelConfig::agent()
+    .with_line_hasher(LineHasher::new(|line| my_short_hash(line)));
+```
+
+`cat --hashline`, `head`, `tail`, and `grep` print line anchors as
+`LINE:HASH:TEXT`, and `edit` checks them. The kernel computes every hash with
+one `LineHasher`, so a builtin never hashes on its own and the two always
+agree. The default is FNV-1a, 4 hex digits (`fnv1a_line_hash(b"alpha") ==
+"202b"`), the same as kaijutsu's. The function gets the line without its
+terminator, as `kaish_types::hashline::lines` splits it, and must return ASCII
+letters and digits; `LineHasher::hash` panics on anything else, because the
+anchor would not parse. A tool you write hashes through `ToolCtx::line_hash`
+and sets the result with `OutputNode::with_hash` beside `at_line`, for lines of
+one named file only.
 
 #### Deciding what a statement may do
 
@@ -472,8 +493,8 @@ vfs.mount("/", MemoryFs::with_budget(budget.clone()));
 Every operation on `KernelBackend` and `Filesystem` states its symlink policy
 in its doc comment. The rule for the destructive pair: `remove` and `rename`
 never follow the final path component, on either side of `rename`. `stat`,
-`exists`, `read`, and `write` follow; `lstat`, `read_link`, and `symlink` do
-not. `symlink` refuses an absolute target (`InvalidInput`); the kernel's VFS
+`exists`, `read`, `write`, and `replace` follow; `lstat`, `read_link`, and
+`symlink` do not. `symlink` refuses an absolute target (`InvalidInput`); the kernel's VFS
 router rewrites `ln -s /abs/target link` relative to the link on the same
 mount before it reaches a backend.
 
@@ -492,6 +513,22 @@ let host = resolve_beneath(&root, path, Follow::LinkItself)?; // remove, rename,
 against any `Filesystem`; `run_all(make_root)` takes a closure that returns a
 fresh empty root per case. A backend that inherits the trait's `lstat`
 default fails the first case rather than passing silently.
+
+### Replacing a file (`replace`)
+
+`sed -i`, `patch`, and an overlay commit call `Filesystem::replace` (and
+`KernelBackend::write` with `WriteMode::Replace`). A reader must see the old
+content or the new, never a partial file, even when the process dies
+mid-write. `>`, `tee`, and `write` call `write`, which may truncate in place.
+
+The trait default calls `write`. That is correct for a backend whose `write`
+is one in-memory swap, as `MemoryFs` is. A backend over durable storage
+overrides `replace`; `LocalFs` writes `.<name>.kaish-<hex>` beside the
+target, syncs it, renames it over the target, and syncs the directory. A
+`Filesystem` that routes to another must forward `replace`; inheriting the
+default silently turns it into a truncating `write`. A `KernelBackend` that
+matches on `WriteMode` should return an error for a mode it does not know
+instead of treating it as `Overwrite`.
 
 ### Canonicalizing a path (`canonicalize`)
 

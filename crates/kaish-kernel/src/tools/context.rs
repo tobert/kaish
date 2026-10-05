@@ -297,6 +297,9 @@ pub struct ExecContext {
     /// Builtins set this via `GlobalFlags::apply(ctx)`; external commands
     /// don't touch it.
     pub output_format: Option<OutputFormat>,
+    /// The embedder's hasher for line anchors, from `KernelConfig`. Copied to
+    /// every child context; a context built without the kernel uses FNV-1a.
+    pub line_hasher: kaish_types::LineHasher,
 
     /// Shared VFS memory budget for this kernel's `MemoryFs` mounts.
     ///
@@ -609,6 +612,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -653,6 +657,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -694,6 +699,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -735,6 +741,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -779,6 +786,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -820,6 +828,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -1156,6 +1165,7 @@ impl ExecContext {
             cancel: self.cancel.clone(),
             // Output format is per-execution; child pipeline stages start fresh.
             output_format: None,
+            line_hasher: self.line_hasher.clone(),
             // Budget is shared: the child draws from the same pool as the parent.
             vfs_budget: self.vfs_budget.clone(),
             // The counter is shared: one sequence for the whole kernel.
@@ -1277,9 +1287,9 @@ impl ExecContext {
     /// Copy the prior content of `resolved` into the trash before it's
     /// overwritten, returning those bytes for the caller's compare-and-swap.
     ///
-    /// We **copy** (not move): the builtin overwrites the file in place next,
-    /// and read-modify-write callers (`patch`, `sed -i`) still need to read it —
-    /// the file keeps its identity, only its content changes. (`rm` *moves*
+    /// We **copy** (not move): the builtin still needs the file. `tee`/`write`
+    /// overwrite it in place, and read-modify-write callers (`patch`, `sed -i`)
+    /// read it before replacing it. (`rm` *moves*
     /// because removal is the op; an overwrite backs up the prior bytes.) Reads
     /// through the backend so a real, overlay, or in-memory file is handled the
     /// same way. A missing trash backend or a trash failure is an error — never
@@ -1529,6 +1539,10 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         self.output_format = Some(format);
     }
 
+    fn line_hash(&self, line: &[u8]) -> String {
+        self.line_hasher.hash(line)
+    }
+
     fn patient(&self, budget: std::time::Duration) -> kaish_tool_api::PatientGuard {
         match &self.watchdog {
             Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
@@ -1655,6 +1669,9 @@ mod tests {
             unimplemented!("ForeignCtx exists only to fail the downcast")
         }
         fn set_output_format(&mut self, _format: kaish_types::OutputFormat) {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn line_hash(&self, _line: &[u8]) -> String {
             unimplemented!("ForeignCtx exists only to fail the downcast")
         }
         fn as_any(&self) -> &dyn std::any::Any {

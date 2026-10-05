@@ -10,7 +10,54 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
+  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
+  target, and syncs the directory. The trait default calls `write`, which
+  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
+  `replace`. `KernelBackend::patch` on the built-in backends uses it.
+
+- **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
+  print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
+  anchor the coming `edit` builtin takes. `grep` prefixes file names across
+  several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
+  context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
+  `cat -v/-E/-T/-A`, `grep -U`, `grep --encoding`, `grep -c/-l`, and other
+  builtins (`ls --hashline`) exit 2 and name the form that works.
+- **`--json` rows carry `hash` beside `line`** when the row is a line of
+  one named file, kept byte for byte, including `grep --json` match
+  records. A line `grep` decoded lossily gets no `hash`.
+- **`KernelConfig::with_line_hasher`** chooses the line hash. The default
+  is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
+  holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
+  anchor uses. Builtins hash through `ToolCtx::line_hash`.
+
+### Changed
+
+- **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
+  They write a new file beside the target and rename it over the old one,
+  as GNU `sed -i` does, so a crash leaves the old file or the new one,
+  never a partial file. The file gets a new inode: it keeps its mode, is
+  owned by the user kaish runs as, and stops sharing content with hard
+  links. The directory must be writable. `>`, `tee`, and `write` still
+  rewrite in place, as bash does. (#486)
+
+- **API:** `ToolCtx` has a required `line_hash` method; the trait is
+  sealed, so only the kernel implements it. `OutputFormat` has a
+  `Hashline` variant, `OutputNode` a `hash` field, and `GlobalFlags` an
+  `apply_hashline` method for a tool that declares `--hashline`. Only
+  `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
+  not list it; elsewhere it exits 2 naming those four.
+
 ### Fixed
+
+- `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
+  did not know as `Overwrite`. They now return `InvalidOperation` naming
+  the mode.
+
+- `grep` dropped a lone `\r` at the end of a file without a final newline.
+  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
 
 - **`grep -U` matches across lines on every input path.** A single file
   searched without `-c`/`-o`/`-l`/`-q`/context and a pipe into a pipe were
