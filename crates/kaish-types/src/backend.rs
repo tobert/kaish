@@ -241,6 +241,12 @@ pub enum WriteMode {
     UpdateOnly,
     /// Explicitly truncate file before writing.
     Truncate,
+    /// Replace the whole file atomically: a reader sees the old content or
+    /// the new, never a partial file. Use it for a read-modify-write of an
+    /// existing file. A backend over durable storage writes a new file and
+    /// renames it over the old one, so the file gets a new identity and a
+    /// hard link to the old one keeps the old content.
+    Replace,
 }
 
 /// Result from tool execution via backend.

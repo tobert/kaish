@@ -13,12 +13,11 @@ use regex::{Regex, RegexBuilder};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::backend::PatchOp;
 use crate::operation::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{gnu_bre_to_regex, translate_strict_ere};
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{cas_replace, exec_context, read_for_replace, schema_from_clap, OverwriteExpectation, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::validator::{IssueCode, ValidationIssue};
 
 /// Sed tool: stream editor for text transformations.
@@ -49,7 +48,9 @@ struct SedArgs {
     extended: bool,
 
     /// Edit files in place (-i) instead of streaming to stdout. Requires file
-    /// operands. The GNU glued backup suffix `-i.bak` is not supported —
+    /// operands. Each file is replaced atomically, as GNU `sed -i` does: a new
+    /// file is written beside it and renamed over it, so the directory must be
+    /// writable. The GNU glued backup suffix `-i.bak` is not supported —
     /// kaish splits `-i.bak` at the dot, so the suffix arrives as a separate
     /// word. Turn on `set -o trash` for a recoverable copy of the prior
     /// contents.
@@ -202,7 +203,7 @@ impl Tool for Sed {
         let file_pos = if expression_from_flag(&args) { 0 } else { 1 };
 
         // In-place: edit each file operand on disk instead of streaming to
-        // stdout. It is *always* a truncating overwrite of an existing file,
+        // stdout. It always overwrites an existing file (by atomic replace),
         // so it takes the same trash snapshot as tee/patch. Editing a stream
         // in place is meaningless, so no operands is a loud error.
         if in_place {
@@ -227,13 +228,10 @@ impl Tool for Sed {
                 hint_prefix.push_str(&format!(" -e '{escaped}'"));
             }
             let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
-            if let Err(blocked) = ctx
-                .snapshot_overwrites("sed",
-                    &targets)
-                .await
-            {
-                return blocked;
-            }
+            let mut known = match ctx.snapshot_overwrites("sed", &targets).await {
+                Ok(snapshots) => snapshots,
+                Err(blocked) => return blocked,
+            };
 
             // Apply per file; continue past per-file errors but report every one
             // so a multi-file failure isn't masked down to just the last.
@@ -241,7 +239,7 @@ impl Tool for Sed {
             for path in &files {
                 let resolved = ctx.resolve_path(path);
                 let target = Path::new(&resolved);
-                let content = match ctx.backend.read(target, None).await {
+                let content = match read_for_replace(&*ctx.backend, target, &known).await {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {
@@ -258,17 +256,15 @@ impl Tool for Sed {
                     Ok(o) => o,
                     Err(i) => return i.result("sed"),
                 };
-                // Whole-file compare-and-swap, matching patch: the `expected`
-                // makes a concurrent change between read and write a loud
-                // Conflict, never a silent clobber.
-                let ops = vec![PatchOp::Replace {
-                    offset: 0,
-                    len: content.len(),
-                    content: output,
-                    expected: Some(content.clone()),
-                }];
-                if let Err(e) = ctx.backend.patch(target, &ops).await {
-                    errors.push(format!("sed: {}: {}", path, e));
+                // The file must still hold the bytes sed read, else a writer
+                // got in between and replacing would lose its change.
+                let expected = OverwriteExpectation::Bytes(content.into_bytes());
+                match cas_replace(&*ctx.backend, target, output.as_bytes(), Some(&expected)).await {
+                    Ok(()) => {
+                        // A repeated operand starts from this output.
+                        known.insert(resolved.clone(), OverwriteExpectation::Bytes(output.into_bytes()));
+                    }
+                    Err(e) => errors.push(format!("sed: {}: {}", path, e)),
                 }
             }
             return if errors.is_empty() {

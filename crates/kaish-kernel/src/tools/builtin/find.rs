@@ -569,6 +569,9 @@ mod tests {
         async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
             self.0.write(path, data).await
         }
+        async fn replace(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.0.replace(path, data).await
+        }
         async fn list(&self, path: &Path) -> std::io::Result<Vec<kaish_types::DirEntry>> {
             self.0.list(path).await
         }

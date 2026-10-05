@@ -297,6 +297,9 @@ pub struct ExecContext {
     /// Builtins set this via `GlobalFlags::apply(ctx)`; external commands
     /// don't touch it.
     pub output_format: Option<OutputFormat>,
+    /// The embedder's hasher for line anchors, from `KernelConfig`. Copied to
+    /// every child context; a context built without the kernel uses FNV-1a.
+    pub line_hasher: kaish_types::LineHasher,
 
     /// Shared VFS memory budget for this kernel's `MemoryFs` mounts.
     ///
@@ -444,15 +447,53 @@ pub(crate) fn decide_mutation_action(
 /// `ExecContext::overwrite_checked` (`tee`/`write`/`dd`) and directly by
 /// `cp`'s free copy path.
 ///
-/// This catches a change between the snapshot and the write. It does not
-/// make the write OS-atomic — a crash mid-write can still truncate (the
-/// atomic write-temp-then-rename primitive is a tracked write-model
-/// residual).
+/// This catches a change between the snapshot and the re-read here. A write
+/// that lands between that re-read and the write below is not caught: no
+/// backend offers compare-and-replace as one step yet. The window is two
+/// backend calls wide. `cas_overwrite` truncates in place, so a crash
+/// mid-write can leave a partial file; [`cas_replace`] cannot.
 pub(crate) async fn cas_overwrite(
     backend: &dyn KernelBackend,
     resolved: &Path,
     content: &[u8],
     expected: Option<&OverwriteExpectation>,
+) -> Result<(), crate::backend::BackendError> {
+    cas_write(backend, resolved, content, expected, crate::backend::WriteMode::Overwrite).await
+}
+
+/// [`cas_overwrite`] for a read-modify-write: the new content replaces the
+/// file atomically (`WriteMode::Replace`), so a crash leaves the old file or
+/// the new one, never a partial file.
+pub(crate) async fn cas_replace(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    content: &[u8],
+    expected: Option<&OverwriteExpectation>,
+) -> Result<(), crate::backend::BackendError> {
+    cas_write(backend, resolved, content, expected, crate::backend::WriteMode::Replace).await
+}
+
+/// The bytes a read-modify-write transforms. A path in `known` (the trash
+/// snapshot, or what this command last wrote there) uses those bytes, so the
+/// trash holds exactly the version that is replaced; any other path is read.
+/// Pass the result to [`cas_replace`] as the expectation.
+pub(crate) async fn read_for_replace(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    known: &GateExpectations,
+) -> Result<Vec<u8>, crate::backend::BackendError> {
+    match known.get(resolved) {
+        Some(OverwriteExpectation::Bytes(bytes)) => Ok(bytes.clone()),
+        None => backend.read(resolved, None).await,
+    }
+}
+
+async fn cas_write(
+    backend: &dyn KernelBackend,
+    resolved: &Path,
+    content: &[u8],
+    expected: Option<&OverwriteExpectation>,
+    mode: crate::backend::WriteMode,
 ) -> Result<(), crate::backend::BackendError> {
     // A re-read or re-digest failure propagates loudly — never
     // `unwrap_or_default()` to empty bytes, which would false-match an empty
@@ -467,17 +508,14 @@ pub(crate) async fn cas_overwrite(
         }
         None => {}
     }
-    backend
-        .write(resolved, content, crate::backend::WriteMode::Overwrite)
-        .await
+    backend.write(resolved, content, mode).await
 }
 
 /// One wording for "somebody else wrote this while the write-model gate was
 /// deciding".
 fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
     crate::backend::BackendError::InvalidOperation(format!(
-        "{}: changed since the write-model gate checked it (concurrent write); \
-         aborting overwrite",
+        "{}: changed since kaish read it, so it was not overwritten; read it again and retry",
         resolved.display()
     ))
 }
@@ -609,6 +647,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -653,6 +692,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -694,6 +734,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -735,6 +776,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -779,6 +821,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -820,6 +863,7 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            line_hasher: kaish_types::LineHasher::default(),
             vfs_budget: None,
             output_sequence: kaish_types::OutputSequence::new(),
             watchdog: None,
@@ -1156,6 +1200,7 @@ impl ExecContext {
             cancel: self.cancel.clone(),
             // Output format is per-execution; child pipeline stages start fresh.
             output_format: None,
+            line_hasher: self.line_hasher.clone(),
             // Budget is shared: the child draws from the same pool as the parent.
             vfs_budget: self.vfs_budget.clone(),
             // The counter is shared: one sequence for the whole kernel.
@@ -1191,8 +1236,9 @@ impl ExecContext {
     ///
     /// `Ok(snapshots)` means every snapshot is done and the caller may write
     /// all targets; `snapshots` maps each trash-snapshotted target's resolved
-    /// path to its prior bytes, so a byte-oriented caller can pass them as the
-    /// `expected` to `overwrite_checked` for a binary-safe compare-and-swap.
+    /// path to its prior bytes. A writer passes them as the `expected` to
+    /// `overwrite_checked`; a read-modify-write starts from them through
+    /// `read_for_replace`, so the trash holds the version it replaces.
     /// `Err(result)` is what the caller must return verbatim — a trash failure
     /// is an error, never a fall-through to a destructive overwrite.
     // `ExecResult` IS the error here — `Err(result)` is what the caller
@@ -1232,17 +1278,14 @@ impl ExecContext {
             // `real` is used only for the exclusion decision (/tmp, /v); the
             // snapshot reads bytes through the backend, not the real path.
             let real = self.backend.resolve_real_path(Path::new(&resolved));
-            let exists = self.backend.exists(Path::new(&resolved)).await;
-            // Prior size decides trash eligibility (a file too big to snapshot
-            // can't be backed up). Only stat an existing target.
-            let size = if exists {
-                self.backend
-                    .stat(Path::new(&resolved))
-                    .await
-                    .map(|e| e.size)
-                    .unwrap_or(0)
-            } else {
-                0
+            // One stat decides both whether there is prior content and its
+            // size (a file too big to snapshot can't be backed up). Only
+            // NotFound means a new file; any other error is reported, never
+            // read as "nothing to lose".
+            let (exists, size) = match self.backend.stat(Path::new(&resolved)).await {
+                Ok(entry) => (true, entry.size),
+                Err(crate::backend::BackendError::NotFound(_)) => (false, 0),
+                Err(e) => return Err(ExecResult::failure(1, format!("{command}: {display}: {e}"))),
             };
             let action = decide_mutation_action(
                 trash_enabled,
@@ -1277,9 +1320,9 @@ impl ExecContext {
     /// Copy the prior content of `resolved` into the trash before it's
     /// overwritten, returning those bytes for the caller's compare-and-swap.
     ///
-    /// We **copy** (not move): the builtin overwrites the file in place next,
-    /// and read-modify-write callers (`patch`, `sed -i`) still need to read it —
-    /// the file keeps its identity, only its content changes. (`rm` *moves*
+    /// We **copy** (not move): the builtin still needs the file. `tee`/`write`
+    /// overwrite it in place, and read-modify-write callers (`patch`, `sed -i`)
+    /// read it before replacing it. (`rm` *moves*
     /// because removal is the op; an overwrite backs up the prior bytes.) Reads
     /// through the backend so a real, overlay, or in-memory file is handled the
     /// same way. A missing trash backend or a trash failure is an error — never
@@ -1529,6 +1572,10 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         self.output_format = Some(format);
     }
 
+    fn line_hash(&self, line: &[u8]) -> String {
+        self.line_hasher.hash(line)
+    }
+
     fn patient(&self, budget: std::time::Duration) -> kaish_tool_api::PatientGuard {
         match &self.watchdog {
             Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
@@ -1655,6 +1702,9 @@ mod tests {
             unimplemented!("ForeignCtx exists only to fail the downcast")
         }
         fn set_output_format(&mut self, _format: kaish_types::OutputFormat) {
+            unimplemented!("ForeignCtx exists only to fail the downcast")
+        }
+        fn line_hash(&self, _line: &[u8]) -> String {
             unimplemented!("ForeignCtx exists only to fail the downcast")
         }
         fn as_any(&self) -> &dyn std::any::Any {

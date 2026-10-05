@@ -153,6 +153,12 @@ struct GrepArgs {
     #[arg(long = "cross-mounts")]
     cross_mounts: bool,
 
+    /// Print each matching line as LINE:HASH:TEXT (FILE:LINE:HASH:TEXT across
+    /// several files), context lines too. `edit` takes LINE:HASH as an
+    /// anchor. Needs FILE operands; -o anchors the whole line.
+    #[arg(long)]
+    hashline: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -318,6 +324,7 @@ impl Grep {
             Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
         };
         parsed.global.apply(ctx);
+        let wants_anchors = parsed.global.apply_hashline(parsed.hashline, ctx);
 
         // `--ftype-list` is a pure info query: emit the TYPE→globs table and
         // exit, no pattern required.
@@ -473,7 +480,29 @@ impl Grep {
             encoding: encoding.clone(),
             binary_detection,
             max_count,
+            anchors: wants_anchors.then(|| ctx.line_hasher.clone()),
         };
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
+        if hashline {
+            if multiline {
+                return super::hashline::flag(
+                    "grep",
+                    "-U",
+                    "a match can span lines, and an anchor names one line",
+                );
+            }
+            if encoding.is_some() {
+                return super::hashline::flag(
+                    "grep",
+                    "--encoding",
+                    "the decoded text is not the file's bytes, which an anchor hashes",
+                );
+            }
+            if !recursive && args.positional.len() < 2 {
+                return super::hashline::stdin("grep", "grep --hashline PATTERN FILE");
+            }
+        }
 
         // Validate search options even when -m 0 needs no input.
         if max_count == Some(0) {
@@ -688,6 +717,9 @@ impl Grep {
                 Ok(p) => p,
                 Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
             };
+        if hashline && file_operands.is_empty() {
+            return super::hashline::stdin("grep", "grep --hashline PATTERN FILE");
+        }
         if file_operands.len() > 1 {
             let root = ctx.resolve_path(".");
             let sources: Vec<Source> = file_operands
@@ -745,7 +777,8 @@ impl Grep {
                 quit_byte,
                 Some(path.clone()),
                 max_count,
-            );
+            )
+            .with_hasher(grep_opts.anchors.clone());
             let scan_result = ctx
                 .read_file_chunked(
                     Path::new(&resolved),
@@ -1444,6 +1477,8 @@ struct GrepLineScanner<'r> {
     /// Set to `true` when the `quit_byte` is encountered.  Scanning stops but
     /// the matched output collected so far is still returned (no error).
     stopped_early: bool,
+    /// Hashes each matched line for its anchor; `None` leaves rows unhashed.
+    hasher: Option<kaish_types::LineHasher>,
     /// `--max-count`: stop after this many emitted lines. `None` = no limit;
     /// `Some(0)` emits nothing.
     max_count: Option<usize>,
@@ -1479,7 +1514,14 @@ impl<'r> GrepLineScanner<'r> {
             stopped_early: false,
             max_count,
             hit_limit: false,
+            hasher: None,
         }
+    }
+
+    /// Hash each matched line for its anchor.
+    fn with_hasher(mut self, hasher: Option<kaish_types::LineHasher>) -> Self {
+        self.hasher = hasher;
+        self
     }
 
     /// Feed the next chunk of bytes from the file.
@@ -1580,9 +1622,9 @@ impl<'r> GrepLineScanner<'r> {
         }
         match std::str::from_utf8(&self.carry) {
             Ok(line) => {
-                // `trim_line_terminator` strips a trailing `\r` even with no
-                // following `\n`, so the final unterminated line does too.
-                let owned = line.strip_suffix('\r').unwrap_or(line).to_owned();
+                // No `\n` follows, so a trailing `\r` is text, as in
+                // `trim_line_terminator` and `str::lines`.
+                let owned = line.to_owned();
                 self.line_number += 1;
                 // The trailing line starts exactly where the undrained carry begins.
                 let line_abs = self.consumed;
@@ -1631,8 +1673,16 @@ impl<'r> GrepLineScanner<'r> {
         // given: the searcher numbers unconditionally and `rich_json` has
         // always reported it that way. `-n` governs the text rendering above,
         // never whether a consumer can find the line.
-        self.nodes
-            .push(OutputNode::new(line).at_line(self.line_number));
+        // Stdin has no file to anchor to, whatever the caller passed.
+        let hash = match (&self.hasher, &self.path) {
+            (Some(hasher), Some(_)) => Some(hasher.hash(line.as_bytes())),
+            _ => None,
+        };
+        let mut node = OutputNode::new(line).at_line(self.line_number);
+        if let Some(hash) = &hash {
+            node = node.with_hash(hash.clone());
+        }
+        self.nodes.push(node);
 
         // Rich JSON: must be byte-identical to `match_record_to_json` for the
         // same line — path (the filename arg), the real line number (the
@@ -1657,13 +1707,17 @@ impl<'r> GrepLineScanner<'r> {
             Some(p) => serde_json::Value::String(p.clone()),
             None => serde_json::Value::Null,
         };
-        self.rich.push(serde_json::json!({
+        let mut record = serde_json::json!({
             "path": path_v,
             "line": self.line_number,
             "byte_offset": byte_offset,
             "line_text": line,
             "submatches": submatches,
-        }));
+        });
+        if let Some(hash) = hash {
+            record["hash"] = serde_json::Value::String(hash);
+        }
+        self.rich.push(record);
     }
 
     fn into_render_result(self) -> RenderResult {
@@ -1692,6 +1746,10 @@ struct GrepOptions {
     /// Stop after this many matching lines (GNU `--max-count`). `None` = no
     /// limit; `Some(0)` matches nothing.
     max_count: Option<usize>,
+    /// Hash rows from a named file for their anchors (`--json`,
+    /// `--hashline`). Also turns context lines into rows, since they are
+    /// file lines `edit` can address.
+    anchors: Option<kaish_types::LineHasher>,
 }
 
 /// Search bytes via grep-searcher and return the rendered output bundle.
@@ -1944,6 +2002,14 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                 // line carries none rather than claiming line zero.
                 let line_num = m.line_number.unwrap_or(0);
                 let anchor = m.line_number;
+                // Only a line of a named file, kept byte for byte, gets a
+                // hash: stdin has no file, and decoded text is not its bytes.
+                let hash = match (&opts.anchors, filename) {
+                    (Some(hasher), Some(_)) if m.exact && opts.encoding.is_none() => {
+                        Some(hasher.hash(m.line_text.as_bytes()))
+                    }
+                    _ => None,
+                };
                 if opts.only_matching && !opts.invert && !m.submatches.is_empty() {
                     // GNU `-o` prints non-empty matches only: `grep -o 'a*'`
                     // on `b` selects the line and prints nothing.
@@ -1962,6 +2028,9 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                         if let Some(n) = anchor {
                             node = node.at_line(n);
                         }
+                        if let Some(hash) = &hash {
+                            node = node.with_hash(hash.clone());
+                        }
                         nodes.push(node);
                     }
                 } else {
@@ -1979,10 +2048,17 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                     if let Some(n) = anchor {
                         node = node.at_line(n);
                     }
+                    if let Some(hash) = &hash {
+                        node = node.with_hash(hash.clone());
+                    }
                     nodes.push(node);
                 }
 
-                rich.push(match_record_to_json(m, filename));
+                let mut record = match_record_to_json(m, filename);
+                if let Some(hash) = hash {
+                    record["hash"] = serde_json::Value::String(hash);
+                }
+                rich.push(record);
                 match_count += 1;
                 emitted_any = true;
             }
@@ -1995,6 +2071,22 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                 output.push_str(&c.line_text);
                 output.push('\n');
                 emitted_any = true;
+                // Anchored context rows, so `--hashline` keeps them. Without
+                // anchors, context stays text-only as before.
+                if let (Some(hasher), Some(file), Some(n), true) =
+                    (&opts.anchors, filename, c.line_number, c.exact && opts.encoding.is_none())
+                {
+                    let mut cells = Vec::new();
+                    if opts.show_filename {
+                        cells.push(file.to_string());
+                    }
+                    nodes.push(
+                        OutputNode::new(&c.line_text)
+                            .with_cells(cells)
+                            .at_line(n)
+                            .with_hash(hasher.hash(c.line_text.as_bytes())),
+                    );
+                }
             }
             SearchEvent::ContextBreak => {
                 if emitted_any {
@@ -2703,6 +2795,7 @@ mod tests {
             encoding: None,
             binary_detection: BinaryDetection::quit(b'\x00'),
             max_count: None,
+            anchors: None,
         };
         grep_lines_structured(content, &matcher, &opts, path).unwrap()
     }
@@ -3034,6 +3127,7 @@ mod tests {
             encoding: None,
             binary_detection: BinaryDetection::quit(b'\x00'),
             max_count: None,
+            anchors: None,
         }
     }
 

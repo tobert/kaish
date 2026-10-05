@@ -349,6 +349,14 @@ impl Filesystem for VfsRouter {
     }
 
     #[tracing::instrument(level = "trace", skip(self, data), fields(path = %path.display(), size = data.len()))]
+    async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        // Forward, as with `append`: the trait default would reach the
+        // mount's `write` and lose the atomic replace.
+        let (fs, relative) = self.find_mount(path)?;
+        fs.replace(&relative, data).await
+    }
+
+    #[tracing::instrument(level = "trace", skip(self, data), fields(path = %path.display(), size = data.len()))]
     async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         // Forward to the mount so a real append (LocalFs's O_APPEND, say)
         // reaches it. Falling through to the trait default would call our

@@ -12,11 +12,22 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
-- **`Tool::refused_flags()`** lets a tool list flags it rejects on purpose,
-  each as a `RefusedFlag` with a reason and the command to run instead. The
-  default is none.
-
 ### Changed
+
+- **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
+  They write a new file beside the target and rename it over the old one,
+  as GNU `sed -i` does, so a crash leaves the old file or the new one,
+  never a partial file. The file gets a new inode: it keeps its mode, is
+  owned by the user kaish runs as, and stops sharing content with hard
+  links. The directory must be writable. `>`, `tee`, and `write` still
+  rewrite in place, as bash does. (#486)
+
+- **API:** `ToolCtx` has a required `line_hash` method; the trait is
+  sealed, so only the kernel implements it. `OutputFormat` has a
+  `Hashline` variant, `OutputNode` a `hash` field, and `GlobalFlags` an
+  `apply_hashline` method for a tool that declares `--hashline`. Only
+  `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
+  not list it; elsewhere it exits 2 naming those four.
 
 - **A flag kaish drops on purpose names the reason and the fix.**
   `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
@@ -26,6 +37,33 @@ breaking entries are marked **BREAKING**.
   `grep -P`, `find -delete/-exec/-execdir/-ok/-okdir`. See `help limits`.
 
 ### Fixed
+
+- `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
+  did not know as `Overwrite`. They now return `InvalidOperation` naming
+  the mode.
+- Under `set -o trash`, `sed -i` and `patch` transformed a second read of
+  the file, not the bytes the trash saved. A write between the two was
+  replaced with no copy in the trash. They now transform the saved bytes
+  and fail with "changed since" if the file no longer holds them.
+- In overlay mode, a path with a symlink in it could name one file for a
+  read and another for a write. A write through a link made a file that
+  hid the link, a read through a link could return a copied-up file's old
+  bytes or a removed file's bytes, and `ls` through a directory link
+  showed removed files. Every overlay operation now follows links the way
+  a real filesystem does: a write changes the link's target and the link
+  stays. A link that leaves the root is refused with "path escapes root",
+  as without the overlay.
+- In overlay mode, `rm` of a file the overlay had already changed did not
+  reach `kaish-vfs commit`. It is now a removal that commit applies.
+- `kaish-vfs commit` refuses a new file whose path holds a dangling symlink
+  in the target, instead of writing through the link.
+- The overwrite conflict error now reads "changed since kaish read it, so
+  it was not overwritten; read it again and retry". Under `set -o trash`,
+  an error reading a target's metadata now fails the command instead of
+  being read as a new file with nothing to snapshot.
+
+- `grep` dropped a lone `\r` at the end of a file without a final newline.
+  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
 
 - **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
   output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.

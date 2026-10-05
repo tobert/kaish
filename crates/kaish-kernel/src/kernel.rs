@@ -218,6 +218,10 @@ pub struct KernelConfig {
     /// Ignore file configuration for file-walking tools.
     pub ignore_config: crate::ignore_config::IgnoreConfig,
 
+    /// Hashes lines for anchors (`42:202b`). Defaults to FNV-1a, 4 hex
+    /// digits; set it with [`with_line_hasher`](Self::with_line_hasher).
+    pub line_hasher: kaish_types::LineHasher,
+
     /// Output size limit configuration for agent safety.
     pub output_limit: crate::output_limit::OutputLimitConfig,
 
@@ -398,6 +402,7 @@ impl Default for KernelConfig {
                 skip_validation: false,
                 interactive: false,
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
+                line_hasher: kaish_types::LineHasher::default(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_unwrapped_commands: cfg!(feature = "subprocess"),
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
@@ -420,6 +425,7 @@ impl Default for KernelConfig {
                 skip_validation: false,
                 interactive: false,
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
+                line_hasher: kaish_types::LineHasher::default(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_unwrapped_commands: false,
                 trash_enabled: false,
@@ -448,6 +454,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            line_hasher: kaish_types::LineHasher::default(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: false,
@@ -479,6 +486,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            line_hasher: kaish_types::LineHasher::default(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: false,
@@ -518,6 +526,7 @@ impl KernelConfig {
             // Ignore-aware by default (GH #134): .gitignore + default ignores
             // at Advisory scope — `--no-ignore` / `kaish-ignore clear` recover.
             ignore_config: crate::ignore_config::IgnoreConfig::interactive(),
+            line_hasher: kaish_types::LineHasher::default(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
@@ -554,6 +563,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
+            line_hasher: kaish_types::LineHasher::default(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
@@ -586,6 +596,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
+            line_hasher: kaish_types::LineHasher::default(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_unwrapped_commands: cfg!(feature = "subprocess"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
@@ -613,6 +624,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            line_hasher: kaish_types::LineHasher::default(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_unwrapped_commands: false,
             trash_enabled: false,
@@ -648,6 +660,13 @@ impl KernelConfig {
     /// Enable interactive mode (external commands inherit stdio).
     pub fn with_interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Hash line anchors with `hasher` instead of FNV-1a. Every builtin's
+    /// anchors and `edit`'s checks use it, so they always agree.
+    pub fn with_line_hasher(mut self, hasher: kaish_types::LineHasher) -> Self {
+        self.line_hasher = hasher;
         self
     }
 
@@ -1259,7 +1278,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_unwrapped_commands, trash_enabled, errexit_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_unwrapped_commands, trash_enabled, errexit_enabled, initial_vars, request_timeout, kill_grace, kill_children_on_parent_death, line_hasher, .. } = config;
 
         if no_host_side_channel {
             output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
@@ -1293,6 +1312,7 @@ impl Kernel {
         exec_ctx.set_trash_backend(Arc::new(crate::trash_system::SystemTrash));
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
+        exec_ctx.line_hasher = line_hasher;
         exec_ctx.output_limit = output_limit;
         exec_ctx.allow_unwrapped_commands = allow_unwrapped_commands;
         exec_ctx.vfs_budget = vfs_budget.clone();
@@ -3896,6 +3916,7 @@ impl Kernel {
             dispatcher: self.dispatcher(),
             cancel,
             output_format: None,
+            line_hasher: ec.line_hasher.clone(),
             vfs_budget: self.vfs_budget.clone(),
             output_sequence: self.output_sequence.clone(),
             watchdog: ec.watchdog.clone(),
@@ -9184,6 +9205,13 @@ fn unknown_flag_refusal(
         .and_then(|(_, after)| after.split_once('\''))
         .map(|(flag, _)| format!(" (similar: {flag})"))
         .unwrap_or_default();
+    // --hashline is not global: name the builtins whose rows are file lines.
+    if word == "--hashline" {
+        return Some(format!(
+            "{name}: --hashline is not supported; line anchors come from cat, head, tail, \
+             and grep reading a file: cat --hashline FILE"
+        ));
+    }
     Some(format!("{name}: {word} is not supported{similar} (see `help {name}`)"))
 }
 

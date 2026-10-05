@@ -508,7 +508,8 @@ impl OverlayFs {
     ///    target's current content must byte-equal `base` (stale-base
     ///    detection).
     /// 2. Write: `Added`/`Modified` => `target.mkdir(parent)` (create-parents,
-    ///    Ok if existing), then `target.write`. `Removed` => `target.remove`.
+    ///    Ok if existing), then `target.replace`, so a crash leaves each file
+    ///    whole, old or new. `Removed` => `target.remove`.
     ///
     /// On any write-phase error, returns a loud error naming the failed path
     /// and the paths already committed.
@@ -535,7 +536,14 @@ impl OverlayFs {
         for change in &changes {
             match change.kind {
                 ChangeKind::Added => {
-                    if target.exists(&change.path).await {
+                    // lstat, not exists(): exists() follows a dangling link
+                    // and answers false, and the write would then go through it.
+                    let occupied = match target.lstat(&change.path).await {
+                        Ok(_) => true,
+                        Err(ref error) if is_not_found(error) => false,
+                        Err(error) => return Err(error),
+                    };
+                    if occupied {
                         // The lead "exists in target" restated
                         // `ErrorKind::AlreadyExists`'s own meaning, and
                         // `BackendError::AlreadyExists`'s Display adds
@@ -603,10 +611,10 @@ impl OverlayFs {
                         if let Err(error) = target.mkdir(parent).await {
                             Err(error)
                         } else {
-                            target.write(&change.path, current).await
+                            target.replace(&change.path, current).await
                         }
                     } else {
-                        target.write(&change.path, current).await
+                        target.replace(&change.path, current).await
                     }
                 }
                 ChangeKind::Removed => target.remove(&change.path).await,
@@ -793,37 +801,160 @@ impl Drop for OverlayFs {
     }
 }
 
-#[async_trait]
-impl Filesystem for OverlayFs {
-    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
+/// Symlink hops `resolve` follows before refusing, matching Linux's
+/// `MAXSYMLINKS`.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// The layer that holds an entry.
+#[derive(Debug, Clone, Copy)]
+enum Layer {
+    Upper,
+    Lower,
+}
+
+/// Whether `resolve` follows a link in the last component.
+#[derive(Debug, Clone, Copy)]
+enum Last {
+    Follow,
+    /// lstat, read_link, remove, and symlink act on the link itself.
+    Keep,
+}
+
+/// What `resolve` does at a component that does not exist.
+#[derive(Debug, Clone, Copy)]
+enum Missing {
+    /// NotFound, as a read reports it.
+    Error,
+    /// Allowed only for the last component (`canonicalize`).
+    Last,
+    /// Kept with everything after it, for a write that creates parents.
+    Create,
+}
+
+/// Which upper call a file write reaches.
+#[derive(Debug, Clone, Copy)]
+enum UpperWrite {
+    Write,
+    Replace,
+}
+
+impl OverlayFs {
+    /// The entry at `path` in the merged view, without following a link in
+    /// the last component, and the layer that holds it. Every directory in
+    /// `path` must already be resolved (see `resolve`), so neither layer
+    /// follows a link on the way.
+    async fn entry_at(&self, state: &OverlayState, path: &Path) -> io::Result<(DirEntry, Layer)> {
+        if state.whiteouts.contains(path) {
+            return Err(not_found(path));
         }
-        match self.upper.read(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.read(&path).await,
-            other => other,
+        match self.upper.lstat(path).await {
+            Ok(entry) => Ok((entry, Layer::Upper)),
+            Err(error) if is_not_found(&error) => {
+                self.lower.lstat(path).await.map(|entry| (entry, Layer::Lower))
+            }
+            Err(error) => Err(error),
         }
     }
 
-    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
-        // Delegate the slice to whichever layer holds the file so a byte range
-        // rides on that backend's own `read_range` (e.g. MemoryFs slices its
-        // stored bytes) instead of the default whole-file-read+slice. Without
-        // this, chunked streaming over an overlay would be O(n²).
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read_range(&path, range.clone()).await {
-            Err(error) if is_not_found(&error) => self.lower.read_range(&path, range).await,
-            other => other,
+    fn layer(&self, layer: Layer) -> &dyn Filesystem {
+        match layer {
+            Layer::Upper => self.upper.as_ref(),
+            Layer::Lower => self.lower.as_ref(),
         }
     }
 
-    async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        let path = normalize(path);
+    /// `path` with its symlinks resolved through the merged view, as a real
+    /// filesystem resolves them: a link in either layer is followed, and its
+    /// target is looked up with whiteouts and the upper first. The result
+    /// names no link except, under `Last::Keep`, the last component.
+    ///
+    /// Every operation resolves with the state lock held, so reads and
+    /// writes agree on which file a path names.
+    async fn resolve(
+        &self,
+        state: &OverlayState,
+        path: &Path,
+        last: Last,
+        missing: Missing,
+    ) -> io::Result<PathBuf> {
+        let mut pending: std::collections::VecDeque<std::ffi::OsString> = normalize(path)
+            .components()
+            .map(|component| component.as_os_str().to_os_string())
+            .collect();
+        let mut resolved = PathBuf::new();
+        let mut hops = 0;
+        while let Some(name) = pending.pop_front() {
+            if name == ".." {
+                // `normalize` already clamped the caller's own `..`, so this
+                // one came from a link target. A link that leaves the root
+                // is refused, as LocalFs refuses it.
+                if !resolved.pop() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("path escapes root: {}", path.display()),
+                    ));
+                }
+                continue;
+            }
+            if name == "." {
+                continue;
+            }
+            let candidate = resolved.join(&name);
+            let is_last = pending.is_empty();
+            if is_last && matches!(last, Last::Keep) {
+                return Ok(candidate);
+            }
+            match self.entry_at(state, &candidate).await {
+                Ok((entry, layer)) if entry.is_symlink() => {
+                    hops += 1;
+                    if hops > MAX_SYMLINK_HOPS {
+                        return Err(io::Error::other(format!(
+                            "too many levels of symbolic links: {}",
+                            path.display()
+                        )));
+                    }
+                    let mut target = self.layer(layer).read_link(&candidate).await?;
+                    if target.is_absolute() {
+                        // Only a lower link can be absolute (`symlink`
+                        // refuses one). The lower knows its own namespace
+                        // and root, so it maps the target or refuses it.
+                        if let Layer::Lower = layer {
+                            target = self.lower.canonicalize(&candidate, true).await?;
+                        }
+                        resolved = PathBuf::new();
+                    }
+                    for component in target.components().rev() {
+                        match component {
+                            std::path::Component::RootDir | std::path::Component::Prefix(_) => {}
+                            other => pending.push_front(other.as_os_str().to_os_string()),
+                        }
+                    }
+                }
+                Ok(_) => resolved = candidate,
+                Err(error) if is_not_found(&error) => {
+                    let allowed = match missing {
+                        Missing::Error => false,
+                        Missing::Last => is_last,
+                        Missing::Create => true,
+                    };
+                    if !allowed {
+                        return Err(not_found(path));
+                    }
+                    resolved = candidate;
+                    resolved.extend(pending.drain(..));
+                    return Ok(normalize(&resolved));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// `write` and `replace`: copy-up bookkeeping, then the upper call
+    /// `how` names.
+    async fn write_file(&self, path: &Path, data: &[u8], how: UpperWrite) -> io::Result<()> {
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Create).await?;
 
         // First touch of a lower path: snapshot its content as the base.
         // Already-dirty paths keep their first-touch base; a whiteouted path
@@ -854,7 +985,11 @@ impl Filesystem for OverlayFs {
         };
         self.charge_base(base_len)?;
 
-        if let Err(error) = self.upper.write(&path, data).await {
+        let written = match how {
+            UpperWrite::Write => self.upper.write(&path, data).await,
+            UpperWrite::Replace => self.upper.replace(&path, data).await,
+        };
+        if let Err(error) = written {
             self.refund_base_charge(base_len);
             return Err(error);
         }
@@ -876,41 +1011,63 @@ impl Filesystem for OverlayFs {
         }
         Ok(())
     }
+}
+
+#[async_trait]
+impl Filesystem for OverlayFs {
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
+        let (_, layer) = self.entry_at(&state, &path).await?;
+        self.layer(layer).read(&path).await
+    }
+
+    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
+        // Delegate the slice to whichever layer holds the file so a byte range
+        // rides on that backend's own `read_range` (e.g. MemoryFs slices its
+        // stored bytes) instead of the default whole-file-read+slice. Without
+        // this, chunked streaming over an overlay would be O(n²).
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
+        let (_, layer) = self.entry_at(&state, &path).await?;
+        self.layer(layer).read_range(&path, range).await
+    }
+
+    async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write_file(path, data, UpperWrite::Write).await
+    }
+
+    async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write_file(path, data, UpperWrite::Replace).await
+    }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
-        let path = normalize(path);
         let state = self.state.read().await;
-        if state.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
         self.merged_list(&path, &state).await
     }
 
     async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.stat(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.stat(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
+        self.entry_at(&state, &path).await.map(|(entry, _)| entry)
     }
 
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.lstat(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.lstat(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Keep, Missing::Error).await?;
+        self.entry_at(&state, &path).await.map(|(entry, _)| entry)
+    }
+
+    async fn canonicalize(&self, path: &Path, allow_missing_final: bool) -> io::Result<PathBuf> {
+        let state = self.state.read().await;
+        let missing = if allow_missing_final { Missing::Last } else { Missing::Error };
+        self.resolve(&state, path, Last::Follow, missing).await
     }
 
     async fn mkdir(&self, path: &Path) -> io::Result<()> {
-        let path = normalize(path);
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Create).await?;
 
         // A visible lower non-directory blocks mkdir; a visible lower
         // directory makes it the usual create-parents `Ok`.
@@ -930,8 +1087,8 @@ impl Filesystem for OverlayFs {
     }
 
     async fn remove(&self, path: &Path) -> io::Result<()> {
-        let path = normalize(path);
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Keep, Missing::Error).await?;
         if state.whiteouts.contains(&path) {
             return Err(not_found(&path));
         }
@@ -1009,13 +1166,14 @@ impl Filesystem for OverlayFs {
                 if let Some(content) = pending_base {
                     self.settle_base(content.len() as u64);
                     state.bases.insert(path.clone(), Some(content));
-                } else {
+                } else if let Some(None) = state.bases.get(&path) {
                     // Removing a path that was Added (bases[path] = None): the net
                     // result is no change relative to lower. Drop the stale Added
                     // entry so changes() does not fabricate a phantom Added entry
                     // with base=None, current=None.
                     state.bases.remove(&path);
                 }
+                // A copied-up file keeps its `Some` base: the remove is Removed.
                 // Clear any stale dirty_symlinks entry before conditionally
                 // re-inserting (the lower-Symlink case re-adds via
                 // pending_dirty_symlink; clearing first avoids stale entries when
@@ -1042,8 +1200,8 @@ impl Filesystem for OverlayFs {
     }
 
     async fn set_mtime(&self, path: &Path, mtime: SystemTime) -> io::Result<()> {
-        let path = normalize(path);
         let mut state = self.state.write().await;
+        let path = self.resolve(&state, path, Last::Follow, Missing::Error).await?;
         if state.whiteouts.contains(&path) {
             return Err(not_found(&path));
         }
@@ -1076,19 +1234,15 @@ impl Filesystem for OverlayFs {
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read_link(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.read_link(&path).await,
-            other => other,
-        }
+        let state = self.state.read().await;
+        let path = self.resolve(&state, path, Last::Keep, Missing::Error).await?;
+        let (_, layer) = self.entry_at(&state, &path).await?;
+        self.layer(layer).read_link(&path).await
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
-        let link = normalize(link);
         let mut state = self.state.write().await;
+        let link = self.resolve(&state, link, Last::Keep, Missing::Create).await?;
 
         // A visible lower entry blocks creation, matching POSIX symlink(2).
         // The path alone — `ErrorKind::AlreadyExists` already says what
@@ -1380,6 +1534,75 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    /// A write through a lower symlink lands on its target, as on a real
+    /// filesystem; the link stays a link instead of being shadowed by an
+    /// upper file.
+    #[tokio::test]
+    async fn test_write_through_lower_symlink_reaches_target() {
+        for how in [UpperWrite::Write, UpperWrite::Replace] {
+            let (lower, overlay) = overlay_with_lower().await;
+            lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+
+            overlay.write_file(Path::new("l.txt"), b"new", how).await.unwrap();
+
+            assert!(overlay.lstat(Path::new("l.txt")).await.unwrap().is_symlink(), "{how:?}");
+            assert_eq!(overlay.read_link(Path::new("l.txt")).await.unwrap(), Path::new("a.txt"));
+            assert_eq!(overlay.read(Path::new("a.txt")).await.unwrap(), b"new", "{how:?}");
+            assert_eq!(lower.read(Path::new("a.txt")).await.unwrap(), b"alpha");
+            let changes = overlay.changes().await.unwrap();
+            assert_eq!(changes.len(), 1, "{how:?}: {changes:?}");
+            assert_eq!(changes[0].path, Path::new("a.txt"));
+            assert_eq!(changes[0].kind, ChangeKind::Modified);
+        }
+    }
+
+    /// A write through an upper symlink keeps the link tracked, so changes()
+    /// still refuses instead of dropping the link from a commit.
+    #[tokio::test]
+    async fn test_write_through_upper_symlink_keeps_it_dirty() {
+        for how in [UpperWrite::Write, UpperWrite::Replace] {
+            let (_, overlay) = overlay_with_lower().await;
+            overlay.symlink(Path::new("a.txt"), Path::new("u.txt")).await.unwrap();
+
+            overlay.write_file(Path::new("u.txt"), b"new", how).await.unwrap();
+
+            assert!(overlay.lstat(Path::new("u.txt")).await.unwrap().is_symlink(), "{how:?}");
+            assert_eq!(overlay.read(Path::new("a.txt")).await.unwrap(), b"new", "{how:?}");
+            let err = overlay.changes().await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{how:?}");
+        }
+    }
+
+    /// set_mtime through a lower symlink copies up the target, not the link.
+    #[tokio::test]
+    async fn test_set_mtime_through_lower_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+
+        overlay.set_mtime(Path::new("l.txt"), SystemTime::UNIX_EPOCH).await.unwrap();
+
+        assert!(overlay.lstat(Path::new("l.txt")).await.unwrap().is_symlink());
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].path, Path::new("a.txt"));
+    }
+
+    /// A lower symlink to a directory in the middle of the path is followed
+    /// too; the upper does not grow a real directory that hides the link.
+    #[tokio::test]
+    async fn test_write_through_lower_directory_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+
+        overlay.write(Path::new("dl/x.txt"), b"new").await.unwrap();
+
+        assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
+        assert_eq!(overlay.read(Path::new("d/x.txt")).await.unwrap(), b"new");
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].path, Path::new("d/x.txt"));
     }
 
     #[tokio::test]
@@ -1919,30 +2142,193 @@ mod tests {
         assert!(changes[0].current.is_none());
     }
 
-    // Symlink interleaved: remove-then-symlink-then-write is Modified with
-    // original base; dirty_symlinks ends empty (improvement 8).
+    // Symlink interleaved: remove, then symlink, then write. The write
+    // follows the dangling link and creates its target; the link stays, so
+    // changes() still refuses.
     #[tokio::test]
-    async fn test_remove_symlink_write_is_modified_with_original_base() {
+    async fn test_remove_symlink_write_creates_link_target() {
         let lower = Arc::new(MemoryFs::new());
         lower.write(Path::new("f.txt"), b"original").await.unwrap();
         let overlay = OverlayFs::over(lower);
 
-        // Remove the file (records base Some("original") + whiteout).
         overlay.remove(Path::new("f.txt")).await.unwrap();
-        // Create a symlink at the same path (clears whiteout, adds dirty_symlinks entry).
         overlay
             .symlink(Path::new("other.txt"), Path::new("f.txt"))
             .await
             .unwrap();
-        // Write over the symlink (clears dirty_symlinks on success; keeps base Some("original")).
         overlay.write(Path::new("f.txt"), b"replaced").await.unwrap();
 
-        // No dirty symlinks.
+        assert!(overlay.lstat(Path::new("f.txt")).await.unwrap().is_symlink());
+        assert_eq!(overlay.read(Path::new("other.txt")).await.unwrap(), b"replaced");
+        let err = overlay.changes().await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    /// An Added file whose path holds a dangling symlink in the target is a
+    /// conflict. exists() follows the link and says no, so commit used to
+    /// write through it and create the link's target.
+    #[tokio::test]
+    async fn test_commit_added_over_dangling_target_symlink_refuses() {
+        let lower = Arc::new(MemoryFs::new());
+        let overlay = OverlayFs::over(lower);
+        overlay.write(Path::new("n.txt"), b"new").await.unwrap();
+
+        let target = MemoryFs::new();
+        target.symlink(Path::new("x.txt"), Path::new("n.txt")).await.unwrap();
+
+        let err = overlay.commit_into(&target).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert!(!target.exists(Path::new("x.txt")).await, "nothing written through the link");
+    }
+
+    /// commit_into replaces each file: on a LocalFs target the inode changes
+    /// and a reader holding the old file still sees the old bytes.
+    #[cfg(all(unix, feature = "localfs"))]
+    #[tokio::test]
+    async fn test_commit_into_localfs_replaces_the_file() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, b"old\n").unwrap();
+        let old_inode = std::fs::metadata(&path).unwrap().ino();
+        let mut old_handle = std::fs::File::open(&path).unwrap();
+
+        let local: Arc<dyn Filesystem> = Arc::new(crate::local::LocalFs::new(dir.path()));
+        let overlay = OverlayFs::over(local.clone());
+        overlay.write(Path::new("f.txt"), b"new\n").await.unwrap();
+        overlay.commit_into(local.as_ref()).await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), old_inode);
+        let mut seen = Vec::new();
+        old_handle.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"old\n");
+    }
+
+    /// Removing a copied-up file keeps its base, so the delete is a Removed
+    /// change that commit applies.
+    #[tokio::test]
+    async fn test_remove_after_copy_up_is_removed() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("f.txt"), b"alpha").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+
+        overlay.write(Path::new("f.txt"), b"edited").await.unwrap();
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+
         let changes = overlay.changes().await.unwrap();
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].kind, ChangeKind::Modified);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].kind, ChangeKind::Removed);
+        assert_eq!(changes[0].base.as_deref(), Some(b"alpha" as &[u8]));
+
+        let target = MemoryFs::new();
+        target.write(Path::new("f.txt"), b"alpha").await.unwrap();
+        overlay.commit_into(&target).await.unwrap();
+        assert!(!target.exists(Path::new("f.txt")).await);
+    }
+
+    /// Reads follow a link through the merged view, the same way writes do.
+    #[tokio::test]
+    async fn test_read_through_links_uses_the_merged_view() {
+        // An upper link to a lower-only file reads the file.
+        let (_, overlay) = overlay_with_lower().await;
+        overlay.symlink(Path::new("a.txt"), Path::new("u.txt")).await.unwrap();
+        assert_eq!(overlay.read(Path::new("u.txt")).await.unwrap(), b"alpha");
+
+        // A lower link to a copied-up file reads the upper copy.
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+        overlay.write(Path::new("a.txt"), b"new").await.unwrap();
+        assert_eq!(overlay.read(Path::new("l.txt")).await.unwrap(), b"new");
+        assert_eq!(
+            overlay.read_range(Path::new("l.txt"), Some(ReadRange::bytes(0, 2))).await.unwrap(),
+            b"ne"
+        );
+        assert_eq!(overlay.stat(Path::new("l.txt")).await.unwrap().size, 3);
+
+        // A link to a removed file is dangling.
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("a.txt"), Path::new("l.txt")).await.unwrap();
+        overlay.remove(Path::new("a.txt")).await.unwrap();
+        assert!(overlay.read(Path::new("l.txt")).await.is_err());
+        assert!(!overlay.exists(Path::new("l.txt")).await);
+
+        // Listing through a directory link hides a removed child.
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+        overlay.remove(Path::new("d/x.txt")).await.unwrap();
+        assert!(overlay.list(Path::new("dl")).await.unwrap().is_empty());
+    }
+
+    /// mkdir through a lower directory link creates inside the target.
+    #[tokio::test]
+    async fn test_mkdir_through_lower_directory_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+
+        overlay.mkdir(Path::new("dl/sub")).await.unwrap();
+
+        assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
+        assert!(overlay.stat(Path::new("d/sub")).await.unwrap().is_dir());
+    }
+
+    /// symlink with a lower directory link in the parent creates the new link
+    /// inside the target; the parent link stays.
+    #[tokio::test]
+    async fn test_symlink_through_lower_directory_symlink_reaches_target() {
+        let (lower, overlay) = overlay_with_lower().await;
+        lower.symlink(Path::new("d"), Path::new("dl")).await.unwrap();
+
+        overlay.symlink(Path::new("x.txt"), Path::new("dl/y.txt")).await.unwrap();
+
+        assert!(overlay.lstat(Path::new("dl")).await.unwrap().is_symlink());
+        assert!(overlay.lstat(Path::new("d/y.txt")).await.unwrap().is_symlink());
+        assert_eq!(overlay.read(Path::new("d/y.txt")).await.unwrap(), b"in dir");
+    }
+
+    /// A lower link that leaves the root is refused, as the lower LocalFs
+    /// refuses it, and nothing is written; an absolute link inside the root
+    /// is followed.
+    #[cfg(all(unix, feature = "localfs"))]
+    #[tokio::test]
+    async fn test_lower_link_out_of_the_root_is_refused() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"alpha").unwrap();
+        std::os::unix::fs::symlink("../escape", root.join("dangle")).unwrap();
+        std::os::unix::fs::symlink(root.join("a.txt"), root.join("abs")).unwrap();
+
+        let local: Arc<dyn Filesystem> = Arc::new(crate::local::LocalFs::new(&root));
+        let overlay = OverlayFs::over(local);
+
+        let err = overlay.write(Path::new("dangle"), b"x").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(!overlay.exists(Path::new("escape")).await, "not folded into the root");
+        assert!(overlay.changes().await.unwrap().is_empty());
+
+        assert_eq!(overlay.read(Path::new("abs")).await.unwrap(), b"alpha");
+    }
+
+    /// remove, then symlink, then remove keeps the file's base: the result is
+    /// a Removed change and the base stays charged exactly once.
+    #[tokio::test]
+    async fn test_remove_symlink_remove_keeps_the_base() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("f.txt"), b"original").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+        overlay.symlink(Path::new("other"), Path::new("f.txt")).await.unwrap();
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].kind, ChangeKind::Removed);
         assert_eq!(changes[0].base.as_deref(), Some(b"original" as &[u8]));
-        assert_eq!(changes[0].current.as_deref(), Some(b"replaced" as &[u8]));
+        assert_eq!(overlay.resident_bytes(), Some(8));
     }
 
     #[tokio::test]
@@ -2143,6 +2529,92 @@ mod tests {
                 b"changed in overlay"
             );
         }
+    }
+
+    /// A MemoryFs that logs which write call reached it.
+    #[derive(Default)]
+    struct WriteLog {
+        inner: crate::memory::MemoryFs,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    // A poisoned log means another assertion already failed the test.
+    #[allow(clippy::expect_used)]
+    impl WriteLog {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("call log").clone()
+        }
+
+        fn log(&self, call: String) {
+            self.calls.lock().expect("call log").push(call);
+        }
+    }
+
+    #[async_trait]
+    impl Filesystem for WriteLog {
+        async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.inner.read(path).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+            self.log(format!("write {}", path.display()));
+            self.inner.write(path, data).await
+        }
+        async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+            self.log(format!("replace {}", path.display()));
+            self.inner.replace(path, data).await
+        }
+        async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> io::Result<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> io::Result<()> {
+            self.inner.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_reaches_the_upper_as_a_replace_and_records_the_base() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("a.txt"), b"alpha").await.unwrap();
+        let upper = Arc::new(WriteLog::default());
+        let overlay = OverlayFs::new(lower, upper.clone());
+
+        overlay.replace(Path::new("a.txt"), b"ALPHA").await.unwrap();
+
+        assert_eq!(upper.calls(), vec!["replace a.txt"]);
+        assert_eq!(overlay.read(Path::new("a.txt")).await.unwrap(), b"ALPHA");
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, ChangeKind::Modified);
+        assert_eq!(changes[0].base.as_deref(), Some(&b"alpha"[..]));
+    }
+
+    // A commit rewrites files the target already holds; each write is a
+    // replace so a crash mid-commit leaves no half-written file.
+    #[tokio::test]
+    async fn commit_into_replaces_each_file() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("a.txt"), b"alpha").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+        overlay.write(Path::new("a.txt"), b"ALPHA").await.unwrap();
+        overlay.write(Path::new("b.txt"), b"bravo").await.unwrap();
+        let target = WriteLog::default();
+        target.inner.write(Path::new("a.txt"), b"alpha").await.unwrap();
+
+        overlay.commit_into(&target).await.unwrap();
+
+        let mut calls = target.calls();
+        calls.sort();
+        assert_eq!(calls, vec!["replace a.txt", "replace b.txt"]);
+        assert_eq!(target.read(Path::new("a.txt")).await.unwrap(), b"ALPHA");
     }
 
     /// A lower holding one FIFO, `pipe`. Reading it is a test failure.

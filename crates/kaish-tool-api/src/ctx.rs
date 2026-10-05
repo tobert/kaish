@@ -116,6 +116,14 @@ pub trait ToolCtx: sealed::Sealed + Send + Sync {
     /// format to the result.
     fn set_output_format(&mut self, format: OutputFormat);
 
+    /// Hash one line of a file for its anchor (`42:202b`), with the hasher
+    /// the embedder configured. Pass the line without its terminator, as
+    /// [`kaish_types::hashline::lines`] splits it.
+    ///
+    /// Call it only for a line read from a named file, and put the result on
+    /// the row with `OutputNode::with_hash` beside `at_line`.
+    fn line_hash(&self, line: &[u8]) -> String;
+
     /// Suspend the script-level timeout watchdog while the returned guard is
     /// held, bounding the patient operation by `budget` instead.
     ///
