@@ -516,8 +516,8 @@ default fails the first case rather than passing silently.
 
 ### Replacing a file (`replace`)
 
-`sed -i`, `patch`, and an overlay commit call `Filesystem::replace` (and
-`KernelBackend::write` with `WriteMode::Replace`). A reader must see the old
+`sed -i`, `patch`, `edit`, and an overlay commit call `Filesystem::replace`
+(`edit` through `KernelBackend::write` with `WriteMode::Replace`). A reader must see the old
 content or the new, never a partial file, even when the process dies
 mid-write. `>`, `tee`, and `write` call `write`, which may truncate in place.
 

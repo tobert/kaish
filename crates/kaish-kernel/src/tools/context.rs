@@ -349,7 +349,7 @@ pub(crate) enum MutationAction {
 ///
 /// The trash path already holds the prior bytes (it had to copy them to the
 /// trash), so the expectation compares bytes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OverwriteExpectation {
     /// The exact prior bytes, from the trash snapshot.
@@ -1224,7 +1224,7 @@ impl ExecContext {
     }
 
     /// Snapshot a batch of truncating overwrites into the trash, the way `rm`
-    /// snapshots deletes — so `tee`/`patch`/`sed -i` can't clobber a file
+    /// snapshots deletes — so `tee`/`patch`/`sed -i`/`edit` can't clobber a file
     /// under `set -o trash` without leaving a recoverable prior copy.
     ///
     /// Each target is `(display_path, is_append)`. A path that doesn't exist
@@ -1321,7 +1321,7 @@ impl ExecContext {
     /// overwritten, returning those bytes for the caller's compare-and-swap.
     ///
     /// We **copy** (not move): the builtin still needs the file. `tee`/`write`
-    /// overwrite it in place, and read-modify-write callers (`patch`, `sed -i`)
+    /// overwrite it in place, and read-modify-write callers (`patch`, `sed -i`, `edit`)
     /// read it before replacing it. (`rm` *moves*
     /// because removal is the op; an overwrite backs up the prior bytes.) Reads
     /// through the backend so a real, overlay, or in-memory file is handled the

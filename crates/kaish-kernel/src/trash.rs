@@ -118,7 +118,7 @@ pub trait TrashBackend: Send + Sync {
     /// `original_path`'s basename.
     ///
     /// Used by the write-model gate to back up a file's prior content before a
-    /// overwrite (`tee`/`patch`/`sed -i`). Unlike [`trash`](Self::trash) it
+    /// overwrite (`tee`/`patch`/`sed -i`/`edit`). Unlike [`trash`](Self::trash) it
     /// *copies* rather than moves, so the file is still there for the overwrite
     /// and for read-modify-write callers that read it first. What's recoverable is the snapshot's
     /// bytes (via `list`/`restore`), not its original location.

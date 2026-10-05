@@ -1064,7 +1064,7 @@ fn render_literal(value: &Value) -> String {
 
 /// Single-quote a word that a shell reader could not take literally, or that
 /// would re-lex as a different type than the `Value::String` it is.
-fn quote_word(s: &str) -> String {
+pub(crate) fn quote_word(s: &str) -> String {
     let needs_quotes = s.is_empty()
         || s.chars()
             .any(|c| c.is_whitespace() || "\"'$`&|;<>(){}[]*?#!~\\".contains(c))

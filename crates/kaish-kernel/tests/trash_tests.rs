@@ -680,3 +680,25 @@ async fn trash_empty_asks_and_the_confirm_flag_it_names_is_accepted() {
         "--confirm=<nonce> no longer parses: {old_spelling:?}"
     );
 }
+
+// ============================================================================
+// Write model: edit snapshots to trash (same rule as patch and sed -i)
+// ============================================================================
+
+#[tokio::test]
+async fn edit_under_trash_snapshots_prior_bytes() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("f.txt"), "old\n").expect("write");
+    let mock = Arc::new(MockTrash::default());
+    let session = kernel_with_trash(dir.path(), &mock);
+
+    run(&session, "set -o trash").await;
+    let anchor = format!("1:{}", kaish_types::hashline::fnv1a_line_hash(b"old"));
+    let r = run(&session, &format!("edit f.txt {anchor} new")).await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "one byte-snapshot before the edit: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old\n", "snapshot captured the prior content");
+    assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).expect("read"), "new\n");
+}

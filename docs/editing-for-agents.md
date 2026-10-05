@@ -1,10 +1,10 @@
-# Editing files from an agent shell: `diff` and `patch`
+# Editing files from an agent shell: `diff`, `patch`, and `edit`
 
 *A design pass over kaish's diff/patch surface, run through the
 [LLM-panel method](designing-syntax-with-llms.md) (existing-tool variant) and
 grounded in 2025–2026 research on how models actually edit code. Decides what
-stays a workalike, what relaxes — and why content-anchored editing belongs in the
-embedders, not the kaish shell.*
+stays a workalike, what relaxes, and how content-anchored editing came to kaish
+as `edit`.*
 
 ---
 
@@ -27,10 +27,9 @@ about *reliability*:
   anchors, delimiter collisions with real file content. So the *failure-mode
   design is the design*, not an afterthought.
 
-Reflex and reliability diverge. The resolution splits along the kaish/embedder
-seam: kaish keeps the reflex tools honest (a POSIX-80% shell), and the
-content-anchored tool that addresses the reliability problem lives where it
-already does — the embedder's MCP surface (see "Why not a kaish `edit` builtin").
+Reflex and reliability diverge. kaish keeps the reflex tools honest (a
+POSIX-80% shell), and the content-anchored tool that addresses the reliability problem is `edit` (see
+"`edit` — anchored line edits").
 
 ---
 
@@ -68,42 +67,59 @@ emit *correct* diffs; breaking a working reflex is gratuitous.
 
 ---
 
-## Why not a kaish `edit` builtin
+## `edit` — anchored line edits (October 2026)
 
-The obvious "kaish magic" move is a content-anchored `edit` builtin
-(`str_replace`-style, or hashline `N:hash` anchors). It was considered and
-**declined for kaish** — it belongs in the embedders:
+The first pass of this document declined an `edit` builtin: it is not a
+POSIX command, kaijutsu already had one as an MCP file tool, and a
+`str_replace` shape needs two multi-line blocks that argv handles badly.
+Amy reversed that on 2026-09-25 ("kaish gets edit and hashline support
+throughout"), and the October design answered each objection:
 
-- **It isn't shell.** kaish is *the 80% of POSIX/Bourne/bash*. A hashline/
-  `str_replace` editor is a wholly invented affordance, not a recognizable Unix
-  command — the first builtin that isn't one.
-- **It already lives in the right place.** kaijutsu's `file_tools/edit.rs` exposes
-  it as an **MCP file tool** with a JSON-param surface that fits it natively, and
-  CLAUDE.md is explicit that the MCP/tool surface lives in the embedders, not
-  kaish.
-- **The ergonomics confirm the seam.** Forcing a JSON-param-shaped tool into
-  argv+stdin needs awkward two-block heredoc gymnastics (old *and* new content as
-  separate multi-line blocks). When the shell surface fights that hard, the tool
-  isn't shell-shaped.
-- **The in-shell edit reflex is already covered** by `sed -i` plus
-  `tee`/`patch` — the POSIX-80% answer. An agent wanting hashline-anchored editing
-  is reaching past the shell, into the embedder.
+- **One shape, measured.** With no help text, four model families
+  (DeepSeek, Gemini, GPT, Claude Sonnet) all wrote the same commands:
+  `edit FILE ANCHOR 'TEXT'`, anchor/text pairs for a batch, a delete flag,
+  and `--after`. Help text for exactly that shape, plus `A..B` ranges and
+  `--before`, scored 24/24 with byte-identical answers across the four. The
+  heredoc, ed-script, and `@@`-hunk candidates were not needed.
+- **Anchors only, no `str_replace` mode.** `sed` and `patch` already cover
+  substitution and diffs. An anchor forces a read first and makes every edit
+  a compare-and-set, which is the reliability property the research above
+  asks for. Without the old-text block, the two-heredoc problem goes away.
+- **The kernel owns the hash.** Builtins mark which file line a row is, and
+  the kernel hashes it with the embedder's `LineHasher` (default FNV-1a, 4
+  hex, the same as kaijutsu's). `cat`, `head`, `tail`, and `grep` print
+  `LINE:HASH:TEXT` under `--hashline`; `edit` checks with the same hasher.
 
-### The kaijutsu hashline paradigm (reference)
+```sh
+cat --hashline config.toml                       # 3:a8c7:port = 8080
+edit config.toml 3:a8c7 'port = 9090'            # prints 3:<new hash>:port = 9090
+edit config.toml --delete 6:8d62..10:2325
+edit config.toml --after 2:7f4b 'workers = 4'
+edit config.toml 12:5f5e 'enabled = true' 13:fbb6 'size = 512'   # one batch, all or nothing
+```
 
-Worth knowing, because it's the strongest answer to the reliability problem and
-the alignment target if a shared core is ever extracted. kaijutsu's `read` prints
-each line as `N:hash→ content`; `edit` addresses a line/range by that `N:hash`
-**anchor** and re-hashes before writing — a stale anchor fails loud instead of
-splicing the wrong place. The line number locates; the 4-hex FNV-1a hash is a
-cheap compare-and-swap. (Background: "The Harness Problem", blog.can.ac 2026;
-anthropics/claude-code#25775.) The pure planning core (`line_hash`,
-`plan_string_edit`/`plan_anchor_edit`, `render`) is I/O- and CRDT-free, so it
-*could* be lifted into a shared leaf crate — but that only pays off once a second
-embedder (e.g. kaibo) needs hashline editing. **Deferred**; not built
-speculatively, and not a reason to put `edit` in kaish.
+The failure-mode design, per "The finding":
 
----
+- **An anchor names a line of one file.** `--hashline` refuses stdin,
+  several files to `cat`/`head`/`tail`, `-c`, marked-up `cat`, `grep -U`,
+  and decoded text. A row numbered by stream position could carry a hash
+  that matches a *different* file line with the same text (blank lines,
+  `}`), and `edit` would change the wrong line with no error.
+- **A batch resolves every anchor against the file as read**, so line
+  numbers do not shift between its edits. Overlapping edits exit 2.
+- **A stale anchor writes nothing and asks for a re-read.** In the panel, all
+  four models took a fresh anchor straight from the error and overwrote
+  someone else's change. So the error shows the current text but no usable
+  anchor: `line 12 changed since you read it (now: enabled = maybe);
+  nothing was written. Read it again before editing: cat --hashline
+  config.toml`.
+- **The file keeps its line endings** (CRLF stays CRLF, including inside
+  multi-line TEXT) and its final newline, or lack of one.
+- **The write is an atomic replace** (#486): after a crash the file is old
+  or new, never partial.
+
+`patch` stays a faithful GNU `patch` for the diff-producing world; `edit`
+carries the exact-position contract #375 asked about.
 
 ## What this is NOT
 

@@ -236,7 +236,7 @@ kaish builtins run in-process, and replace calls to the host OS tools.
 | Category | Tools |
 |----------|-------|
 | **Text** | awk, base64, cut, diff, grep, head, sed, sort, split, tac, tail, tr, uniq, wc, xxd |
-| **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
+| **Files** | basename, cat, cd, checksum, cmp, cp, dd, dirname, edit, file, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
 | **System** | alias, bg, command, date, echo, env, exec, export, fg, help, hostname, jobs, kill, plan, printf, ps, push, random, read, seq, set, sleep, spawn, timeout, tokens, type, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
