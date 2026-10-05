@@ -28,7 +28,7 @@ use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::ignore_config::IgnoreScope;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolCtx, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, WalkOptions};
 use kaish_glob::WalkerError;
 
@@ -101,10 +101,26 @@ struct FindArgs {
     _paths: Vec<String>,
 }
 
+/// Flags find rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-delete"],
+        "find only prints paths, one per line. Run `for f in $(find . -name '*.tmp'); do rm \"$f\"; done`.",
+    ),
+    RefusedFlag::new(
+        &["-exec", "-execdir", "-ok", "-okdir"],
+        "find only prints paths, one per line. Run `for f in $(find . -name '*.txt'); do wc -l \"$f\"; done`.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Find {
     fn name(&self) -> &str {
         "find"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {
@@ -552,6 +568,9 @@ mod tests {
         }
         async fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
             self.0.write(path, data).await
+        }
+        async fn replace(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.0.replace(path, data).await
         }
         async fn list(&self, path: &Path) -> std::io::Result<Vec<kaish_types::DirEntry>> {
             self.0.list(path).await

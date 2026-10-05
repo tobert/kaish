@@ -8,6 +8,7 @@
 
 use kaish_glob::glob_match;
 
+use crate::tools::RefusedFlag;
 use crate::vfs::DirEntry;
 
 const MAX_EXPRESSION_NODES: usize = 256;
@@ -289,7 +290,10 @@ impl Parser<'_> {
             }
             "-print" if inline.is_some() => Err(format!("{word} does not take a value; use -print")),
             "-print" => Ok(Expr::Print),
-            _ => Err(format!("{word} is not supported (see `help find`)")),
+            _ => Err(match RefusedFlag::hint_for(super::find::REFUSED_FLAGS, &name) {
+                Some(hint) => format!("{word} is not supported: {hint}"),
+                None => format!("{word} is not supported (see `help find`)"),
+            }),
         }
     }
 }

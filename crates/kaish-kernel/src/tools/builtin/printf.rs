@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema};
 use super::format_string::{self, FormatArg};
 
 /// Printf tool: formatted output.
@@ -243,10 +243,22 @@ fn not_a_number(value: &Value) -> String {
     format!("{kind} is not a number")
 }
 
+/// Flags printf rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-v"],
+        "assign the output of command substitution instead. Run `NAME=$(printf FORMAT ARGS)`.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Printf {
     fn name(&self) -> &str {
         "printf"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {

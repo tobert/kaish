@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::ExecResult;
-use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
+use crate::tools::{exec_context, schema_from_clap, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema};
 
 /// Mkdir tool: create directories.
 pub struct Mkdir;
@@ -26,10 +26,22 @@ struct MkdirArgs {
     paths: Vec<String>,
 }
 
+/// Flags mkdir rejects on purpose; see [`Tool::refused_flags`].
+pub(crate) const REFUSED_FLAGS: &[RefusedFlag] = &[
+    RefusedFlag::new(
+        &["-m", "--mode"],
+        "kaish cannot set a directory's mode. Run `mkdir DIR`.",
+    ),
+];
+
 #[async_trait]
 impl Tool for Mkdir {
     fn name(&self) -> &str {
         "mkdir"
+    }
+
+    fn refused_flags(&self) -> &[RefusedFlag] {
+        REFUSED_FLAGS
     }
 
     fn schema(&self) -> ToolSchema {

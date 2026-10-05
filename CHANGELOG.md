@@ -12,27 +12,6 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
-- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
-  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
-  target, and syncs the directory. The trait default calls `write`, which
-  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
-  `replace`. `KernelBackend::patch` on the built-in backends uses it.
-
-- **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
-  print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
-  anchor the coming `edit` builtin takes. `grep` prefixes file names across
-  several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
-  context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
-  `cat -v/-E/-T/-A`, `grep -U`, `grep --encoding`, `grep -c/-l`, and other
-  builtins (`ls --hashline`) exit 2 and name the form that works.
-- **`--json` rows carry `hash` beside `line`** when the row is a line of
-  one named file, kept byte for byte, including `grep --json` match
-  records. A line `grep` decoded lossily gets no `hash`.
-- **`KernelConfig::with_line_hasher`** chooses the line hash. The default
-  is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
-  holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
-  anchor uses. Builtins hash through `ToolCtx::line_hash`.
-
 ### Changed
 
 - **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
@@ -50,22 +29,42 @@ breaking entries are marked **BREAKING**.
   `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
   not list it; elsewhere it exits 2 naming those four.
 
+- **A flag kaish drops on purpose names the reason and the fix.**
+  `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
+  mode, owner, or times; no builtin sets them from another file. Run
+  `cp SRC DST`; the copy gets the current time.` and exits 2. Covered:
+  `cp -p/-a/-f/-i`, `mv -f/-i`, `mkdir -m`, `echo -e`, `printf -v`,
+  `grep -P`, `find -delete/-exec/-execdir/-ok/-okdir`. See `help limits`.
+
 ### Fixed
 
 - `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
   did not know as `Overwrite`. They now return `InvalidOperation` naming
   the mode.
+- Under `set -o trash`, `sed -i` and `patch` transformed a second read of
+  the file, not the bytes the trash saved. A write between the two was
+  replaced with no copy in the trash. They now transform the saved bytes
+  and fail with "changed since" if the file no longer holds them.
+- In overlay mode, a path with a symlink in it could name one file for a
+  read and another for a write. A write through a link made a file that
+  hid the link, a read through a link could return a copied-up file's old
+  bytes or a removed file's bytes, and `ls` through a directory link
+  showed removed files. Every overlay operation now follows links the way
+  a real filesystem does: a write changes the link's target and the link
+  stays. A link that leaves the root is refused with "path escapes root",
+  as without the overlay.
+- In overlay mode, `rm` of a file the overlay had already changed did not
+  reach `kaish-vfs commit`. It is now a removal that commit applies.
+- `kaish-vfs commit` refuses a new file whose path holds a dangling symlink
+  in the target, instead of writing through the link.
+- The overwrite conflict error now reads "changed since kaish read it, so
+  it was not overwritten; read it again and retry". Under `set -o trash`,
+  an error reading a target's metadata now fails the command instead of
+  being read as a new file with nothing to snapshot.
 
 - `grep` dropped a lone `\r` at the end of a file without a final newline.
   GNU grep prints it, and `cat` keeps it, so the line now ends with it.
 
-- **`grep -U` matches across lines on every input path.** A single file
-  searched without `-c`/`-o`/`-l`/`-q`/context and a pipe into a pipe were
-  scanned one line at a time, so a match that spans lines was missed. Large
-  input was searched in 256 KiB windows, so a match that crossed a window
-  boundary was missed. `-U` now searches each input whole, in one call. A
-  pattern that can match a newline (`\s`, `\W`, `[^a]`) now does so under
-  `-U` on these paths too, as it already did for several files.
 
 ## [0.18.0] - 2026-10-03
 
