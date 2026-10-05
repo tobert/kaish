@@ -12,27 +12,6 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
-- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
-  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
-  target, and syncs the directory. The trait default calls `write`, which
-  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
-  `replace`. `KernelBackend::patch` on the built-in backends uses it.
-
-- **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
-  print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
-  anchor the coming `edit` builtin takes. `grep` prefixes file names across
-  several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
-  context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
-  `cat -v/-E/-T/-A`, `grep -U`, `grep --encoding`, `grep -c/-l`, and other
-  builtins (`ls --hashline`) exit 2 and name the form that works.
-- **`--json` rows carry `hash` beside `line`** when the row is a line of
-  one named file, kept byte for byte, including `grep --json` match
-  records. A line `grep` decoded lossily gets no `hash`.
-- **`KernelConfig::with_line_hasher`** chooses the line hash. The default
-  is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
-  holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
-  anchor uses. Builtins hash through `ToolCtx::line_hash`.
-
 ### Changed
 
 - **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
@@ -49,6 +28,13 @@ breaking entries are marked **BREAKING**.
   `apply_hashline` method for a tool that declares `--hashline`. Only
   `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
   not list it; elsewhere it exits 2 naming those four.
+
+- **A flag kaish drops on purpose names the reason and the fix.**
+  `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
+  mode, owner, or times; no builtin sets them from another file. Run
+  `cp SRC DST`; the copy gets the current time.` and exits 2. Covered:
+  `cp -p/-a/-f/-i`, `mv -f/-i`, `mkdir -m`, `echo -e`, `printf -v`,
+  `grep -P`, `find -delete/-exec/-execdir/-ok/-okdir`. See `help limits`.
 
 ### Fixed
 
@@ -78,6 +64,9 @@ breaking entries are marked **BREAKING**.
 
 - `grep` dropped a lone `\r` at the end of a file without a final newline.
   GNU grep prints it, and `cat` keeps it, so the line now ends with it.
+
+- **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
+  output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.
 
 ## [0.18.0] - 2026-10-03
 

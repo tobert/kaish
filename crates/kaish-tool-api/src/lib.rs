@@ -39,7 +39,7 @@ pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap}
 pub use ctx::{sealed, Interrupted, PatientGuard, ToolCtx};
 pub use global_flags::GlobalFlags;
 pub use issue::{IssueCode, Severity, Span, ValidationIssue};
-pub use tool::{is_global_output_flag, validate_against_schema, Tool};
+pub use tool::{is_global_output_flag, validate_against_schema, RefusedFlag, Tool};
 
 // Re-export the data types tool authors need most often, so a tool crate can
 // depend on just `kaish-tool-api` for the common case.

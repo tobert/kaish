@@ -35,7 +35,7 @@ pub use context::{
 pub(crate) use context::{cas_overwrite, cas_replace, exec_context, read_for_replace, is_trash_excluded, note_skipped_mounts, ExternalCommandOutcome};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
-pub use traits::{ArgBinding, global_flag_value_is_truthy, is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};
+pub use traits::{ArgBinding, global_flag_value_is_truthy, is_global_output_flag, validate_against_schema, RefusedFlag, Tool, ToolArgs, ToolCtx, ToolSchema, ParamSchema};
 
 /// Commands that consume bareword `key=value` argv (Arg::WordAssign) as
 /// shell-assignment pairs and route them through `tool_args.named`. For every

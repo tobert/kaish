@@ -106,8 +106,8 @@ use crate::parser::parse;
 use crate::scheduler::{is_bool_type, numbered_stderr_stream, schema_param_lookup, select_leaf, JobManager, PipelineRunner, StderrReceiver};
 use crate::tools::{
     external_commands_unavailable_error, global_flag_value_is_truthy, register_builtins,
-    ExecContext, ExternalCommandOutcome, ExternalCommandsUnavailable, GlobalFlags, ToolArgs,
-    ToolRegistry,
+    ExecContext, ExternalCommandOutcome, ExternalCommandsUnavailable, GlobalFlags, RefusedFlag,
+    ToolArgs, ToolRegistry,
 };
 #[cfg(feature = "subprocess")]
 use crate::tools::{resolve_in_path, virtual_cwd_error};
@@ -1165,9 +1165,12 @@ impl Kernel {
     /// The optional `configure_vfs` closure lets you add additional virtual mounts
     /// (e.g., `/v/docs` for CRDT blocks) after the built-in mounts are set up.
     ///
-    /// **Note:** The config's `vfs_mode` is ignored — all non-`/v/*` path routing
-    /// is handled by your custom backend. The config is only used for `name`, `cwd`,
-    /// `skip_validation`, and `interactive`.
+    /// **Note:** Every config field applies except three. `vfs_mode` is
+    /// ignored: your backend routes every path outside the kernel's own
+    /// mounts. `overlay = true` is an error, because the kernel cannot wrap
+    /// your backend. output over the `output_limit` is
+    /// truncated in memory and never spilled to disk, so it never reaches a
+    /// host filesystem your backend does not control.
     ///
     /// # Example
     ///
@@ -4514,6 +4517,18 @@ impl Kernel {
             Some(stdout) => stdout.stats().await.total_written,
             None => 0,
         };
+        // The binder splits `-m755` into one-letter flags and clap names the
+        // first unknown one in sorted order (`-5`), so note which refused
+        // spellings were bound, in table order, for the lookup below.
+        let bound_refusals: Vec<&str> = tool
+            .refused_flags()
+            .iter()
+            .flat_map(|refused| refused.spellings.iter().copied())
+            .filter(|spelling| {
+                let key = spelling.trim_start_matches('-');
+                tool_args.flags.contains(key) || tool_args.named.contains_key(key)
+            })
+            .collect();
         let flow = tool.execute_flow(tool_args, &mut *ctx).await;
         let (mut result, exited) = match flow {
             kaish_types::ToolFlow::Normal(result) => (result, false),
@@ -4522,10 +4537,14 @@ impl Kernel {
                 "tool `{name}` returned a ToolFlow variant this kernel does not know: {other:?}"
             ),
         };
+        // Text already on the stream cannot be taken back, so a published
+        // diagnostic stays as the tool wrote it.
         if result.code == 2
-            && let Some(refusal) = unknown_flag_refusal(name, &result.err)
+            && result.stderr_published_len == 0
+            && let Some(refusal) =
+                unknown_flag_refusal(name, &result.err, tool.refused_flags(), &bound_refusals)
         {
-            result.err = refusal;
+            result.err = ExecResult::terminate_diagnostic(refusal);
         }
         // A command substitution binds `.data` only when it is the result's
         // VALUE. `--json` and the pipeline sideband read `.data` either way,
@@ -9151,18 +9170,35 @@ mod argv_classify_tests {
 }
 
 /// Rewrite a builtin's clap "unexpected argument" error for a flag-shaped
-/// word as `ls: -Z is not supported (see `help ls`)`.
+/// word as `ls: -Z is not supported (see `help ls`)`, or, for a flag in
+/// `refused`, as `cp: -p is not supported: HINT`.
 ///
 /// clap's text adds a usage block and a tip about passing the word as a
 /// value; for a word the binder already read as a flag, that tip misleads.
 /// Every clap-parsed builtin formats its parse error as `NAME: {clap error}`,
 /// so one rewrite after dispatch covers them all. `None` leaves any other
 /// error, and a stray operand that is not flag-shaped, as the tool wrote it.
-fn unknown_flag_refusal(name: &str, err: &str) -> Option<String> {
+/// `bound` holds the refused spellings the binder passed, in table order:
+/// when clap names a word with no hint, the refusal names the first of them
+/// instead. The text has no trailing newline; the caller terminates it.
+fn unknown_flag_refusal(
+    name: &str,
+    err: &str,
+    refused: &[RefusedFlag],
+    bound: &[&str],
+) -> Option<String> {
     let rest = err.strip_prefix(name)?.strip_prefix(": error: unexpected argument '")?;
     let (word, tail) = rest.split_once('\'')?;
     if !word.starts_with('-') {
         return None;
+    }
+    let declared = RefusedFlag::hint_for(refused, word).map(|hint| (word, hint)).or_else(|| {
+        bound
+            .iter()
+            .find_map(|flag| RefusedFlag::hint_for(refused, flag).map(|hint| (*flag, hint)))
+    });
+    if let Some((flag, hint)) = declared {
+        return Some(format!("{name}: {flag} is not supported: {hint}"));
     }
     let similar = tail
         .split_once("a similar argument exists: '")
@@ -12693,20 +12729,50 @@ AFTER="yes"'"#)
     fn unknown_flag_refusal_rewrites_clap_text() {
         let clap = "ls: error: unexpected argument '-Z' found\n\n  tip: to pass '-Z' as a value, use '-- -Z'\n\nUsage: ls [OPTIONS] [PATHS]...\n";
         assert_eq!(
-            unknown_flag_refusal("ls", clap).as_deref(),
+            unknown_flag_refusal("ls", clap, &[], &[]).as_deref(),
             Some("ls: -Z is not supported (see `help ls`)")
         );
         let similar = "ls: error: unexpected argument '--lon' found\n\n  tip: a similar argument exists: '--long'\n";
         assert_eq!(
-            unknown_flag_refusal("ls", similar).as_deref(),
+            unknown_flag_refusal("ls", similar, &[], &[]).as_deref(),
             Some("ls: --lon is not supported (similar: --long) (see `help ls`)")
         );
     }
 
     #[test]
+    fn unknown_flag_refusal_names_the_fix_for_a_refused_flag() {
+        const REFUSED: &[RefusedFlag] =
+            &[RefusedFlag::new(&["-p", "--preserve"], "the rule. Run `cp SRC DST`.")];
+        let short = "cp: error: unexpected argument '-p' found\n\n  tip: to pass '-p' as a value, use '-- -p'\n";
+        assert_eq!(
+            unknown_flag_refusal("cp", short, REFUSED, &[]).as_deref(),
+            Some("cp: -p is not supported: the rule. Run `cp SRC DST`.")
+        );
+        // The hint replaces clap's guess at a similar flag.
+        let long = "cp: error: unexpected argument '--preserve' found\n\n  tip: a similar argument exists: '--recursive'\n";
+        assert_eq!(
+            unknown_flag_refusal("cp", long, REFUSED, &[]).as_deref(),
+            Some("cp: --preserve is not supported: the rule. Run `cp SRC DST`.")
+        );
+        let other = "cp: error: unexpected argument '-Z' found\n";
+        assert_eq!(
+            unknown_flag_refusal("cp", other, REFUSED, &[]).as_deref(),
+            Some("cp: -Z is not supported (see `help cp`)")
+        );
+        // An attached value binds as one-letter flags; clap names `-5`, and
+        // the refusal names the bound `-p`.
+        let attached = "cp: error: unexpected argument '-5' found\n";
+        let bound = ["-p"];
+        assert_eq!(
+            unknown_flag_refusal("cp", attached, REFUSED, &bound).as_deref(),
+            Some("cp: -p is not supported: the rule. Run `cp SRC DST`.")
+        );
+    }
+
+    #[test]
     fn unknown_flag_refusal_leaves_other_errors_alone() {
-        assert_eq!(unknown_flag_refusal("ls", "ls: error: unexpected argument 'extra' found\n"), None);
-        assert_eq!(unknown_flag_refusal("ls", "cat: error: unexpected argument '-Z' found\n"), None);
-        assert_eq!(unknown_flag_refusal("ls", "ls: cannot access 'x'\n"), None);
+        assert_eq!(unknown_flag_refusal("ls", "ls: error: unexpected argument 'extra' found\n", &[], &[]), None);
+        assert_eq!(unknown_flag_refusal("ls", "cat: error: unexpected argument '-Z' found\n", &[], &[]), None);
+        assert_eq!(unknown_flag_refusal("ls", "ls: cannot access 'x'\n", &[], &[]), None);
     }
 }
