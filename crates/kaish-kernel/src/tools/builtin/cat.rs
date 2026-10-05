@@ -38,6 +38,11 @@ struct CatArgs {
     #[arg(short = 'T', long = "show-tabs")]
     show_tabs: bool,
 
+    /// Print each line as LINE:HASH:TEXT. `edit` takes LINE:HASH as an
+    /// anchor. Needs exactly one FILE; not with -v, -E, -T, or -A.
+    #[arg(long)]
+    hashline: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -77,12 +82,25 @@ impl Tool for Cat {
             Err(e) => return ExecResult::failure(2, format!("cat: {e}")),
         };
         parsed.global.apply(ctx);
+        let wants_anchors = parsed.global.apply_hashline(parsed.hashline, ctx);
         let number_lines = parsed.number;
         let show = ShowOptions {
             nonprinting: parsed.show_all || parsed.show_nonprinting,
             ends: parsed.show_all || parsed.show_ends,
             tabs: parsed.show_all || parsed.show_tabs,
         };
+        // Checks apply whenever --hashline is asked for; --json only wins the render.
+        let hashline = parsed.hashline;
+        if hashline && show.any() {
+            return super::hashline::flag(
+                "cat",
+                "-v, -E, -T, or -A",
+                "they mark up the text, so the rows are not the file's lines",
+            );
+        }
+        if hashline && args.positional.is_empty() {
+            return super::hashline::stdin("cat", "cat --hashline FILE");
+        }
         if show.any() {
             return show_stream(ctx, &args, number_lines, show).await;
         }
@@ -178,13 +196,20 @@ impl Tool for Cat {
         if paths.is_empty() {
             return ExecResult::failure(1, "cat: missing path argument");
         }
+        if hashline && paths.len() > 1 {
+            return super::hashline::several_files("cat", paths.len());
+        }
+        // Rows are lines of one file only when there is one file; `cat -n a b`
+        // numbers straight through both, so those rows get no hash.
+        let anchors = wants_anchors && paths.len() == 1;
+        let build_rows = number_lines || hashline;
 
         // Binary-capable fast path: a single file with no line numbering. Valid
         // UTF-8 is text as before; anything else becomes a Bytes result (a hex
         // dump in the REPL, a base64 envelope under --json) instead of the old
         // "invalid UTF-8" error. Multi-file / -n stay text-only below — you
         // can't line-number or text-concat binary. See docs/binary-data.md.
-        if paths.len() == 1 && !number_lines {
+        if paths.len() == 1 && !build_rows {
             let resolved = ctx.resolve_path(&paths[0]);
             // Streaming path: when cat feeds a downstream stage, stream the file
             // in bounded chunks rather than reading it whole. This bounds memory
@@ -236,7 +261,7 @@ impl Tool for Cat {
             match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
-                        if number_lines {
+                        if build_rows {
                             // An empty operand contributes no line, so it must
                             // not answer the trailing-newline question for the
                             // file before it: `cat -n a.txt empty.txt` ends the
@@ -244,14 +269,21 @@ impl Tool for Cat {
                             if !content.is_empty() {
                                 last_had_trailing_newline = content.ends_with('\n');
                             }
-                            for line in content.lines() {
+                            for line in kaish_types::hashline::lines(&content) {
                                 if !all_content.is_empty() {
                                     all_content.push('\n');
                                 }
-                                all_content.push_str(&format!("{:6}\t{}", line_num, line));
-                                rows.push(
-                                    crate::interpreter::OutputNode::new(line).at_line(line_num),
-                                );
+                                if number_lines {
+                                    all_content.push_str(&format!("{:6}\t{}", line_num, line));
+                                } else {
+                                    all_content.push_str(line);
+                                }
+                                let mut row =
+                                    crate::interpreter::OutputNode::new(line).at_line(line_num);
+                                if anchors {
+                                    row = row.with_hash(ctx.line_hash(line.as_bytes()));
+                                }
+                                rows.push(row);
                                 line_num += 1;
                             }
                         } else {
@@ -271,11 +303,11 @@ impl Tool for Cat {
 
         // `.lines()` strips trailing newlines; restore one if the last file
         // ended with `\n` (which it almost always does — this was the bug).
-        if number_lines && last_had_trailing_newline {
+        if build_rows && last_had_trailing_newline {
             all_content.push('\n');
         }
 
-        if number_lines && !rows.is_empty() {
+        if build_rows && !rows.is_empty() {
             // Both forms: the text is byte-identical to GNU `cat -n`, and the
             // table carries the anchor for `--json`.
             let table = OutputData::table(vec!["TEXT".to_string()], rows);

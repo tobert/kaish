@@ -210,6 +210,59 @@ pub(crate) fn non_negative_count(
     usize::try_from(value).map_err(|_| format!("{tool}: {flag} {value}: {advice}"))
 }
 
+/// `--hashline` refusals. An anchor names a line of one file, so a builtin
+/// refuses before reading anything when its rows would not be file lines.
+pub(crate) mod hashline {
+    use crate::interpreter::ExecResult;
+
+    /// Lines from stdin have no file for `edit` to open.
+    pub(crate) fn stdin(tool: &str, usage: &str) -> ExecResult {
+        ExecResult::failure(
+            2,
+            format!(
+                "{tool}: --hashline needs a file; lines from stdin have no file to anchor to. \
+                 Use: {usage}"
+            ),
+        )
+    }
+
+    /// Line numbers restart in each file, so one stream would repeat them.
+    pub(crate) fn several_files(tool: &str, count: usize) -> ExecResult {
+        ExecResult::failure(
+            2,
+            format!(
+                "{tool}: --hashline takes one file at a time, got {count}; \
+                 run {tool} --hashline once per file, or grep --hashline across files"
+            ),
+        )
+    }
+
+    /// A flag whose output is not the file's own lines.
+    pub(crate) fn flag(tool: &str, flag: &str, why: &str) -> ExecResult {
+        ExecResult::failure(2, format!("{tool}: --hashline cannot be used with {flag}: {why}"))
+    }
+}
+
+/// Lines of one named file as rows, each with its anchor when `hash` is set.
+/// `first_line` is the 1-based file line of `lines[0]`.
+pub(crate) fn file_line_rows(
+    lines: &[&str],
+    first_line: u64,
+    hasher: Option<&kaish_types::LineHasher>,
+) -> Vec<crate::interpreter::OutputNode> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let node = crate::interpreter::OutputNode::new(*line).at_line(first_line + i as u64);
+            match hasher {
+                Some(hasher) => node.with_hash(hasher.hash(line.as_bytes())),
+                None => node,
+            }
+        })
+        .collect()
+}
+
 /// Attach the failures of a multi-operand reader to its result: one stderr
 /// line per failed operand, exit code 1. The good operands' output stays.
 pub(crate) fn with_operand_errors(

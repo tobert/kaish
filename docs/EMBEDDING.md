@@ -392,7 +392,28 @@ failure instead of continuing — off by default, see
 ["When exit status is a decision"](#when-exit-status-is-a-decision-errexit)
 above), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
 in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
-(below).
+(below), `.with_line_hasher(hasher)` (below).
+
+#### Choosing the line hash (`with_line_hasher`)
+
+```rust
+use kaish_types::LineHasher;
+
+// Anchors print as 42:<your hash>:text; `edit` checks with the same function.
+let config = KernelConfig::agent()
+    .with_line_hasher(LineHasher::new(|line| my_short_hash(line)));
+```
+
+`cat --hashline`, `head`, `tail`, and `grep` print line anchors as
+`LINE:HASH:TEXT`, and `edit` checks them. The kernel computes every hash with
+one `LineHasher`, so a builtin never hashes on its own and the two always
+agree. The default is FNV-1a, 4 hex digits (`fnv1a_line_hash(b"alpha") ==
+"202b"`), the same as kaijutsu's. The function gets the line without its
+terminator, as `kaish_types::hashline::lines` splits it, and must return ASCII
+letters and digits; `LineHasher::hash` panics on anything else, because the
+anchor would not parse. A tool you write hashes through `ToolCtx::line_hash`
+and sets the result with `OutputNode::with_hash` beside `at_line`, for lines of
+one named file only.
 
 #### Deciding what a statement may do
 

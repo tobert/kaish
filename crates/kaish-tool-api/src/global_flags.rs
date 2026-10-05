@@ -33,6 +33,17 @@ impl GlobalFlags {
         }
     }
 
+    /// Apply `--hashline` for a builtin that declares it. JSON rows already
+    /// carry the hash, so `--json` wins when both are given. Returns whether
+    /// the builtin should hash its rows: `--json` and `--hashline` both show
+    /// anchors, and hashing is skipped when neither will.
+    pub fn apply_hashline(&self, hashline: bool, ctx: &mut dyn ToolCtx) -> bool {
+        if hashline && !self.json {
+            ctx.set_output_format(OutputFormat::Hashline);
+        }
+        self.json || hashline
+    }
+
     /// Honor `--json` straight off `ToolArgs` before any per-builtin clap parse.
     ///
     /// The kernel calls this just before `tool.execute()` so the format is set
@@ -51,6 +62,11 @@ impl GlobalFlags {
     pub fn apply_from_args(args: &ToolArgs, raw_argv: bool, ctx: &mut dyn ToolCtx) {
         if args.has_flag("json") || (raw_argv && positional_json_flag(args)) {
             ctx.set_output_format(OutputFormat::Json);
+        } else if args.has_flag("hashline") {
+            // Only cat, head, tail, and grep declare --hashline. Setting the
+            // format here as well means a builtin that takes any word does
+            // not print plain text under it: the render refuses, exit 2.
+            ctx.set_output_format(OutputFormat::Hashline);
         }
     }
 }
