@@ -65,8 +65,6 @@ breaking entries are marked **BREAKING**.
 - `grep` dropped a lone `\r` at the end of a file without a final newline.
   GNU grep prints it, and `cat` keeps it, so the line now ends with it.
 
-- **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
-  output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.
 
 ## [0.18.0] - 2026-10-03
 

@@ -79,7 +79,9 @@ struct GrepArgs {
     #[arg(id = "R", short = 'R')]
     recursive_upper: bool,
 
-    /// Allow patterns to match across line boundaries.
+    /// Let a match span lines: `grep -U -E '(?s)start.*?end' file`. `.` matches
+    /// a newline only after `(?s)`; `\s`, `\W`, and `[^a]` always can. Each input
+    /// is read whole before the search.
     #[arg(short = 'U', long = "multiline")]
     multiline: bool,
 
@@ -736,12 +738,15 @@ impl Grep {
         }
 
         // Streaming path: pipe_stdin → pipe_stdout, process line by line.
-        // Only for simple grep (no context, no count, no quiet, no files-only, no only-matching).
+        // Only for simple grep (no context, no count, no quiet, no files-only,
+        // no only-matching). `-U` is never simple: a line-by-line scan cannot
+        // see a match that spans lines.
         // `ctx.stdin.is_none()` matters as much as the pipe checks: `stream_grep`
         // below reads only `pipe_stdin`, so a buffered leftover (e.g. after
         // `read x`) would never be searched or written out — silently skipped
         // rather than matched or passed through.
         let is_simple = !count_only && !quiet && !files_only && !only_matching
+            && !multiline
             && before_context.is_none() && after_context.is_none();
         let can_stream = args.get_string("path", 1).is_none()
             && is_simple
@@ -758,8 +763,8 @@ impl Grep {
 
         // Single file: stream the file in bounded chunks rather than reading it whole.
         // The conditions mirror `can_stream` above — simple invocations only.
-        // Complex flags (-A/-B/-C context, -c, -q, -l, -o) keep the whole-buffer path
-        // below because context lines need look-behind buffering.
+        // Complex flags (-A/-B/-C context, -c, -q, -l, -o, -U) keep the whole-buffer
+        // path below because context lines and multiline matches need the whole input.
         if let Some(path) = args.get_string("path", 1).filter(|_| is_simple) {
             let resolved = ctx.resolve_path(&path);
             // Mirror BinaryDetection::quit(b'\x00') for the default binary_mode.
@@ -838,7 +843,7 @@ impl Grep {
             // else: NUL seen — fall through to the whole-buffer path below.
         }
 
-        // Fallback: whole-buffer path for stdin OR complex flags (-c/-q/-l/-o/-A/-B/-C).
+        // Fallback: whole-buffer path for stdin OR complex flags (-c/-q/-l/-o/-A/-B/-C/-U).
         let (bytes, filename) = match args.get_string("path", 1) {
             Some(path) => {
                 let resolved = ctx.resolve_path(&path);
@@ -1760,7 +1765,8 @@ struct GrepOptions {
 /// empty `RenderResult` with `match_count == 0`.
 ///
 /// [`grep_lines_structured_checkpointed`] searches in chunks, and calls this
-/// for one whole-buffer search when `-A`/`-B`/`-C` asks for context lines.
+/// for one whole-buffer search when `-A`/`-B`/`-C` asks for context lines or
+/// `-U` lets a match span lines.
 fn grep_lines_structured(
     input: &[u8],
     matcher: &RegexMatcher,
@@ -1780,7 +1786,7 @@ enum GrepScanError {
 }
 
 /// The checkpointed counterpart to `grep_lines_structured`, for the
-/// whole-buffer path (stdin, and any of `-c`/`-q`/`-l`/`-o`/`-A`/`-B`/`-C`
+/// whole-buffer path (stdin, and any of `-c`/`-q`/`-l`/`-o`/`-A`/`-B`/`-C`/`-U`
 /// over a single file) — the one grep path a script `request_timeout` could
 /// not reach: `grep_lines_structured` handed the whole buffer to
 /// `Searcher::search_slice` in one call, and a call that never awaits holds
@@ -1789,13 +1795,14 @@ enum GrepScanError {
 /// Runs the search in `ExecContext::STREAM_CHUNK_SIZE` windows, cut at the
 /// nearest line boundary, checkpointing between them.
 ///
-/// `-A`/`-B`/`-C` searches the whole buffer in one call instead, after a
-/// checkpoint. `Searcher::search_slice` resets its context tracking on every
+/// `-A`/`-B`/`-C` and `-U` search the whole buffer in one call instead, after
+/// a checkpoint. `Searcher::search_slice` resets its context tracking on every
 /// call, so a match within NUM lines of a chunk boundary would print fewer
-/// context lines than asked for — a wrong answer, where an uninterruptible
-/// search is only a slow one. That one call is not interruptible: a context
-/// grep over a file larger than one chunk runs to the end, and a script
-/// timeout lands after it.
+/// context lines than asked for, and a `-U` match that crosses a chunk
+/// boundary would be split or missed — a wrong answer, where an
+/// uninterruptible search is only a slow one. That one call is not
+/// interruptible: such a grep over a file larger than one chunk runs to the
+/// end, and a script timeout lands after it.
 async fn grep_lines_structured_checkpointed(
     ctx: &mut ExecContext,
     input: &[u8],
@@ -1803,7 +1810,10 @@ async fn grep_lines_structured_checkpointed(
     opts: &GrepOptions,
     filename: Option<&str>,
 ) -> Result<RenderResult, GrepScanError> {
-    if opts.before_context.unwrap_or(0) > 0 || opts.after_context.unwrap_or(0) > 0 {
+    if opts.multiline
+        || opts.before_context.unwrap_or(0) > 0
+        || opts.after_context.unwrap_or(0) > 0
+    {
         if ctx.checkpoint().await.is_err() {
             return Err(GrepScanError::Interrupted);
         }
