@@ -81,7 +81,7 @@ struct GrepArgs {
 
     /// Let a match span lines: `grep -U -E '(?s)start.*?end' file`. `.` matches
     /// a newline only after `(?s)`; `\s`, `\W`, and `[^a]` always can. Each input
-    /// is read whole before the search.
+    /// is read whole before the search. `-c` counts every line a match covers.
     #[arg(short = 'U', long = "multiline")]
     multiline: bool,
 
@@ -910,7 +910,7 @@ impl Grep {
             // GNU `grep -c`: the count is printed *and* the exit status still
             // reflects whether anything matched (1 = no match).
             let mut result =
-                ExecResult::with_output(OutputData::text(format!("{}\n", render.match_count)));
+                ExecResult::with_output(OutputData::text(format!("{}\n", render.matched_lines)));
             if render.match_count == 0 {
                 result.code = 1;
             }
@@ -1116,7 +1116,7 @@ impl Grep {
             if count_only {
                 // GNU parity: one `name:count` line per searched file, zero
                 // counts included.
-                count_lines.push(format!("{}:{}", display_name, render.match_count));
+                count_lines.push(format!("{}:{}", display_name, render.matched_lines));
             }
 
             if render.match_count > 0 {
@@ -1280,6 +1280,7 @@ impl<'a> ChunkedFileSearch<'a> {
                 nodes: Vec::new(),
                 rich: Vec::new(),
                 match_count: 0,
+                matched_lines: 0,
             },
             finished: false,
             error: None,
@@ -1404,6 +1405,7 @@ impl<'a> ChunkedFileSearch<'a> {
         self.result.nodes.extend(rendered.nodes);
         self.result.rich.extend(rendered.rich);
         self.result.match_count += rendered.match_count;
+        self.result.matched_lines += rendered.matched_lines;
         if let Some(limit) = limit
             && self.result.match_count >= limit
         {
@@ -1731,6 +1733,8 @@ impl<'r> GrepLineScanner<'r> {
             nodes: self.nodes,
             rich: self.rich,
             match_count: self.match_count,
+            // The line scanner never spans lines: a record is one line.
+            matched_lines: self.match_count,
         }
     }
 }
@@ -1826,6 +1830,7 @@ async fn grep_lines_structured_checkpointed(
         nodes: Vec::new(),
         rich: Vec::new(),
         match_count: 0,
+        matched_lines: 0,
     };
     let chunk_size = ExecContext::STREAM_CHUNK_SIZE as usize;
     let mut line_offset: u64 = 0;
@@ -1868,6 +1873,7 @@ async fn grep_lines_structured_checkpointed(
         combined.nodes.extend(rendered.nodes);
         combined.rich.extend(rendered.rich);
         combined.match_count += rendered.match_count;
+        combined.matched_lines += rendered.matched_lines;
 
         line_offset += chunk.iter().filter(|&&b| b == b'\n').count() as u64;
         pos = end;
@@ -1966,7 +1972,10 @@ struct RenderResult {
     text: String,
     nodes: Vec<OutputNode>,
     rich: Vec<serde_json::Value>,
+    /// Match records. `--max-count` and the exit status read this.
     match_count: usize,
+    /// Lines the records cover: a `-U` record can span several. `-c` prints this.
+    matched_lines: usize,
 }
 
 /// Render a stream of search events into both the legacy table form and a
@@ -1991,6 +2000,7 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
     let mut nodes: Vec<OutputNode> = Vec::new();
     let mut rich: Vec<serde_json::Value> = Vec::new();
     let mut match_count: usize = 0;
+    let mut matched_lines: usize = 0;
     let mut emitted_any = false;
 
     for event in events {
@@ -2070,6 +2080,8 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
                 }
                 rich.push(record);
                 match_count += 1;
+                // line_text has its last newline trimmed, so n newlines inside it span n + 1 lines.
+                matched_lines += m.line_text.matches('\n').count() + 1;
                 emitted_any = true;
             }
             SearchEvent::Context(c) => {
@@ -2111,6 +2123,7 @@ fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&s
         nodes,
         rich,
         match_count,
+        matched_lines,
     }
 }
 
