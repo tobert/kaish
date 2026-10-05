@@ -675,6 +675,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cp_np_keeps_a_dangling_link_at_the_destination() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("file.txt"), Path::new("/src_link.txt"))
+            .await
+            .unwrap();
+        ctx.backend
+            .symlink(Path::new("missing.txt"), Path::new("/dst_link.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/src_link.txt".into()));
+        args.positional.push(Value::String("/dst_link.txt".into()));
+        args.flags.insert("no-dereference".to_string());
+        args.flags.insert("n".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        assert!(!ctx.backend.exists(Path::new("/missing.txt")).await);
+        let entry = ctx.backend.lstat(Path::new("/dst_link.txt")).await.unwrap();
+        assert!(entry.is_symlink(), "cp -nP replaced the link");
+        let target = ctx.backend.read_link(Path::new("/dst_link.txt")).await.unwrap();
+        assert_eq!(target, Path::new("missing.txt"), "cp -nP retargeted the link");
+    }
+
+    // A link to a directory is a directory for -n too: the copy lands inside
+    // it unless that name is taken.
+    #[tokio::test]
+    async fn test_cp_n_through_a_link_to_a_directory() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("emptydir"), Path::new("/link_to_dir"))
+            .await
+            .unwrap();
+
+        let copy = || {
+            let mut args = ToolArgs::new();
+            args.positional.push(Value::String("/file.txt".into()));
+            args.positional.push(Value::String("/link_to_dir".into()));
+            args.flags.insert("n".to_string());
+            args
+        };
+
+        let args = copy();
+        assert!(Cp.execute(args, &mut ctx).await.ok());
+        let data = ctx.backend.read(Path::new("/link_to_dir/file.txt"), None).await.unwrap();
+        assert_eq!(data, b"hello world", "a new name is copied");
+
+        ctx.backend
+            .write(Path::new("/link_to_dir/file.txt"), b"original", WriteMode::Overwrite)
+            .await
+            .unwrap();
+        let args = copy();
+        assert!(Cp.execute(args, &mut ctx).await.ok());
+        let data = ctx.backend.read(Path::new("/link_to_dir/file.txt"), None).await.unwrap();
+        assert_eq!(data, b"original", "a name that exists is kept");
+    }
+
+    #[tokio::test]
     async fn test_cp_p_and_l_together_is_a_usage_error() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();

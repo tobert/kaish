@@ -83,6 +83,8 @@ const SPAN: &str = "'(?s)foo.*?bar'";
 #[case::count_two_regions(format!("grep -cU -E {SPAN} two.txt"), "4\n")]
 #[case::count_stdin(format!("cat two.txt | grep -cU -E {SPAN}"), "4\n")]
 #[case::count_two_files(format!("grep -cU -E {SPAN} two.txt other.txt"), "two.txt:4\nother.txt:0\n")]
+#[case::count_invert(format!("grep -cvU -E {SPAN} small.txt"), "2\n")]
+#[case::count_two_matches_one_line("grep -cU -E 'foo' dup.txt", "1\n")]
 #[case::count_max_count(format!("grep -cU -m1 -E {SPAN} two.txt"), "2\n")]
 #[case::files_with_matches(format!("grep -lU -E {SPAN} small.txt"), "small.txt\n")]
 #[case::pipe_into_pipe(format!("cat small.txt | grep -U -E {SPAN} | cat"), "foo start\nmiddle\nbar end\n")]
@@ -103,6 +105,7 @@ async fn multiline_match_crosses_lines(#[case] script: String, #[case] expected:
         ("small.txt", SMALL),
         ("other.txt", "nothing here\n"),
         ("two.txt", "foo 1\nbar 1\nbetween\nfoo 2\nbar 2\n"),
+        ("dup.txt", "foo foo\nqux\n"),
     ];
     let (out, err, code) = run_with_files(&files, &script).await;
     assert_eq!(code, 0, "script={script:?} err={err:?} out={out:?}");
