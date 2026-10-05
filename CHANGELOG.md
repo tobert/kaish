@@ -55,6 +55,26 @@ breaking entries are marked **BREAKING**.
 - `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
   did not know as `Overwrite`. They now return `InvalidOperation` naming
   the mode.
+- Under `set -o trash`, `sed -i` and `patch` transformed a second read of
+  the file, not the bytes the trash saved. A write between the two was
+  replaced with no copy in the trash. They now transform the saved bytes
+  and fail with "changed since" if the file no longer holds them.
+- In overlay mode, a path with a symlink in it could name one file for a
+  read and another for a write. A write through a link made a file that
+  hid the link, a read through a link could return a copied-up file's old
+  bytes or a removed file's bytes, and `ls` through a directory link
+  showed removed files. Every overlay operation now follows links the way
+  a real filesystem does: a write changes the link's target and the link
+  stays. A link that leaves the root is refused with "path escapes root",
+  as without the overlay.
+- In overlay mode, `rm` of a file the overlay had already changed did not
+  reach `kaish-vfs commit`. It is now a removal that commit applies.
+- `kaish-vfs commit` refuses a new file whose path holds a dangling symlink
+  in the target, instead of writing through the link.
+- The overwrite conflict error now reads "changed since kaish read it, so
+  it was not overwritten; read it again and retry". Under `set -o trash`,
+  an error reading a target's metadata now fails the command instead of
+  being read as a new file with nothing to snapshot.
 
 - `grep` dropped a lone `\r` at the end of a file without a final newline.
   GNU grep prints it, and `cat` keeps it, so the line now ends with it.
