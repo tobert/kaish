@@ -508,7 +508,8 @@ impl OverlayFs {
     ///    target's current content must byte-equal `base` (stale-base
     ///    detection).
     /// 2. Write: `Added`/`Modified` => `target.mkdir(parent)` (create-parents,
-    ///    Ok if existing), then `target.write`. `Removed` => `target.remove`.
+    ///    Ok if existing), then `target.replace`, so a crash leaves each file
+    ///    whole, old or new. `Removed` => `target.remove`.
     ///
     /// On any write-phase error, returns a loud error naming the failed path
     /// and the paths already committed.
@@ -603,10 +604,10 @@ impl OverlayFs {
                         if let Err(error) = target.mkdir(parent).await {
                             Err(error)
                         } else {
-                            target.write(&change.path, current).await
+                            target.replace(&change.path, current).await
                         }
                     } else {
-                        target.write(&change.path, current).await
+                        target.replace(&change.path, current).await
                     }
                 }
                 ChangeKind::Removed => target.remove(&change.path).await,
@@ -793,35 +794,17 @@ impl Drop for OverlayFs {
     }
 }
 
-#[async_trait]
-impl Filesystem for OverlayFs {
-    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read(&path).await {
-            Err(error) if is_not_found(&error) => self.lower.read(&path).await,
-            other => other,
-        }
-    }
+/// Which upper call a file write reaches.
+#[derive(Debug, Clone, Copy)]
+enum UpperWrite {
+    Write,
+    Replace,
+}
 
-    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
-        // Delegate the slice to whichever layer holds the file so a byte range
-        // rides on that backend's own `read_range` (e.g. MemoryFs slices its
-        // stored bytes) instead of the default whole-file-read+slice. Without
-        // this, chunked streaming over an overlay would be O(n²).
-        let path = normalize(path);
-        if self.state.read().await.whiteouts.contains(&path) {
-            return Err(not_found(&path));
-        }
-        match self.upper.read_range(&path, range.clone()).await {
-            Err(error) if is_not_found(&error) => self.lower.read_range(&path, range).await,
-            other => other,
-        }
-    }
-
-    async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+impl OverlayFs {
+    /// `write` and `replace`: copy-up bookkeeping, then the upper call
+    /// `how` names.
+    async fn write_file(&self, path: &Path, data: &[u8], how: UpperWrite) -> io::Result<()> {
         let path = normalize(path);
         let mut state = self.state.write().await;
 
@@ -854,7 +837,11 @@ impl Filesystem for OverlayFs {
         };
         self.charge_base(base_len)?;
 
-        if let Err(error) = self.upper.write(&path, data).await {
+        let written = match how {
+            UpperWrite::Write => self.upper.write(&path, data).await,
+            UpperWrite::Replace => self.upper.replace(&path, data).await,
+        };
+        if let Err(error) = written {
             self.refund_base_charge(base_len);
             return Err(error);
         }
@@ -875,6 +862,43 @@ impl Filesystem for OverlayFs {
             state.dirty_symlinks.remove(&path);
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Filesystem for OverlayFs {
+    async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let path = normalize(path);
+        if self.state.read().await.whiteouts.contains(&path) {
+            return Err(not_found(&path));
+        }
+        match self.upper.read(&path).await {
+            Err(error) if is_not_found(&error) => self.lower.read(&path).await,
+            other => other,
+        }
+    }
+
+    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
+        // Delegate the slice to whichever layer holds the file so a byte range
+        // rides on that backend's own `read_range` (e.g. MemoryFs slices its
+        // stored bytes) instead of the default whole-file-read+slice. Without
+        // this, chunked streaming over an overlay would be O(n²).
+        let path = normalize(path);
+        if self.state.read().await.whiteouts.contains(&path) {
+            return Err(not_found(&path));
+        }
+        match self.upper.read_range(&path, range.clone()).await {
+            Err(error) if is_not_found(&error) => self.lower.read_range(&path, range).await,
+            other => other,
+        }
+    }
+
+    async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write_file(path, data, UpperWrite::Write).await
+    }
+
+    async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write_file(path, data, UpperWrite::Replace).await
     }
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
@@ -2143,6 +2167,92 @@ mod tests {
                 b"changed in overlay"
             );
         }
+    }
+
+    /// A MemoryFs that logs which write call reached it.
+    #[derive(Default)]
+    struct WriteLog {
+        inner: crate::memory::MemoryFs,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    // A poisoned log means another assertion already failed the test.
+    #[allow(clippy::expect_used)]
+    impl WriteLog {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("call log").clone()
+        }
+
+        fn log(&self, call: String) {
+            self.calls.lock().expect("call log").push(call);
+        }
+    }
+
+    #[async_trait]
+    impl Filesystem for WriteLog {
+        async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.inner.read(path).await
+        }
+        async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+            self.log(format!("write {}", path.display()));
+            self.inner.write(path, data).await
+        }
+        async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+            self.log(format!("replace {}", path.display()));
+            self.inner.replace(path, data).await
+        }
+        async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
+            self.inner.list(path).await
+        }
+        async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
+            self.inner.stat(path).await
+        }
+        async fn mkdir(&self, path: &Path) -> io::Result<()> {
+            self.inner.mkdir(path).await
+        }
+        async fn remove(&self, path: &Path) -> io::Result<()> {
+            self.inner.remove(path).await
+        }
+        fn read_only(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_reaches_the_upper_as_a_replace_and_records_the_base() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("a.txt"), b"alpha").await.unwrap();
+        let upper = Arc::new(WriteLog::default());
+        let overlay = OverlayFs::new(lower, upper.clone());
+
+        overlay.replace(Path::new("a.txt"), b"ALPHA").await.unwrap();
+
+        assert_eq!(upper.calls(), vec!["replace a.txt"]);
+        assert_eq!(overlay.read(Path::new("a.txt")).await.unwrap(), b"ALPHA");
+        let changes = overlay.changes().await.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, ChangeKind::Modified);
+        assert_eq!(changes[0].base.as_deref(), Some(&b"alpha"[..]));
+    }
+
+    // A commit rewrites files the target already holds; each write is a
+    // replace so a crash mid-commit leaves no half-written file.
+    #[tokio::test]
+    async fn commit_into_replaces_each_file() {
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("a.txt"), b"alpha").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+        overlay.write(Path::new("a.txt"), b"ALPHA").await.unwrap();
+        overlay.write(Path::new("b.txt"), b"bravo").await.unwrap();
+        let target = WriteLog::default();
+        target.inner.write(Path::new("a.txt"), b"alpha").await.unwrap();
+
+        overlay.commit_into(&target).await.unwrap();
+
+        let mut calls = target.calls();
+        calls.sort();
+        assert_eq!(calls, vec!["replace a.txt", "replace b.txt"]);
+        assert_eq!(target.read(Path::new("a.txt")).await.unwrap(), b"ALPHA");
     }
 
     /// A lower holding one FIFO, `pipe`. Reading it is a test failure.

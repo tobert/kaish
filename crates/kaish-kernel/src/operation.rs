@@ -18,8 +18,8 @@
 pub enum KernelOperation {
     /// `rm` removing a path permanently — the trash did not catch it.
     FsRemove,
-    /// A truncating overwrite of an existing file (`cp`, `dd`, `patch`,
-    /// `sed -i`, `tee`, `write`).
+    /// An overwrite of an existing file: truncating in place (`cp`, `dd`,
+    /// `tee`, `write`) or an atomic replace (`patch`, `sed -i`).
     FsOverwrite,
     /// `mv` replacing an existing destination.
     FsRename,

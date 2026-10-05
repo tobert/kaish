@@ -49,7 +49,9 @@ struct SedArgs {
     extended: bool,
 
     /// Edit files in place (-i) instead of streaming to stdout. Requires file
-    /// operands. The GNU glued backup suffix `-i.bak` is not supported —
+    /// operands. Each file is replaced atomically, as GNU `sed -i` does: a new
+    /// file is written beside it and renamed over it, so the directory must be
+    /// writable. The GNU glued backup suffix `-i.bak` is not supported —
     /// kaish splits `-i.bak` at the dot, so the suffix arrives as a separate
     /// word. Turn on `set -o trash` for a recoverable copy of the prior
     /// contents.
@@ -202,7 +204,7 @@ impl Tool for Sed {
         let file_pos = if expression_from_flag(&args) { 0 } else { 1 };
 
         // In-place: edit each file operand on disk instead of streaming to
-        // stdout. It is *always* a truncating overwrite of an existing file,
+        // stdout. It always overwrites an existing file (by atomic replace),
         // so it takes the same trash snapshot as tee/patch. Editing a stream
         // in place is meaningless, so no operands is a loud error.
         if in_place {

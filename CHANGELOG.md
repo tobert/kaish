@@ -10,6 +10,30 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+
+- **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
+  They write a new file beside the target and rename it over the old one,
+  as GNU `sed -i` does, so a crash leaves the old file or the new one,
+  never a partial file. The file gets a new inode: it keeps its mode, is
+  owned by the user kaish runs as, and stops sharing content with hard
+  links. The directory must be writable. `>`, `tee`, and `write` still
+  rewrite in place, as bash does. (#486)
+
+### Added
+
+- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
+  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
+  target, and syncs the directory. The trait default calls `write`, which
+  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
+  `replace`. `KernelBackend::patch` on the built-in backends uses it.
+
+### Fixed
+
+- `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
+  did not know as `Overwrite`. They now return `InvalidOperation` naming
+  the mode.
+
 ## [0.18.0] - 2026-10-03
 
 ### Added

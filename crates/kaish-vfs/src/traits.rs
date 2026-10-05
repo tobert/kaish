@@ -38,6 +38,26 @@ pub trait Filesystem: Send + Sync {
     /// Returns `Err` if the filesystem is read-only.
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
 
+    /// Replace a file's whole content atomically, creating it if it doesn't
+    /// exist. A reader sees the old content or the new, never a partial file,
+    /// even when the process dies mid-write. A symlink is followed and the
+    /// link itself is kept.
+    ///
+    /// This is the call for a read-modify-write of an existing file (`sed -i`,
+    /// `patch`, an overlay commit). `write` stays the call for `>`, which
+    /// truncates in place and keeps the file's identity, as bash does.
+    ///
+    /// The default calls `write`, which is atomic for a backend whose `write`
+    /// is a single in-memory swap (`MemoryFs`). A backend over durable storage
+    /// overrides this; `LocalFs` writes a temp file beside the target and
+    /// renames it over. A wrapper that routes to another `Filesystem` must
+    /// forward `replace`, or it silently gives up the guarantee.
+    ///
+    /// Returns `Err` if the filesystem is read-only.
+    async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.write(path, data).await
+    }
+
     /// Append data to a file, creating it if it doesn't exist.
     ///
     /// The default composes `read` (treating a missing file as empty) with
