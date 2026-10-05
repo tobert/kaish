@@ -158,16 +158,18 @@ impl KernelBackend for VirtualOverlayBackend {
                 WriteMode::Overwrite | WriteMode::Truncate => {
                     self.vfs.write(path, content).await?;
                 }
+                WriteMode::Replace => {
+                    self.vfs.replace(path, content).await?;
+                }
                 WriteMode::UpdateOnly => {
                     if !self.vfs.exists(path).await {
                         return Err(BackendError::NotFound(path.display().to_string()));
                     }
                     self.vfs.write(path, content).await?;
                 }
-                // WriteMode is #[non_exhaustive] — treat unknown modes as Overwrite
-                _ => {
-                    self.vfs.write(path, content).await?;
-                }
+                // WriteMode is #[non_exhaustive]; a mode this backend predates
+                // must not be guessed at.
+                unknown => return Err(super::local::unsupported_write_mode(unknown)),
             }
             Ok(())
         } else if self.is_shared_ancestor(path) {
@@ -211,8 +213,7 @@ impl KernelBackend for VirtualOverlayBackend {
                 LocalBackend::apply_patch_op(&mut content, op)?;
             }
 
-            // Write back
-            self.vfs.write(path, content.as_bytes()).await?;
+            self.vfs.replace(path, content.as_bytes()).await?;
             Ok(())
         } else if self.is_shared_ancestor(path) {
             Err(BackendError::IsDirectory(synth_dir_note(path)))

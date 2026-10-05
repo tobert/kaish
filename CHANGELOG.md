@@ -12,6 +12,12 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
+  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
+  target, and syncs the directory. The trait default calls `write`, which
+  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
+  `replace`. `KernelBackend::patch` on the built-in backends uses it.
+
 - **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
   print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
   anchor the coming `edit` builtin takes. `grep` prefixes file names across
@@ -29,6 +35,14 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
+  They write a new file beside the target and rename it over the old one,
+  as GNU `sed -i` does, so a crash leaves the old file or the new one,
+  never a partial file. The file gets a new inode: it keeps its mode, is
+  owned by the user kaish runs as, and stops sharing content with hard
+  links. The directory must be writable. `>`, `tee`, and `write` still
+  rewrite in place, as bash does. (#486)
+
 - **API:** `ToolCtx` has a required `line_hash` method; the trait is
   sealed, so only the kernel implements it. `OutputFormat` has a
   `Hashline` variant, `OutputNode` a `hash` field, and `GlobalFlags` an
@@ -37,6 +51,10 @@ breaking entries are marked **BREAKING**.
   not list it; elsewhere it exits 2 naming those four.
 
 ### Fixed
+
+- `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
+  did not know as `Overwrite`. They now return `InvalidOperation` naming
+  the mode.
 
 - `grep` dropped a lone `\r` at the end of a file without a final newline.
   GNU grep prints it, and `cat` keeps it, so the line now ends with it.

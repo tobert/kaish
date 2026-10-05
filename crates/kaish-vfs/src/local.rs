@@ -211,6 +211,106 @@ fn kind_of(file_type: std::fs::FileType) -> DirEntryKind {
     DirEntryKind::File
 }
 
+/// Write `data` to a new file beside `target`, then rename it over `target`.
+/// `target` is a resolved host path whose final component is not a symlink.
+fn replace_file(target: &Path, data: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{}: not a file path", target.display()),
+        ));
+    };
+    // The old file's mode carries over. Its owner does not: the new file
+    // belongs to this process, as with GNU `sed -i`.
+    let permissions = match std::fs::metadata(target) {
+        Ok(meta) if meta.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                format!("{}: is a directory", target.display()),
+            ));
+        }
+        Ok(meta) => Some(meta.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+
+    let (temp_path, mut file) = create_temp_beside(parent, name)?;
+    let written = (|| {
+        file.write_all(data)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp_path, target)
+    })();
+    if let Err(error) = written {
+        return Err(match std::fs::remove_file(&temp_path) {
+            Ok(()) => error,
+            Err(cleanup) => io::Error::new(
+                error.kind(),
+                format!("{error}; the temp file {} was left behind: {cleanup}", temp_path.display()),
+            ),
+        });
+    }
+    // The rename already made the swap atomic: after a crash a reader finds
+    // the old file or the new one, whole. Syncing the directory only decides
+    // which of the two survives a power loss. Its error is not returned,
+    // because the content has changed and every caller reads `Err` as "not
+    // applied": overlay accounting and commit's "already committed" list
+    // would both be wrong.
+    let _ = sync_directory(parent);
+    Ok(())
+}
+
+/// Create `.<name>.kaish-<hex>` in `dir`, refusing to reuse an existing file.
+fn create_temp_beside(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, std::fs::File)> {
+    const ATTEMPTS: usize = 8;
+    for _ in 0..ATTEMPTS {
+        let mut nonce = [0u8; 6];
+        getrandom::fill(&mut nonce).map_err(|error| {
+            io::Error::other(format!("temp file name: entropy source failed: {error}"))
+        })?;
+        let hex: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(name);
+        temp_name.push(format!(".kaish-{hex}"));
+        let temp_path = dir.join(temp_name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path) {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: cannot create a temp file to replace {}: {error}",
+                        dir.display(),
+                        Path::new(name).display()
+                    ),
+                ));
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("{}: {ATTEMPTS} random temp file names were all taken", dir.display()),
+    ))
+}
+
+/// Make a rename in `dir` durable.
+#[cfg(unix)]
+fn sync_directory(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Windows cannot open a directory as a file without
+/// `FILE_FLAG_BACKUP_SEMANTICS`; the rename is not synced there.
+#[cfg(not(unix))]
+fn sync_directory(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[async_trait]
 impl Filesystem for LocalFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -268,6 +368,20 @@ impl Filesystem for LocalFs {
         }
 
         fs::write(&full_path, data).await
+    }
+
+    async fn replace(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.check_writable()?;
+        // Follow::Final: the rename lands on the link's target, so the link
+        // itself is kept, matching `write`.
+        let full_path = self.resolve(path, Follow::Final)?;
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || replace_file(&full_path, &data))
+            .await
+            .map_err(io::Error::other)?
     }
 
     async fn append(&self, path: &Path, data: &[u8]) -> io::Result<()> {
@@ -630,6 +744,129 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         assert_eq!(data, b"original\nappended\n");
 
+        cleanup(&dir).await;
+    }
+
+    // An open handle keeps the bytes it opened: the old file is renamed
+    // over, never truncated in place, so no reader sees a partial file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_replace_swaps_in_a_new_file_and_leaves_the_old_one_whole() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        let (fs, dir) = setup().await;
+        let path = dir.join("f.txt");
+        std::fs::write(&path, b"old bytes\n").unwrap();
+        let old_inode = std::fs::metadata(&path).unwrap().ino();
+        let mut old_handle = std::fs::File::open(&path).unwrap();
+
+        fs.replace(Path::new("f.txt"), b"new\n").await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), old_inode);
+        let mut seen = Vec::new();
+        old_handle.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"old bytes\n");
+
+        cleanup(&dir).await;
+    }
+
+    // `write` keeps the inode, like bash's `>`; only `replace` swaps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_keeps_the_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (fs, dir) = setup().await;
+        let path = dir.join("f.txt");
+        std::fs::write(&path, b"old\n").unwrap();
+        let old_inode = std::fs::metadata(&path).unwrap().ino();
+
+        fs.write(Path::new("f.txt"), b"new\n").await.unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), old_inode);
+        cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_replace_keeps_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (fs, dir) = setup().await;
+        let path = dir.join("script.sh");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
+
+        fs.replace(Path::new("script.sh"), b"#!/bin/sh\necho hi\n").await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o751);
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_replace_leaves_no_temp_file() {
+        let (fs, dir) = setup().await;
+        fs.write(Path::new("f.txt"), b"old\n").await.unwrap();
+
+        fs.replace(Path::new("f.txt"), b"new\n").await.unwrap();
+
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("f.txt")]);
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_replace_on_a_read_only_fs_is_refused() {
+        let (_, dir) = setup().await;
+        std::fs::write(dir.join("f.txt"), b"old\n").unwrap();
+        let fs = LocalFs::read_only(&dir);
+
+        let error = fs.replace(Path::new("f.txt"), b"new\n").await.unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::ReadOnlyFilesystem);
+        assert_eq!(std::fs::read(dir.join("f.txt")).unwrap(), b"old\n");
+        cleanup(&dir).await;
+    }
+
+    // The temp file goes beside the target, so a directory that refuses new
+    // entries refuses the replace, even when the file itself is writable.
+    // GNU `sed -i` fails the same way. The file is untouched and no temp
+    // file is left behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_replace_in_an_unwritable_directory_fails_and_keeps_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (fs, dir) = setup().await;
+        let sub = dir.join("locked");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("f.txt"), b"old\n").unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let can_create = std::fs::write(sub.join("probe"), b"").is_ok();
+        let result = fs.replace(Path::new("locked/f.txt"), b"new\n").await;
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if can_create {
+            eprintln!("skipping: running as root, 0555 did not deny create");
+            cleanup(&dir).await;
+            return;
+        }
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("locked"),
+            "error should name the directory: {error}"
+        );
+        assert_eq!(std::fs::read(sub.join("f.txt")).unwrap(), b"old\n");
+        assert_eq!(std::fs::read_dir(&sub).unwrap().count(), 1);
         cleanup(&dir).await;
     }
 

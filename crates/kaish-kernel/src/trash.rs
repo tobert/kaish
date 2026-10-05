@@ -118,9 +118,9 @@ pub trait TrashBackend: Send + Sync {
     /// `original_path`'s basename.
     ///
     /// Used by the write-model gate to back up a file's prior content before a
-    /// truncating overwrite (`tee`/`patch`/`sed -i`). Unlike [`trash`](Self::trash)
-    /// it *copies* rather than moves, so the file stays in place for the overwrite
-    /// (and for read-modify-write callers). What's recoverable is the snapshot's
+    /// overwrite (`tee`/`patch`/`sed -i`). Unlike [`trash`](Self::trash) it
+    /// *copies* rather than moves, so the file is still there for the overwrite
+    /// and for read-modify-write callers that read it first. What's recoverable is the snapshot's
     /// bytes (via `list`/`restore`), not its original location.
     async fn trash_bytes(&self, original_path: &Path, bytes: &[u8]) -> Result<(), TrashError>;
 

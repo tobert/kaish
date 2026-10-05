@@ -145,12 +145,11 @@ impl Tool for Patch {
 
         let groups = group_by_file(&hunks);
 
-        // Under trash, truncating overwrites snapshot the prior content
-        // (no-op with trash off; skipped for --dry-run, which never writes).
-        // patch always rewrites an existing file, so every target is a
-        // non-append overwrite. The snapshot copies the prior content (it
-        // doesn't move the file), so the read + CAS write below still see
-        // the file in place.
+        // Under trash, overwrites snapshot the prior content (no-op with
+        // trash off; skipped for --dry-run, which never writes). patch
+        // always rewrites an existing file, so every target is a non-append
+        // overwrite. The snapshot copies the prior content (it doesn't move
+        // the file), so the read below still finds it before the replace.
         if !dry_run {
             let targets: Vec<(String, bool)> = groups
                 .iter()
