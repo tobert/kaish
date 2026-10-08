@@ -12,6 +12,38 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **`edit` changes lines by anchor.** `edit FILE ANCHOR TEXT` replaces a
+  line or an `A..B` range; `--delete`, `--after`, and `--before` delete
+  and insert. Every anchor in one call refers to the file as read, and
+  nothing is written unless every anchor still matches; a stale anchor
+  exits 1 naming the line's current text and `cat --hashline FILE`. New
+  lines keep the file's line ending and final newline. Success prints the
+  changed lines with their new anchors (a summary past 40 lines; `-q` for
+  none). The write is an atomic replace. `patch` stays a faithful GNU
+  `patch`. (#375)
+- **`--hashline` prints line anchors.** `cat`, `head`, `tail`, and `grep`
+  print each line of a named file as `LINE:HASH:TEXT`; `LINE:HASH` is the
+  anchor the coming `edit` builtin takes. `grep` prefixes file names across
+  several files, anchors the whole line under `-o`, and anchors `-A/-B/-C`
+  context lines. Stdin, several files to `cat`/`head`/`tail`, `-c`,
+  `cat -v/-E/-T/-A`, `grep -U`, `grep --encoding`, `grep -c/-l`, and other
+  builtins (`ls --hashline`) exit 2 and name the form that works.
+- **`--json` rows carry `hash` beside `line`** when the row is a line of
+  one named file, kept byte for byte, including `grep --json` match
+  records. A line `grep` decoded lossily gets no `hash`.
+- **`KernelConfig::with_line_hasher`** chooses the line hash. The default
+  is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
+  holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
+  anchor uses. Builtins hash through `ToolCtx::line_hash`.
+- **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
+  atomically. `LocalFs` writes a temp file, syncs it, renames it over the
+  target, and syncs the directory. The trait default calls `write`, which
+  is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
+  `replace`. `KernelBackend::patch` on the built-in backends uses it.
+- **`Tool::refused_flags()`** lets a tool list flags it rejects on purpose,
+  each as a `RefusedFlag` with a reason and the command to run instead. The
+  default is none.
+
 ### Changed
 
 - **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
@@ -27,14 +59,6 @@ breaking entries are marked **BREAKING**.
   `apply_hashline` method for a tool that declares `--hashline`. Only
   `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
   not list it; elsewhere it exits 2 naming those four.
-- **`sed -i`, `patch`, and `kaish-vfs commit` replace files atomically.**
-  They write a new file beside the target and rename it over the old one,
-  as GNU `sed -i` does, so a crash leaves the old file or the new one,
-  never a partial file. The file gets a new inode: it keeps its mode, is
-  owned by the user kaish runs as, and stops sharing content with hard
-  links. The directory must be writable. `>`, `tee`, and `write` still
-  rewrite in place, as bash does. (#486)
-
 - **A flag kaish drops on purpose names the reason and the fix.**
   `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
   mode, owner, or times; no builtin sets them from another file. Run
@@ -47,6 +71,15 @@ breaking entries are marked **BREAKING**.
 - `LocalBackend` and `VirtualOverlayBackend` treated a `WriteMode` they
   did not know as `Overwrite`. They now return `InvalidOperation` naming
   the mode.
+- `grep` dropped a lone `\r` at the end of a file without a final newline.
+  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
+- **`grep -U` matches across lines on every input path.** A single file
+  searched without `-c`/`-o`/`-l`/`-q`/context and a pipe into a pipe were
+  scanned one line at a time, so a match that spans lines was missed. Large
+  input was searched in 256 KiB windows, so a match that crossed a window
+  boundary was missed. `-U` now searches each input whole, in one call. A
+  pattern that can match a newline (`\s`, `\W`, `[^a]`) now does so under
+  `-U` on these paths too, as it already did for several files.
 - Under `set -o trash`, `sed -i` and `patch` transformed a second read of
   the file, not the bytes the trash saved. A write between the two was
   replaced with no copy in the trash. They now transform the saved bytes
@@ -67,9 +100,8 @@ breaking entries are marked **BREAKING**.
   it was not overwritten; read it again and retry". Under `set -o trash`,
   an error reading a target's metadata now fails the command instead of
   being read as a new file with nothing to snapshot.
-
-- `grep` dropped a lone `\r` at the end of a file without a final newline.
-  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
+- **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
+  output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.
 
 ## [0.18.0] - 2026-10-03
 
