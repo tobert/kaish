@@ -21,7 +21,8 @@ struct CpArgs {
     recursive: bool,
 
 
-    /// Do not overwrite existing files (-n)
+    /// Keep a destination that exists, even a dangling symlink, and exit 0:
+    /// `cp -n SRC DST`. With `-r`, each file inside a directory is checked.
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 
@@ -321,8 +322,9 @@ async fn copy_path(
             _ => dst.to_path_buf(),
         };
 
-        // Check for no-clobber mode
-        if no_clobber && backend.exists(&final_dst).await {
+        // -n asks whether a name is taken, so lstat: a dangling link at
+        // `final_dst` still counts as "there" (same rule mv -n uses).
+        if no_clobber && backend.lstat(&final_dst).await.is_ok() {
             return Ok(()); // Silently skip existing files
         }
 
@@ -418,8 +420,8 @@ fn copy_dir_recursive<'a>(
             if is_dir {
                 copy_dir_recursive(backend, &src_child, &dst_child, no_clobber, link_mode).await?;
             } else {
-                // Check for no-clobber mode
-                if no_clobber && backend.exists(&dst_child).await {
+                // lstat, as above: a dangling link at `dst_child` holds its name.
+                if no_clobber && backend.lstat(&dst_child).await.is_ok() {
                     continue; // Skip existing files
                 }
                 let data = backend.read(&src_child, None).await?;
@@ -619,6 +621,118 @@ mod tests {
         assert!(!entry.is_symlink(), "cp -L must materialize the link as a real file");
         let data = ctx.backend.read(Path::new("/dircopy/alias.txt"), None).await.unwrap();
         assert_eq!(data, b"nested content");
+    }
+
+    // -n keeps a name that is taken, and a dangling link holds its name.
+    #[tokio::test]
+    async fn test_cp_n_keeps_a_dangling_link_at_the_destination() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("missing.txt"), Path::new("/dst.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.positional.push(Value::String("/dst.txt".into()));
+        args.flags.insert("n".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        assert!(
+            !ctx.backend.exists(Path::new("/missing.txt")).await,
+            "cp -n wrote through the dangling link and made its target"
+        );
+        let entry = ctx.backend.lstat(Path::new("/dst.txt")).await.unwrap();
+        assert!(entry.is_symlink(), "cp -n replaced the link");
+    }
+
+    #[tokio::test]
+    async fn test_cp_rn_keeps_a_dangling_link_inside_a_copied_directory() {
+        let mut ctx = make_ctx().await;
+        ctx.backend.mkdir(Path::new("/dircopy")).await.unwrap();
+        ctx.backend
+            .symlink(Path::new("missing.txt"), Path::new("/dircopy/nested.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/dir".into()));
+        args.positional.push(Value::String("/dircopy".into()));
+        args.flags.insert("r".to_string());
+        args.flags.insert("n".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        assert!(
+            !ctx.backend.exists(Path::new("/dircopy/missing.txt")).await,
+            "cp -rn wrote through the dangling link and made its target"
+        );
+        let entry = ctx.backend.lstat(Path::new("/dircopy/nested.txt")).await.unwrap();
+        assert!(entry.is_symlink(), "cp -rn replaced the link");
+    }
+
+    #[tokio::test]
+    async fn test_cp_np_keeps_a_dangling_link_at_the_destination() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("file.txt"), Path::new("/src_link.txt"))
+            .await
+            .unwrap();
+        ctx.backend
+            .symlink(Path::new("missing.txt"), Path::new("/dst_link.txt"))
+            .await
+            .unwrap();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/src_link.txt".into()));
+        args.positional.push(Value::String("/dst_link.txt".into()));
+        args.flags.insert("no-dereference".to_string());
+        args.flags.insert("n".to_string());
+
+        let result = Cp.execute(args, &mut ctx).await;
+        assert!(result.ok(), "{}", result.err);
+
+        assert!(!ctx.backend.exists(Path::new("/missing.txt")).await);
+        let entry = ctx.backend.lstat(Path::new("/dst_link.txt")).await.unwrap();
+        assert!(entry.is_symlink(), "cp -nP replaced the link");
+        let target = ctx.backend.read_link(Path::new("/dst_link.txt")).await.unwrap();
+        assert_eq!(target, Path::new("missing.txt"), "cp -nP retargeted the link");
+    }
+
+    // A link to a directory is a directory for -n too: the copy lands inside
+    // it unless that name is taken.
+    #[tokio::test]
+    async fn test_cp_n_through_a_link_to_a_directory() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .symlink(Path::new("emptydir"), Path::new("/link_to_dir"))
+            .await
+            .unwrap();
+
+        let copy = || {
+            let mut args = ToolArgs::new();
+            args.positional.push(Value::String("/file.txt".into()));
+            args.positional.push(Value::String("/link_to_dir".into()));
+            args.flags.insert("n".to_string());
+            args
+        };
+
+        let args = copy();
+        assert!(Cp.execute(args, &mut ctx).await.ok());
+        let data = ctx.backend.read(Path::new("/link_to_dir/file.txt"), None).await.unwrap();
+        assert_eq!(data, b"hello world", "a new name is copied");
+
+        ctx.backend
+            .write(Path::new("/link_to_dir/file.txt"), b"original", WriteMode::Overwrite)
+            .await
+            .unwrap();
+        let args = copy();
+        assert!(Cp.execute(args, &mut ctx).await.ok());
+        let data = ctx.backend.read(Path::new("/link_to_dir/file.txt"), None).await.unwrap();
+        assert_eq!(data, b"original", "a name that exists is kept");
     }
 
     #[tokio::test]

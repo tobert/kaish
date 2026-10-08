@@ -78,7 +78,14 @@ const SPAN: &str = "'(?s)foo.*?bar'";
 #[case::plain(format!("grep -U -E {SPAN} small.txt"), "foo start\nmiddle\nbar end\n")]
 #[case::line_numbers(format!("grep -nU -E {SPAN} small.txt"), "2:foo start\nmiddle\nbar end\n")]
 #[case::only_matching(format!("grep -oU -E {SPAN} small.txt"), "foo start\nmiddle\nbar\n")]
-#[case::count(format!("grep -cU -E {SPAN} small.txt"), "1\n")]
+// -c counts the lines a match covers, as it does without -U.
+#[case::count(format!("grep -cU -E {SPAN} small.txt"), "3\n")]
+#[case::count_two_regions(format!("grep -cU -E {SPAN} two.txt"), "4\n")]
+#[case::count_stdin(format!("cat two.txt | grep -cU -E {SPAN}"), "4\n")]
+#[case::count_two_files(format!("grep -cU -E {SPAN} two.txt other.txt"), "two.txt:4\nother.txt:0\n")]
+#[case::count_invert(format!("grep -cvU -E {SPAN} small.txt"), "2\n")]
+#[case::count_two_matches_one_line("grep -cU -E 'foo' dup.txt", "1\n")]
+#[case::count_max_count(format!("grep -cU -m1 -E {SPAN} two.txt"), "2\n")]
 #[case::files_with_matches(format!("grep -lU -E {SPAN} small.txt"), "small.txt\n")]
 #[case::pipe_into_pipe(format!("cat small.txt | grep -U -E {SPAN} | cat"), "foo start\nmiddle\nbar end\n")]
 #[case::stdin(format!("cat small.txt | grep -U -E {SPAN}"), "foo start\nmiddle\nbar end\n")]
@@ -98,6 +105,7 @@ async fn multiline_match_crosses_lines(#[case] script: String, #[case] expected:
         ("small.txt", SMALL),
         ("other.txt", "nothing here\n"),
         ("two.txt", "foo 1\nbar 1\nbetween\nfoo 2\nbar 2\n"),
+        ("dup.txt", "foo foo\nqux\n"),
     ];
     let (out, err, code) = run_with_files(&files, &script).await;
     assert_eq!(code, 0, "script={script:?} err={err:?} out={out:?}");
@@ -128,16 +136,16 @@ async fn without_multiline_a_match_stays_on_one_line(
     format!("{}:{}\n", head_line_number(), straddle_match())
 )]
 #[case::only_matching("grep -oU -E '(?s)foo start.*?bar end' big.txt", format!("{}\n", straddle_match()))]
-#[case::count("grep -cU -E '(?s)foo start.*?bar end' big.txt", "1\n".to_string())]
+#[case::count("grep -cU -E '(?s)foo start.*?bar end' big.txt", "3\n".to_string())]
 #[case::files_with_matches("grep -lU -E '(?s)foo start.*?bar end' big.txt", "big.txt\n".to_string())]
-#[case::stdin("cat big.txt | grep -cU -E '(?s)foo start.*?bar end'", "1\n".to_string())]
+#[case::stdin("cat big.txt | grep -cU -E '(?s)foo start.*?bar end'", "3\n".to_string())]
 #[case::pipe_into_pipe(
     "cat big.txt | grep -U -E '(?s)foo start.*?bar end' | cat",
     format!("{}\n", straddle_match())
 )]
 #[case::two_files(
     "grep -cU -E '(?s)foo start.*?bar end' big.txt other.txt",
-    "big.txt:1\nother.txt:0\n".to_string()
+    "big.txt:3\nother.txt:0\n".to_string()
 )]
 #[tokio::test]
 async fn multiline_match_straddles_a_chunk_boundary(#[case] script: &str, #[case] expected: String) {
@@ -164,4 +172,22 @@ async fn without_multiline_the_straddle_fixture_matches_per_line() {
         run_with_files(&[("big.txt", big.as_str())], "grep -c -E 'foo start|bar end' big.txt").await;
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, "2\n");
+}
+
+// `\s` can match a newline, so one match region covers the whole file. The
+// count is still the lines it covers: every one of the 34.
+#[rstest]
+#[case::file("grep -cU '\\s' lines.txt", "34\n")]
+#[case::stdin("cat lines.txt | grep -cU '\\s'", "34\n")]
+#[case::two_files("grep -cU '\\s' lines.txt other.txt", "lines.txt:34\nother.txt:1\n")]
+#[tokio::test]
+async fn count_of_a_match_that_spans_every_line_is_the_line_count(
+    #[case] script: &str,
+    #[case] expected: &str,
+) {
+    let lines: String = (1..=34).map(|n| format!("line {n}\n")).collect();
+    let (out, err, code) =
+        run_with_files(&[("lines.txt", lines.as_str()), ("other.txt", "one line\n")], script).await;
+    assert_eq!(code, 0, "script={script:?} err={err:?}");
+    assert_eq!(out, expected, "script={script:?}");
 }

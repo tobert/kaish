@@ -102,6 +102,14 @@ breaking entries are marked **BREAKING**.
   being read as a new file with nothing to snapshot.
 - **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
   output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.
+- `grep` dropped a lone `\r` at the end of a file without a final newline.
+  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
+- `cp -n` wrote through a dangling symlink at the destination, creating the
+  link's target. It now keeps any name that exists, link or not, as `mv -n`
+  does, for a single file and for files inside `cp -rn`.
+- `grep -cU` counted match regions, so a 3-line match printed `1`. It now
+  counts every line a match covers, as `grep -c` does: `grep -cU '\s'` on 34
+  lines prints `34`.
 
 ## [0.18.0] - 2026-10-03
 
