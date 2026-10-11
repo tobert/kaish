@@ -238,10 +238,11 @@ fn replace_file(target: &Path, data: &[u8]) -> io::Result<()> {
 
     let (temp_path, mut file) = create_temp_beside(parent, name)?;
     let written = (|| {
-        file.write_all(data)?;
+        // Mode first, so a 0600 file's new bytes are never readable at 0644.
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
+        file.write_all(data)?;
         file.sync_all()?;
         std::fs::rename(&temp_path, target)
     })();

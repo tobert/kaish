@@ -10,13 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-08
+
 ### Added
 
 - **`edit` changes lines by anchor.** `edit FILE ANCHOR TEXT` replaces a
   line or an `A..B` range; `--delete`, `--after`, and `--before` delete
   and insert. Every anchor in one call refers to the file as read, and
-  nothing is written unless every anchor still matches; a stale anchor
-  exits 1 naming the line's current text and `cat --hashline FILE`. New
+  nothing is written unless every anchor still matches at the re-read
+  just before the write; a stale anchor exits 1 naming the line's current text and `cat --hashline FILE`. New
   lines keep the file's line ending and final newline. Success prints the
   changed lines with their new anchors (a summary past 40 lines; `-q` for
   none). The write is an atomic replace. `patch` stays a faithful GNU
@@ -34,10 +36,11 @@ breaking entries are marked **BREAKING**.
 - **`KernelConfig::with_line_hasher`** chooses the line hash. The default
   is FNV-1a, 4 hex digits, matching kaijutsu's. `kaish_types::hashline`
   holds `LineHasher`, `fnv1a_line_hash`, and `lines`, the line split every
-  anchor uses. Builtins hash through `ToolCtx::line_hash`.
+  anchor uses. Every builtin hashes with the kernel's hasher; a tool
+  reaches it as `ToolCtx::line_hash`.
 - **`Filesystem::replace` and `WriteMode::Replace`** replace a whole file
   atomically. `LocalFs` writes a temp file, syncs it, renames it over the
-  target, and syncs the directory. The trait default calls `write`, which
+  target, and tries to sync the directory (a failed sync is ignored). The trait default calls `write`, which
   is atomic for `MemoryFs`. A `Filesystem` that wraps another must forward
   `replace`. `KernelBackend::patch` on the built-in backends uses it.
 - **`Tool::refused_flags()`** lets a tool list flags it rejects on purpose,
@@ -58,7 +61,11 @@ breaking entries are marked **BREAKING**.
   `Hashline` variant, `OutputNode` a `hash` field, and `GlobalFlags` an
   `apply_hashline` method for a tool that declares `--hashline`. Only
   `cat`, `head`, `tail`, and `grep` declare it, so other tool schemas do
-  not list it; elsewhere it exits 2 naming those four.
+  not list it; elsewhere it exits 2. Clap-parsed builtins name those four;
+  `edit` and `find` name the flag only.
+- **API:** `KernelConfig` has a new public `line_hasher` field. Build it
+  with `KernelConfig::agent()` and the other constructors plus `with_*`
+  setters; a struct literal that lists every field no longer compiles.
 - **A flag kaish drops on purpose names the reason and the fix.**
   `cp -p a b` prints `cp: -p is not supported: kaish cannot copy a file's
   mode, owner, or times; no builtin sets them from another file. Run
@@ -102,8 +109,9 @@ breaking entries are marked **BREAKING**.
   being read as a new file with nothing to snapshot.
 - **An unknown-flag refusal ends its line.** Under `kaish -c`, the next
   output no longer runs onto `ls: --bogus is not supported (see `help ls`)`.
-- `grep` dropped a lone `\r` at the end of a file without a final newline.
-  GNU grep prints it, and `cat` keeps it, so the line now ends with it.
+- `LocalFs::replace` set the old file's mode after writing the new bytes,
+  so a 0600 file's replacement was readable at the default mode until
+  then. The mode is now set first.
 - `cp -n` wrote through a dangling symlink at the destination, creating the
   link's target. It now keeps any name that exists, link or not, as `mv -n`
   does, for a single file and for files inside `cp -rn`.
@@ -3104,7 +3112,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/tobert/kaish/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/tobert/kaish/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/tobert/kaish/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/tobert/kaish/compare/v0.17.0...v0.17.1
