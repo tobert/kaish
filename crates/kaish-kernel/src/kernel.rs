@@ -7171,7 +7171,7 @@ async fn consume_flag_positionals(
     if consumes <= 1 {
         if let Some(v) = collected.pop() {
             if repeatable {
-                push_repeatable_value(tool_args, flag_name, canonical, v)?;
+                push_repeatable_value(tool_args, flag_name, canonical, 1, v)?;
             } else {
                 tool_args.named.insert(canonical.to_string(), v);
             }
@@ -7675,8 +7675,8 @@ pub(crate) async fn bind_tool_args(
                     let is_declared_value_flag = param_lookup
                         .get(key.as_str())
                         .is_some_and(|(_, typ, ..)| !is_bool_type(typ));
-                    if let Some(&(canonical, _, _, true)) = param_lookup.get(key.as_str()) {
-                        push_repeatable_value(&mut tool_args, key, canonical, val)?;
+                    if let Some(&(canonical, _, consumes, true)) = param_lookup.get(key.as_str()) {
+                        push_repeatable_value(&mut tool_args, key, canonical, consumes, val)?;
                     } else if matches!(val, Value::Bool(_)) && !is_declared_value_flag {
                         // Flagify at bind time (GH #189): `--flag=true`/
                         // `--flag=false` binds the same way the bare
@@ -8796,9 +8796,16 @@ pub(crate) fn push_repeatable_value(
     tool_args: &mut ToolArgs,
     flag_name: &str,
     canonical: &str,
+    consumes: usize,
     v: Value,
 ) -> anyhow::Result<()> {
     let occ = flag_value_to_json(canonical, &v)?;
+    // `named_repeated` tells `to_argv` each element is one occurrence. A
+    // `consumes > 1` flag's occurrences are inner arrays (`jq --arg NAME VAL`),
+    // which `to_argv` already renders, so only a one-value flag is marked.
+    if consumes <= 1 {
+        tool_args.named_repeated.insert(canonical.to_string());
+    }
     let entry = tool_args
         .named
         .entry(canonical.to_string())
@@ -8831,7 +8838,7 @@ pub(crate) fn bind_glued_short_value(
         );
     }
     if repeatable {
-        push_repeatable_value(tool_args, flag_name, canonical, Value::String(value))
+        push_repeatable_value(tool_args, flag_name, canonical, 1, Value::String(value))
     } else {
         tool_args
             .named

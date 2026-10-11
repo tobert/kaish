@@ -1193,8 +1193,8 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
                 }
                 match param_lookup.get(key.as_str()) {
                     // Repeatable `--flag=a --flag=b` accumulates (matches execute).
-                    Some(&(canonical, _, _, true)) => {
-                        let _ = push_repeatable_value(&mut tool_args, key, canonical, v);
+                    Some(&(canonical, _, consumes, true)) => {
+                        let _ = push_repeatable_value(&mut tool_args, key, canonical, consumes, v);
                     }
                     Some(&(canonical, ..)) => {
                         tool_args.named.insert(canonical.to_string(), v);
@@ -1390,7 +1390,7 @@ fn bind_value_or_flag(
                 // non-array-entry case, which a fresh `tool_args` cannot reach.
                 // Give the validator real evaluated values and this line starts
                 // swallowing that gate — propagate it then.
-                let _ = push_repeatable_value(tool_args, flag_name, canonical, v);
+                let _ = push_repeatable_value(tool_args, flag_name, canonical, 1, v);
             } else {
                 tool_args.named.insert(canonical.to_string(), v);
             }

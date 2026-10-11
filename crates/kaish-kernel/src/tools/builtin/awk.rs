@@ -279,10 +279,9 @@ impl Tool for Awk {
         }
 
         // Handle -v assignments. Read from the *raw* args, not `parsed.var`: the
-        // kernel accumulates repeated `-v` into a `Value::Json(Array)`, which
-        // `ToolArgs::to_argv()` collapses to one JSON token (it can't tell a
-        // repeatable scalar array from a single array value) — same gotcha as
-        // sed's `-e`. Each assignment is applied in order; later wins.
+        // raw read rejects a non-string occurrence, where the clap field would
+        // receive its JSON text — same as sed's `-e`. Each assignment is
+        // applied in order; later wins.
         let var_assigns = match collect_vars(&args) {
             Ok(v) => v,
             Err(e) => return ExecResult::failure(2, format!("awk: -v: {e}")),

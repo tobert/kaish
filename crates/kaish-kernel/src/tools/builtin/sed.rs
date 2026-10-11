@@ -174,10 +174,9 @@ impl Tool for Sed {
         let extended = parsed.extended;
 
         // Collect expressions from the *raw* args, not `parsed.expression`: the
-        // kernel accumulates repeated `-e` into a `Value::Json(Array)`, which
-        // `ToolArgs::to_argv()` renders as one JSON token (it can't tell a
-        // repeatable scalar array from a single array value). `parsed` above is
-        // only consulted for `-n`/global flags; expressions live here.
+        // raw read rejects a non-string occurrence, where the clap field would
+        // receive its JSON text. `parsed` above is only consulted for
+        // `-n`/global flags; expressions live here.
         let expressions = match collect_expressions(&args) {
             Ok(e) => e,
             Err(msg) => return ExecResult::failure(2, format!("sed: {msg}")),
