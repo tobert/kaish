@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ToolArgs::to_argv` renders a repeatable flag once per occurrence.** It
+  emitted `--path a --path b` as one `--path=["a","b"]` token, so a clap
+  `Vec` field got one wrong value. `ToolArgs.named_repeated` marks those keys.
+
 ## [0.18.1] - 2026-10-08
 
 ### Added

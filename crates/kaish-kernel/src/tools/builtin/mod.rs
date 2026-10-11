@@ -146,9 +146,9 @@ pub(crate) fn mixed_script_issue(name: &str) -> Option<ValidationIssue> {
 ///
 /// Repeatable value flags (clap `Append`) are accumulated by the kernel into a
 /// `Value::Json(Array)` under the flag's long name; a single occurrence may
-/// arrive as a bare `Value::String`. `to_argv()` can't round-trip the array, so
-/// the clap field isn't a reliable source — search builtins read the raw args
-/// here. Shared by grep/glob `--ftype`/`--ftype-not`; mirrors sed's
+/// arrive as a bare `Value::String`. `to_argv()` renders one `--key=value` per
+/// occurrence, but it stringifies a non-string occurrence; reading the raw args
+/// here makes that an error instead. Shared by grep/glob `--ftype`/`--ftype-not`; mirrors sed's
 /// `collect_expressions` (see the repeatable-flag gotcha in `arch_repeatable_flags`).
 ///
 /// A non-string occurrence is a loud error, never a silent skip — a dropped

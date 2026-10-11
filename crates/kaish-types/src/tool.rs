@@ -1,6 +1,6 @@
 //! Tool schema and argument types.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::value::Value;
 
@@ -541,6 +541,12 @@ pub struct ToolArgs {
     /// Only populated for a single, non-repeated value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub named_raw: BTreeMap<String, String>,
+    /// Named keys bound from a repeatable flag (`ParamSchema::repeatable`).
+    /// Each one holds a `Value::Json(Array)` with one element per occurrence,
+    /// so `--path a --path b` is `["a", "b"]`. `to_argv` renders each element
+    /// as its own `--key=value`; a JSON array under any other key is one value.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub named_repeated: BTreeSet<String>,
     /// Boolean flags (e.g., -l, --force).
     pub flags: HashSet<String>,
     /// Every word after the tool name, in source order, post-expansion —
@@ -781,13 +787,22 @@ impl ToolArgs {
 
         // Named values: emit `-k=value` for single-char keys and `--key=value`
         // for multi-char keys. `=` form keeps parsing unambiguous when the
-        // value begins with `-`. Multi-value (`consumes > 1`) params are
+        // value begins with `-`. A repeatable key emits one token per
+        // occurrence. Multi-value (`consumes > 1`) params are
         // stored as Value::Json(Array(Array(...))) — one entry per occurrence.
         // An excluded key is skipped before its value is ever inspected, so a
         // Value::Bytes there can't reach render_named_value's Bytes guard.
         for (key, value) in &self.named {
             if exclude.contains(&key.as_str()) {
                 continue;
+            }
+            if self.named_repeated.contains(key) {
+                if let Value::Json(serde_json::Value::Array(occurrences)) = value {
+                    for occurrence in occurrences {
+                        argv.push(format!("{}={}", flag_token(key), json_value_to_token(occurrence)));
+                    }
+                    continue;
+                }
             }
             if let Some(raw) = self.named_raw.get(key) {
                 argv.push(format!("{}={}", flag_token(key), raw));
@@ -1104,6 +1119,30 @@ mod to_argv_tests {
         args.named.insert("count".into(), Value::Float(0.10));
         args.named_raw.insert("count".into(), "0.10".to_string());
         assert_eq!(args.to_argv().unwrap(), vec!["--count=0.10"]);
+    }
+
+    #[test]
+    fn a_repeated_key_renders_one_token_per_occurrence() {
+        let mut args = ToolArgs::new();
+        args.named.insert("path".into(), Value::Json(serde_json::json!(["a", "b c", 3])));
+        args.named_repeated.insert("path".into());
+        assert_eq!(args.to_argv().unwrap(), vec!["--path=a", "--path=b c", "--path=3"]);
+    }
+
+    #[test]
+    fn excluding_a_repeated_key_drops_every_occurrence() {
+        let mut args = ToolArgs::new();
+        args.named.insert("path".into(), Value::Json(serde_json::json!(["x", "y"])));
+        args.named_repeated.insert("path".into());
+        args.named.insert("one".into(), Value::String("z".into()));
+        assert_eq!(args.to_argv_excluding(&["path"]).unwrap(), vec!["--one=z"]);
+    }
+
+    #[test]
+    fn a_json_array_under_an_unmarked_key_is_one_token() {
+        let mut args = ToolArgs::new();
+        args.named.insert("one".into(), Value::Json(serde_json::json!(["a", "b"])));
+        assert_eq!(args.to_argv().unwrap(), vec![r#"--one=["a","b"]"#]);
     }
 
     #[test]

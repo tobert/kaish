@@ -341,8 +341,8 @@ impl Grep {
 
         // Build the file-type filter from `--ftype`/`--ftype-not`. Repeatable
         // value flags arrive as `Json(Array)` (or a bare `String` for one) —
-        // read them off the raw args like sed's `-e`, since `to_argv()` can't
-        // round-trip a repeatable array back through the clap re-parse. An
+        // read them off the raw args like sed's `-e`, so a non-string
+        // occurrence is an error rather than its JSON text. An
         // unknown type name is loud (exit 2), never a silent empty match. The
         // filter only takes effect on the `-r` walk below, but we validate the
         // names here regardless so a typo is caught on any invocation.
