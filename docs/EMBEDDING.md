@@ -1479,7 +1479,7 @@ $ kaish --plan '[[ "abc" -eq 1 ]]'
 {"statements":[…],"warnings":[{"code":"W008","message":"this comparison
 cannot succeed: type error: expected numeric operand, got non-numeric string
 \"abc\"","suggestion":"compare with `==` for text, or give the operand a
-numeric value"}],"kaish_version":"0.18.0",…}
+numeric value"}],"kaish_version":"0.18.1",…}
 ```
 
 The plan exits **0** for that program, because the program runs. `warnings`
