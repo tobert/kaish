@@ -52,10 +52,6 @@ jobs:
         env:
           KAISH_BASH_COMPAT: 1
 
-      - name: Disk after tests
-        if: always()
-        run: df -h / && du -sh target
-
       - name: Clippy (deny warnings)
         run: cargo clippy --all --all-targets --locked -- -D warnings
 
