@@ -10,13 +10,7 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`ToolArgs::to_argv` renders a repeatable flag once per occurrence.** It
-  emitted `--path a --path b` as one `--path=["a","b"]` token, so a clap
-  `Vec` field got one wrong value. `ToolArgs.named_repeated` marks those keys.
-
-## [0.18.1] - 2026-10-08
+## [0.18.1] - 2026-10-11
 
 ### Added
 
@@ -124,6 +118,9 @@ breaking entries are marked **BREAKING**.
 - `grep -cU` counted match regions, so a 3-line match printed `1`. It now
   counts every line a match covers, as `grep -c` does: `grep -cU '\s'` on 34
   lines prints `34`.
+- **`ToolArgs::to_argv` renders a repeatable flag once per occurrence.** It
+  emitted `--path a --path b` as one `--path=["a","b"]` token, so a clap
+  `Vec` field got one wrong value. `ToolArgs.named_repeated` marks those keys.
 
 ## [0.18.0] - 2026-10-03
 
