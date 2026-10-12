@@ -14,7 +14,8 @@
 `test` is a real builtin (VFS-aware, following `[[`'s semantics), so both
 `test -f x` and `[[ -f x ]]` work. There is no `[` command, though: the bracket
 belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`, see
-`help syntax` → Collections) — so `[ -f x ]` is a parse error. Prefer `[[ … ]]`:
+`help syntax` → Collections) — so `[ -f x ]` is a parse error. A bare `]` in a
+word is one too: write `ls "clip].mp4"` or `ls clip\].mp4`. Prefer `[[ … ]]`:
 it is real syntax the parser understands, so kaish can **validate it before
 running** (catch a malformed test, an unknown operator, an unquoted expansion),
 and it carries the richer tests (membership, regex, shape guards) plus compound
