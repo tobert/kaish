@@ -402,10 +402,11 @@ echo "$(echo "$(date +%F)")"
 ### Word characters
 
 A bareword or path takes ASCII letters, digits, `_`, `.`, `@`, `-`, `/`, `+`, `^`,
-`~` after the first character, and **any non-ASCII character** — kaish, like
+`~`, `%` after the first character, and **any non-ASCII character** — kaish, like
 bash, never inspects word bytes for alphabetic-ness. Any script lexes
-unquoted, no quoting needed. (ASCII punctuation outside that set is still not
-a word character: `echo 100%` is an error, as it was before.)
+unquoted, no quoting needed. A word may also start with `%` when a letter, `_`
+or `%` follows (`printf %s x`); `%` plus digits is a job spec (`wait %1`).
+(ASCII punctuation outside that set is still not a word character.)
 
 ```sh
 echo HEAD^2 HEAD~1 f.txt~ 9-    # complete literal words
