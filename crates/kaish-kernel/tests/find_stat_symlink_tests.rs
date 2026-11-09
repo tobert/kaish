@@ -217,7 +217,9 @@ async fn find_type_l_finds_a_link_to_a_directory_and_stat_names_its_target() {
     let out = r.text_out();
     assert!(out.contains("symbolic link") && out.contains("realdir"), "{out}");
 
-    // A plain file's row carries no target cell.
+    // A plain file's block names no target.
     let r = run(&kernel, "stat plain").await;
-    assert_eq!(r.text_out().trim(), "plain\t1\tregular file");
+    let out = r.text_out();
+    assert!(out.starts_with("  File: plain\n  Size: 1 "), "{out}");
+    assert!(out.contains("regular file") && !out.contains("->"), "{out}");
 }

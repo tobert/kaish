@@ -103,6 +103,11 @@ tiktoken-rs = { workspace = true, optional = true }
 # the workspace's `unsafe_code = "deny"`.
 dhat = { version = "0.3", optional = true }
 
+# The host zone name, for the `%Z` abbreviation in `date`. The crate does
+# not build for wasm32-wasip1; there `%Z` prints the numeric offset.
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+iana-time-zone = "0.1"
+
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal", "process", "term"], optional = true }
 

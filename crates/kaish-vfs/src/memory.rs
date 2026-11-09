@@ -340,6 +340,10 @@ impl MemoryFs {
                     modified: Some(system_now()),
                     permissions: Some(Self::DIRECTORY_MODE),
                     symlink_target: None,
+                    links: None,
+                    blocks: None,
+                    owner: None,
+                    group: None,
                 });
             }
 
@@ -354,6 +358,10 @@ impl MemoryFs {
                             modified: Some(*modified),
                             permissions: Some(Self::FILE_MODE),
                             symlink_target: None,
+                            links: None,
+                            blocks: None,
+                            owner: None,
+                            group: None,
                         },
                         None,
                     )),
@@ -365,6 +373,10 @@ impl MemoryFs {
                             modified: Some(*modified),
                             permissions: Some(Self::DIRECTORY_MODE),
                             symlink_target: None,
+                            links: None,
+                            blocks: None,
+                            owner: None,
+                            group: None,
                         },
                         None,
                     )),
@@ -376,6 +388,10 @@ impl MemoryFs {
                             modified: None,
                             permissions: Some(Self::FILE_MODE),
                             symlink_target: None,
+                            links: None,
+                            blocks: None,
+                            owner: None,
+                            group: None,
                         },
                         Some(Self::resolve_symlink_target(&normalized, target)),
                     )),
@@ -616,6 +632,10 @@ impl Filesystem for MemoryFs {
                             modified,
                             permissions: Self::mode_for(kind),
                             symlink_target,
+                            links: None,
+                            blocks: None,
+                            owner: None,
+                            group: None,
                         });
                     }
         }
@@ -655,6 +675,10 @@ impl Filesystem for MemoryFs {
                 modified: Some(system_now()),
                 permissions: Some(Self::DIRECTORY_MODE),
                 symlink_target: None,
+                links: None,
+                blocks: None,
+                owner: None,
+                group: None,
             });
         }
 
@@ -666,6 +690,10 @@ impl Filesystem for MemoryFs {
                 modified: Some(*modified),
                 permissions: Some(Self::FILE_MODE),
                 symlink_target: None,
+                links: None,
+                blocks: None,
+                owner: None,
+                group: None,
             }),
             Some(Entry::Directory { modified }) => Ok(DirEntry {
                 name,
@@ -674,6 +702,10 @@ impl Filesystem for MemoryFs {
                 modified: Some(*modified),
                 permissions: Some(Self::DIRECTORY_MODE),
                 symlink_target: None,
+                links: None,
+                blocks: None,
+                owner: None,
+                group: None,
             }),
             Some(Entry::Symlink { target, modified }) => Ok(DirEntry {
                 name,
@@ -682,6 +714,10 @@ impl Filesystem for MemoryFs {
                 modified: Some(*modified),
                 permissions: Some(Self::SYMLINK_MODE),
                 symlink_target: Some(target.clone()),
+                links: None,
+                blocks: None,
+                owner: None,
+                group: None,
             }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,

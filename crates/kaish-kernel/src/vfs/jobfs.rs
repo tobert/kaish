@@ -188,6 +188,10 @@ impl Filesystem for JobFs {
                         permissions: None,
                         size: 0,
                         symlink_target: None,
+                        links: None,
+                        blocks: None,
+                        owner: None,
+                        group: None,
                     })
                     .collect();
                 Ok(entries)
@@ -208,6 +212,10 @@ impl Filesystem for JobFs {
                         permissions: None,
                         size: 0,
                         symlink_target: None,
+                        links: None,
+                        blocks: None,
+                        owner: None,
+                        group: None,
                     },
                     DirEntry {
                         name: "command".to_string(),
@@ -216,6 +224,10 @@ impl Filesystem for JobFs {
                         permissions: None,
                         size: 0,
                         symlink_target: None,
+                        links: None,
+                        blocks: None,
+                        owner: None,
+                        group: None,
                     },
                     DirEntry {
                         name: "stdout".to_string(),
@@ -227,6 +239,10 @@ impl Filesystem for JobFs {
                         // follows it, and a stale number is worse than none.
                         size: 0,
                         symlink_target: None,
+                        links: None,
+                        blocks: None,
+                        owner: None,
+                        group: None,
                     },
                     DirEntry {
                         name: "stderr".to_string(),
@@ -235,6 +251,10 @@ impl Filesystem for JobFs {
                         permissions: None,
                         size: 0,
                         symlink_target: None,
+                        links: None,
+                        blocks: None,
+                        owner: None,
+                        group: None,
                     },
                 ])
             }

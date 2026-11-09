@@ -649,7 +649,7 @@ async fn date_at_epoch_decodes_through_kernel() {
     let kernel = kernel_at(dir.path());
     let (out, code) = run(&kernel, "date -u -d \"@1700000000\"").await;
     assert_eq!(code, 0, "@N decode should succeed: {out:?}");
-    assert_eq!(out, "2023-11-14 22:13:20", "@N should decode, not echo: {out:?}");
+    assert_eq!(out, "Tue Nov 14 22:13:20 UTC 2023", "@N should decode, not echo: {out:?}");
 }
 
 #[tokio::test]

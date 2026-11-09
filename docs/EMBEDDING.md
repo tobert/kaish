@@ -50,9 +50,9 @@ newline. JSON output keeps its structure.
 
 ## The result contract
 
-Output is clean text by default — simple commands return plain text, structured
-builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable tab-separated
-values, and `--json` on a builtin emits JSON plus a parsed value (`data`) that
+Output is clean text by default — simple commands return plain text, `ls -l`,
+`stat`, and `date` print GNU's formats, kaish's own tables (`kaish-mounts`,
+`kaish-vars`) render readable tab-separated values, and `--json` on a builtin emits JSON plus a parsed value (`data`) that
 builtins set explicitly — kaish never infers it by sniffing stdout. The exit
 code is something agents can branch on:
 
@@ -563,6 +563,20 @@ and be contained — through that backend's own resolver in one call, not be
 re-routed through the split hop by hop. `VirtualOverlayBackend` already
 overrides it this way; a hand-rolled `KernelBackend` wrapping another one
 should follow the same shape.
+
+### Reporting owners, links, and blocks
+
+`ls -l` and `stat` print `DirEntry.links`, `blocks` (512-byte units),
+`owner`, and `group`. `LocalFs` fills them from the host on Unix. A backend
+that leaves one `None` prints `?` in that column, as GNU does for a field it
+cannot read; `ls -l` leaves out its `total` line unless every entry reports
+`blocks`.
+
+```rust
+let mut entry = DirEntry::file("notes.txt", 12);
+entry.links = Some(1);
+entry.owner = Some(AccountId { id: 1000, name: Some("amy".into()) });
+```
 
 ### Reporting file permissions (`path_access`)
 

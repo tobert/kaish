@@ -143,7 +143,7 @@ struct DateArgs {
 }
 
 /// The effective timezone the output is rendered in.
-enum Zone {
+pub(super) enum Zone {
     Utc,
     Local,
     Named(Tz),
@@ -153,12 +153,64 @@ impl Zone {
     /// Render a UTC instant as a fixed-offset datetime in this zone. Used for
     /// the no-arithmetic paths (`now`, `-r FILE`); `-d` math is DST-aware and
     /// runs in the concrete zone via [`resolve_instant`].
-    fn instant(&self, utc: DateTime<Utc>) -> DateTime<FixedOffset> {
+    pub(super) fn instant(&self, utc: DateTime<Utc>) -> DateTime<FixedOffset> {
         match self {
             Zone::Utc => utc.fixed_offset(),
             Zone::Local => utc.with_timezone(&Local).fixed_offset(),
             Zone::Named(tz) => utc.with_timezone(tz).fixed_offset(),
         }
+    }
+
+    /// The zone abbreviation GNU `date` prints for `%Z` at `utc`: `UTC`,
+    /// `EST`, `JST`, or tzdata's numeric form for a zone without letters:
+    /// `-03`, `+0530`.
+    fn abbreviation(&self, utc: DateTime<Utc>) -> String {
+        use chrono_tz::OffsetName;
+        let named = match self {
+            Zone::Utc => return "UTC".to_string(),
+            Zone::Named(tz) => Some(*tz),
+            // The host zone's IANA name; `None` when the host does not say.
+            Zone::Local => host_zone(),
+        };
+        if let Some(tz) = named
+            && let Some(abbreviation) = utc.with_timezone(&tz).offset().abbreviation()
+        {
+            return abbreviation.to_string();
+        }
+        // tzdata's numeric abbreviation: hours, plus minutes when nonzero.
+        let offset = self.instant(utc).offset().local_minus_utc();
+        let sign = if offset < 0 { '-' } else { '+' };
+        let (hours, minutes) = (offset.abs() / 3600, offset.abs() % 3600 / 60);
+        if minutes == 0 {
+            format!("{sign}{hours:02}")
+        } else {
+            format!("{sign}{hours:02}{minutes:02}")
+        }
+    }
+}
+
+/// The host's IANA zone, when it names one.
+#[cfg(not(target_os = "wasi"))]
+fn host_zone() -> Option<Tz> {
+    // An unnamed or unknown host zone prints the numeric offset instead.
+    iana_time_zone::get_timezone().ok()?.parse::<Tz>().ok()
+}
+
+/// WASI has no host zone name.
+#[cfg(target_os = "wasi")]
+fn host_zone() -> Option<Tz> {
+    None
+}
+
+/// The zone for local times outside `date`: the exported `TZ`, else the
+/// host zone. An unknown `TZ` is an error.
+pub(super) fn scope_zone(ctx: &ExecContext) -> Result<Zone, String> {
+    match scope_tz(ctx) {
+        Some(name) => name
+            .parse::<Tz>()
+            .map(Zone::Named)
+            .map_err(|_| format!("unknown timezone '{name}' in TZ (use an IANA name like Asia/Tokyo)")),
+        None => Ok(Zone::Local),
     }
 }
 
@@ -249,7 +301,8 @@ impl Date {
             zone.instant(now_utc)
         };
 
-        let body = format!("{}\n", render(&dt, parsed, fmt_positional)?);
+        let abbreviation = zone.abbreviation(dt.to_utc());
+        let body = format!("{}\n", render(&dt, &abbreviation, parsed, fmt_positional)?);
         // Keep both the text body and the OutputData: `with_output` alone would
         // collapse a simple-text node back to a plain result and drop the
         // `rich_json`, leaving `--json` with nothing structured to emit.
@@ -590,11 +643,12 @@ fn shift_to_weekday<Tz: TimeZone>(
 /// legacy --iso > legacy --unix > default.
 fn render(
     dt: &DateTime<FixedOffset>,
+    abbreviation: &str,
     parsed: &DateArgs,
     fmt_positional: Option<&str>,
 ) -> Result<String, String> {
     if let Some(fmt) = fmt_positional.or(parsed.format.as_deref()) {
-        return format_strftime(dt, fmt);
+        return format_strftime(dt, abbreviation, fmt);
     }
     if parsed.rfc_2822 {
         return Ok(dt.to_rfc2822());
@@ -611,20 +665,25 @@ fn render(
     if parsed.unix {
         return Ok(dt.timestamp().to_string());
     }
-    Ok(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    // GNU's default format: `Mon Nov  9 10:39:22 EST 2026`.
+    Ok(format!("{} {abbreviation} {}", dt.format("%a %b %e %H:%M:%S"), dt.format("%Y")))
 }
 
 /// Format via a strftime string, after translating GNU `%N` and validating
 /// against unknown specifiers — so the path can never panic the worker.
-fn format_strftime(dt: &DateTime<FixedOffset>, fmt: &str) -> Result<String, String> {
-    let translated = translate_format(fmt);
+fn format_strftime(dt: &DateTime<FixedOffset>, abbreviation: &str, fmt: &str) -> Result<String, String> {
+    let translated = translate_format(fmt, abbreviation)?;
     validate_format(&translated)?;
     Ok(dt.format(&translated).to_string())
 }
 
-/// Translate GNU nanosecond specifiers chrono lacks into chrono's `%<n>f`:
+/// The widest `%<width>Z` accepted; a larger width is an error.
+const MAX_ZONE_WIDTH: usize = 4096;
+
+/// Translate `%Z` into the zone abbreviation, and the GNU nanosecond
+/// specifiers chrono lacks into chrono's `%<n>f`:
 /// `%N`→`%9f`, `%3N`→`%3f`, `%6N`→`%6f`, `%9N`→`%9f`. `%%` is preserved.
-fn translate_format(fmt: &str) -> String {
+fn translate_format(fmt: &str, abbreviation: &str) -> Result<String, String> {
     let mut out = String::with_capacity(fmt.len());
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
@@ -647,7 +706,24 @@ fn translate_format(fmt: &str) -> String {
                 break;
             }
         }
-        if chars.peek() == Some(&'N') {
+        if chars.peek() == Some(&'Z') {
+            // chrono's `%Z` on a fixed offset prints `+09:00`; GNU prints
+            // the zone abbreviation, right-aligned to a width (`%10Z`).
+            chars.next();
+            let width = if digits.is_empty() {
+                0
+            } else {
+                match digits.parse::<usize>() {
+                    Ok(width) if width <= MAX_ZONE_WIDTH => width,
+                    _ => {
+                        return Err(format!(
+                            "date: width {digits} in %{digits}Z is too large (at most {MAX_ZONE_WIDTH})"
+                        ))
+                    }
+                }
+            };
+            out.push_str(&format!("{abbreviation:>width$}").replace('%', "%%"));
+        } else if chars.peek() == Some(&'N') {
             chars.next();
             let width = if digits.is_empty() { "9" } else { &digits };
             out.push('%');
@@ -660,7 +736,7 @@ fn translate_format(fmt: &str) -> String {
             out.push_str(&digits);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Reject a format string containing an unknown specifier, loudly.
@@ -778,7 +854,7 @@ mod tests {
         // Quoted @N positional, no -d: decode to the known UTC instant.
         let result = run(&fixed_date(), &["-u", "@1700000000"]).await;
         assert!(result.ok());
-        assert_eq!(result.text_out().trim(), "2023-11-14 22:13:20");
+        assert_eq!(result.text_out(), "Tue Nov 14 22:13:20 UTC 2023\n");
     }
 
     #[tokio::test]
@@ -907,7 +983,7 @@ mod tests {
     async fn default_and_utc() {
         let r = run(&fixed_date(), &["-u"]).await;
         assert!(r.ok());
-        assert_eq!(r.text_out().trim(), "2023-11-14 22:13:20");
+        assert_eq!(r.text_out(), "Tue Nov 14 22:13:20 UTC 2023\n");
     }
 
     #[tokio::test]
