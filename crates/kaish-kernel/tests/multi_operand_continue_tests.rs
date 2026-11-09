@@ -56,7 +56,7 @@ async fn cat_all_operands_missing_prints_nothing_and_fails() {
 #[tokio::test]
 async fn head_continues_past_a_missing_operand() {
     let (out, err, code) = run_with_good("head -n 1 good nosuch good").await;
-    assert_eq!(out, "==> good <==\none\n\n==> good <==\none");
+    assert_eq!(out, "==> good <==\none\n\n==> good <==\none\n");
     assert!(err.contains("head: nosuch"), "{err}");
     assert_eq!(code, 1);
 }
@@ -64,7 +64,7 @@ async fn head_continues_past_a_missing_operand() {
 #[tokio::test]
 async fn head_missing_operand_first_leaves_no_leading_blank_line() {
     let (out, err, code) = run_with_good("head -n 1 nosuch good good").await;
-    assert_eq!(out, "==> good <==\none\n\n==> good <==\none");
+    assert_eq!(out, "==> good <==\none\n\n==> good <==\none\n");
     assert!(err.contains("head: nosuch"), "{err}");
     assert_eq!(code, 1);
 }
@@ -72,7 +72,7 @@ async fn head_missing_operand_first_leaves_no_leading_blank_line() {
 #[tokio::test]
 async fn tail_continues_past_a_missing_operand() {
     let (out, err, code) = run_with_good("tail -n 1 good nosuch good").await;
-    assert_eq!(out, "==> good <==\ntwo\n\n==> good <==\ntwo");
+    assert_eq!(out, "==> good <==\ntwo\n\n==> good <==\ntwo\n");
     assert!(err.contains("tail: nosuch"), "{err}");
     assert_eq!(code, 1);
 }
@@ -80,7 +80,7 @@ async fn tail_continues_past_a_missing_operand() {
 #[tokio::test]
 async fn tail_missing_operand_first_leaves_no_leading_blank_line() {
     let (out, err, code) = run_with_good("tail -n 1 nosuch good good").await;
-    assert_eq!(out, "==> good <==\ntwo\n\n==> good <==\ntwo");
+    assert_eq!(out, "==> good <==\ntwo\n\n==> good <==\ntwo\n");
     assert!(err.contains("tail: nosuch"), "{err}");
     assert_eq!(code, 1);
 }
