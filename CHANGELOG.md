@@ -20,6 +20,13 @@ breaking entries are marked **BREAKING**.
   another (`xs=[a b]]`) is named as an extra bracket. A `]` that closes a
   test or a subscript keeps the grammar's message.
 
+### Fixed
+
+- **`%` is a word character.** `printf %s x`, `git log --format=%cd`,
+  `echo a%b`, and `echo 100%` failed with `lexer error: unexpected
+  character`. `%` now lexes inside and at the start of a word, as in POSIX
+  shells; `%1` stays a job spec, and `${x%y}` and `$((7 % 3))` are unchanged.
+
 ## [0.18.1] - 2026-10-11
 
 ### Added
