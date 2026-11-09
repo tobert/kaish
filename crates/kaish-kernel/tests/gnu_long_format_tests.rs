@@ -55,11 +55,16 @@ async fn kaish(root: &std::path::Path, script: &str) -> (String, String, i64) {
 
 #[cfg(target_os = "linux")]
 fn gnu(root: &std::path::Path, script: &str) -> String {
+    gnu_in(root, "UTC", script)
+}
+
+#[cfg(target_os = "linux")]
+fn gnu_in(root: &std::path::Path, tz: &str, script: &str) -> String {
     let out = std::process::Command::new("sh")
         .arg("-c")
         .arg(script)
         .env("LC_ALL", "C")
-        .env("TZ", "UTC")
+        .env("TZ", tz)
         .current_dir(root)
         .output()
         .unwrap();
@@ -118,6 +123,9 @@ async fn stat_lines_match_gnu() {
         }
     }
     assert_eq!(out.lines().filter(|l| l.starts_with("  File:")).count(), 2, "{out}");
+    // Five lines per file, in GNU's order, with no blank line between files.
+    let starts: Vec<&str> = out.lines().map(|l| &l[..6]).collect();
+    assert_eq!(starts, ["  File", "  Size", " Links", "Access", "Modify"].repeat(2), "{out}");
 }
 
 #[tokio::test]
@@ -170,4 +178,60 @@ async fn date_pads_a_zone_abbreviation_to_a_width() {
     let (_, err, code) = kaish(tmp.path(), "date '+%99999Z'").await;
     assert_eq!(code, 2);
     assert!(err.contains("width 99999 in %99999Z is too large (at most 4096)"), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[rstest::rstest]
+#[case(":/etc/localtime")]
+#[case(":UTC")]
+#[case("UTC0")]
+#[case("JST-9")]
+#[case("<+0530>-5:30")]
+#[case("/usr/share/zoneinfo/Asia/Tokyo")]
+#[tokio::test]
+async fn ls_l_reads_tz_as_the_c_library_does(#[case] tz: &str) {
+    let tmp = fixture();
+    let kernel = kernel_at(tmp.path());
+    let r = kernel.execute(&format!("export TZ='{tz}'; ls -l big a.txt")).await.expect("execute");
+    assert_eq!(r.code, 0, "{tz}: {}", r.err);
+    assert_eq!(r.text_out(), gnu_in(tmp.path(), tz, "ls -l big a.txt"), "{tz}");
+}
+
+#[tokio::test]
+async fn a_tz_with_daylight_saving_rules_names_the_iana_fix() {
+    let tmp = fixture();
+    let kernel = kernel_at(tmp.path());
+    let r = kernel.execute("export TZ='EST5EDT,M3.2.0,M11.1.0'; stat a.txt").await.expect("execute");
+    assert_eq!(r.code, 1);
+    assert!(r.err.contains("daylight-saving rules") && r.err.contains("America/New_York"), "{}", r.err);
+}
+
+#[tokio::test]
+async fn ls_a_json_includes_dot_entries() {
+    let tmp = fixture();
+    let (out, err, code) = kaish(tmp.path(), "ls -a sub --json").await;
+    assert_eq!(code, 0, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+    assert_eq!(json, serde_json::json!([".", "..", "inner"]), "{json}");
+}
+
+#[tokio::test]
+async fn stat_names_an_empty_file_in_text_json_and_format() {
+    let tmp = fixture();
+    let (out, err, code) = kaish(tmp.path(), "stat .hidden --json").await;
+    assert_eq!(code, 0, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+    assert_eq!(json[0]["TYPE"], "regular empty file", "{json}");
+    let (out, _, _) = kaish(tmp.path(), "stat -c %F .hidden; stat -c %F a.txt").await;
+    assert_eq!(out, "regular empty file\nregular file\n");
+}
+
+#[tokio::test]
+async fn stat_prints_question_marks_for_fields_memoryfs_does_not_track() {
+    let tmp = fixture();
+    let (out, err, code) = kaish(tmp.path(), "echo hi > /v/x.txt; stat /v/x.txt").await;
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Blocks: ?"), "{out}");
+    assert!(out.contains(" Links: ?\n"), "{out}");
+    assert!(out.contains("Uid: (    ?/       ?)   Gid: (    ?/       ?)"), "{out}");
 }

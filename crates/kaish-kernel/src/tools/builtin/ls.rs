@@ -22,7 +22,7 @@ pub struct Ls;
 #[derive(Parser, Debug)]
 #[command(name = "ls", about = "List directory contents", disable_help_flag = true)]
 struct LsArgs {
-    /// Use long format with details.
+    /// Use GNU long format: mode, links, owner, group, size, modification time, and name, after a `total` line for a directory.
     #[arg(short = 'l', long = "long")]
     long: bool,
 

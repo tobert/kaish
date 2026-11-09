@@ -192,7 +192,7 @@ fn stat_block(name: &str, info: &crate::vfs::DirEntry, zone: Option<&super::date
         Some(mode) => format!("{:04o}/{}", mode & 0o7777, super::ls::mode_string(info)),
         None => format!("?/{}", super::ls::mode_string(info)),
     };
-    let account = |a: &Option<kaish_types::AccountId>| match a {
+    let account = |a: &Option<crate::vfs::AccountId>| match a {
         Some(a) => format!("{:>5}/{:>8}", a.id, a.display_name()),
         None => format!("{:>5}/{:>8}", "?", "?"),
     };

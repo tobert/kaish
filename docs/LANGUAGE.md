@@ -1827,6 +1827,8 @@ date +%Y-%m-%d                     # formatted date
 
 # `date` follows the GNU dialect (-d, -I, -R, -r) and emits --json.
 # An unknown specifier fails loud (exit 2), never panics.
+date                               # Tue Nov 14 22:13:20 UTC 2023 (GNU's default)
+date +%Z                           # the zone abbreviation: EST, JST, -03
 date -u                            # UTC
 date -I                            # ISO 8601 date (2026-06-14)
 date -R                            # RFC 2822
@@ -1835,6 +1837,8 @@ date -d "next friday"              # weekdays
 date -d @1700000000                # decode an epoch (a leading @ is a bareword)
 date -d "2026-06-01 -1 day"        # absolute date + offset
 date --tz Asia/Tokyo               # honor an IANA timezone (also reads $TZ)
+TZ=UTC0 date                       # TZ also takes :/etc/localtime, a zoneinfo
+                                   # path, and a POSIX zone without DST rules
 date -r file.txt                   # the file's last-modified time
 date --json                        # {"iso":…,"epoch":…,"weekday":…, …}
 ```
@@ -2096,6 +2100,8 @@ These are documented limitations of the current implementation:
 ### Builtins
 
 - **`set` supports `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o crossmounts`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. A bare unrecognized short flag (`-u`, `-x`) is silently ignored for compatibility, but an unrecognized `-o`/`+o` name exits 2 and names the valid set instead of no-opping (see Shell Options).
+- **`ls -l` and `stat` print GNU's formats for the fields a filesystem reports** — `LocalFs` reports them all on Unix. A filesystem that does not track links, blocks, owner, or group (MemoryFs, such as `/v`) prints `?` there, and `ls -l` leaves out its `total` line unless every entry reports blocks. `stat` leaves out GNU's `Device:`, `Inode:`, and `IO Block:` fields and its access, change, and birth times, and prints a link as `File: link -> target`, unquoted.
+- **`TZ` with daylight-saving rules is an error** — `date`, `ls -l`, and `stat` read `TZ` as an IANA name, `:/etc/localtime`, a zoneinfo path, or a POSIX zone without rules (`UTC0`, `JST-9`). `TZ='EST5EDT,M3.2.0,M11.1.0'` exits 1 and names `America/New_York`.
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`grep` reads GNU BRE by default, exactly as GNU grep does** — `grep 'fn consult('` matches the text `fn consult(`: bare `( ) { } | + ?` are literal, and `\(…\)`, `\|`, `\{n,m\}`, `\+`, `\?` are operators. `*` at the start of a pattern or group and `^`/`$` in the middle of a pattern are literal; every character inside `[...]` is literal, backslash included; a backslash before an ordinary character (`\d`) is that character, with GNU's `grep: warning: stray \ before d` on stderr. `grep -E` is ERE (`grep -E 'a|b'`) — the same escape table applies there too: `grep -E -o '\d' f` still matches the letter `d`, not the regex engine's own digit class, and still warns. `grep -F` is a fixed string. Two GNU behaviors the regex engine cannot reach: back-references (`\1` is refused with exit 2, in BRE and in `-E` alike, even though GNU's `-E` runs one when a group precedes it), and the longest-alternative rule for `-o` (`grep -o 'a\|ab'` prints `a` on the line `ab`; GNU prints `ab`).
 - **`[[:alpha:]]` and its eleven siblings are Unicode-aware, matching GNU grep in a UTF-8 locale** — `grep -o '[[:alpha:]]' <<< 'héllo 日本語'` prints every letter, not just the ASCII ones (`grep -E` translates the same way). `[:digit:]` stays ASCII-only, as GNU's does. One gap remains: a combining mark (`e` + U+0301) is a word character for `-w`/`\w`/`\W` here (Unicode's mark property continues a word) but not for glibc's (it ends one).

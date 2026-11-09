@@ -12,25 +12,31 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **BREAKING:** for embedders, **`DirEntry` gains `links`, `blocks`,
+  `owner`, and `group`**, all `Option`; `owner` and `group` are the new
+  `AccountId`, exported by `kaish_vfs`. A struct literal must set them; the
+  constructors set `None`. See `docs/EMBEDDING.md`, "Reporting owners,
+  links, and blocks".
 - **`ls -l` prints GNU's long format**: `-rw-r--r-- 1 amy amy 6 Nov  9
   10:39 a.txt`, aligned, with a `total` line and the time in `TZ`. It was
   `name<TAB>type<TAB>size`, which models misread. A field the filesystem
   does not track prints `?`. `--json` is unchanged.
-- **`ls -a` lists `.` and `..`**, as GNU does; the new `-A` lists hidden
-  files without them. Plain `ls` prints a symlink's bare name: the `name@`
-  suffix belongs to `ls -F`, and models read it as part of the name.
+- **`ls -a` lists `.` and `..`**, as GNU does, in text and `--json`; the
+  new `-A` lists hidden files without them. Plain `ls` prints a symlink's
+  bare name: `name@` is GNU's `ls -F` marker, and models read it as part
+  of the name.
 - **`stat` prints GNU's block**: `File:`, `Size:`/`Blocks:` and type,
   `Links:`, `Access:` with mode, uid, and gid, and `Modify:`. It was one
-  unlabeled row. An empty file is `regular empty file`. `--json` is unchanged.
+  unlabeled row. An empty file is `regular empty file` in the text, the
+  `--json` `TYPE`, and `-c %F`.
 - **`date` prints GNU's default format**, `Tue Nov 14 22:13:20 UTC 2023`;
   it was `2023-11-14 22:13:20`, with no zone, so `-u` looked like local
   time. `%Z` prints the zone abbreviation (`JST`), not an offset, and
   `%10Z` pads it.
-- **BREAKING (embedders): `DirEntry` gains `links`, `blocks`, `owner`, and
-  `group`**, all `Option`. A struct literal must set them; the constructors
-  set `None`. `LocalFs` fills them on Unix. See `docs/EMBEDDING.md`,
-  "Reporting owners, links, and blocks".
-
+- **`TZ` reads as the C library reads it** in `date`, `ls -l`, and `stat`:
+  `:/etc/localtime`, a zoneinfo path, and POSIX zones such as `UTC0` and
+  `JST-9` work. A POSIX zone with daylight-saving rules exits 1 and names
+  `America/New_York`.
 - **A `]` glued to a word names its fix.** `ls foo].mp4` is still a parse
   error, because `]` closes a `[ ]` list or a `[[ ]]` test. The message was
   a list of every token the grammar expected; it now shows the word
@@ -46,9 +52,9 @@ breaking entries are marked **BREAKING**.
   `1.0K` and `1024K`, which disagreed with GNU.
 - **`%` is a word character.** `printf %s x`, `git log --format=%cd`,
   `echo a%b`, and `echo 100%` failed with `lexer error: unexpected
-  character`. `%` now lexes inside and at the start of a word, as in POSIX
-  shells; `%1` stays a job spec, and `${x%y}` and `$((7 % 3))` are unchanged.
-
+  character`. `%` now lexes inside a word and before a letter, `_`, or `%`
+  (`%s`); `%1` stays a job spec, a lone `%` is still an error, and
+  `${x%y}` and `$((7 % 3))` are unchanged.
 - **A builtin that prints a line ends it with a newline**, as `echo` does.
   `pwd`, `hostname`, `uname`, `cd -`, `mktemp`, `which`, `env`, `export`,
   `type`, `command -v`, `write`, `cmp`, `head` and `tail` on several files,

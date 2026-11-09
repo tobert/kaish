@@ -15,7 +15,7 @@ mod traits;
 pub use budget::ByteBudget;
 pub use dev::DevFs;
 pub use traits::{
-    refuse_absolute_target, DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess,
+    refuse_absolute_target, AccountId, DirEntry, DirEntryKind, EffectiveAccess, Filesystem, PathAccess,
     ReadRange,
 };
 

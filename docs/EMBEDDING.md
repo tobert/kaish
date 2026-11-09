@@ -573,6 +573,8 @@ cannot read; `ls -l` leaves out its `total` line unless every entry reports
 `blocks`.
 
 ```rust
+use kaish_vfs::{AccountId, DirEntry};
+
 let mut entry = DirEntry::file("notes.txt", 12);
 entry.links = Some(1);
 entry.owner = Some(AccountId { id: 1000, name: Some("amy".into()) });
