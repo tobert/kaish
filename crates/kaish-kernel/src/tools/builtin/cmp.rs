@@ -179,7 +179,7 @@ async fn cmp_lockstep(
             let msg = format!(
                 "{name1} {name2} differ: byte {byte_number}, line {line_number}"
             );
-            return ExecResult::success(msg).with_code(1);
+            return ExecResult::success(format!("{msg}\n")).with_code(1);
         }
 
         // Common region matched. If the chunk lengths differ, the shorter file
@@ -194,7 +194,7 @@ async fn cmp_lockstep(
                 (name2, offset + chunk_b.len() as u64)
             };
             let msg = format!("cmp: EOF on {shorter} after byte {at}");
-            return ExecResult::success(msg).with_code(1);
+            return ExecResult::success(format!("{msg}\n")).with_code(1);
         }
 
         // Both chunks are the same length and identical — advance to the next window.
@@ -218,7 +218,7 @@ fn cmp_whole_buffer(a: &[u8], b: &[u8], name1: &str, name2: &str, silent: bool) 
         }
         let line = a[..offset].iter().filter(|&&c| c == b'\n').count() + 1;
         let msg = format!("{name1} {name2} differ: byte {}, line {}", offset + 1, line);
-        return ExecResult::success(msg).with_code(1);
+        return ExecResult::success(format!("{msg}\n")).with_code(1);
     }
 
     // Common prefix matches; a length difference is EOF on the shorter file.
@@ -232,7 +232,7 @@ fn cmp_whole_buffer(a: &[u8], b: &[u8], name1: &str, name2: &str, silent: bool) 
             (name2, b.len())
         };
         let msg = format!("cmp: EOF on {shorter} after byte {at}");
-        return ExecResult::success(msg).with_code(1);
+        return ExecResult::success(format!("{msg}\n")).with_code(1);
     }
 
     // Identical → exit 0, no output.

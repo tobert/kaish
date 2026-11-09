@@ -11250,7 +11250,7 @@ AFTER="yes"'"#)
             .expect("receipt");
         let result = jobs.wait(id).await.expect("job result");
         assert!(result.ok(), "background program failed: {result:?}");
-        assert_eq!(result.text_out(), "before\ntool:embedder_toolAmy\n/workspace");
+        assert_eq!(result.text_out(), "before\ntool:embedder_toolAmy\n/workspace\n");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "custom tool must run in the fork");
         assert_eq!(
             String::from_utf8(jobs.read_stdout(id).await.expect("stdout stream")).expect("utf8"),

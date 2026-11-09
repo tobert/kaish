@@ -107,11 +107,6 @@ impl Tool for Which {
             }
         }
 
-        // Trim trailing newline
-        if output.ends_with('\n') {
-            output.pop();
-        }
-
         if found_any {
             if not_found.is_empty() {
                 ExecResult::with_output(OutputData::text(output))

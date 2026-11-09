@@ -110,7 +110,7 @@ async fn cmd_list(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     };
 
     if entries.is_empty() {
-        let msg = if filter.is_some() { "no matching items in trash" } else { "trash is empty" };
+        let msg = if filter.is_some() { "no matching items in trash\n" } else { "trash is empty\n" };
         return ExecResult::with_output(OutputData::text(msg));
     }
 
@@ -145,7 +145,7 @@ async fn cmd_restore(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     };
 
     match trash.restore(matches).await {
-        Ok(()) => ExecResult::with_output(OutputData::text(format!("restored: {}", name))),
+        Ok(()) => ExecResult::with_output(OutputData::text(format!("restored: {}\n", name))),
         Err(e) => ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
     }
 }
@@ -169,8 +169,8 @@ async fn cmd_empty(confirmed: bool, ctx: &mut ExecContext) -> ExecResult {
         Err(e) => return e,
     };
     match trash.purge_all().await {
-        Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty")),
-        Ok(_) => ExecResult::with_output(OutputData::text("trash emptied")),
+        Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty\n")),
+        Ok(_) => ExecResult::with_output(OutputData::text("trash emptied\n")),
         Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
     }
 }
@@ -191,7 +191,7 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
                 };
                 ctx.scope.set_trash_max_size(size);
                 return ExecResult::with_output(OutputData::text(format!(
-                    "trash max-size set to {}",
+                    "trash max-size set to {}\n",
                     format_size(size),
                 )));
             }

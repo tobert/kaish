@@ -283,8 +283,10 @@ impl Head {
                             count
                         };
                         let head: Vec<&str> = file_lines.into_iter().take(take_n).collect();
-                        output.push_str(&head.join("\n"));
-                        output.push('\n');
+                        for line in head {
+                            output.push_str(line);
+                            output.push('\n');
+                        }
                     }
                     Err(_) => errors.push_str(&format!("head: {}: invalid UTF-8\n", path)),
                 },
@@ -292,8 +294,7 @@ impl Head {
             }
         }
 
-        let trimmed = output.trim_end().to_string();
-        super::with_operand_errors(ExecResult::with_output(OutputData::text(trimmed)), errors)
+        super::with_operand_errors(ExecResult::with_output(OutputData::text(output)), errors)
     }
 
     async fn head_files_bytes(ctx: &mut ExecContext, paths: &[String], byte_count: usize) -> ExecResult {

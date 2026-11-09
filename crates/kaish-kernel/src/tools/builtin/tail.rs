@@ -271,8 +271,10 @@ impl Tail {
                             all_lines.len().saturating_sub(count)
                         };
                         let tail: Vec<&str> = all_lines.into_iter().skip(skip).collect();
-                        output.push_str(&tail.join("\n"));
-                        output.push('\n');
+                        for line in tail {
+                            output.push_str(line);
+                            output.push('\n');
+                        }
                     }
                     Err(_) => errors.push_str(&format!("tail: {}: invalid UTF-8\n", path)),
                 },
@@ -280,8 +282,7 @@ impl Tail {
             }
         }
 
-        let trimmed = output.trim_end().to_string();
-        super::with_operand_errors(ExecResult::with_output(OutputData::text(trimmed)), errors)
+        super::with_operand_errors(ExecResult::with_output(OutputData::text(output)), errors)
     }
 }
 
