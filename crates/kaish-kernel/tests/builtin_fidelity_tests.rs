@@ -374,12 +374,16 @@ async fn sort_version_no_digits_is_lexical() {
 async fn a_printed_line_ends_with_a_newline() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(dir.path().join("sub")).expect("mkdir sub");
+    std::fs::write(dir.path().join("a"), "x\n").expect("write a");
+    std::fs::write(dir.path().join("b"), "y\n").expect("write b");
+    std::fs::write(dir.path().join("long"), "x\nz\n").expect("write long");
     let kernel = Kernel::new(KernelConfig::repl().with_trash(false).with_cwd(dir.path().to_path_buf()))
         .expect("failed to create kernel")
         .into_arc();
     let mut commands = vec![
         "pwd", "uname", "uname -a", "cd sub && cd -", "mktemp", "mktemp -d",
         "export K=v && env", "export K=v && export", "type ls", "command -v ls", "write g hi",
+        "head a b", "tail a b", "head -n 0 a b", "cmp a b", "cmp a long",
     ];
     // `hostname` is a builtin only with `host`, and `which` finds a program
     // only with `subprocess`.
@@ -391,7 +395,8 @@ async fn a_printed_line_ends_with_a_newline() {
     }
     for cmd in commands {
         let result = kernel
-            .execute_with_options(&format!("{cmd} && echo END"), ExecuteOptions::new())
+            // `;`, not `&&`: `cmp` exits 1 when the files differ.
+            .execute_with_options(&format!("{cmd}; echo END"), ExecuteOptions::new())
             .await
             .expect("kernel execute");
         let out = result.text_out().to_string();

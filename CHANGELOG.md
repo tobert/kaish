@@ -29,8 +29,9 @@ breaking entries are marked **BREAKING**.
 
 - **A builtin that prints a line ends it with a newline**, as `echo` does.
   `pwd`, `hostname`, `uname`, `cd -`, `mktemp`, `which`, `env`, `export`,
-  `type`, `command -v`, `write`, and `kaish-trash`'s messages printed their
-  last line without one, so the next command's output joined it:
+  `type`, `command -v`, `write`, `cmp`, `head` and `tail` on several files,
+  and `kaish-trash`'s messages printed their last line without one, so the
+  next command's output joined it:
   `pwd && ls -l` printed `/home/amyCargo.toml	-	1098`. `$(...)` strips the
   newline, so a captured value is unchanged.
 
