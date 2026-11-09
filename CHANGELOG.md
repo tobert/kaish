@@ -12,6 +12,24 @@ breaking entries are marked **BREAKING**.
 
 ### Changed
 
+- **`ls -l` prints GNU's long format**: `-rw-r--r-- 1 amy amy 6 Nov  9
+  10:39 a.txt`, aligned, with a `total` line and the time in `TZ`. It was
+  `name<TAB>type<TAB>size`, which models misread. A field the filesystem
+  does not track prints `?`. `--json` is unchanged.
+- **`ls -a` lists `.` and `..`**, as GNU does; the new `-A` lists hidden
+  files without them. Plain `ls` prints a symlink's bare name: the `name@`
+  suffix belongs to `ls -F`, and models read it as part of the name.
+- **`stat` prints GNU's block**: `File:`, `Size:`/`Blocks:` and type,
+  `Links:`, `Access:` with mode, uid, and gid, and `Modify:`. It was one
+  unlabeled row. An empty file is `regular empty file`. `--json` is unchanged.
+- **`date` prints GNU's default format**, `Tue Nov 14 22:13:20 UTC 2023`;
+  it was `2023-11-14 22:13:20`, with no zone, so `-u` looked like local
+  time. `%Z` prints the zone abbreviation (`JST`), not an offset.
+- **BREAKING (embedders): `DirEntry` gains `links`, `blocks`, `owner`, and
+  `group`**, all `Option`. A struct literal must set them; the constructors
+  set `None`. `LocalFs` fills them on Unix. See `docs/EMBEDDING.md`,
+  "Reporting owners, links, and blocks".
+
 - **A `]` glued to a word names its fix.** `ls foo].mp4` is still a parse
   error, because `]` closes a `[ ]` list or a `[[ ]]` test. The message was
   a list of every token the grammar expected; it now shows the word

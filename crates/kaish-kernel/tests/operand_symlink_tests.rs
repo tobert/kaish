@@ -223,13 +223,12 @@ async fn ls_json_on_a_link_operand_shows_a_symlink_entry() {
     std::fs::write(root.join("target.txt"), "hello").unwrap();
     symlink("target.txt", root.join("link")).unwrap();
 
-    // Non-long --json: a bare array of names; a symlink gets the `@` suffix
-    // ls -F uses, matching the rendering ls already uses for a link found
-    // inside a directory listing.
+    // Non-long --json: a bare array of names; a symlink is its bare name, as
+    // GNU `ls` prints it without -F.
     let r = run(&kernel_at(root), "ls link --json").await;
     assert_eq!(r.code, 0, "ls link --json failed: {}", r.err);
     let json: serde_json::Value = serde_json::from_str(&r.text_out()).expect("valid json");
-    assert_eq!(json, serde_json::json!(["link@"]), "{json}");
+    assert_eq!(json, serde_json::json!(["link"]), "{json}");
 
     // Long --json: a table row whose TYPE cell is 'l' and whose NAME carries
     // the target, mirroring a link found inside a directory listing.
@@ -280,12 +279,12 @@ async fn ls_l_with_several_operands_shows_a_link_as_a_link() {
     let out = r.text_out();
     assert!(out.contains("link -> target"), "{out}");
     assert!(out.contains("dangling -> nowhere"), "{out}");
-    // Rows are `name\ttype\tsize`.
-    let type_of = |needle: &str| -> String {
-        let row = out.lines().find(|l| l.starts_with(needle)).unwrap();
-        row.split('\t').nth(1).unwrap().to_string()
+    // Rows are GNU long format; the mode's first character is the type.
+    let type_of = |needle: &str| -> char {
+        let row = out.lines().find(|l| l.contains(needle)).expect("row for needle");
+        row.chars().next().expect("non-empty row")
     };
-    assert_eq!(type_of("link ->"), "l");
-    assert_eq!(type_of("dangling ->"), "l");
-    assert_eq!(type_of("plain"), "-");
+    assert_eq!(type_of(" link ->"), 'l');
+    assert_eq!(type_of(" dangling ->"), 'l');
+    assert_eq!(type_of(" plain"), '-');
 }

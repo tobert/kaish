@@ -168,7 +168,7 @@ impl LocalFs {
             None
         };
 
-        Ok(Some(DirEntry {
+        let mut entry = DirEntry {
             name: path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -178,7 +178,62 @@ impl LocalFs {
             modified: metadata.modified().ok(),
             permissions: Self::extract_permissions(&metadata),
             symlink_target,
-        }))
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
+        };
+        fill_unix_details(&mut entry, &metadata);
+        Ok(Some(entry))
+    }
+}
+
+/// Fill the link count, block count, owner, and group from host metadata.
+#[cfg(unix)]
+fn fill_unix_details(entry: &mut DirEntry, meta: &std::fs::Metadata) {
+    use std::os::unix::fs::MetadataExt;
+    entry.links = Some(meta.nlink());
+    entry.blocks = Some(meta.blocks());
+    entry.owner = Some(accounts::user(meta.uid()));
+    entry.group = Some(accounts::group(meta.gid()));
+}
+
+/// A platform without Unix metadata leaves the fields `None`.
+#[cfg(not(unix))]
+fn fill_unix_details(_entry: &mut DirEntry, _meta: &std::fs::Metadata) {}
+
+/// uid and gid to name lookups, cached for the life of the process: `ls -l`
+/// on a large directory asks for the same few IDs once per entry.
+#[cfg(unix)]
+mod accounts {
+    use kaish_types::AccountId;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    type Cache = OnceLock<Mutex<HashMap<u32, Option<String>>>>;
+
+    static USERS: Cache = OnceLock::new();
+    static GROUPS: Cache = OnceLock::new();
+
+    fn cached(cache: &Cache, id: u32, lookup: impl FnOnce(u32) -> Option<String>) -> AccountId {
+        let map = cache.get_or_init(|| Mutex::new(HashMap::new()));
+        // A poisoned lock still holds a valid map: entries are inserted whole.
+        let mut map = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let name = map.entry(id).or_insert_with(|| lookup(id)).clone();
+        AccountId { id, name }
+    }
+
+    pub(super) fn user(uid: u32) -> AccountId {
+        // A failed or empty lookup shows the numeric ID, as GNU `ls` does.
+        cached(&USERS, uid, |id| {
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(id)).ok().flatten().map(|u| u.name)
+        })
+    }
+
+    pub(super) fn group(gid: u32) -> AccountId {
+        cached(&GROUPS, gid, |id| {
+            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(id)).ok().flatten().map(|g| g.name)
+        })
     }
 }
 
@@ -474,14 +529,20 @@ impl Filesystem for LocalFs {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".to_string());
 
-        Ok(DirEntry {
+        let mut entry = DirEntry {
             name,
             kind,
             size: meta.len(),
             modified: meta.modified().ok(),
             permissions: Self::extract_permissions(&meta),
             symlink_target: None, // stat follows symlinks
-        })
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
+        };
+        fill_unix_details(&mut entry, &meta);
+        Ok(entry)
     }
 
     async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
@@ -505,14 +566,20 @@ impl Filesystem for LocalFs {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".to_string());
 
-        Ok(DirEntry {
+        let mut entry = DirEntry {
             name,
             kind,
             size: meta.len(),
             modified: meta.modified().ok(),
             permissions: Self::extract_permissions(&meta),
             symlink_target,
-        })
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
+        };
+        fill_unix_details(&mut entry, &meta);
+        Ok(entry)
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {

@@ -75,6 +75,16 @@ impl Tool for Stat {
         // errors and report the last failure so users see what worked.
         let mut nodes: Vec<OutputNode> = Vec::with_capacity(args.positional.len());
         let mut format_output = String::new();
+        // The default text prints times in the exported `TZ`, else host local.
+        let zone = if format.is_none() {
+            match super::date::scope_zone(ctx) {
+                Ok(zone) => Some(zone),
+                Err(e) => return ExecResult::failure(1, format!("stat: {e}")),
+            }
+        } else {
+            None
+        };
+        let mut text = String::new();
         let mut last_err: Option<String> = None;
 
         for value in &args.positional {
@@ -95,15 +105,10 @@ impl Tool for Stat {
                     if let Some(fmt) = &format {
                         format_output.push_str(&format_stat(fmt, &path_str, &info));
                     } else {
+                        text.push_str(&stat_block(&path_str, &info, zone.as_ref()));
                         let is_symlink = info.is_symlink();
                         let is_dir = info.is_dir();
-                        let file_type = if is_symlink {
-                            "symbolic link"
-                        } else if is_dir {
-                            "directory"
-                        } else {
-                            "regular file"
-                        };
+                        let file_type = file_type_name(&info);
                         let entry_type = if is_symlink {
                             EntryType::Symlink
                         } else if is_dir {
@@ -147,7 +152,7 @@ impl Tool for Stat {
                 "TYPE".to_string(),
                 "TARGET".to_string(),
             ];
-            ExecResult::with_output(OutputData::table(headers, nodes))
+            ExecResult::with_output_and_text(OutputData::table(headers, nodes), text)
         };
         if let Some(msg) = last_err {
             result.err = ExecResult::terminate_diagnostic(msg);
@@ -155,6 +160,56 @@ impl Tool for Stat {
         }
         result
     }
+}
+
+/// GNU's name for the file type, as `%F` and the default output print it.
+fn file_type_name(info: &crate::vfs::DirEntry) -> &'static str {
+    use kaish_types::DirEntryKind;
+    match info.kind {
+        DirEntryKind::Directory => "directory",
+        DirEntryKind::Symlink => "symbolic link",
+        DirEntryKind::CharDevice => "character special file",
+        DirEntryKind::BlockDevice => "block special file",
+        DirEntryKind::Fifo => "fifo",
+        DirEntryKind::Socket => "socket",
+        _ if info.size == 0 => "regular empty file",
+        _ => "regular file",
+    }
+}
+
+/// GNU `stat`'s default block for one file. Lines and fields kaish has no
+/// data for (device, inode, IO block, access, change, and birth times) are
+/// left out; a field the backend does not track prints `?`.
+fn stat_block(name: &str, info: &crate::vfs::DirEntry, zone: Option<&super::date::Zone>) -> String {
+    let unknown = || "?".to_string();
+    let file = match (&info.symlink_target, info.is_symlink()) {
+        (Some(target), true) => format!("{name} -> {}", target.display()),
+        _ => name.to_string(),
+    };
+    let blocks = info.blocks.map_or_else(unknown, |b| b.to_string());
+    let links = info.links.map_or_else(unknown, |n| n.to_string());
+    let access = match info.permissions {
+        Some(mode) => format!("{:04o}/{}", mode & 0o7777, super::ls::mode_string(info)),
+        None => format!("?/{}", super::ls::mode_string(info)),
+    };
+    let account = |a: &Option<kaish_types::AccountId>| match a {
+        Some(a) => format!("{:>5}/{:>8}", a.id, a.display_name()),
+        None => format!("{:>5}/{:>8}", "?", "?"),
+    };
+    let modify = match (info.modified, zone) {
+        (Some(modified), Some(zone)) => zone
+            .instant(chrono::DateTime::<chrono::Utc>::from(modified))
+            .format("%Y-%m-%d %H:%M:%S%.9f %z")
+            .to_string(),
+        _ => unknown(),
+    };
+    format!(
+        "  File: {file}\n  Size: {:<10}\tBlocks: {blocks:<10} {}\n Links: {links}\nAccess: ({access})  Uid: ({})   Gid: ({})\nModify: {modify}\n",
+        info.size,
+        file_type_name(info),
+        account(&info.owner),
+        account(&info.group),
+    )
 }
 
 /// Format stat output according to a format string.
@@ -168,14 +223,7 @@ fn format_stat(fmt: &str, name: &str, info: &crate::vfs::DirEntry) -> String {
     result = result.replace("%s", &info.size.to_string());
 
     // %F - file type
-    let file_type = if info.is_symlink() {
-        "symbolic link"
-    } else if info.is_dir() {
-        "directory"
-    } else {
-        "regular file"
-    };
-    result = result.replace("%F", file_type);
+    result = result.replace("%F", file_type_name(info));
 
     // Add newline if not present
     if !result.ends_with('\n') {

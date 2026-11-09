@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::ast::Value;
 use crate::glob::contains_glob;
@@ -25,9 +26,13 @@ struct LsArgs {
     #[arg(short = 'l', long = "long")]
     long: bool,
 
-    /// Show hidden files starting with `.`.
+    /// Show hidden files starting with `.`, plus `.` and `..` for each directory listed.
     #[arg(short = 'a', long = "all")]
     all: bool,
+
+    /// Show hidden files starting with `.`, but not `.` and `..`. Overrides -a.
+    #[arg(short = 'A', long = "almost-all")]
+    almost_all: bool,
 
     /// One entry per line.
     #[arg(short = '1', long = "one")]
@@ -119,7 +124,7 @@ impl Tool for Ls {
         parsed.global.apply(ctx);
 
         let long_format = parsed.long;
-        let show_all = parsed.all;
+        let show_all = parsed.all || parsed.almost_all;
         let human_readable = parsed.human;
         let sort_time = parsed.sort_time;
         let sort_size = parsed.sort_size;
@@ -135,12 +140,21 @@ impl Tool for Ls {
             long_format,
             human_readable,
             show_all,
+            dot_entries: parsed.all && !parsed.almost_all,
             sort: SortOptions {
                 by_time: sort_time,
                 by_size: sort_size,
                 reverse,
             },
             cross_mounts: parsed.cross_mounts,
+            zone: if long_format {
+                match super::date::scope_zone(ctx) {
+                    Ok(zone) => Some(zone),
+                    Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
+                }
+            } else {
+                None
+            },
         };
 
         // Collect every positional path. The kernel pre-expands bare globs
@@ -255,9 +269,13 @@ struct ListOptions {
     long_format: bool,
     human_readable: bool,
     show_all: bool,
+    /// `-a` without `-A`: a directory listing includes `.` and `..`.
+    dot_entries: bool,
     sort: SortOptions,
     /// `--cross-mounts`: `-R` descends into other mount regions.
     cross_mounts: bool,
+    /// The zone `-l` prints modification times in; `None` without `-l`.
+    zone: Option<super::date::Zone>,
 }
 
 impl Ls {
@@ -279,23 +297,19 @@ impl Ls {
             } else {
                 info.size.to_string()
             };
-            OutputNode::new(name_display)
+            OutputNode::new(name_display.clone())
                 .with_cells(vec![type_char.to_string(), size_str])
                 .with_entry_type(entry_type)
         } else {
-            OutputNode::new(name_display).with_entry_type(entry_type)
+            OutputNode::new(name_display.clone()).with_entry_type(entry_type)
         };
 
-        let output = if opts.long_format {
-            OutputData::table(
-                vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
-                vec![node],
-            )
+        if opts.long_format {
+            let text = long_listing(&[(name_display, info)], opts, false);
+            ExecResult::with_output_and_text(long_table(vec![node]), text)
         } else {
-            OutputData::nodes(vec![node])
-        };
-
-        ExecResult::with_output(output)
+            ExecResult::with_output(OutputData::nodes(vec![node]))
+        }
     }
 
     /// List files matching a glob pattern.
@@ -467,16 +481,14 @@ impl Ls {
             })
             .collect();
 
-        let output = if opts.long_format {
-            OutputData::table(
-                vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
-                nodes,
-            )
+        let mut result = if opts.long_format {
+            let rows: Vec<(String, &DirEntry)> =
+                infos.iter().map(|e| (entry_name_display(&e.name, e, true), e)).collect();
+            let text = long_listing(&rows, opts, false);
+            ExecResult::with_output_and_text(long_table(nodes), text)
         } else {
-            OutputData::nodes(nodes)
+            ExecResult::with_output(OutputData::nodes(nodes))
         };
-
-        let mut result = ExecResult::with_output(output);
         // An inaccessible explicit operand is a loud error: stderr message plus
         // a nonzero exit (matching the single-arg `list_single` path's exit 1),
         // even though the readable operands still list successfully.
@@ -495,10 +507,13 @@ impl Ls {
         opts: &ListOptions,
     ) -> ExecResult {
         match ctx.backend.list(resolved).await {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                if opts.dot_entries {
+                    entries.extend(dot_entries(ctx, resolved).await);
+                }
                 let filtered = filter_and_sort(entries, opts.show_all, &opts.sort);
 
-                if filtered.is_empty() {
+                if filtered.is_empty() && !opts.long_format {
                     return ExecResult::with_output(OutputData::new());
                 }
 
@@ -532,16 +547,16 @@ impl Ls {
                     })
                     .collect();
 
-                let output = if opts.long_format {
-                    OutputData::table(
-                        vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
-                        nodes,
-                    )
+                if opts.long_format {
+                    let rows: Vec<(String, &DirEntry)> = filtered
+                        .iter()
+                        .map(|e| (entry_name_display(&e.name, e, true), e))
+                        .collect();
+                    let text = long_listing(&rows, opts, true);
+                    ExecResult::with_output_and_text(long_table(nodes), text)
                 } else {
-                    OutputData::nodes(nodes)
-                };
-
-                ExecResult::with_output(output)
+                    ExecResult::with_output(OutputData::nodes(nodes))
+                }
             }
             Err(e) => ExecResult::failure(1, format!("ls: {}: {}", path, e)),
         }
@@ -589,7 +604,7 @@ impl Ls {
                 return kaish_tool_api::Interrupted.result("ls");
             }
             // List this directory
-            let entries = match ctx.backend.list(Path::new(&dir_path)).await {
+            let mut entries = match ctx.backend.list(Path::new(&dir_path)).await {
                 Ok(e) => e,
                 Err(e) => {
                     errors.push(format!(
@@ -607,6 +622,9 @@ impl Ls {
             text_output.push_str(&text_display_path);
             text_output.push_str(":\n");
 
+            if opts.dot_entries {
+                entries.extend(dot_entries(ctx, Path::new(&dir_path)).await);
+            }
             let mut filtered = filter_and_sort(entries, opts.show_all, &opts.sort);
 
             // Filter out ignored directories
@@ -623,7 +641,7 @@ impl Ls {
             // Collect subdirs for recursion (before formatting)
             let subdirs: Vec<_> = filtered
                 .iter()
-                .filter(|e| e.is_dir())
+                .filter(|e| e.is_dir() && e.name != "." && e.name != "..")
                 .filter(|e| {
                     let child = Path::new(&dir_path).join(&e.name);
                     let enter = boundaries.may_descend(root, &child);
@@ -674,10 +692,17 @@ impl Ls {
             );
 
             // Format and output entries (text)
-            let lines = format_entries(&filtered, opts.long_format, opts.human_readable);
-            text_output.push_str(&lines.join("\n"));
-            if !lines.is_empty() {
-                text_output.push('\n');
+            if opts.long_format {
+                let rows: Vec<(String, &DirEntry)> = filtered
+                    .iter()
+                    .map(|e| (entry_name_display(&e.name, e, true), e))
+                    .collect();
+                text_output.push_str(&long_listing(&rows, opts, true));
+            } else {
+                for e in &filtered {
+                    text_output.push_str(&e.name);
+                    text_output.push('\n');
+                }
             }
 
             // Add subdirs to visit (in reverse order for DFS)
@@ -687,10 +712,7 @@ impl Ls {
         }
 
         let output = if opts.long_format {
-            OutputData::table(
-                vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
-                dir_nodes,
-            )
+            long_table(dir_nodes)
         } else {
             OutputData::nodes(dir_nodes)
         };
@@ -711,6 +733,22 @@ impl Ls {
         note_skipped_mounts(&mut result, "ls", skipped_mounts);
         result
     }
+}
+
+/// The `.` and `..` entries `-a` adds to a listing of `dir`. At a root,
+/// `..` describes the root itself, as on Unix.
+async fn dot_entries(ctx: &mut ExecContext, dir: &Path) -> Vec<DirEntry> {
+    let parent = dir.parent().unwrap_or(dir);
+    let mut out = Vec::with_capacity(2);
+    for (name, path) in [(".", dir), ("..", parent)] {
+        // The directory was just listed, so a failed stat is a race with a
+        // concurrent removal; the listing goes on without that entry.
+        if let Ok(mut entry) = ctx.backend.stat(path).await {
+            entry.name = name.to_string();
+            out.push(entry);
+        }
+    }
+    out
 }
 
 /// Filter hidden files and sort entries.
@@ -738,22 +776,18 @@ fn filter_and_sort(entries: Vec<DirEntry>, show_all: bool, sort_opts: &SortOptio
     filtered
 }
 
-/// Render one entry's display name: `name -> target` for a symlink under
-/// `-l` (or a bare `name@` when the link is dangling), `name@` for a
-/// symlink otherwise (matching `ls -F`), and the name unchanged for
-/// anything else. `name` is passed separately from `entry` so a caller can
-/// use the exact operand string (`ls -l some/link`) rather than only the
-/// entry's own basename.
+/// Render one entry's display name, as GNU `ls` does: `name -> target` for
+/// a symlink under `-l`, and the bare name otherwise. `name` is passed
+/// separately from `entry` so a caller can use the exact operand string
+/// (`ls -l some/link`) rather than only the entry's own basename.
 fn entry_name_display(name: &str, entry: &DirEntry, long_format: bool) -> String {
-    if !entry.is_symlink() {
-        return name.to_string();
+    if long_format
+        && entry.is_symlink()
+        && let Some(target) = &entry.symlink_target
+    {
+        return format!("{} -> {}", name, target.display());
     }
-    if long_format {
-        if let Some(target) = &entry.symlink_target {
-            return format!("{} -> {}", name, target.display());
-        }
-    }
-    format!("{}@", name)
+    name.to_string()
 }
 
 /// Convert DirEntry to EntryType for coloring.
@@ -769,46 +803,114 @@ fn dir_entry_to_type(entry: &DirEntry) -> EntryType {
     }
 }
 
-/// Format entries for output (used by recursive listing).
-fn format_entries(entries: &[DirEntry], long_format: bool, human_readable: bool) -> Vec<String> {
-    if long_format {
-        entries
-            .iter()
-            .map(|e| {
-                let type_char = if e.is_symlink() {
-                    'l'
-                } else if e.is_dir() {
-                    'd'
-                } else {
-                    '-'
-                };
-                let size_str = if human_readable {
-                    format_human_size(e.size)
-                } else {
-                    e.size.to_string()
-                };
-                // For symlinks, show the target
-                let name_display = if e.is_symlink() {
-                    if let Some(target) = &e.symlink_target {
-                        format!("{} -> {}", e.name, target.display())
-                    } else {
-                        format!("{}@", e.name)
-                    }
-                } else {
-                    e.name.clone()
-                };
-                format!("{}  {}  {}", type_char, size_str, name_display)
-            })
-            .collect()
-    } else {
-        // In non-long format, add @ suffix for symlinks (like ls -F)
-        entries.iter().map(|e| {
-            if e.is_symlink() {
-                format!("{}@", e.name)
+/// The structured `-l` table behind `--json`. Text output comes from
+/// [`long_listing`] instead.
+fn long_table(nodes: Vec<OutputNode>) -> OutputData {
+    OutputData::table(vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()], nodes)
+}
+
+/// GNU `ls -l` text: a `total` line when `with_total` is set and every entry
+/// reports its blocks, then one aligned row per entry:
+/// `-rw-r--r-- 1 amy amy 6 Nov  9 10:39 a.txt`. A field the backend does
+/// not track prints `?`, as GNU does for a field it cannot read.
+fn long_listing(rows: &[(String, &DirEntry)], opts: &ListOptions, with_total: bool) -> String {
+    let now = SystemTime::now();
+    let fields: Vec<[String; 6]> = rows
+        .iter()
+        .map(|(_, e)| {
+            [
+                mode_string(e),
+                e.links.map_or_else(|| "?".to_string(), |n| n.to_string()),
+                e.owner.as_ref().map_or_else(|| "?".to_string(), |a| a.display_name()),
+                e.group.as_ref().map_or_else(|| "?".to_string(), |a| a.display_name()),
+                if opts.human_readable { format_human_size(e.size) } else { e.size.to_string() },
+                long_time(e.modified, now, opts.zone.as_ref()),
+            ]
+        })
+        .collect();
+    let width = |column: usize| fields.iter().map(|f| f[column].chars().count()).max().unwrap_or(0);
+    let (links_width, owner_width, group_width, size_width) = (width(1), width(2), width(3), width(4));
+
+    let mut text = String::new();
+    if with_total {
+        let blocks: Option<u64> = rows.iter().map(|(_, e)| e.blocks).sum();
+        if let Some(blocks) = blocks {
+            // GNU counts 1024-byte units, rounded up, or a size under -h.
+            let total = if opts.human_readable {
+                format_human_size(blocks * 512)
             } else {
-                e.name.clone()
-            }
-        }).collect()
+                blocks.div_ceil(2).to_string()
+            };
+            text.push_str(&format!("total {total}\n"));
+        }
+    }
+    for ((name, _), f) in rows.iter().zip(&fields) {
+        text.push_str(&format!(
+            "{} {:>links_width$} {:<owner_width$} {:<group_width$} {:>size_width$} {} {}\n",
+            f[0], f[1], f[2], f[3], f[4], f[5], name
+        ));
+    }
+    text
+}
+
+/// The ten-character mode, such as `drwxr-xr-x`. Unknown permissions print
+/// `?????????`.
+pub(super) fn mode_string(entry: &DirEntry) -> String {
+    use kaish_types::DirEntryKind;
+    let kind = match entry.kind {
+        DirEntryKind::Directory => 'd',
+        DirEntryKind::Symlink => 'l',
+        DirEntryKind::CharDevice => 'c',
+        DirEntryKind::BlockDevice => 'b',
+        DirEntryKind::Fifo => 'p',
+        DirEntryKind::Socket => 's',
+        _ => '-',
+    };
+    let Some(mode) = entry.permissions else {
+        return format!("{kind}?????????");
+    };
+    let bit = |mask: u32, c: char| if mode & mask != 0 { c } else { '-' };
+    // The execute slot also shows setuid, setgid, and sticky: `s`/`t` when
+    // execute is set, `S`/`T` when it is not.
+    let special = |exec: u32, special: u32, set: char| match (mode & exec != 0, mode & special != 0) {
+        (true, true) => set,
+        (false, true) => set.to_ascii_uppercase(),
+        (true, false) => 'x',
+        (false, false) => '-',
+    };
+    [
+        kind,
+        bit(0o400, 'r'),
+        bit(0o200, 'w'),
+        special(0o100, 0o4000, 's'),
+        bit(0o040, 'r'),
+        bit(0o020, 'w'),
+        special(0o010, 0o2000, 's'),
+        bit(0o004, 'r'),
+        bit(0o002, 'w'),
+        special(0o001, 0o1000, 't'),
+    ]
+    .iter()
+    .collect()
+}
+
+/// GNU's `-l` time column: `Nov  9 10:39` within the last six months,
+/// `Nov  9  2025` otherwise or in the future, and `?` when unknown.
+fn long_time(modified: Option<SystemTime>, now: SystemTime, zone: Option<&super::date::Zone>) -> String {
+    // Six Gregorian months, the cutoff GNU uses.
+    const SIX_MONTHS: Duration = Duration::from_secs(31_556_952 / 2);
+    let (Some(modified), Some(zone)) = (modified, zone) else {
+        return format!("{:>12}", "?");
+    };
+    let local = zone.instant(chrono::DateTime::<chrono::Utc>::from(modified));
+    let recent = match now.duration_since(modified) {
+        Ok(age) => age < SIX_MONTHS,
+        Err(_) => false,
+    };
+    if recent {
+        local.format("%b %e %H:%M").to_string()
+    } else {
+        local.format("%b %e  %Y").to_string()
     }
 }
 
@@ -1066,6 +1168,26 @@ mod tests {
         ExecContext::new(Arc::new(vfs))
     }
 
+    #[rstest::rstest]
+    #[case(0o755, "-rwxr-xr-x")]
+    #[case(0o4755, "-rwsr-xr-x")]
+    #[case(0o4644, "-rwSr--r--")]
+    #[case(0o2755, "-rwxr-sr-x")]
+    #[case(0o2644, "-rw-r-Sr--")]
+    #[case(0o1777, "-rwxrwxrwt")]
+    #[case(0o1666, "-rw-rw-rwT")]
+    #[case(0o000, "----------")]
+    fn mode_string_matches_gnu(#[case] mode: u32, #[case] expected: &str) {
+        let mut entry = DirEntry::file("f", 0);
+        entry.permissions = Some(mode);
+        assert_eq!(mode_string(&entry), expected);
+    }
+
+    #[test]
+    fn mode_string_without_permissions_is_question_marks() {
+        assert_eq!(mode_string(&DirEntry::directory("d")), "d?????????");
+    }
+
     #[tokio::test]
     async fn test_ls_shows_symlinks() {
         let mut ctx = make_ctx_with_symlinks().await;
@@ -1074,10 +1196,13 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Should show symlinks with @ suffix in short format
-        assert!(result.text_out().contains("link.txt@"), "output was: {}", result.text_out());
-        assert!(result.text_out().contains("linkdir@"), "output was: {}", result.text_out());
-        assert!(result.text_out().contains("broken@"), "output was: {}", result.text_out());
+        // Plain `ls` prints a symlink's bare name, as GNU does without -F.
+        let text = result.text_out().to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        for name in ["link.txt", "linkdir", "broken"] {
+            assert!(lines.contains(&name), "output was: {}", result.text_out());
+        }
+        assert!(!result.text_out().contains('@'), "output was: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -1113,8 +1238,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Symlinks should appear with @ suffix
-        assert!(result.text_out().contains("link.txt@"));
+        // Symlinks appear by bare name, as GNU prints them without -F.
+        assert!(result.text_out().lines().any(|l| l == "link.txt"), "output was: {}", result.text_out());
+        assert!(!result.text_out().contains('@'), "output was: {}", result.text_out());
     }
 
     #[tokio::test]

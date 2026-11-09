@@ -72,6 +72,8 @@ md-5 = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+# The host zone name, for the `%Z` abbreviation in `date`.
+iana-time-zone = "0.1"
 similar = { workspace = true }
 
 # ripgrep family — `ignore` provides global-gitignore lookup + file walking;

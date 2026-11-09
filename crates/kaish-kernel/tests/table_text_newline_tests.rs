@@ -59,8 +59,9 @@ async fn ls_redirect_ends_with_newline() {
 }
 
 #[tokio::test]
-async fn stat_is_one_line() {
-    assert_counts_lines("stat f", 1).await;
+async fn stat_block_is_five_lines() {
+    // File, Size, Links, Access, Modify; each line ends with a newline.
+    assert_counts_lines("stat f", 5).await;
 }
 
 #[tokio::test]

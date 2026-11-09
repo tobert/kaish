@@ -121,6 +121,10 @@ impl DevFs {
             modified: None,
             permissions: Some(Self::DEVICE_MODE),
             symlink_target: None,
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
         }
     }
 }
@@ -211,6 +215,10 @@ impl Filesystem for DevFs {
                 modified: None,
                 permissions: Some(Self::DIRECTORY_MODE),
                 symlink_target: None,
+                links: None,
+                blocks: None,
+                owner: None,
+                group: None,
             });
         }
         match Self::device(path) {

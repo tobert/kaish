@@ -36,6 +36,34 @@ pub struct DirEntry {
     pub permissions: Option<u32>,
     /// For symlinks, the target path.
     pub symlink_target: Option<PathBuf>,
+    /// Hard link count, if the backend tracks one.
+    pub links: Option<u64>,
+    /// Allocated size in 512-byte blocks, if available. `ls -l` sums these
+    /// for its `total` line.
+    pub blocks: Option<u64>,
+    /// The owning user, if the backend tracks one.
+    pub owner: Option<AccountId>,
+    /// The owning group, if the backend tracks one.
+    pub group: Option<AccountId>,
+}
+
+/// A numeric user or group ID, with its name when the system can resolve it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountId {
+    /// The numeric ID (uid or gid).
+    pub id: u32,
+    /// The account name, or `None` when the ID has no entry on this system.
+    pub name: Option<String>,
+}
+
+impl AccountId {
+    /// The name when known, else the numeric ID, as `ls -l` prints it.
+    pub fn display_name(&self) -> String {
+        match &self.name {
+            Some(name) => name.clone(),
+            None => self.id.to_string(),
+        }
+    }
 }
 
 impl DirEntry {
@@ -48,6 +76,10 @@ impl DirEntry {
             modified: None,
             permissions: None,
             symlink_target: None,
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
         }
     }
 
@@ -60,6 +92,10 @@ impl DirEntry {
             modified: None,
             permissions: None,
             symlink_target: None,
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
         }
     }
 
@@ -72,6 +108,10 @@ impl DirEntry {
             modified: None,
             permissions: None,
             symlink_target: Some(target.into()),
+            links: None,
+            blocks: None,
+            owner: None,
+            group: None,
         }
     }
 
