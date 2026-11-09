@@ -170,7 +170,7 @@ impl Zone {
             Zone::Utc => return "UTC".to_string(),
             Zone::Named(tz) => Some(*tz),
             // The host zone's IANA name; `None` when the host does not say.
-            Zone::Local => iana_time_zone::get_timezone().ok().and_then(|name| name.parse::<Tz>().ok()),
+            Zone::Local => host_zone(),
         };
         if let Some(tz) = named
             && let Some(abbreviation) = utc.with_timezone(&tz).offset().abbreviation()
@@ -187,6 +187,19 @@ impl Zone {
             format!("{sign}{hours:02}{minutes:02}")
         }
     }
+}
+
+/// The host's IANA zone, when it names one.
+#[cfg(not(target_os = "wasi"))]
+fn host_zone() -> Option<Tz> {
+    // An unnamed or unknown host zone prints the numeric offset instead.
+    iana_time_zone::get_timezone().ok()?.parse::<Tz>().ok()
+}
+
+/// WASI has no host zone name.
+#[cfg(target_os = "wasi")]
+fn host_zone() -> Option<Tz> {
+    None
 }
 
 /// The zone for local times outside `date`: the exported `TZ`, else the

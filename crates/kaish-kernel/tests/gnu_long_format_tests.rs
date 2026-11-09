@@ -95,7 +95,9 @@ async fn stat_lines_match_gnu() {
     let tmp = fixture();
     let (out, err, code) = kaish(tmp.path(), "stat a.txt link").await;
     assert_eq!(code, 0, "{err}");
-    let expected = gnu(tmp.path(), "stat a.txt link");
+    // Some coreutils releases quote a link's names (`'link' -> 'a.txt'`,
+    // Ubuntu 24.04); kaish prints them bare, as coreutils on Arch does.
+    let expected = gnu(tmp.path(), "stat a.txt link").replace('\'', "");
     // kaish prints GNU's lines for the fields it has, in GNU's order. GNU's
     // `IO Block:` field and its device, inode, and other time lines are absent.
     for line in out.lines() {
