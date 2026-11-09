@@ -659,15 +659,18 @@ fn render(
 /// Format via a strftime string, after translating GNU `%N` and validating
 /// against unknown specifiers — so the path can never panic the worker.
 fn format_strftime(dt: &DateTime<FixedOffset>, abbreviation: &str, fmt: &str) -> Result<String, String> {
-    let translated = translate_format(fmt, abbreviation);
+    let translated = translate_format(fmt, abbreviation)?;
     validate_format(&translated)?;
     Ok(dt.format(&translated).to_string())
 }
 
+/// The widest `%<width>Z` accepted; a larger width is an error.
+const MAX_ZONE_WIDTH: usize = 4096;
+
 /// Translate `%Z` into the zone abbreviation, and the GNU nanosecond
 /// specifiers chrono lacks into chrono's `%<n>f`:
 /// `%N`→`%9f`, `%3N`→`%3f`, `%6N`→`%6f`, `%9N`→`%9f`. `%%` is preserved.
-fn translate_format(fmt: &str, abbreviation: &str) -> String {
+fn translate_format(fmt: &str, abbreviation: &str) -> Result<String, String> {
     let mut out = String::with_capacity(fmt.len());
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
@@ -690,11 +693,23 @@ fn translate_format(fmt: &str, abbreviation: &str) -> String {
                 break;
             }
         }
-        if digits.is_empty() && chars.peek() == Some(&'Z') {
+        if chars.peek() == Some(&'Z') {
             // chrono's `%Z` on a fixed offset prints `+09:00`; GNU prints
-            // the zone abbreviation.
+            // the zone abbreviation, right-aligned to a width (`%10Z`).
             chars.next();
-            out.push_str(&abbreviation.replace('%', "%%"));
+            let width = if digits.is_empty() {
+                0
+            } else {
+                match digits.parse::<usize>() {
+                    Ok(width) if width <= MAX_ZONE_WIDTH => width,
+                    _ => {
+                        return Err(format!(
+                            "date: width {digits} in %{digits}Z is too large (at most {MAX_ZONE_WIDTH})"
+                        ))
+                    }
+                }
+            };
+            out.push_str(&format!("{abbreviation:>width$}").replace('%', "%%"));
         } else if chars.peek() == Some(&'N') {
             chars.next();
             let width = if digits.is_empty() { "9" } else { &digits };
@@ -708,7 +723,7 @@ fn translate_format(fmt: &str, abbreviation: &str) -> String {
             out.push_str(&digits);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Reject a format string containing an unknown specifier, loudly.

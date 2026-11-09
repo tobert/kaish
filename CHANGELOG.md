@@ -24,7 +24,8 @@ breaking entries are marked **BREAKING**.
   unlabeled row. An empty file is `regular empty file`. `--json` is unchanged.
 - **`date` prints GNU's default format**, `Tue Nov 14 22:13:20 UTC 2023`;
   it was `2023-11-14 22:13:20`, with no zone, so `-u` looked like local
-  time. `%Z` prints the zone abbreviation (`JST`), not an offset.
+  time. `%Z` prints the zone abbreviation (`JST`), not an offset, and
+  `%10Z` pads it.
 - **BREAKING (embedders): `DirEntry` gains `links`, `blocks`, `owner`, and
   `group`**, all `Option`. A struct literal must set them; the constructors
   set `None`. `LocalFs` fills them on Unix. See `docs/EMBEDDING.md`,
@@ -40,6 +41,9 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **`ls -lh` rounds sizes up**, as GNU does: 1075 bytes is `1.1K`, 11776
+  is `12K`, and 1048575 is `1.0M`. It rounded to nearest, so it printed
+  `1.0K` and `1024K`, which disagreed with GNU.
 - **`%` is a word character.** `printf %s x`, `git log --format=%cd`,
   `echo a%b`, and `echo 100%` failed with `lexer error: unexpected
   character`. `%` now lexes inside and at the start of a word, as in POSIX

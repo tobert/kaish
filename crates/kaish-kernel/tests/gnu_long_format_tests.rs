@@ -158,3 +158,14 @@ async fn date_prints_the_gnu_default_with_the_zone_abbreviation() {
         "Tue Nov 14 22:13:20 UTC 2023\nWed Nov 15 07:13:20 JST 2023\nTue Nov 14 19:13:20 -03 2023\n"
     );
 }
+
+#[tokio::test]
+async fn date_pads_a_zone_abbreviation_to_a_width() {
+    let tmp = fixture();
+    let (out, err, code) = kaish(tmp.path(), "TZ=Asia/Tokyo date -d @1700000000 '+[%10Z] [%Z] [%%Z]'").await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "[       JST] [JST] [%Z]\n");
+    let (_, err, code) = kaish(tmp.path(), "date '+%99999Z'").await;
+    assert_eq!(code, 2);
+    assert!(err.contains("width 99999 in %99999Z is too large (at most 4096)"), "{err}");
+}

@@ -929,24 +929,28 @@ fn compare_by_size(a: &DirEntry, b: &DirEntry) -> Ordering {
     b.size.cmp(&a.size) // Largest first
 }
 
-/// Format a size in human-readable form (1K, 2M, etc.).
+/// Format a size as GNU `ls -h` does: powers of 1024, rounded up, with one
+/// decimal below 10 (`1.1K`, `11K`, `1.0M`).
 fn format_human_size(bytes: u64) -> String {
-    const UNITS: &[&str] = &["", "K", "M", "G", "T", "P"];
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
-
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
+    const UNITS: &[&str] = &["K", "M", "G", "T", "P", "E"];
+    if bytes < 1024 {
+        return bytes.to_string();
     }
-
-    if unit_idx == 0 {
-        bytes.to_string()
-    } else if size >= 10.0 {
-        format!("{:.0}{}", size, UNITS[unit_idx])
-    } else {
-        format!("{:.1}{}", size, UNITS[unit_idx])
+    let bytes = u128::from(bytes);
+    let mut scale: u128 = 1;
+    for (index, unit) in UNITS.iter().enumerate() {
+        scale *= 1024;
+        let tenths = (bytes * 10).div_ceil(scale);
+        if tenths < 100 {
+            return format!("{}.{}{unit}", tenths / 10, tenths % 10);
+        }
+        let whole = bytes.div_ceil(scale);
+        // Rounding up can reach the next unit: 1048575 bytes is 1.0M.
+        if whole < 1024 || index == UNITS.len() - 1 {
+            return format!("{whole}{unit}");
+        }
     }
+    unreachable!("the last unit always returns")
 }
 
 #[cfg(test)]
@@ -1181,6 +1185,21 @@ mod tests {
         let mut entry = DirEntry::file("f", 0);
         entry.permissions = Some(mode);
         assert_eq!(mode_string(&entry), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(1023, "1023")]
+    #[case(1024, "1.0K")]
+    #[case(1025, "1.1K")]
+    #[case(10239, "10K")]
+    #[case(10752, "11K")]
+    #[case(11776, "12K")]
+    #[case(1_048_575, "1.0M")]
+    #[case(1_572_864, "1.5M")]
+    #[case(5_000_000, "4.8M")]
+    #[case(u64::MAX, "16E")]
+    fn human_size_rounds_up_as_gnu_does(#[case] bytes: u64, #[case] expected: &str) {
+        assert_eq!(format_human_size(bytes), expected);
     }
 
     #[test]
