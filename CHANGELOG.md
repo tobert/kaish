@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `]` glued to a word names its fix.** `ls foo].mp4` is still a parse
+  error, because `]` closes a `[ ]` list or a `[[ ]]` test. The message was
+  a list of every token the grammar expected; it now shows the word
+  escaped and quoted: `foo\].mp4` and `"foo].mp4"`. `NAME=` and `--flag=`
+  keep their prefix outside the quotes (`x="foo]"`). A `]` right after
+  another (`xs=[a b]]`) is named as an extra bracket. A `]` that closes a
+  test or a subscript keeps the grammar's message.
+
 ## [0.18.1] - 2026-10-11
 
 ### Added

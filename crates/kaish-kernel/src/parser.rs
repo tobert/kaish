@@ -1465,12 +1465,17 @@ fn parse_tokens(
             .map(|e| {
                 // Recover only the rejected word at this error's position;
                 // escaped patterns in earlier valid clauses remain valid.
-                let message = tokens.iter().find_map(|(token, span)| {
+                let message = tokens.iter().enumerate().find_map(|(i, (token, span))| {
                     if span != e.span() {
                         return None;
                     }
                     match token {
                         Token::EscapedWord(word) if word.has_unquoted_glob => Some(word.glob_error()),
+                        // A purpose-built `Custom` diagnosis stands; only the
+                        // grammar's own "found ']'" is replaced.
+                        Token::RBracket if !matches!(e.reason(), RichReason::Custom(_)) => {
+                            stray_rbracket_message(&tokens, i)
+                        }
                         _ => None,
                     }
                 }).unwrap_or_else(|| e.to_string());
@@ -2685,6 +2690,84 @@ fn glued_args_message(span: Span) -> String {
              word, e.g. {word:?}"
         ),
         _ => GLUED_ARGS_MESSAGE.to_string(),
+    }
+}
+
+/// The message for a `]` the grammar could not place, the token at
+/// `tokens[at]`, or `None` to keep the grammar's own message.
+///
+/// A `]` outside a bracket pair is its own token, so `foo].mp4` is three
+/// tokens and the grammar fails at the bracket with a long expected-token
+/// list. A file name is the usual source. This answers only a `]` glued to
+/// the end of a word with no bracket of its own: a `]` after whitespace may
+/// close a `[[ ]]` test (`[[ a == ]]`), and one inside a word with a `[`
+/// belongs to a subscript (`xs[]=1`); the grammar's labels describe those
+/// better than a quoting hint. A `]` glued to another `]` (`xs=[a b]]`) is
+/// named as one too many.
+///
+/// The word is the run of word tokens with no gap between them, so an
+/// escaped space stays inside it and a glued `;` or `|` stays out. The escaped form leads because it works in every
+/// position, including a command name, which cannot be quoted. The word is
+/// named only when [`is_plain_glued_word`] says it reads the same verbatim.
+fn stray_rbracket_message(tokens: &[(Token, Span)], at: usize) -> Option<String> {
+    let in_word =
+        |t: &Token| is_word_token(t) || matches!(t, Token::LBracket | Token::RBracket);
+    let glued = |i: usize| {
+        i > 0 && tokens[i - 1].1.end == tokens[i].1.start && in_word(&tokens[i - 1].0) && in_word(&tokens[i].0)
+    };
+    if !glued(at) {
+        return None;
+    }
+    if matches!(tokens[at - 1].0, Token::RBracket) {
+        return Some(
+            "extra `]`: no `[ ]` list or `[[ ]]` test is open for it to close; \
+             remove it, or escape it as `\\]` if the bracket is text"
+                .to_string(),
+        );
+    }
+    let mut first = at;
+    while glued(first) {
+        first -= 1;
+    }
+    let mut last = at;
+    while last + 1 < tokens.len() && glued(last + 1) {
+        last += 1;
+    }
+    if tokens[first..=last].iter().any(|(t, _)| matches!(t, Token::LBracket)) {
+        return None;
+    }
+    let word = PARSE_SOURCE.with(|source| {
+        source.borrow().as_deref().and_then(|s| s.get(tokens[first].1.start..tokens[last].1.end)).map(str::to_string)
+    });
+    Some(match word {
+        Some(word) if is_plain_glued_word(&word) => {
+            // `NAME=value` and `--flag=value` keep their prefix outside the
+            // quotes: a quoted `"x=foo]"` is no longer an assignment, and a
+            // quoted `"--flag=foo]"` no longer binds the flag.
+            let quoted = match word.split_once('=') {
+                Some((prefix, value)) if !value.is_empty() && is_name_or_flag(prefix) => {
+                    format!("{prefix}={value:?}")
+                }
+                _ => format!("{word:?}"),
+            };
+            format!(
+                "`]` outside a `[ ]` list or `[[ ]]` test must be escaped or quoted; \
+                 escape it, e.g. {}, or quote an argument, e.g. {quoted}",
+                word.replace(']', r"\]")
+            )
+        }
+        _ => "`]` outside a `[ ]` list or `[[ ]]` test must be escaped or quoted; \
+              escape it as `\\]`, or quote the whole argument, e.g. \"photo [1].jpg\""
+            .to_string(),
+    })
+}
+
+/// True when `prefix` is a variable name or a flag such as `--flag` or `-x`.
+fn is_name_or_flag(prefix: &str) -> bool {
+    let flag = prefix.strip_prefix("--").or_else(|| prefix.strip_prefix('-'));
+    match flag {
+        Some(flag) => !flag.is_empty() && flag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')),
+        None => crate::name::validate(prefix).is_ok(),
     }
 }
 
@@ -6364,6 +6447,108 @@ mod tests {
         // silently splat into 3 args. Reject with a quote-it hint.
         let msg = parse_err_message("echo /tmp/$(echo x).txt");
         assert!(msg.contains("quote"), "expected quote hint, got: {msg}");
+    }
+
+    #[test]
+    fn stray_rbracket_in_a_word_names_the_escaped_and_quoted_word() {
+        let msg = parse_err_message("ls -l foo].mp4");
+        assert!(msg.contains(r"foo\].mp4"), "expected the escaped word, got: {msg}");
+        assert!(msg.contains(r#""foo].mp4""#), "expected the quoted word, got: {msg}");
+        assert!(!msg.contains("expected"), "expected no grammar dump, got: {msg}");
+    }
+
+    #[test]
+    fn stray_rbracket_hint_points_at_the_bracket() {
+        let errs = parse("echo foo].mp4").expect_err("expected a parse error");
+        assert_eq!(errs[0].span, (8..9).into());
+    }
+
+    #[test]
+    fn stray_rbracket_examples_parse() {
+        // Every example the hint gives must be a fix, in the position it was
+        // given for. A command name cannot be quoted, so the escape leads.
+        assert!(parse(r"foo\].mp4").is_ok());
+        assert!(parse(r#"ls -l "foo].mp4""#).is_ok());
+        assert!(parse(r"ls -l foo\].mp4").is_ok());
+    }
+
+    #[test]
+    fn stray_rbracket_in_an_escaped_word_gives_the_generic_fix() {
+        // The word already holds backslashes, so naming it verbatim inside
+        // quotes would show a value the user did not mean.
+        let msg = parse_err_message(r"ls Im\ Here\ \[x-1].mp4");
+        assert!(msg.contains(r"\]"), "expected the escape fix, got: {msg}");
+        assert!(!msg.contains("Here"), "expected no verbatim word, got: {msg}");
+        assert!(!msg.contains("expected"), "expected no grammar dump, got: {msg}");
+    }
+
+    #[test]
+    fn stray_rbracket_word_keeps_its_escaped_space() {
+        // `Im\ Here` is one word; naming only `Here].mp4` would split it.
+        let msg = parse_err_message(r"ls Im\ Here].mp4");
+        assert!(!msg.contains(r#""Here].mp4""#), "expected the whole word, got: {msg}");
+    }
+
+    #[test]
+    fn stray_rbracket_word_stops_at_an_operator() {
+        let msg = parse_err_message("echo foo]; echo ok");
+        assert!(msg.contains(r#""foo]""#), "expected the word without `;`, got: {msg}");
+    }
+
+    #[test]
+    fn stray_rbracket_in_an_assignment_quotes_the_value() {
+        // A quoted `"x=foo]"` is not an assignment.
+        let msg = parse_err_message("x=foo]");
+        assert!(msg.contains(r#"x="foo]""#), "expected the quoted value, got: {msg}");
+        assert!(msg.contains(r"x=foo\]"), "expected the escaped word, got: {msg}");
+        assert!(parse(r#"x="foo]""#).is_ok());
+    }
+
+    #[test]
+    fn stray_rbracket_in_a_flag_value_keeps_the_flag() {
+        // A quoted `"--flag=foo]"` is a positional word, not the flag.
+        let msg = parse_err_message("cmd --flag=foo]");
+        assert!(msg.contains(r#"--flag="foo]""#), "expected the quoted value, got: {msg}");
+        let program = parse(r#"cmd --flag="foo]""#).expect("the suggested form parses");
+        let Stmt::Command(cmd) = &program.statements[0] else {
+            panic!("expected a command, got {:?}", program.statements[0]);
+        };
+        assert!(
+            matches!(&cmd.args[0], Arg::Named { key, .. } if key == "flag"),
+            "expected the flag to bind, got {:?}",
+            cmd.args
+        );
+    }
+
+    #[test]
+    fn extra_closing_bracket_is_named_as_extra() {
+        // Quoting `"b]]"` would not fix a list with one bracket too many.
+        for source in ["xs=[a b]]", "[[ a == b ]]]"] {
+            let msg = parse_err_message(source);
+            assert!(msg.contains("extra `]`"), "{source}: expected the extra-bracket message, got: {msg}");
+        }
+    }
+
+    #[test]
+    fn rbracket_closing_kaish_syntax_keeps_the_grammar_message() {
+        // These brackets close a test or a subscript; quoting them is no fix.
+        for source in ["[[ a == ]]", "[[ a ]]", "xs[]=1", "xs=[a b] ]", "echo ]"] {
+            let msg = parse_err_message(source);
+            assert!(!msg.contains("must be escaped"), "{source}: expected the grammar's message, got: {msg}");
+        }
+    }
+
+    #[test]
+    fn brackets_that_close_kaish_syntax_still_parse() {
+        for source in [
+            "xs=[a b]",
+            "[[ -f x ]]",
+            r#"echo "foo].mp4""#,
+            r"echo foo\].mp4",
+            "echo foo[1]",
+        ] {
+            assert!(parse(source).is_ok(), "{source} should parse");
+        }
     }
 
     #[test]
