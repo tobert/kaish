@@ -380,7 +380,7 @@ async fn alias_body_cd_tilde_expands() {
     let kernel = kernel();
     let out = kernel.execute("mkdir -p /home/fixture; alias ll='cd ~'; ll; pwd").await.unwrap();
     assert!(out.ok(), "{out:?}");
-    assert_eq!(out.text_out(), HOME);
+    assert_eq!(out.text_out(), format!("{HOME}\n"));
 }
 
 // Pre-existing, unrelated limitation, checked (not fixed) per the review's

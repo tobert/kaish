@@ -310,11 +310,6 @@ fn print_env_with_overrides(
         output.push_str(&format!("{}={}{}", name, value, sep));
     }
 
-    // Remove trailing separator for consistency (unless null-sep)
-    if !null_sep && !output.is_empty() {
-        output.pop();
-    }
-
     ExecResult::with_output(OutputData::text(output))
 }
 

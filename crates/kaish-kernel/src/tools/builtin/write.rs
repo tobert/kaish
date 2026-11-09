@@ -128,7 +128,7 @@ impl Tool for Write {
         // and this write is a loud conflict, not a silent clobber.
         let expected = snapshots.get(&resolved);
         match ctx.overwrite_checked(Path::new(&resolved), &content, expected).await {
-            Ok(()) => ExecResult::with_output(OutputData::text(format!("Wrote {} bytes to {}", content.len(), path))),
+            Ok(()) => ExecResult::with_output(OutputData::text(format!("Wrote {} bytes to {}\n", content.len(), path))),
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
         }
     }

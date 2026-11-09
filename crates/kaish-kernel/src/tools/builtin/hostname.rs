@@ -60,7 +60,7 @@ impl Tool for Hostname {
         };
         parsed.global.apply(ctx);
 
-        ExecResult::with_output(OutputData::text(read_hostname()))
+        ExecResult::with_output(OutputData::text(format!("{}\n", read_hostname())))
     }
 }
 
@@ -80,7 +80,7 @@ mod tests {
         let result = Hostname.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
         assert!(!result.text_out().is_empty(), "hostname should return a non-empty string");
-        // Should not contain trailing newline
-        assert!(!result.text_out().contains('\n'));
+        // One line, ended with a newline
+        assert!(result.text_out().ends_with('\n') && result.text_out().matches('\n').count() == 1);
     }
 }

@@ -27,6 +27,13 @@ breaking entries are marked **BREAKING**.
   character`. `%` now lexes inside and at the start of a word, as in POSIX
   shells; `%1` stays a job spec, and `${x%y}` and `$((7 % 3))` are unchanged.
 
+- **A builtin that prints a line ends it with a newline**, as `echo` does.
+  `pwd`, `hostname`, `uname`, `cd -`, `mktemp`, `which`, `env`, `export`,
+  `type`, `command -v`, `write`, and `kaish-trash`'s messages printed their
+  last line without one, so the next command's output joined it:
+  `pwd && ls -l` printed `/home/amyCargo.toml	-	1098`. `$(...)` strips the
+  newline, so a captured value is unchanged.
+
 ## [0.18.1] - 2026-10-11
 
 ### Added

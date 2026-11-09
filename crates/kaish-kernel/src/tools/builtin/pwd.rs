@@ -52,7 +52,7 @@ impl Tool for Pwd {
         };
         parsed.global.apply(ctx);
 
-        ExecResult::with_output(OutputData::text(ctx.cwd.to_string_lossy().to_string()))
+        ExecResult::with_output(OutputData::text(format!("{}\n", ctx.cwd.to_string_lossy())))
     }
 }
 
@@ -72,7 +72,7 @@ mod tests {
 
         let result = Pwd.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "/");
+        assert_eq!(&*result.text_out(), "/\n");
     }
 
     #[tokio::test]
@@ -84,6 +84,6 @@ mod tests {
 
         let result = Pwd.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "/mnt/project");
+        assert_eq!(&*result.text_out(), "/mnt/project\n");
     }
 }

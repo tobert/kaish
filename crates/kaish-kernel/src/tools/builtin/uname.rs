@@ -244,7 +244,7 @@ impl Tool for Uname {
             parts.push(&info.os);
         }
 
-        let output = parts.join(" ");
+        let output = parts.join(" ") + "\n";
         ExecResult::with_output(OutputData::text(output))
     }
 }
@@ -266,7 +266,7 @@ mod tests {
         let mut ctx = make_ctx();
         let result = Uname.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "kaish");
+        assert_eq!(result.text_out().trim_end(), "kaish");
     }
 
     #[tokio::test]
@@ -276,7 +276,7 @@ mod tests {
         args.flags.insert("s".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "kaish");
+        assert_eq!(result.text_out().trim_end(), "kaish");
     }
 
     #[tokio::test]
@@ -288,7 +288,7 @@ mod tests {
         args.flags.insert("n".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "kaish");
+        assert_eq!(result.text_out().trim_end(), "kaish");
     }
 
     #[tokio::test]
@@ -300,7 +300,7 @@ mod tests {
         args.flags.insert("n".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "sandbox-01");
+        assert_eq!(result.text_out().trim_end(), "sandbox-01");
     }
 
     #[tokio::test]
@@ -310,7 +310,7 @@ mod tests {
         args.flags.insert("r".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(result.text_out().trim_end(), env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
@@ -331,7 +331,7 @@ mod tests {
         args.flags.insert("m".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), std::env::consts::ARCH);
+        assert_eq!(result.text_out().trim_end(), std::env::consts::ARCH);
     }
 
     #[tokio::test]
@@ -341,7 +341,7 @@ mod tests {
         args.flags.insert("o".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(&*result.text_out(), "kai");
+        assert_eq!(result.text_out().trim_end(), "kai");
     }
 
     #[tokio::test]
@@ -395,7 +395,7 @@ mod tests {
         assert!(result.ok());
 
         let text = result.text_out();
-        let parts: Vec<&str> = text.split(' ').collect();
+        let parts: Vec<&str> = text.trim_end().split(' ').collect();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0], "kaish");
     }
@@ -410,9 +410,9 @@ mod tests {
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
         // In host mode, sysname should NOT be "kaish"
-        assert_ne!(&*result.text_out(), "kaish", "host mode should return real OS");
+        assert_ne!(result.text_out().trim_end(), "kaish", "host mode should return real OS");
         // On Linux it should be "Linux"
-        assert_eq!(&*result.text_out(), "Linux");
+        assert_eq!(result.text_out().trim_end(), "Linux");
     }
 
     #[cfg(all(target_os = "linux", feature = "host"))]

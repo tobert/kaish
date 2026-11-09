@@ -269,7 +269,7 @@ async fn describe_all(
             Err(message) => return ExecResult::failure(2, message),
         }
     }
-    let mut result = ExecResult::with_output(OutputData::text(lines.join("\n")));
+    let mut result = ExecResult::with_output(OutputData::text(lines.iter().map(|l| format!("{l}\n")).collect::<String>()));
     if !missing.is_empty() {
         result = result.with_code(1);
         if report_missing {

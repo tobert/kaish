@@ -127,13 +127,13 @@ impl Tool for Mktemp {
         // Create the temp file or directory
         if is_dir {
             match ctx.backend.mkdir(Path::new(&resolved)).await {
-                Ok(()) => ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string())),
+                Ok(()) => ExecResult::with_output(OutputData::text(format!("{}\n", resolved.to_string_lossy()))),
                 Err(e) => ExecResult::failure(1, format!("mktemp: failed to create directory: {}", e)),
             }
         } else {
             // Create empty file (CreateNew ensures uniqueness)
             match ctx.backend.write(Path::new(&resolved), &[], WriteMode::CreateNew).await {
-                Ok(()) => ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string())),
+                Ok(()) => ExecResult::with_output(OutputData::text(format!("{}\n", resolved.to_string_lossy()))),
                 Err(e) => ExecResult::failure(1, format!("mktemp: failed to create file: {}", e)),
             }
         }
@@ -262,7 +262,7 @@ mod tests {
         assert!(result.text_out().starts_with("/tmp/tmp."));
 
         // Verify file was created
-        let stat = ctx.backend.stat(Path::new(&*result.text_out())).await;
+        let stat = ctx.backend.stat(Path::new(result.text_out().trim_end())).await;
         assert!(stat.is_ok());
         assert!(stat.unwrap().is_file());
     }
@@ -278,7 +278,7 @@ mod tests {
         assert!(result.text_out().starts_with("/tmp/tmp."));
 
         // Verify directory was created
-        let stat = ctx.backend.stat(Path::new(&*result.text_out())).await;
+        let stat = ctx.backend.stat(Path::new(result.text_out().trim_end())).await;
         assert!(stat.is_ok());
         assert!(stat.unwrap().is_dir());
     }
@@ -308,7 +308,7 @@ mod tests {
         let result = Mktemp.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.text_out().starts_with("/tmp/myapp."));
-        assert_eq!(result.text_out().len(), "/tmp/myapp.".len() + 5);
+        assert_eq!(result.text_out().len(), "/tmp/myapp.".len() + 5 + 1, "five random characters and the newline");
     }
 
     /// mktemp honors the `$TMPDIR` kaish var when no explicit `-p` is given,

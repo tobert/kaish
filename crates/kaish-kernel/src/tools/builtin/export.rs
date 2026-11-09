@@ -167,7 +167,7 @@ fn print_exports(ctx: &ExecContext) -> ExecResult {
         }
     }
 
-    ExecResult::with_output(OutputData::text(output.trim_end()))
+    ExecResult::with_output(OutputData::text(output))
 }
 
 /// Format a value for shell output.

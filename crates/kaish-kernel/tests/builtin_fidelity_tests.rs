@@ -364,6 +364,44 @@ async fn sort_version_no_digits_is_lexical() {
     assert_eq!(out, "apple\nbanana\ncherry\n");
 }
 
+// ─────────────── a printed line ends with a newline ───────────────
+// A builtin that prints one or more lines ends the last one with a newline,
+// as `echo` does, so a following command's output starts on its own line:
+// `pwd && ls` printed `/home/amyfile.txt` before. `$(...)` strips the
+// newline, so a captured value is unchanged.
+
+#[tokio::test]
+async fn a_printed_line_ends_with_a_newline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("sub")).expect("mkdir sub");
+    let kernel = Kernel::new(KernelConfig::repl().with_trash(false).with_cwd(dir.path().to_path_buf()))
+        .expect("failed to create kernel")
+        .into_arc();
+    let mut commands = vec![
+        "pwd", "uname", "uname -a", "cd sub && cd -", "mktemp", "mktemp -d",
+        "export K=v && env", "export K=v && export", "type ls", "command -v ls", "write g hi",
+    ];
+    // `hostname` is a builtin only with `host`, and `which` finds a program
+    // only with `subprocess`.
+    if cfg!(feature = "host") {
+        commands.push("hostname");
+    }
+    if cfg!(feature = "subprocess") {
+        commands.push("export PATH=/usr/bin:/bin && which ls");
+    }
+    for cmd in commands {
+        let result = kernel
+            .execute_with_options(&format!("{cmd} && echo END"), ExecuteOptions::new())
+            .await
+            .expect("kernel execute");
+        let out = result.text_out().to_string();
+        assert_eq!(result.code, 0, "{cmd}: out={out:?} err={:?}", result.err);
+        assert!(out.ends_with("\nEND\n") && out.len() > 5, "{cmd}: its last line must end before END: {out:?} err={:?}", result.err);
+    }
+    let result = kernel.execute_with_options("x=$(pwd); echo \"[$x]\"", ExecuteOptions::new()).await.expect("kernel execute");
+    assert!(result.text_out().ends_with("]\n") && !result.text_out().contains("\n]"), "$(pwd) strips the newline: {:?}", result.text_out());
+}
+
 // ───────────────── trailing-newline EMIT batch (P4.1) ────────────────────
 // tac / base64-encode / xxd -p newline-terminate their output to match the
 // consensus and kaish's line tools. base64 -d (raw bytes out) does NOT.

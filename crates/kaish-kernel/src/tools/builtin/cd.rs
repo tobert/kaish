@@ -95,7 +95,7 @@ impl Tool for Cd {
                     ctx.set_cwd(new_cwd);
                     // For `cd -`, output the new directory (like bash)
                     if path_arg == "-" {
-                        ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string()))
+                        ExecResult::with_output(OutputData::text(format!("{}\n", resolved.to_string_lossy())))
                     } else {
                         ExecResult::success("")
                     }
@@ -188,7 +188,7 @@ mod tests {
         assert!(result.ok());
         assert_eq!(ctx.cwd, PathBuf::from("/"));
         // cd - prints the new directory
-        assert_eq!(&*result.text_out(), "/");
+        assert_eq!(&*result.text_out(), "/\n");
     }
 
     #[tokio::test]
