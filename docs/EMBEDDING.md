@@ -6,7 +6,7 @@ and output capture.
 
 ## Stability
 
-kaish is pre-1.0 (currently 0.18.x, MSRV 1.85). The language has settled;
+kaish is pre-1.0 (currently 0.19.x, MSRV 1.85). The language has settled;
 the embedding API may still change between minor versions where it improves
 both kaish and its embedders — [kaijutsu](https://github.com/tobert/kaijutsu)
 is the reference embedder. Pin a minor version and read release notes when
@@ -1495,7 +1495,7 @@ $ kaish --plan '[[ "abc" -eq 1 ]]'
 {"statements":[…],"warnings":[{"code":"W008","message":"this comparison
 cannot succeed: type error: expected numeric operand, got non-numeric string
 \"abc\"","suggestion":"compare with `==` for text, or give the operand a
-numeric value"}],"kaish_version":"0.18.1",…}
+numeric value"}],"kaish_version":"0.19.0",…}
 ```
 
 The plan exits **0** for that program, because the program runs. `warnings`
