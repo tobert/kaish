@@ -47,6 +47,10 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **`stat -c` reads `%%` and leaves file names alone.** `stat -c '%n %%'`
+  prints the name and `%`; it printed `%%`, and a name such as `a%sb` came
+  out as `a2b` because the size replaced the `%s` inside it. `date` with an
+  unknown or daylight-saving `TZ` exits 1, as `ls` and `stat` do; it was 2.
 - **`ls -lh` rounds sizes up**, as GNU does: 1075 bytes is `1.1K`, 11776
   is `12K`, and 1048575 is `1.0M`. It rounded to nearest, so it printed
   `1.0K` and `1024K`, which disagreed with GNU.

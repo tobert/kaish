@@ -340,7 +340,11 @@ impl Date {
             return Err("date: cannot combine --date and --reference".to_string());
         }
 
-        let zone = resolve_zone(parsed.utc, parsed.tz.as_deref(), scope_tz(ctx))?;
+        // A zone error exits 1, as in `ls -l` and `stat`; 2 is for usage errors.
+        let zone = match resolve_zone(parsed.utc, parsed.tz.as_deref(), scope_tz(ctx)) {
+            Ok(zone) => zone,
+            Err(message) => return Ok(ExecResult::failure(1, message)),
+        };
 
         // The format positional is the first `+...` operand; any bare operand
         // that is neither `+FORMAT` nor `@TIMESTAMP` is an error (GNU rejects
@@ -964,7 +968,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_timezone_is_loud_error() {
         let result = run(&fixed_date(), &["--tz", "Mars/Olympus", "-d", "now"]).await;
-        assert_eq!(result.code, 2);
+        assert_eq!(result.code, 1);
     }
 
     // --- `-d` grammar -------------------------------------------------------

@@ -59,9 +59,8 @@ async fn oldpwd_is_this_sessions_previous_directory() {
 /// variable reports.
 #[tokio::test]
 async fn cd_dash_agrees_with_oldpwd() {
-    // `cd -` prints the new directory (as bash does) and with no trailing
-    // newline, so its output would run into the next one — redirect it away
-    // and ask the variable, which is what this is about.
+    // `cd -` prints the new directory (as bash does); redirect it away and
+    // ask the variable, which is what this is about.
     assert_eq!(out("cd /tmp; cd /usr; cd - > /dev/null; echo $PWD").await, "/tmp");
 }
 

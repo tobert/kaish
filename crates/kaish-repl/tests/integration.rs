@@ -1587,3 +1587,23 @@ fn dirname_multi_positional_prints_each() {
         lines
     );
 }
+
+/// `ls -l` and `stat` print GNU's text in an interactive session, as `kaish -c`
+/// does; the REPL must not re-render their rows as a NAME/TYPE/SIZE table.
+#[test]
+fn ls_l_and_stat_print_gnu_text_in_the_repl() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"hello\n").unwrap();
+    let mut repl = Repl::with_root(dir.path().to_path_buf()).unwrap();
+
+    let ProcessResult::Output(listing) = repl.process_line("ls -l a.txt") else {
+        panic!("ls -l printed nothing");
+    };
+    assert!(listing.contains("-rw-") && listing.trim_end().ends_with("a.txt"), "{listing:?}");
+    assert!(!listing.contains("NAME"), "{listing:?}");
+
+    let ProcessResult::Output(block) = repl.process_line("stat a.txt") else {
+        panic!("stat printed nothing");
+    };
+    assert!(block.contains("Size: 6") && block.contains("Links:"), "{block:?}");
+}

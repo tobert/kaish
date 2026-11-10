@@ -33,7 +33,7 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
         // bare lines. Print that text rather than re-deriving a rendering
         // from the rows, so an interactive session shows what `kaish -c`
         // shows and no gutter appears that the command never asked for.
-        if output.root.iter().any(|n| n.line.is_some()) {
+        if output.root.iter().any(|n| n.line.is_some()) || prints_own_text(result, output) {
             let text = result.text_out();
             if !text.is_empty() {
                 return text.trim_end_matches('\n').to_string();
@@ -44,6 +44,14 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
 
     // No structured output - use raw output
     result.text_out().into_owned()
+}
+
+/// A table whose builtin set its own text, which differs from the canonical
+/// rows: `ls -l` and `stat` print GNU's layout, and an interactive session
+/// shows it as `kaish -c` does instead of a NAME/TYPE/SIZE table.
+fn prints_own_text(result: &ExecResult, output: &OutputData) -> bool {
+    output.root.iter().any(|node| !node.cells.is_empty())
+        && result.text_out() != output.to_canonical_string()
 }
 
 /// Format OutputData for display based on context.

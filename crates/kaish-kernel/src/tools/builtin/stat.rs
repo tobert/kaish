@@ -213,17 +213,29 @@ fn stat_block(name: &str, info: &crate::vfs::DirEntry, zone: Option<&super::date
 }
 
 /// Format stat output according to a format string.
+///
+/// One left-to-right pass, so a `%` inside a file name is never read as a
+/// directive. `%%` is a literal `%`; an unknown directive stays as written.
 fn format_stat(fmt: &str, name: &str, info: &crate::vfs::DirEntry) -> String {
-    let mut result = fmt.to_string();
-
-    // %n - file name
-    result = result.replace("%n", name);
-
-    // %s - size in bytes
-    result = result.replace("%s", &info.size.to_string());
-
-    // %F - file type
-    result = result.replace("%F", file_type_name(info));
+    let mut result = String::with_capacity(fmt.len());
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            result.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => result.push_str(name),
+            Some('s') => result.push_str(&info.size.to_string()),
+            Some('F') => result.push_str(file_type_name(info)),
+            Some('%') => result.push('%'),
+            Some(other) => {
+                result.push('%');
+                result.push(other);
+            }
+            None => result.push('%'),
+        }
+    }
 
     // Add newline if not present
     if !result.ends_with('\n') {
