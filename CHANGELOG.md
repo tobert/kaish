@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-10
+
 ### Changed
 
 - **BREAKING:** for embedders, **`DirEntry` gains `links`, `blocks`,
@@ -3172,7 +3174,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/tobert/kaish/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/tobert/kaish/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/tobert/kaish/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/tobert/kaish/compare/v0.17.1...v0.17.2
