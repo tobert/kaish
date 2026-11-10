@@ -235,3 +235,29 @@ async fn stat_prints_question_marks_for_fields_memoryfs_does_not_track() {
     assert!(out.contains(" Links: ?\n"), "{out}");
     assert!(out.contains("Uid: (    ?/       ?)   Gid: (    ?/       ?)"), "{out}");
 }
+
+#[tokio::test]
+async fn date_with_a_daylight_saving_tz_exits_1_like_ls_and_stat() {
+    let tmp = fixture();
+    let kernel = kernel_at(tmp.path());
+    let r = kernel.execute("export TZ='EST5EDT,M3.2.0,M11.1.0'; date").await.expect("execute");
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("America/New_York"), "{}", r.err);
+}
+
+#[tokio::test]
+async fn date_prints_a_posix_zone_abbreviation() {
+    let tmp = fixture();
+    let kernel = kernel_at(tmp.path());
+    let r = kernel.execute("export TZ=JST-9; date -d @0 '+%Z %H'").await.expect("execute");
+    assert_eq!((r.code, r.text_out().trim().to_string()), (0, "JST 09".to_string()), "{}", r.err);
+}
+
+#[tokio::test]
+async fn stat_format_substitutes_once_and_reads_percent_percent() {
+    let tmp = fixture();
+    std::fs::write(tmp.path().join("a%sb"), b"xy").expect("write");
+    let kernel = kernel_at(tmp.path());
+    let r = kernel.execute("stat -c '%n|%s|%%' 'a%sb'").await.expect("execute");
+    assert_eq!(r.text_out(), "a%sb|2|%\n", "{}", r.err);
+}

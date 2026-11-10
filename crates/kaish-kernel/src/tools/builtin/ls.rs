@@ -833,7 +833,12 @@ fn long_listing(rows: &[(String, &DirEntry)], opts: &ListOptions, with_total: bo
 
     let mut text = String::new();
     if with_total {
-        let blocks: Option<u64> = rows.iter().map(|(_, e)| e.blocks).sum();
+        // A backend that reports a count too large to total gets no `total`
+        // line, the same as one that does not track blocks.
+        let blocks: Option<u64> = rows
+            .iter()
+            .try_fold(0u64, |sum, (_, e)| e.blocks.and_then(|b| sum.checked_add(b)))
+            .filter(|b| b.checked_mul(512).is_some());
         if let Some(blocks) = blocks {
             // GNU counts 1024-byte units, rounded up, or a size under -h.
             let total = if opts.human_readable {
@@ -967,6 +972,34 @@ mod tests {
         mem.mkdir(Path::new("subdir")).await.unwrap();
         vfs.mount("/", mem);
         ExecContext::new(Arc::new(vfs))
+    }
+
+    /// An embedder can report any `blocks`; a sum or product past `u64`
+    /// drops the `total` line instead of panicking.
+    #[test]
+    fn huge_block_counts_drop_the_total_line() {
+        let opts = ListOptions {
+            long_format: true,
+            human_readable: true,
+            show_all: false,
+            dot_entries: false,
+            sort: SortOptions { by_time: false, by_size: false, reverse: false },
+            cross_mounts: false,
+            zone: Some(super::super::date::Zone::Utc),
+        };
+        for blocks in [u64::MAX, u64::MAX / 512 + 1] {
+            let mut entry = DirEntry::file("a", 1);
+            entry.blocks = Some(blocks);
+            let rows = vec![("a".to_string(), &entry)];
+            let text = long_listing(&rows, &opts, true);
+            assert!(!text.contains("total"), "{blocks}: {text}");
+        }
+        let mut one = DirEntry::file("a", 1);
+        let mut two = DirEntry::file("b", 1);
+        one.blocks = Some(u64::MAX);
+        two.blocks = Some(1);
+        let rows = vec![("a".to_string(), &one), ("b".to_string(), &two)];
+        assert!(!long_listing(&rows, &opts, true).contains("total"));
     }
 
     #[tokio::test]
