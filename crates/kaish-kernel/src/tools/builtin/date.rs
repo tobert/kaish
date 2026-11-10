@@ -147,6 +147,9 @@ pub(super) enum Zone {
     Utc,
     Local,
     Named(Tz),
+    /// A POSIX `TZ` without daylight-saving rules (`UTC0`, `JST-9`), with
+    /// the abbreviation it names.
+    Fixed(FixedOffset, String),
 }
 
 impl Zone {
@@ -158,6 +161,7 @@ impl Zone {
             Zone::Utc => utc.fixed_offset(),
             Zone::Local => utc.with_timezone(&Local).fixed_offset(),
             Zone::Named(tz) => utc.with_timezone(tz).fixed_offset(),
+            Zone::Fixed(offset, _) => utc.with_timezone(offset),
         }
     }
 
@@ -168,6 +172,7 @@ impl Zone {
         use chrono_tz::OffsetName;
         let named = match self {
             Zone::Utc => return "UTC".to_string(),
+            Zone::Fixed(_, name) => return name.clone(),
             Zone::Named(tz) => Some(*tz),
             // The host zone's IANA name; `None` when the host does not say.
             Zone::Local => host_zone(),
@@ -206,12 +211,78 @@ fn host_zone() -> Option<Tz> {
 /// host zone. An unknown `TZ` is an error.
 pub(super) fn scope_zone(ctx: &ExecContext) -> Result<Zone, String> {
     match scope_tz(ctx) {
-        Some(name) => name
-            .parse::<Tz>()
-            .map(Zone::Named)
-            .map_err(|_| format!("unknown timezone '{name}' in TZ (use an IANA name like Asia/Tokyo)")),
+        Some(value) => parse_zone(&value).map_err(|e| format!("{e} in TZ")),
         None => Ok(Zone::Local),
     }
+}
+
+/// Read a `TZ` value the way the C library does: an optional leading `:`,
+/// then `/etc/localtime` (the host zone), a path under `zoneinfo/`, an IANA
+/// name (`Asia/Tokyo`), or a POSIX zone without daylight-saving rules
+/// (`UTC0`, `JST-9`, `<+0530>-5:30`).
+fn parse_zone(value: &str) -> Result<Zone, String> {
+    let name = value.strip_prefix(':').unwrap_or(value);
+    if name.starts_with('/') {
+        if name == "/etc/localtime" {
+            return Ok(Zone::Local);
+        }
+        if let Some((_, zone)) = name.rsplit_once("zoneinfo/")
+            && let Ok(tz) = zone.parse::<Tz>()
+        {
+            return Ok(Zone::Named(tz));
+        }
+        return Err(format!(
+            "unknown timezone file '{value}' (use a path under /usr/share/zoneinfo, or an IANA name like Asia/Tokyo)"
+        ));
+    }
+    if let Ok(tz) = name.parse::<Tz>() {
+        return Ok(Zone::Named(tz));
+    }
+    parse_posix_zone(value, name)
+}
+
+/// A POSIX `std offset` zone. The offset counts hours west of UTC, so `JST-9`
+/// is UTC+9. Daylight-saving rules after the offset are refused.
+fn parse_posix_zone(value: &str, spec: &str) -> Result<Zone, String> {
+    let unknown = || {
+        format!("unknown timezone '{value}' (use an IANA name like Asia/Tokyo, or a POSIX zone like UTC0)")
+    };
+    let (abbreviation, rest) = if let Some(quoted) = spec.strip_prefix('<') {
+        let (inner, rest) = quoted.split_once('>').ok_or_else(unknown)?;
+        (inner, rest)
+    } else {
+        let end = spec.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(spec.len());
+        spec.split_at(end)
+    };
+    if abbreviation.len() < 3 {
+        return Err(unknown());
+    }
+    let (sign, digits) = match rest.as_bytes().first() {
+        Some(b'-') => (1, &rest[1..]),
+        Some(b'+') => (-1, &rest[1..]),
+        _ => (-1, rest),
+    };
+    let offset_end = digits.find(|c: char| !(c.is_ascii_digit() || c == ':')).unwrap_or(digits.len());
+    let (offset, rules) = digits.split_at(offset_end);
+    let mut parts = offset.split(':');
+    let mut seconds = 0i32;
+    for (unit, limit) in [(3600, 24), (60, 59), (1, 59)] {
+        let Some(part) = parts.next() else { break };
+        match part.parse::<i32>() {
+            Ok(n) if !part.is_empty() && part.len() <= 2 && n <= limit => seconds += n * unit,
+            _ => return Err(unknown()),
+        }
+    }
+    if parts.next().is_some() || offset.is_empty() {
+        return Err(unknown());
+    }
+    if !rules.is_empty() {
+        return Err(format!(
+            "timezone '{value}' has daylight-saving rules kaish does not read (use an IANA name like America/New_York)"
+        ));
+    }
+    let offset = FixedOffset::east_opt(sign * seconds).ok_or_else(unknown)?;
+    Ok(Zone::Fixed(offset, abbreviation.to_string()))
 }
 
 #[async_trait]
@@ -328,10 +399,7 @@ fn resolve_zone(utc: bool, tz_flag: Option<&str>, tz_var: Option<String>) -> Res
     }
     let name = tz_flag.map(str::to_string).or(tz_var);
     match name {
-        Some(zone) => zone
-            .parse::<Tz>()
-            .map(Zone::Named)
-            .map_err(|_| format!("date: unknown timezone '{zone}' (use an IANA name like Asia/Tokyo)")),
+        Some(zone) => parse_zone(&zone).map_err(|e| format!("date: {e}")),
         None => Ok(Zone::Local),
     }
 }
@@ -375,6 +443,7 @@ fn resolve_instant(
         Zone::Utc => parse_in_tz(spec, &Utc, now_utc),
         Zone::Local => parse_in_tz(spec, &Local, now_utc),
         Zone::Named(tz) => parse_in_tz(spec, tz, now_utc),
+        Zone::Fixed(offset, _) => parse_in_tz(spec, offset, now_utc),
     }
 }
 

@@ -183,27 +183,29 @@ impl LocalFs {
             owner: None,
             group: None,
         };
-        fill_unix_details(&mut entry, &metadata);
+        fill_unix_details(&mut entry, &metadata).await;
         Ok(Some(entry))
     }
 }
 
 /// Fill the link count, block count, owner, and group from host metadata.
 #[cfg(unix)]
-fn fill_unix_details(entry: &mut DirEntry, meta: &std::fs::Metadata) {
+async fn fill_unix_details(entry: &mut DirEntry, meta: &std::fs::Metadata) {
     use std::os::unix::fs::MetadataExt;
     entry.links = Some(meta.nlink());
     entry.blocks = Some(meta.blocks());
-    entry.owner = Some(accounts::user(meta.uid()));
-    entry.group = Some(accounts::group(meta.gid()));
+    entry.owner = Some(accounts::user(meta.uid()).await);
+    entry.group = Some(accounts::group(meta.gid()).await);
 }
 
 /// A platform without Unix metadata leaves the fields `None`.
 #[cfg(not(unix))]
-fn fill_unix_details(_entry: &mut DirEntry, _meta: &std::fs::Metadata) {}
+async fn fill_unix_details(_entry: &mut DirEntry, _meta: &std::fs::Metadata) {}
 
-/// uid and gid to name lookups, cached for the life of the process: `ls -l`
-/// on a large directory asks for the same few IDs once per entry.
+/// uid and gid to name lookups. `ls -l` on a large directory asks for the
+/// same few IDs once per entry, so each answer is cached for the life of the
+/// process. A lookup can block on NSS (LDAP, SSSD), so a cache miss runs on
+/// the blocking pool. A failed lookup is not cached; the next call retries.
 #[cfg(unix)]
 mod accounts {
     use kaish_types::AccountId;
@@ -215,25 +217,47 @@ mod accounts {
     static USERS: Cache = OnceLock::new();
     static GROUPS: Cache = OnceLock::new();
 
-    fn cached(cache: &Cache, id: u32, lookup: impl FnOnce(u32) -> Option<String>) -> AccountId {
+    /// `Ok(None)`: the ID has no entry. `Err`: the lookup itself failed.
+    type Lookup = fn(u32) -> nix::Result<Option<String>>;
+
+    fn cache_map(cache: &Cache) -> std::sync::MutexGuard<'_, HashMap<u32, Option<String>>> {
         let map = cache.get_or_init(|| Mutex::new(HashMap::new()));
         // A poisoned lock still holds a valid map: entries are inserted whole.
-        let mut map = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let name = map.entry(id).or_insert_with(|| lookup(id)).clone();
-        AccountId { id, name }
+        map.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub(super) fn user(uid: u32) -> AccountId {
-        // A failed or empty lookup shows the numeric ID, as GNU `ls` does.
+    async fn cached(cache: &'static Cache, id: u32, lookup: Lookup) -> AccountId {
+        if let Some(name) = cache_map(cache).get(&id) {
+            return AccountId { id, name: name.clone() };
+        }
+        let answer = match tokio::task::spawn_blocking(move || lookup(id)).await {
+            Ok(answer) => answer,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            // Cancelled: the runtime is shutting down. Show the numeric ID.
+            Err(_) => return AccountId { id, name: None },
+        };
+        match answer {
+            Ok(name) => {
+                cache_map(cache).insert(id, name.clone());
+                AccountId { id, name }
+            }
+            // GNU `ls` shows the numeric ID when a name lookup fails.
+            Err(_) => AccountId { id, name: None },
+        }
+    }
+
+    pub(super) async fn user(uid: u32) -> AccountId {
         cached(&USERS, uid, |id| {
-            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(id)).ok().flatten().map(|u| u.name)
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(id)).map(|u| u.map(|u| u.name))
         })
+        .await
     }
 
-    pub(super) fn group(gid: u32) -> AccountId {
+    pub(super) async fn group(gid: u32) -> AccountId {
         cached(&GROUPS, gid, |id| {
-            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(id)).ok().flatten().map(|g| g.name)
+            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(id)).map(|g| g.map(|g| g.name))
         })
+        .await
     }
 }
 
@@ -541,7 +565,7 @@ impl Filesystem for LocalFs {
             owner: None,
             group: None,
         };
-        fill_unix_details(&mut entry, &meta);
+        fill_unix_details(&mut entry, &meta).await;
         Ok(entry)
     }
 
@@ -578,7 +602,7 @@ impl Filesystem for LocalFs {
             owner: None,
             group: None,
         };
-        fill_unix_details(&mut entry, &meta);
+        fill_unix_details(&mut entry, &meta).await;
         Ok(entry)
     }
 

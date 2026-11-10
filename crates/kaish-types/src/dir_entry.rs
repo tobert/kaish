@@ -142,3 +142,14 @@ impl DirEntry {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AccountId;
+
+    #[test]
+    fn display_name_is_the_name_else_the_numeric_id() {
+        assert_eq!(AccountId { id: 1000, name: Some("amy".into()) }.display_name(), "amy");
+        assert_eq!(AccountId { id: 4242, name: None }.display_name(), "4242");
+    }
+}
