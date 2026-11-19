@@ -468,6 +468,9 @@ pub enum Token {
     /// (the POSIX `.` source alias) which only matches a bare `.` — the source
     /// alias requires whitespace before its file argument (`. script`), so
     /// `.parent` (no space) is unambiguously a single bareword.
+    // Each logos #[regex] is a separate pattern; clippy reads the shared
+    // callback and priority as duplicated attributes.
+    #[allow(clippy::duplicated_attributes)]
     #[regex(r"\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~%\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     #[regex(r"\.[0-9]+\.[a-zA-Z_^\u{80}-\u{10FFFF}][a-zA-Z0-9_.@+#^~%\-\u{80}-\u{10FFFF}]*", lex_dotted_ident, priority = 3)]
     DottedIdent(String),
@@ -713,6 +716,9 @@ pub enum Token {
     /// verbatim, so leading zeros survive. A plain `2024`, `1.5` or `-1` stays
     /// `Int`/`Float`: the digit form needs a `-` after the digits, and the
     /// minus-led form needs a second `-` or a letter.
+    // Each logos #[regex] is a separate pattern; clippy reads the shared
+    // callback and priority as duplicated attributes.
+    #[allow(clippy::duplicated_attributes)]
     #[regex(r"-?[0-9]+(\.[0-9]+)?(-[0-9a-zA-Z._@+#^~%\u{80}-\u{10FFFF}]*)+", lex_slice_word, priority = 3)]
     #[regex(r"-[0-9]+[a-zA-Z_\u{80}-\u{10FFFF}][0-9a-zA-Z._@+#^~%\-\u{80}-\u{10FFFF}]*", lex_slice_word, priority = 3)]
     DashNumWord(String),
