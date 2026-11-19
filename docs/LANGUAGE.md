@@ -132,8 +132,20 @@ printf '%s' "$var" | sed 's/suffix$//'
 printf '%s' "$var" | sed 's/a/b/g'
 ```
 
+Split a path or strip a known suffix from its file name:
+
+```sh
+basename "$f"
+dirname "$f"
+basename "$f" .txt
+```
+
+Use these builtins for path operations such as `${f##*/}`, `${f%/*}`, and
+`${f%.*}`. `basename` removes the directory part and takes a literal suffix,
+not a glob. Get the directory separately with `dirname` if you need it.
+
 kaish does not support `${var#prefix}`, `${var%suffix}`, or `${var/a/b}`
-(and their doubled forms). These `sed` examples use regular expressions,
+(and their doubled forms). The `sed` examples use regular expressions,
 not shell patterns. Use `if` with `test -n "$var"` when you need to choose
 between values, report an error, or assign a default explicitly.
 

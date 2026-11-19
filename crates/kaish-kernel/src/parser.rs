@@ -219,7 +219,13 @@ fn parameter_expansion_hint(content: &str) -> Option<String> {
             _ if depth != 0 || index == 0 => {},
             '#' | '%' | '/' | ':' => {
                 let rest = &content[index..];
+                let pattern = rest.trim_start_matches(ch);
                 let example = match ch {
+                    '#' if rest == "##*/" => "To get the file name from a path, write `basename \"$f\"`.",
+                    '%' if rest == "%/*" => "To get the parent directory, write `dirname \"$f\"`.",
+                    '%' if rest == "%.*" => "For a file stem with a known suffix, write `basename \"$f\" .txt` (use your suffix). To keep the directory too, get it with `dirname \"$f\"`.",
+                    '#' | '%' if pattern.contains(['*', '?', '[']) =>
+                        "Use `basename` or `dirname` to split a path. For other patterns, translate the glob to a regular expression before using `sed`.",
                     '#' => "For a literal prefix, write `printf '%s' \"$var\" | sed 's/^prefix//'`.",
                     '%' => "For a literal suffix, write `printf '%s' \"$var\" | sed 's/suffix$//'`.",
                     '/' if rest.starts_with("//") => "For all matches on each line, write `printf '%s' \"$var\" | sed 's/a/b/g'`.",
