@@ -1,88 +1,91 @@
-# 散/集 (Scatter/Gather) — Parallel Map over Structured Data
+# Parallel Map with Scatter and Gather
 
 ## Syntax
 
-```
+```sh
 input | scatter [--as VAR] [--limit N] [--timeout DUR] | worker… | gather [--lines|--json]
 ```
 
-## The model
+## Output Model
 
-scatter fans structured input out to parallel workers; gather collects one
-**JSONL result record per worker**, in item order, **every worker — failures
-included**:
+`scatter` fans structured input out to parallel workers. `gather` collects one JSONL result record per worker in item order, including failures.
 
 ```jsonl
 {"i":0,"item":"web-1","ok":true,"code":0,"out":"restarted","err":""}
 {"i":1,"item":"web-2","ok":false,"code":7,"out":"","err":"connection refused"}
 ```
 
-Fields: `i` (item index), `item` (the input, **typed** — a record stays a
-record), `ok`, `code`, `out` (worker stdout, trailing newline stripped), `err`
-(worker stderr — always present) on every row; `data` (the worker's structured
-output, typed) and `timed_out:true` only when present. A timed-out worker
-reports `code` 124.
+| Field | Presence | Meaning |
+|---|---|---|
+| `i` | Always | Zero-based item index |
+| `item` | Always | Typed input item |
+| `ok` | Always | Boolean worker success status |
+| `code` | Always | Worker exit code, or `124` on timeout |
+| `out` | Always | Worker `stdout` with trailing newline stripped |
+| `err` | Always | Worker `stderr` |
+| `data` | When present | Typed structured output from the worker |
+| `timed_out` | When timed out | `true` when the worker exceeds `--timeout` |
 
-Read `ok`, not `code`. `code` is the worker's own exit code, and a worker
-whose stdout is binary is `ok:false` with `code` 0 — the refusal is in `ok`
-and `err`.
+Check `ok` instead of `code`. A worker with binary `stdout` gets `ok:false`, `code` `0`, and an error message in `err`.
 
-`ITEM` is **typed**: from a JSON array (jq/`values`/seq/split/glob/find), each
-worker binds the real element — `${ITEM[id]}` subscripts a record, numbers stay
-numbers, `1` ≠ `"1"`. From plain text, one string item per line (blank lines
-skipped). Quote it at command boundaries: `work "$ITEM"` (a record renders as
-compact JSON). A single non-array object, a `null` element, or binary input is
-a loud error. External JSONL (an API stream, a log file) fans out **typed**
-only through `fromjsonl` first — `curl … | fromjsonl | scatter …` — see
-`help fromjsonl`.
+## Typed ITEM Binding
 
-## Consuming results
+- **JSON arrays** from `jq`, `values`, `seq`, `split`, `glob`, or `find` bind each real element to `ITEM`.
+- **Types and fields** stay intact. `${ITEM[id]}` reads a record field, and `1` stays a number instead of `"1"`.
+- **Plain text** splits into one string item per line and skips blank lines.
+- **Command boundaries** require quotes around `"$ITEM"`. Records render as compact JSON.
+- **External JSONL streams** require `fromjsonl` first, such as `curl … | fromjsonl | scatter …`. See `help fromjsonl`.
+- **Invalid inputs** fail loudly. Single non-array objects, `null` elements, and binary inputs produce an error.
+
+## Consuming Results
 
 ```sh
-# kaish jq gets the records as ONE ARRAY — stream rows with .[] :
-… | gather | jq -r '.[] | select(.ok) | .out'        # successes' outputs
+# kaish jq receives all records as one array, so stream rows with .[]
+… | gather | jq -r '.[] | select(.ok) | .out'        # successful outputs
 … | gather | jq -r '.[] | select(.ok | not) | .item' # failed items
 … | gather | jq '[.[] | select(.ok)] | length'       # count successes
 
-# Typed iteration — each r is a record:
+# Iterate over typed records
 for r in $(… | gather); do
   if [[ ${r[ok]} == false ]]; then retry "${r[item]}"; fi
 done
 
-… | gather --json    # same records as one pretty JSON array
-… | gather --lines   # raw successful outputs only, item order — HARD ERROR
-                     # (exit 123, no partial text) if ANY worker failed
+… | gather --json    # emit one JSON array instead of JSONL
+… | gather --lines   # emit raw successful outputs, exits 123 with no output on failure
 
-# gather's JSONL rows round-trip through a file:
+# Round-trip JSONL rows through a file
 … | gather > results.jsonl
-cat results.jsonl | fromjsonl | jq '.[] | select(.ok | not)'    # re-read, typed
-cat results.jsonl | fromjsonl | scatter | retry ${ITEM[item][host]} | gather  # re-fan-out
+cat results.jsonl | fromjsonl | jq '.[] | select(.ok | not)'
+cat results.jsonl | fromjsonl | scatter | retry "${ITEM[item][host]}" | gather
 ```
 
-## Exit codes
+## Exit Codes
 
-`0` every worker succeeded · `123` any worker failed (partial or total —
-distinguish via the rows) · `2` usage error. A pipeline's status is its last
-command's, so check gather's code directly or gate with `if`/`&&`.
+| Exit code | Meaning |
+|---|---|
+| `0` | Every worker succeeded, or input was empty |
+| `123` | At least one worker failed, or `--lines` saw a failure |
+| `2` | Usage error |
+| `124` | Worker `code` field when `--timeout` expires |
 
-A worker can exit `123` itself, and `$?` cannot tell that apart from gather's
-aggregate. The rows can: gather's `123` means at least one row has
-`ok:false`, and each row's `code` is that worker's own.
+A pipeline returns its last command's exit code. An aggregate `123` means at least one row has `ok:false`. Each row's `code` holds that worker's own exit code.
 
 ## Parameters
 
-**scatter:** `--as VAR` (default `ITEM`) — binding name per item. `--limit N`
-(default 8, clamped 1..=10000) — max concurrent workers. `--timeout DUR`
-(`30`, `5s`, `500ms`, `2m`, `1h`) — per-worker timeout; cancels the worker,
-kills its external children, row gets `code` 124 + `timed_out:true`.
+| Command | Flag | Default | Behavior |
+|---|---|---|---|
+| `scatter` | `--as VAR` | `ITEM` | Variable name bound to each worker item |
+| `scatter` | `--limit N` | `8` | Maximum concurrent workers, clamped to `1..=10000` |
+| `scatter` | `--timeout DUR` | none | Per-worker timeout such as `30`, `5s`, `500ms`, `2m`, or `1h` |
+| `gather` | `--lines` | off | Emit raw successful outputs, or exit `123` with no text on failure |
+| `gather` | `--json` | off | Emit one JSON array instead of JSONL rows |
 
-**gather:** `--lines` — raw text override (above). `--json` — one JSON
-array instead of JSONL rows.
+When `--timeout` expires, `scatter` cancels the worker, kills its external children, and sets `code` `124` and `timed_out:true`.
 
 ## Examples
 
 ```sh
-# Typed records from a file: deploy each job, then list timeouts
+# Deploy typed job records and list timeouts
 jq '.jobs' jobs.json | scatter --limit 4 --timeout 30s \
   | deploy --id "${ITEM[id]}" --host "${ITEM[host]}" \
   | gather | jq -r '.[] | select(.timed_out) | .item.id'
@@ -90,7 +93,7 @@ jq '.jobs' jobs.json | scatter --limit 4 --timeout 30s \
 # Fan out an existing collection variable
 values $hosts | scatter | ping -c1 "$ITEM" | gather
 
-# Sum parallel outputs (out is a string — tonumber)
+# Sum parallel outputs
 seq 1 20 | scatter | slowsquare "$ITEM" | gather --json \
   | jq '[.[] | .out | tonumber] | add'
 
@@ -102,15 +105,10 @@ done
 
 ## Behavior
 
-- **Rows are in item order** (deterministic), regardless of completion order.
-- Each worker runs the pipeline segment in its own **forked kernel**
-  (snapshotted scope/cwd/aliases/user tools) — full dispatch chain works;
-  worker mutations don't leak back. A worker's `code` is its segment's last
-  command's exit code.
-- Workers all run to completion — gather never short-circuits remaining
-  workers on a failure (contrast with POSIX `xargs`, which may stop early).
-- Nested scatter: pass `--as` explicitly — an inner default `ITEM` shadows the
-  outer binding.
-- **Cancellation cascades**: parent timeout / `Kernel::cancel` / Ctrl-C
-  propagates into every worker (SIGTERM → `kill_grace` → SIGKILL).
-- Empty input: exit 0, no rows.
+- **Deterministic order:** `gather` emits rows in input item order regardless of worker completion order.
+- **Isolated workers:** Each worker runs in a forked kernel with snapshotted scope, cwd, aliases, and user tools. Worker mutations never leak back.
+- **Worker exit code:** Each row's `code` comes from the last command in that worker's pipeline segment.
+- **Complete execution:** `gather` runs every worker to completion and collects every result even when earlier workers fail.
+- **Nested scatter:** Pass `--as` explicitly in inner `scatter` stages so an inner `ITEM` does not shadow the outer binding.
+- **Cascading cancellation:** Parent timeouts, `Kernel::cancel`, and Ctrl-C send `SIGTERM`, wait for `kill_grace`, and send `SIGKILL` to every worker.
+- **Empty input:** Empty input emits no rows and exits `0`.

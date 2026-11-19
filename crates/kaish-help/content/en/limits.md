@@ -4,107 +4,94 @@
 
 | Feature | Use instead |
 |---------|------------|
-| Shell brace expansion `{a,b,c}` | List items explicitly |
+| Brace expansion `{a,b,c}` | List items explicitly |
 | Process substitution `<(cmd)` | `cmd > /tmp/t.txt; cmd2 /tmp/t.txt` |
-| Backticks `` `cmd` `` (lexer error, not silently tolerated) | `$(cmd)` |
+| Backticks `` `cmd` `` | `$(cmd)` |
 | `eval` | Write explicit code |
-| Implicit word splitting on whitespace | `split "$VAR"` (for-loop `$(cmd)` does split on newlines — see Bash vs kaish below) |
+| Implicit word splitting on whitespace | `split "$VAR"` |
 | `[ … ]` single-bracket conditional | `test …` or `[[ … ]]` |
 
-`test` is a real builtin (VFS-aware, following `[[`'s semantics), so both
-`test -f x` and `[[ -f x ]]` work. There is no `[` command, though: the bracket
-belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`, see
-`help syntax` → Collections) — so `[ -f x ]` is a parse error. A bare `]` in a
-word is one too: write `ls "clip].mp4"` or `ls clip\].mp4`. Prefer `[[ … ]]`:
-it is real syntax the parser understands, so kaish can **validate it before
-running** (catch a malformed test, an unknown operator, an unquoted expansion),
-and it carries the richer tests (membership, regex, shape guards) plus compound
-`&&`/`||`/`!` in one construct. Use `test` when you want a plain command, or
-when the `sh` habit is faster to type — `test -f x && echo yes`,
-`if test "$a" = "$b"; then`.
+- `test` is a VFS-aware builtin that shares semantics with `[[ … ]]`.
+- kaish reserves `[` and `]` for `[[ … ]]` conditionals and native list literals like `xs=[a b c]`.
+- `[ -f x ]` is a parse error.
+- A bare `]` in an argument is also a parse error. Quote or escape it as `ls "clip].mp4"` or `ls clip\].mp4`.
+- Prefer `[[ … ]]`. The parser validates its operators, expansions, and compound logic before execution.
+- Use `test` when you need a plain builtin command, such as `test -f x && echo yes`.
+- See `help syntax` → Test Expressions and `help collections`.
 
 ## Lexer/Parser Limitations
 
 | Limitation | Details | Use instead |
 |-----------|---------|------------|
-| No `until` loop | `until cmd; do …; done` is a parse error. Deliberate — `while !` says the same thing and kaish keeps one spelling per idea. Reconsidered if a use case turns up that `while !` reads badly for. | `while ! cmd; do …; done` |
-| `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; the two-token design deliberately reserves `[ ]` for kaish's native list literals |
-| Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
-| No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. A bare `,` is NOT one of these — it's significant only inside a `[...]`/`{...}` literal or pattern, so `sed -n 1,3p file` and `sort -k2,2n` need no quoting. `-name=value` and `-Wl,-rpath,/x` are single words too. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
+| No `until` loop | `until cmd; do …; done` is a parse error. | `while ! cmd; do …; done` |
+| Statement-opening keywords as bare arguments | `echo if`, `echo for`, `echo while`, and `echo case` are parse errors because those keywords open statements. Closers like `done`, `then`, and `fi` work unquoted. | Quote the word: `echo "if"` |
+| No unquoted token-pasting | `$VAR`, `$(cmd)`, and globs are separate words. Unquoted text adjacent to an expansion such as `echo $dir/f` is a parse error. Single words like `file.txt`, `sed -n 1,3p file`, and `-Wl,-rpath,/x` need no quotes. | Quote the whole word: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
 
 ## Builtin Constraints
 
 | Builtin | Limitation |
 |---------|------------|
-| `alias` | First word only; not in pipelines or compound commands |
-| `set` | `-e`, `-o pipefail`, `-o trash`, `-o glob`, `-o crossmounts`, `-o output-limit[=SIZE]` (`-u`, `-x` ignored; an unknown `-o` name exits 2) |
-| `rm` (trash) | Trash failure = error, no fallthrough to permanent delete. Dirs always trash (stat size unreliable). |
-| `ls`/`find`/`glob` | A name containing a newline is **refused** in text output (exit 2), naming the path and `--json`. One newline is one path boundary in text, so reporting such a name would split it into two paths that name no file. `--json` reads it losslessly. |
-| `ps` | Linux-only (reads `/proc`) |
-| `find` expressions | At most 256 expression nodes (tests, operators, and groups), with at most 64 nested groups or negations. Larger expressions exit 2; split the expression into smaller searches. No `-exec` or `-delete`; see Flags kaish Drops on Purpose. |
-| `cat -A/-v/-E/-T` | Buffers input before marking bytes. `-A` is `-vET`; `-n` with `-E` or `-T` needs UTF-8 text unless `-v` is also given. |
-| `edit` | UTF-8 text files only; the file must exist. A TEXT word that is exactly `--json` or `--help` is taken by the kernel; put `--` before the FILE to pass it. |
-| `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
-| `**` globs | Slow on deep trees; use specific prefixes |
-| `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
-| `kaish-output-limit` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
+| `alias` | First word only. Not expanded in pipelines or compound commands. |
+| `set` | Supports `-e` and `-o` for `pipefail`, `trash`, `glob`, `crossmounts`, and `output-limit[=SIZE]`. Ignores `-u` and `-x`. An unknown `-o` name exits 2. |
+| `rm` with trash | Trash failure returns an error with no permanent delete fallback. Directories always move to Trash. |
+| `ls`, `find`, `glob` | A filename containing a newline exits 2 in text output and names the path and `--json`. Pass `--json` to read such names losslessly. |
+| `ps` | Reads `/proc` on Linux only. |
+| `find` expressions | Allows at most 256 expression nodes and 64 nested groups or negations. Larger expressions exit 2. Split large expressions into separate searches. |
+| `cat -A`, `-v`, `-E`, `-T` | Buffers input before marking bytes. `-A` equals `-vET`. Using `-n` with `-E` or `-T` requires UTF-8 text unless `-v` is also set. |
+| `edit` | Accepts existing UTF-8 text files only. The kernel intercepts `--json` and `--help` unless you place `--` before the path. |
+| `head -c` and `tail -c` | Counts bytes and can split multi-byte UTF-8 characters. Prefer `-n` for text. |
+| `**` globs | Slow on deep directory trees. Use specific path prefixes instead. |
+| `kaish-ignore` | Runtime changes apply to the current session only. Configure persistent rules in `~/.config/kaish/init.kai`, `~/.kaishrc`, or `$KAISH_INIT`. |
+| `kaish-output-limit` | Runtime changes apply to the current session only. Configure persistent limits in `~/.config/kaish/init.kai`, `~/.kaishrc`, or `$KAISH_INIT`. |
 
-## Flags kaish Drops on Purpose
+## Unsupported Flags
 
-A flag in this table exits 2 with the reason and the command to run instead:
+A flag in this table exits 2 with a hint showing the replacement command:
 
 ```
 cp -p a.txt b.txt
 cp: -p is not supported: kaish cannot copy a file's mode, owner, or times; no builtin sets them from another file. Run `cp SRC DST`; the copy gets the current time.
 ```
 
-Any other unknown flag exits 2 and names `help NAME` for the supported flags.
+Any other unknown flag exits 2 and points to `help NAME` for supported flags.
 
 | Flag | Reason | Use instead |
 |------|--------|-------------|
-| `cp -p`, `--preserve` | kaish cannot copy a file's mode, owner, or times | `cp SRC DST` |
-| `cp -a`, `--archive` | Same as `-p` | `cp -rP SRC DST` |
-| `cp -f`, `--force` | `cp` already replaces an existing destination | `cp SRC DST` |
-| `cp -i`, `--interactive` | kaish never prompts | `cp -n SRC DST` |
-| `mv -f`, `--force` | `mv` already replaces an existing destination | `mv SRC DST` |
-| `mv -i`, `--interactive` | kaish never prompts | `mv -n SRC DST` |
-| `mkdir -m`, `--mode` | kaish cannot set a directory's mode | `mkdir DIR` |
+| `cp -p`, `--preserve` | `cp` does not copy mode, owner, or timestamps | `cp SRC DST` |
+| `cp -a`, `--archive` | `cp` does not copy mode, owner, or timestamps | `cp -rP SRC DST` |
+| `cp -f`, `--force` | `cp` already overwrites existing destinations | `cp SRC DST` |
+| `cp -i`, `--interactive` | `cp` never prompts | `cp -n SRC DST` |
+| `mv -f`, `--force` | `mv` already overwrites existing destinations | `mv SRC DST` |
+| `mv -i`, `--interactive` | `mv` never prompts | `mv -n SRC DST` |
+| `mkdir -m`, `--mode` | `mkdir` does not set file modes | `mkdir DIR` |
 | `echo -e` | Double-quoted strings already expand `\n` and `\t` | `echo "a\tb"` or `printf 'a\tb\n'` |
-| `printf -v` | Assignment takes command substitution | `NAME=$(printf FORMAT ARGS)` |
-| `grep -P`, `--perl-regexp` | kaish grep reads GNU BRE or ERE, without look-around or back-references | `grep -E '[0-9]+' FILE` for `\d+` |
-| `find -delete` | `find` only prints paths, one per line | `for f in $(find . -name '*.tmp'); do rm "$f"; done` |
-| `find -exec`, `-execdir`, `-ok`, `-okdir` | `find` only prints paths, one per line | `for f in $(find . -name '*.txt'); do wc -l "$f"; done` |
+| `printf -v` | Assign variables with command substitution | `NAME=$(printf FORMAT ARGS)` |
+| `grep -P`, `--perl-regexp` | `grep` reads GNU BRE or ERE without look-around or back-references | `grep -E '[0-9]+' FILE` |
+| `find -delete` | `find` only prints matching paths | `for f in $(find . -name '*.tmp'); do rm "$f"; done` |
+| `find -exec`, `-execdir`, `-ok`, `-okdir` | `find` only prints matching paths | `for f in $(find . -name '*.txt'); do wc -l "$f"; done` |
 
 ## Execution
 
-- **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
-- **A compound pipeline stage buffers.** Brace groups and `for`/`while`/`if`/`case` may sit in any pipeline position, but such a stage runs to completion before the next stage sees a byte — `for f in $(seq 1 100000); do echo $f; done | head -n 1` runs every iteration where `sh` stops at the first line. Same answer, more work. Command stages still stream.
-- **`scatter`/`gather` cannot share a pipeline with a compound stage** — exits 2. Run the compound on its own and pipe its output in.
-- **Scatter results are in item order**, never completion order — a row's position identifies its item.
-- **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
-- **Redirect targets open before the command or compound body runs** — a target that cannot open (missing directory, read-only mount) exits 1 and the command does not run. A redirect never creates a directory: `mkdir -p` first. A mount ancestor can be visible with no real directory: the error names `mkdir -p` when the backend can create the parent. An uncovered path or immutable ancestor names a writable mounted path, or says none is available. A read-only parent is refused.
-- **Compound redirects require a planned body command and refuse here-docs** — exit 2. Use `: > file` for an empty file, or pipe a here-doc into the compound. Input returns to the session after the body.
-- **Captured output merges use two blocks** — `2>&1`, `1>&2`, and a shared file join stdout first, then stderr, without preserving interleaved write order. When stderr has already reached a background job stream, `1>&2` keeps published stderr first and appends stdout. See `docs/LANGUAGE.md`, "Pipes & Redirects".
-- **`sort < f > f` and `cat < f >> f` are refused** (exit 1): bash empties `f` or grows it without end. Write to a temp file, then `mv` it over `f` (or append it).
-- **Recursion is depth-capped at 48** — nested `$(...)`, recursive shell functions, and `.kai` scripts sourcing each other are bounded so a runaway (or a missing base case) returns a loud `maximum recursion depth exceeded` error instead of overflowing the stack. Real recursion nests far shallower; this only stops runaways.
-- **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.
+- **Pipeline stages run concurrently.** Each stage runs in an isolated scope. Variable assignments in earlier stages do not affect later stages or the parent scope. Only the final stage syncs back to the parent.
+- **Compound pipeline stages buffer output.** Brace groups and `for`, `while`, `if`, and `case` statements run to completion before passing output to the next stage. Simple command stages still stream.
+- **Scatter pipelines forbid compound stages.** Mixing `scatter` or `gather` with a compound stage exits 2. Run the compound separately and pipe its output into `scatter`.
+- **Scatter preserves item order.** `gather` outputs rows in input item order rather than completion order.
+- **Redirects and here-docs expand `$(…)`.** Both `cmd > $(gen-path)` and `$(…)` inside a here-doc body run command substitution. Quote a redirect target when mixing literal text and expansions, such as `> "/tmp/$(id -u).log"`.
+- **Redirects open targets before running the command.** A target failure exits 1 and skips the command or compound body.
+  - Redirects never create missing parent directories. Run `mkdir -p` first when the backend allows creating the parent.
+  - Paths outside any writable mount report a writable mount path, or say none is available.
+  - Read-only mounts and read-only parent directories are refused. See `help vfs`.
+- **Compound redirects require a body command and refuse here-docs.** Invalid compound redirects exit 2. Run `: > file` to create an empty file, or pipe a here-doc into the compound. Stdin returns to the session after the body finishes.
+- **Merged streams join stdout then stderr.** Redirects like `2>&1`, `1>&2`, and shared files write captured stdout followed by stderr without interleaving. When stderr already wrote to a background job stream, `1>&2` appends stdout after published stderr. See `docs/LANGUAGE.md`, "Pipes & Redirects".
+- **Reading and writing the same file is refused.** Commands like `sort < f > f` and `cat < f >> f` exit 1. Write to a temporary file first, then `mv` or append it.
+- **Recursion depth is capped at 48.** Nested `$(…)`, recursive functions, and sourced `.kai` scripts stop with `maximum recursion depth exceeded` at depth 48.
+- **The preprocessor runs before parsing.** It expands `$(( ))` and here-doc markers before the parser sees the token stream.
 
 ## External Commands
 
 | Constraint | Use instead |
 |-----------|------------|
-| No PTY assumed | TTY works if present, but kaish doesn't allocate one |
-| Output buffered (non-pipeline) | Redirect to file or use in pipeline |
-| Virtual cwd fails | `cd` to real directory before running |
-| Bypass VFS sandbox | Set `allow_unwrapped_commands=false` to block PATH lookup, `exec`, `spawn`, and `env CMD` |
-
-## Bash vs kaish
-
-| Bash | kaish |
-|------|-------|
-| `for i in $VAR` splits on IFS | E012 validator error; use `$(split "$VAR")` |
-| `for i in $(cmd)` splits on IFS (default: any whitespace) | Splits on `\n` only — `for line in $(cat file)` iterates per line; `for x in $(echo "a b c")` iterates once |
-| `for i in "$(cmd)"` iterates once | Same — quoted substitution suppresses the per-line split |
-| `*.txt` expands at shell | Bare globs expand (disable with `set +o glob`) |
-| Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
-| `printf "a"; printf "b"` → `ab` | Same — `ab` (no separator inserted; `&&` chains match too) |
+| No PTY allocated | Inherited TTYs work, but kaish allocates no PTY |
+| Non-pipeline output buffered | Redirect to a file or run in a pipeline |
+| Virtual working directory fails | Run `cd` to a real directory first |
+| External commands bypass VFS sandbox | Set `allow_unwrapped_commands=false` to block `PATH` lookup, `exec`, `spawn`, and `env CMD` |

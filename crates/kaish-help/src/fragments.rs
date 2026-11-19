@@ -62,10 +62,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "kaish (会sh) is a Bourne-like shell for AI agents: familiar syntax, typed \
-         values, structured output from every builtin, and pre-execution validation — \
-         the whole command is checked before it runs, so it never half-runs. Builtins \
-         run in-process; external commands run via `PATH`.",
+        "kaish (会sh) is a Bourne-like shell fused with typed JSON values. Every \
+         builtin emits structured output. kaish validates the whole command before \
+         running it, so it never half-runs. Builtins run in-process. External \
+         commands run via `PATH`.",
     ),
     en(
         Concept::Model,
@@ -73,11 +73,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "Values can be structured — a list (`xs=[a b c]`) or a record (`u={k: v}`), not \
-         only strings. Access is brackets-only (`${r[key]}`, `${xs[0]}`, never dots); \
-         iterate with `$(values $c)` (elements/values) or `$(keys $c)` (indices/keys); \
-         `fromjson` / `tojson` bridge real JSON text in and out. See `help syntax` → \
-         Collections.",
+        "Values include strings, numbers, booleans, lists (`xs=[a b c]`), and \
+         records (`u={k: v}`). Access collections with brackets only (`${r[key]}`, \
+         `${xs[0]}`). Iterate with `$(values $c)` or `$(keys $c)`. Convert JSON \
+         text with `fromjson` and `tojson`. See `help syntax` → Collections.",
     ),
     en(
         Concept::Model,
@@ -94,9 +93,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**No word splitting.** `$VAR` is always a single value — a variable holding \
-         spaces stays one argument. Use `split` when you actually want to split on \
-         whitespace, a delimiter, or a regex.",
+        "**No word splitting.** `$VAR` is always one argument, even when it holds \
+         spaces. Use `split` to split on whitespace, a delimiter, or a regex.",
     )
     .ranked(0),
     en(
@@ -105,8 +103,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Contrast,
         Depth::Reference,
         None,
-        "Bash splits unquoted `$VAR` on `$IFS`; kaish never does, so you never have \
-         to quote a variable just to keep it whole.",
+        "kaish never splits unquoted `$VAR` on `$IFS`. Pass `$VAR` unquoted to \
+         keep its value whole.",
     ),
     en(
         Concept::Foundations,
@@ -114,10 +112,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Quote to join.** `$VAR`, `$(cmd)`, and globs are each a separate word \
-         unless quoted — kaish never pastes adjacent unquoted tokens. To build one \
-         word from text plus interpolation, wrap the whole thing in double quotes: \
-         `\"$dir/file.txt\"`, `\"out-$(date +%s).log\"`.",
+        "`\"$dir/file.txt\"` is one path. kaish keeps `$VAR`, `$(cmd)`, and globs \
+         as separate words. Quote the whole word to join text with an expansion.",
     )
     .ranked(1),
     en(
@@ -126,11 +122,9 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Contrast,
         Depth::Reference,
         None,
-        "Quote the whole word to join text with interpolation — `echo \"$dir/file.txt\"` \
-         is one path. Bash pastes adjacent tokens into one word; kaish keeps each \
-         unquoted piece separate and whole, so the unquoted `echo $dir/file.txt` is a \
-         parse error, marked as such wherever it appears, and the quote is the fix — \
-         the same discipline `shellcheck` (SC2086) asks for, enforced by the parser.",
+        "Write `echo \"$dir/file.txt\"` to pass one path. Unquoted `echo \
+         $dir/file.txt` is a parse error because kaish keeps each unquoted token \
+         separate. Quote the whole word to fix it.",
     ),
     en(
         Concept::Foundations,
@@ -139,9 +133,9 @@ pub const FRAGMENTS: &[Fragment] = &[
         Depth::Summary,
         None,
         "**A compound statement is a pipeline stage.** `for f in a b; do echo $f; \
-         done | grep a` works, in any pipeline position. Such a stage *buffers*: \
-         the whole block runs before the next stage sees a byte, so \
-         `for … done | head -n 1` runs every iteration.",
+         done | grep a` works in any pipeline position. Compound stages buffer all \
+         output before the next stage reads it. `for … done | head -n 1` runs \
+         every iteration.",
     )
     .ranked(3),
     en(
@@ -150,11 +144,11 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Structured output.** Every builtin can emit machine-readable data with \
-         `--json` (`ls --json`, `ps --json`, `kaish-vars --json`). Success keeps \
-         its value unwrapped; a nonzero formatted result uses \
-         `{\"code\":N,\"error\":\"...\"}`, with partial results under `data` or `output`. \
-         Check the exit code first. A spill keeps its preview and metadata.",
+        "**Structured output.** Every builtin emits JSON with `--json` \
+         (`ls --json`, `ps --json`, `kaish-vars --json`). Success returns the \
+         value unwrapped. Nonzero exits return `{\"code\":N,\"error\":\"…\"}`, \
+         with partial results under `data` or `output`. Check the exit code \
+         first. Spills keep their preview and metadata.",
     )
     .ranked(8),
     en(
@@ -163,7 +157,7 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Example,
         Depth::Reference,
         None,
-        "```\nls -l --json | jq -r '.[].NAME'\n```",
+        "```sh\nls -l --json | jq -r '.[].NAME'\n```",
     ),
     en(
         Concept::Foundations,
@@ -171,8 +165,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Newline-split substitution.** `for x in $(cmd)` splits on newlines only — \
-         one iteration per line; whitespace within a line never splits.",
+        "**Newline-split substitution.** `for x in $(cmd)` splits on newlines \
+         only. Spaces inside a line never split.",
     )
     .ranked(5),
     en(
@@ -181,10 +175,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "`$(cmd)` carries structured data: `for i in $(seq 1 5)` iterates five values, \
-         not split text. Enumerate a collection the same way — `for x in $(values $c)` \
-         (list elements / record values) or `for k in $(keys $c)` (list indices / record \
-         keys). A bare `for x in $c` is an error: wrap the collection in `$(...)`.",
+        "`$(cmd)` carries structured data. `for i in $(seq 1 5)` iterates five \
+         values. Enumerate a collection with `for x in $(values $c)` for values \
+         or `for k in $(keys $c)` for keys. Bare `for x in $c` is an error. Wrap \
+         the collection in `$(values $c)` or `$(keys $c)`.",
     )
     .ranked(4),
     en(
@@ -193,8 +187,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Strict globs.** `*.txt` expands to matching files; zero matches is an \
-         error, not a silent pass-through.",
+        "**Strict globs.** `*.txt` expands to matching files. Zero matches fail \
+         with exit code 1.",
     )
     .ranked(6),
     en(
@@ -203,10 +197,9 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**`[ … ]` is not a command.** No `[` builtin exists — \
-         `if [ -f file ]; then` fails on the first flag. Use `[[ … ]]` (validated, \
-         richer tests) or `test`: `if [[ -f file ]]; then`, \
-         `test -f file && echo yes`.",
+        "**`[ … ]` is not a command.** No `[` builtin exists, so \
+         `if [ -f file ]; then` fails. Use `[[ … ]]` or `test` instead. Write \
+         `if [[ -f file ]]; then …; fi` or `test -f file && echo yes`.",
     )
     .ranked(7),
     en(
@@ -215,8 +208,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Pre-validation.** kaish validates the whole command before running it — \
-         syntax errors are caught up front, so a command never half-runs.",
+        "**Pre-validation.** kaish checks the whole command before running it. \
+         Syntax errors fail up front, so a command never half-runs.",
     )
     .ranked(9),
     en(
@@ -225,9 +218,9 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Fail loud, not silent.** kaish prefers to error over corrupting data; \
-         `set -o trash` snapshots what a delete or overwrite would destroy, so \
-         the mistake is recoverable.",
+        "**Fail loud, not silent.** kaish returns an error instead of corrupting \
+         data. Run `set -o trash` to snapshot deleted or overwritten files for \
+         recovery.",
     )
     .ranked(10),
     en(
@@ -236,10 +229,9 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Only lowercase `true`/`false` are booleans.** `TRUE`, `Yes`, `yes`, `no`, \
-         `on`, and `off` are ordinary strings — `x=TRUE` binds the string `\"TRUE\"`, \
-         not a boolean. Write `true`/`false` where a boolean is meant, and check \
-         with `typeof`.",
+        "**Only lowercase `true`/`false` are booleans.** `TRUE`, `yes`, `no`, \
+         `on`, and `off` are strings. `x=TRUE` binds the string `\"TRUE\"`. \
+         Write `true` or `false` for booleans, and check types with `typeof`.",
     )
     .ranked(11),
     en(
@@ -248,8 +240,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         Some(Audience::Agent),
-        "When orchestrating tools, prefer `--json` piped through `jq` — consuming \
-         structured data beats scraping text output.",
+        "When orchestrating tools, pipe `--json` output through `jq`. Structured \
+         data avoids scraping text.",
     )
     .ranked(12),
     en(
@@ -258,10 +250,10 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "**Collection literals.** Lists/records have native syntax — `xs=[a b c]`, \
-         `u={k: v}` — no `fromjson` needed. `push xs v` appends in place (like \
-         `read`/`unset`, it takes the bareword NAME, not `$xs`); `...$xs` spread \
-         flattens into a new list — a bare `$xs` nests as one element instead.",
+        "**Collection literals.** Build lists with `xs=[a b c]` and records with \
+         `u={k: v}`. `push xs v` appends in place and takes a bare variable name \
+         like `read` or `unset`. Spread `[...$xs]` flattens a list, while `[$xs]` \
+         nests it.",
     )
     .ranked(13),
     en(
@@ -270,9 +262,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Contrast,
         Depth::Reference,
         None,
-        "Collections are brackets-only, never dots: `${u.name}` is a loud parse \
-         error naming the fix (`${u[name]}`) — the `Ident` token allows `.` for \
-         other uses (filenames), so this can't be caught silently.",
+        "Access collections with brackets only. `${u.name}` is a parse error. \
+         Write `${u[name]}` instead.",
     ),
     // ---- Overlay: opt-in, excluded from every default Recipe -----------------
     // See Concept::Overlay's doc comment for why this isn't in the Foundations
@@ -283,17 +274,14 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         Some(Audience::Agent),
-        "**Overlay mode** (opt-in: `--overlay` flag or `KernelConfig::with_overlay`). \
-         All writes go into a virtual in-memory layer; the real filesystem is never \
-         touched until you explicitly commit. Use `kaish-vfs` to inspect and finalize \
-         the transaction: `kaish-vfs status` (dirty flag + counts), `kaish-vfs diff` \
-         (unified diff), `kaish-vfs commit` (write to real files), \
-         `kaish-vfs reset [path]` (discard edits). \
-         **Fresh-kernel-per-call rule**: when an embedder runs a fresh kernel per \
-         `execute()` call (the common pattern), each call gets a fresh overlay \
-         transaction. `kaish-vfs commit` MUST run in the same call as the writes — if \
-         you commit in a later call the transaction from the write call was already \
-         discarded.",
+        "**Overlay mode** is opt-in via `--overlay`. Writes land in a virtual \
+         memory layer until you commit. Inspect and apply changes with `kaish-vfs`:\n\
+         - `kaish-vfs status`: show dirty flag and counts.\n\
+         - `kaish-vfs diff`: show unified diff.\n\
+         - `kaish-vfs commit`: write changes to disk.\n\
+         - `kaish-vfs reset [path]`: discard edits.\n\n\
+         Each fresh kernel starts a new overlay transaction. Run `kaish-vfs commit` \
+         in the same call as the writes, or the transaction is lost.",
     ),
     // ---- Syntax reference (single source for content/en/syntax.md) -----------
     syntax_section(
@@ -311,29 +299,19 @@ ENABLED=true              # boolean (only true/false)
         "numbers",
         "Numbers",
         r#"```sh
-echo 007        # the string 007 — a leading zero is not a JSON number
-chmod 0644 f    # the string 0644 — a mode keeps every digit you typed
-echo -0         # the number 0 — valid JSON; -0 and 0 are the same number
-echo "-0"       # the string -0 — quote it to keep those two characters
-break 7         # a loop count is a number — `break 007` is an error
+echo 007        # the string 007 (leading zero is not a JSON number)
+chmod 0644 f    # the string 0644 (mode keeps every digit you typed)
+echo -0         # the number 0 (valid JSON; -0 and 0 are the same number)
+echo "-0"       # the string -0 (quote to keep those two characters)
+break 7         # loop count is a number
+break 007       # error — leading zero is a string, write 7
 ```
 
-`007`, `010`, and `00` are strings — `fromjson '007'` already refuses them
-as invalid JSON, and a bare number now agrees. `-0`, `0.10`, and `1.0` are
-numbers; kaish prints back the word you typed wherever it crosses into argv
-or a plan. Once the number moves through a variable, arithmetic, or
-`--json`, it is a plain typed number again: `x=-0; echo $x` prints `0`.
-Quote a number to keep it a string on purpose.
+`007`, `010`, and `00` are strings. `-0`, `0.10`, and `1.0` are numbers. Bare words keep their typed spelling in command arguments. Through a variable, arithmetic, or `--json`, they normalize to plain numbers: `x=-0; echo $x` prints `0`. Quote a number to force a string.
 
-Where kaish needs a number, a leading zero is an error that names the
-number to write: a `break`/`continue` count, arithmetic, a numeric
-comparison, and a list index. kaish reads no octal, so `$((010 + 1))` is
-an error rather than 9 (bash's answer) or 11 (the decimal one). A record
-key is text, so `${r[007]}` reads the `"007"` key.
+Leading zeros error where kaish expects a number. This covers `break` and `continue` counts, arithmetic, numeric tests, and list indices. kaish does not read leading-zero octal, so `$((010 + 1))` errors and names `8#10` or `10`. Record keys are text, so `${r[007]}` reads key `"007"`.
 
-A bare integer must fit in 64 bits (`-9223372036854775808` to
-`9223372036854775807`); a longer numeral is an error naming the limit —
-quote it to keep the text."#,
+Bare integers must fit in signed 64 bits (`-9223372036854775808` to `9223372036854775807`). Longer numerals error and name the limit. Quote them to keep text."#,
     ),
     syntax_section(
         "expansion",
@@ -345,64 +323,67 @@ ${VAR:-default}           # default if unset/empty
 ${#VAR}                   # string length, in characters
 $0 $1 $@ $#              # script name, args, all args, count
 $?                        # last exit code (0-255)
-$$ ${$}                   # kaish session id — see note below
+$$ ${$}                   # kaish session id
 ```
 
-**`$$` is a kaish-internal session identifier**, not the OS PID. It's a
-monotonic `u64` counter (starts at 1) assigned at kernel construction;
-forks/subshells inherit the parent's value. This is an intentional
-divergence from bash — kaish runs embedded inside long-lived host
-processes, where the host PID is meaningless to the script."#,
+`$$` expands to the kaish session ID, not the OS PID. Session IDs start at 1 and increment per session. Subshells inherit the parent session ID."#,
     ),
     syntax_section(
         "collections",
         "Collections (lists & records)",
         r#"```sh
-# CONSTRUCTION — native literal syntax, no fromjson needed. Commas optional.
+# CONSTRUCTION — native literal syntax, commas optional.
 xs=[apple banana cherry]  # list — space-separated, like shell words
 nums=[1 2 3]               # ≡ [1, 2, 3]
+empty=[]                   # empty list
 u={name: amy, role: maintainer}   # record — bareword keys
 compact={port:8080}        # colon may be spaced or unspaced
-r={"content-type": x}      # quoted key for anything that isn't a bareword
+r={"content-type": x}      # quoted key for non-barewords
 d={"$k": x}                # double-quoted keys interpolate; '$k' stays literal
-nested={tags: [a b], meta: {active: true}}   # nesting works both ways
+nested={tags: [a b], meta: {active: true}}   # nested list and record
 
-# SPREAD (...) flattens; a bare $var nests as ONE element instead:
+# SPREAD (...$xs) flattens; bare $var nests as one element:
 xs=[1 2]
 ys=[0 $xs 4]                # [0,[1,2],4]  — nests
 new=[...$xs date]           # [1,2,"date"] — flattens
 
-# Values are also structured JSON — fromjson/tojson bridge real JSON text:
+# JSON BRIDGE — fromjson and tojson convert JSON text:
 u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
 xs=$(fromjson '[10,20,30]')
 
-# READ ACCESS — brackets only, never dots. Bad access is a loud error.
+# PASSING TO COMMANDS/FUNCTIONS — literals are assignment-only.
+# Arguments pass as JSON text; restore typed values inside a function with fromjson:
+f() { local d=$(fromjson "$1"); typeof $d; }
+cfg={a: 1}; f $cfg        # record ($cfg passes as JSON text; fromjson restores it)
+f [x y]                   # error — bind xs=[x y] first; literals are assignment-only
+
+# READ ACCESS — brackets only, never dots.
 ${u[name]}                # record key (bareword = literal key)
+${u["a key"]}             # quoted key for spaces or symbols
 ${u[$k]}                  # dynamic key ($var)
 ${xs[0]}   ${xs[-1]}      # list index; negative counts from the end
-${xs[0:2]}                # slice (end-exclusive) → a list
-${s[0:5]}   ${s[-3:]}     # SAME slice on a string → characters, not bytes
+${xs[0:2]}                # slice (end-exclusive) → list
+${s[0:5]}   ${s[-3:]}     # string slice → characters, not bytes
 ${u[tags][0]}             # nested path
-${#xs}   ${#u}            # length: list elements / record keys
+${#xs}   ${#u}            # length: list elements or record keys
 ${u.name}                 # error — brackets only, use ${u[name]}
-${s:0:5}                  # error — that is bash; use ${s[0:5]}
+${s:0:5}                  # error — slice with brackets, use ${s[0:5]}
 
-# ENUMERATE — always wrap the collection in $(keys ...) or $(values ...).
-# A bare `for x in $xs` is an ERROR (E012): there is no word splitting.
-# keys → indices (list) / keys (record).  values → elements (list) / values (record).
+# ENUMERATE — wrap the collection in $(keys …) or $(values …).
+# keys → indices (list) or keys (record). values → elements (list) or values (record).
+for x in $(values $xs); do echo $x; done          # list elements: 10 20 30
+for i in $(keys $xs);   do echo $i; done          # list indices: 0 1 2
+for k in $(keys $u);    do echo $k; done          # record keys: name tags
+for v in $(values $u);  do echo $v; done          # record values
+for x in $xs;           do echo $x; done          # error — wrap $xs in $(values $xs)
 
-for x in $(values $xs); do echo $x; done          # each list element: 10 20 30
-for i in $(keys $xs);   do echo $i; done          # each list index:   0 1 2
-for k in $(keys $u);    do echo $k; done          # each record key:   name tags
-for v in $(values $u);  do echo $v; done          # each record value
-
-# key + value together — index the record by the loop key:
+# Key and value together:
 for k in $(keys $u); do echo "$k = ${u[$k]}"; done
 
-# nested — a subscript access is still a VarRef, so it needs $() too:
+# Nested collection — subscript access needs $() too:
 for t in $(values ${u[tags]}); do echo $t; done   # rust shell
 
-# filter while iterating — test each element, act on the matches:
+# Filter while iterating:
 for x in $(values $xs); do
   if [[ $x -gt 15 ]]; then echo "big: $x"; fi      # big: 20  big: 30
 done
@@ -412,32 +393,28 @@ if [[ rust in $(values ${u[tags]}) ]]; then echo "has it"; fi   # element presen
 if [[ name in $u ]]; then echo "has it"; fi                     # record has key?
 if [[ 1 in $(keys $xs) ]]; then echo "in bounds"; fi            # index in bounds?
 
-# SHAPE GUARD — an API sometimes returns a list, sometimes a record; check
-# before committing to keys/values/for. typeof + [[ -list ]] / [[ -record ]]:
+# SHAPE GUARD — test a variable's type before iterating:
 if [[ -record $data ]]; then
   for k in $(keys $data); do echo $k; done
 elif [[ -list $data ]]; then
   for x in $(values $data); do echo $x; done
 fi
 
-tojson $u                 # serialize back to JSON text (--pretty to indent)
-# A stream of many documents (JSONL/NDJSON) is fromjsonl/tojsonl, not fromjson/tojson.
+tojson $u                 # serialize to JSON text (--pretty to indent)
+# Use fromjsonl and tojsonl for JSONL/NDJSON streams.
 
-# ASSIGNMENT — the same bracket paths write, in place, no spaces around `=`.
-# No autovivification — every intermediate must already exist with the right
-# shape; the ONLY thing a path-set may create is the final record key.
+# ASSIGNMENT — write via bracket paths in place (no spaces around =).
+# Intermediates must exist; path assignment only creates the final record key.
 xs[0]=9                   # in-bounds index update (negative index works too)
 u[host]=localhost         # record key: insert or update
 s[web][port]=9000         # deep path
 xs[9]=x                   # error — index out of bounds (push grows lists)
-s[api][port]=1            # error — no `api` key (no autoviv; init it first)
-user.email=x              # error — brackets only, use `user[email]=x`
+s[api][port]=1            # error — missing `api` key (initialize intermediate first)
+user.email=x              # error — brackets only, use user[email]=x
 
-# push appends to a LIST in place — takes the NAME (like read/unset), a
-# top-level name or a bracket path; same lvalue rules as assignment (no
-# autoviv on intermediates, leaf must already be a list)
-push xs date               # xs is now [...,"date"]
-push xs $rec               # values push as typed Values, not stringified text
+# push appends to a list in place. Pass a bare variable name or bracket path like read/unset.
+push xs date               # xs is now […,"date"]
+push xs $rec               # values push as typed values, not stringified text
 push services[web][tags] canary   # bracket-path target
 ```"#,
     ),
@@ -456,10 +433,9 @@ push services[web][tags] canary   # bracket-path target
 cd                        # bare cd goes to $HOME
 cd -                      # previous directory
 
-# Tilde expansion applies only to an unquoted ~ at the start of a word —
-# a quoted "~" or '~' is a literal path, never $HOME:
+# Tilde expands only at the start of an unquoted word:
 echo ~/x                  # /home/amy/x
-echo '~/x'                # ~/x
+echo '~/x'                # ~/x (quoted tilde stays literal)
 ```"#,
     ),
     syntax_section(
@@ -472,19 +448,19 @@ echo '~/x'                # ~/x
 printf '<%s>\n' a\ b      # backslash quotes the next character: one argument
 printf '<%s>\n' \( \)     # escaped parentheses are arguments
 find . -name \*.rs        # find receives the pattern *.rs
-# Mixed escapes and unquoted globs are errors; quote the whole literal word.
+# Mixed escapes and unquoted globs error; quote the whole literal word.
 # Backslash does not join text to an unquoted expansion.
 
 # Quote the whole word to join text with interpolation:
-"$dir/file.txt"           # one path
-"out-$(date +%s).log"     # one filename (text + command substitution)
+echo "$dir/file.txt"      # one path
+echo $dir/file.txt        # error — quote the whole path
 echo "/tmp/$(id -u).sock" # one argument
-
-# Unquoted text adjacent to an expansion is a PARSE ERROR (quote the word):
-echo $dir/file.txt        # error — quote "$dir/file.txt"
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
+cmd > "$dir/out.txt"      # one redirect target
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
-# Literal words keep their complete spelling, without quotes:
+"out-$(date +%s).log"     # one filename (text + command substitution)
+
+# Literal words keep their complete spelling without quotes:
 echo HEAD^2 HEAD~1 f.txt~ 9-  # ^, mid-word ~, and 9- stay literal
 printf 'abcdefghijkl\n' | cut -c 9-  # open range stays one word
 echo 123.txt 1.2.3 true:foo a+b .git/HEAD
@@ -497,25 +473,23 @@ ls 1.0*                  # glob keeps the written numeric prefix
         "Comments",
         r#"```sh
 # whole-line comment
-echo hi                   # trailing comment — the space before # is required
+echo hi                   # trailing comment (space before # required)
 
-# `#` starts a comment only at the START of a word. Everywhere else it is an
-# ordinary word character, as in bash and sh:
+# `#` starts a comment only at the start of a word. Mid-word `#` is literal:
 echo abc#3                # prints abc#3
-echo 2d25fb02#3           # prints 2d25fb02#3 — an id keeps its #<seq>
-echo https://ex.com/p#sec # prints the whole URL, fragment included
-echo abc #3               # prints abc — the space makes #3 a comment
+echo 2d25fb02#3           # prints 2d25fb02#3 (id keeps its #<seq>)
+echo https://ex.com/p#sec # prints whole URL, fragment included
+echo abc #3               # prints abc (space makes #3 a comment)
 
-# A # that follows a token kaish keeps as its own word is an ERROR, not a
-# comment — commenting there would drop the rest of the line at exit 0:
-echo "$x#3"               # correct — quote the whole word
+# `#` after a word-boundary token errors instead of dropping the rest of the line:
+echo "$x#3"               # valid — quote the whole word
 echo $x#3                 # error — # after a variable reference
-echo "$(echo a)#3"        # correct
+echo "$(echo a)#3"        # valid
 echo $(echo a)#3          # error — # after a closing )
 
-# A closing ) ] } is not a comment position either — put a space before #:
-case $x in a) # comment   # correct
-case $x in a)# comment    # error — space before #
+# Put a space before `#` after a closing ) ] }:
+case $x in a) # comment   # valid
+case $x in a)# comment    # error — add a space before #
 ```"#,
     ),
     syntax_section(
@@ -536,24 +510,18 @@ EOF
 
 jq -r '.name' <<< "$R"    # here-string — feed expanded word to stdin
 
-cmd > "$dir/out.log"      # quote interpolated targets — one word required
+cmd > "$dir/out.log"      # quote interpolated targets (one word required)
 cat < "$(find-config)"    # command substitution works in a quoted target
 ```
 
-A redirect target is a single word: quote it when it interpolates
-(`> "$dir/f"`, not `> $dir/f`). Bare command substitution as the whole
-target (`> $(cmd)`) works; bare text-plus-interpolation does not.
+A redirect target is one word. Quote targets that combine text and interpolation (`> "$dir/f"`). Bare command substitution (`> $(cmd)`) works as a whole target.
 
 ```sh
 { echo first; echo second; } > log
 while read line; do echo "$line"; done < input
 ```
 
-Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole
-body. Targets open before the body runs; input returns to the session
-afterward. A compound with no command inside it exits 2 when redirected;
-use `: > log` to create an empty file. A here-doc cannot feed a compound;
-pipe it in:
+Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole body. Targets open before the body runs, and input returns to the session afterward. An empty redirected compound exits 2. Use `: > log` to create an empty file. Pipe here-docs into compound statements:
 
 ```sh
 cat <<EOF | while read line; do echo "$line"; done
@@ -561,22 +529,14 @@ one
 EOF
 ```
 
-One stdin source per command: `<`, `<<`, and `<<<` cannot be combined.
-A redirect's input belongs to its command: `seq 3 | jq . < f` reads `f`, and
-the session's stdin is unchanged afterward.
-jq is built-in (native jaq), so `<<<` + jq replaces `echo … | jq`
-without a subprocess. jq also accepts real jq's `--arg NAME VALUE`,
-`--argjson NAME VALUE`, and `-n` / `--null-input` flags for binding
-kaish variables directly into the filter.
+Pass one stdin source per command (`<`, `<<`, or `<<<`). A redirect applies only to its command, so `seq 3 | jq . < f` leaves session stdin intact. `jq` is a builtin, so `<<<` feeds `jq` without a subprocess. Pass `--arg NAME VALUE`, `--argjson NAME VALUE`, and `-n` / `--null-input` to bind variables into filters.
 
 ```sh
 printf 'a\nb\n' | jq -R .    # one JSON string per line
 printf 'a\nb\n' | jq -R -s . # the whole text as one string
 ```
 
-`jq -R` reads raw text instead of JSON. A failing line is named on stderr;
-other lines still run and the command exits 1. `-n -R` is refused with
-exit 2; use `jq -R .` or `jq -R -s .`."#,
+`jq -R` reads raw text instead of JSON. Failing lines print to stderr while remaining lines run, and the command exits 1. `-n -R` exits 2. Use `jq -R .` or `jq -R -s .` instead."#,
     ),
     syntax_section(
         "operators",
@@ -586,43 +546,38 @@ cmd1 && cmd2              # cmd2 if cmd1 succeeds
 cmd1 || cmd2              # cmd2 if cmd1 fails
 
 if ! cmd; then …; fi      # `!` negates a condition
-while ! cmd; do …; done   # and is how kaish spells `until`
+while ! cmd; do …; done   # negates loop condition (`until` spelling)
 
 ! true                    # `!` also negates a pipeline as its own statement
-! a | b                   # binds to the WHOLE pipeline, not just `a`
-!true                     # error — kaish needs a space: write `! true`
-f() { ! cmd; }; f &       # negate inside the job, then background the call
-! cmd &                   # error — kaish refuses; bash silently drops the negation here
+! a | b                   # binds to the whole pipeline, not just `a`
+!true                     # error — add a space: `! true`
+f() { ! cmd; }; f &       # negate inside a function, then background the call
+! cmd &                   # error — wrap negation in a function to background it
 ```
 
-`!` binds to the command (or pipeline) that follows, not to the whole chain:
-`! a && b` is `(! a) && b`, so `if ! true && true` takes the `else` branch,
-and `! true && echo x` never prints `x`. A negated statement never trips
-`set -e` — see the Shell Options section for the assertion hazard this
-creates (`! grep -q secret f` does not stop a `set -e` script)."#,
+`!` binds only to the pipeline that follows, not the whole chain. `! a && b` parses as `(! a) && b`, so `! true && echo x` never prints `x`. A negated statement never trips `set -e`. See `help syntax` → Shell Options for the `! grep -q` hazard."#,
     ),
     syntax_section(
         "test-expressions",
         "Test Expressions",
         r#"```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
-#   -L (symlink, alias -h) — true even for a dangling link, unlike -e
+#   -L (symlink, alias -h) — matches dangling symlinks too, unlike -e
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
-# Shape guard: -list -record — the value's shape, not a path stat. A
-#   defined-but-wrong-shaped value is false; a bare unset $var errors (like
-#   -z), so a typo isn't silently false. Pairs with the typeof builtin.
+# Type: -list -record — false for other types; errors on unset $var (use with typeof)
 # Numeric: -gt -lt -ge -le
 # Logic: && || !
-# Membership: in (list→element, record→key) / not in — RHS must be a collection
+# Membership: in (list element or record key) / not in — RHS must be a collection
 
-[[ -f config.json && -n $NAME ]]
-[[ -L /path/link ]]
-[[ $N -gt 5 ]]
-[[ $s =~ "\.rs$" ]]
+if [[ -f config.json && -n $NAME ]]; then echo "ready"; fi
+if [[ -L /path/link ]]; then echo "symlink"; fi
+if [[ $STATUS != "ok" ]]; then echo "failed"; fi
+if [[ $N -gt 5 ]]; then echo "big"; fi
+if [[ $s =~ "\.rs$" ]]; then echo "rust"; fi
 if [[ banana in $fruits ]]; then echo "have one"; fi
 if [[ tmp not in $services ]]; then echo "not running"; fi
-[[ -list $x ]]
-[[ -record $x ]]
+if [[ -list $x ]]; then echo "list"; fi
+if [[ -record $x ]]; then echo "record"; fi
 ```"#,
     ),
     syntax_section(
@@ -633,8 +588,8 @@ if [[ -f file ]]; then echo "found"; elif [[ -d dir ]]; then echo "dir"; else ec
 
 for item in "one" "two"; do echo $item; done
 for f in *.txt; do cat "$f"; done
-for x in $(values $list); do echo $x; done            # a collection's elements/values
-for k in $(keys $rec); do echo "$k=${rec[$k]}"; done  # a record's keys (bare $rec is E012)
+for x in $(values $list); do echo $x; done            # collection elements/values
+for k in $(keys $rec); do echo "$k=${rec[$k]}"; done  # record keys (bare $rec errors)
 
 while [[ $N -gt 0 ]]; do N=$((N - 1)); done
 
@@ -647,18 +602,18 @@ esac
 break; continue; return [N]; exit [N]
 
 { echo first; echo second; }       # group in the current shell
-false || { echo failed; exit 1; }  # a fallback with several statements
+false || { echo failed; exit 1; }  # fallback with several statements
 
 # A group keeps variable, cwd, and function changes. Its last statement
 # supplies its status; control flow leaves the group for the enclosing body.
-# With set -e, `{ false && true; }` permits the next statement, as in bash.
+# With set -e, `{ false && true; }` lets the next statement run.
 
-# A compound statement is a pipeline stage, in any position. It buffers:
-# the whole block runs before the next stage sees a byte.
+# A compound statement is a pipeline stage in any position. It buffers:
+# the whole block runs before the next stage reads a byte.
 for f in a b; do echo $f; done | grep a
 printf "a\nb\n" | while read l; do echo "got $l"; done
 
-# `:` is the null command — does nothing, exits 0, another spelling of `true`:
+# `:` is the null command (exits 0, like `true`):
 if [[ -f log.txt ]]; then :; else touch log.txt; fi   # empty branch
 : > log.txt                                           # truncate to zero bytes
 ```"#,
@@ -669,41 +624,39 @@ if [[ -f log.txt ]]; then :; else touch log.txt; fi   # empty branch
         r#"```sh
 NOW=$(date)
 
-# In for-loops, $(cmd) splits on newlines (only):
+# In for-loops, $(cmd) splits on newlines only:
 for line in $(cat file); do echo $line; done   # per-line iteration
 for x in $(echo "a b c"); do echo $x; done     # one iteration (no \n)
 
 # Quote the whole word to join text with interpolation:
 for x in "$(echo foo)/b"; do echo "$x"; done  # one item: foo/b
-# Separate loop items with whitespace; adjacent fragments are an error.
+# Separate loop items with whitespace; adjacent fragments error.
 
 # Whitespace splitting needs explicit split:
 for x in $(split "a b c"); do echo $x; done
 
-# A line filter returns text, so the newline split iterates it:
+# A line filter returns text, so newline splitting iterates it:
 for i in $(seq 1 5); do echo $i; done
 
-# A builtin whose output IS a value (fromjson, jq, keys, values, split,
-# gather) binds that value — ask a POSIX-familiar builtin with --json:
+# Value-returning builtins (fromjson, jq, keys, values, split, gather) bind
+# their value directly. Pass --json to other builtins:
 cfg=$(fromjson '{"port": 80}');  echo ${cfg[port]}
-y=$(cut -f2 f)                    # the text cut printed
+y=$(cut -f2 f)                    # text printed by cut
 y=$(cut -f2 f --json)             # ["b"]
 
 # Outside for-loops, $(cmd) is one value:
 R=$(printf 'a\nb')                # R is "a\nb"
 echo "got: $(printf 'x\ny')"      # one echo, newline preserved
 
-# A $(...) body takes the full statement grammar: &&/|| chains, ; sequences,
-# multi-line bodies, # comments, and control structures (not just a single
-# pipeline), quoted or unquoted:
+# A $(…) body accepts the full statement grammar (&&/||, ;, multi-line bodies,
+# comments, and control structures), quoted or unquoted:
 H=$(cd "$repo" && git rev-parse HEAD)
 B=$(printf a; printf b)           # "ab"
 L=$(for f in *.txt; do wc -l < "$f"; done)
 
-# An assignment with no command name takes the exit status of the LAST
-# command substitution in its value, or 0 if there was none (bash's rule) —
-# so a failed substitution makes the assignment fail, and || and set -e see it:
-x="$(read-config)" || x="default"   # fallback fires when read-config fails
+# An assignment with no command returns the last $(…) exit code, or 0.
+# A failed substitution triggers || fallbacks and set -e:
+x="$(read-config)" || x="default"   # fallback runs when read-config fails
 
 # kaish-last prints the previous command's .data (or its stdout) as text:
 seq 1 5
@@ -716,20 +669,21 @@ DATA=$(kaish-last)                # capture for later use
         "arithmetic",
         "Arithmetic",
         r#"```sh
-echo $((5 + 3 * 2))       # 11    checked 64-bit integers; overflow is an error
-echo $((0xff))            # 255   hex; also $((16#ff)) — base#digits, base 2 to 36
-echo $((8#17))            # 15    octal; $((010)) is an error — write 8#10 or 10
+echo $((5 + 3 * 2))       # 11    checked 64-bit integers; overflow errors
+echo $((0xff))            # 255   hex; also $((16#ff)) (base#digits, base 2 to 36)
+echo $((8#17))            # 15    octal; $((010)) errors — write 8#10 or 10
 m=$(date +%m); echo $((10#$m + 1))   # text with a leading zero, read as decimal
 echo $((2 ** 10))         # 1024
 echo $((5 > 3))           # 1     comparisons return 1 or 0
-echo $((a > b ? a : b))   # ternary; && || ? : skip the side they do not need
+echo $((a > b ? a : b))   # ternary; && || ? : skip the unused branch
 echo $(( $(wc -l < f) * 2 ))         # $(cmd) is an operand
-x=$((x + 1))              # assignment stays outside; x++ is an error
-while (( i <= 5 )); do ...; done     # (( )) alone is a condition
+x=$((x + 1))              # assignment stays outside
+(( x++ ))                 # error — assign outside with x=$((x + 1))
+while (( i <= 5 )); do …; done     # (( )) alone is a condition
 ```
 
 Operators, highest first: `+ - ! ~` · `**` · `* / %` · `+ -` · `<< >>` · `< <= > >=` · `== !=` · `&` · `^` · `|` · `&&` · `||` · `? :`.
-An unset variable, a float, or `$RANDOM` is an error that names the fix."#,
+An unset variable, a float, or `$RANDOM` errors and names the fix."#,
     ),
     syntax_section(
         "functions",
@@ -753,20 +707,14 @@ set +o glob               # disable bare glob expansion
 set -o glob               # re-enable (on by default)
 ```
 
-Zero matches is an error (exit code 1). The `glob` builtin receives its
-pattern as written — `glob **/*.rs` needs no quotes, takes multiple patterns,
-and adds `--exclude`, `--ftype`, and depth control.
+Zero matches exit 1. The `glob` builtin takes unquoted patterns (`glob **/*.rs`), multiple patterns, `--exclude`, `--ftype`, and depth flags.
 
 ```sh
 grep -rn TODO src          # skip discovered symlinks, devices, FIFOs and sockets
 grep -R -l TODO src        # read file symlinks; do not enter linked directories
 ```
 
-`grep` reads explicitly named paths. Walk and read errors name the path on stderr,
-keep other matches and exit 2; `-q` exits 0 on a match even after an error.
-Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the
-first match per file; `-m N` stops after N selected lines; `-m 0` reads no contents.
-Context output, multiline matching and encoding conversion still buffer whole files."#,
+`grep` reads explicitly named paths. Walk and read errors print the path to stderr, keep other matches, and exit 2. `-q` exits 0 on a match even after an error. Recursive and multi-file searches read 256 KiB chunks. `-q` and `-l` stop at the first match per file. `-m N` stops after `N` matched lines, and `-m 0` reads no contents. Context output, multiline matching, and encoding conversion buffer whole files."#,
     ),
     syntax_section(
         "builtin-flags",
@@ -780,40 +728,33 @@ grep -x 'ready' file       # match a whole line; overrides -w
 find --help                # print help and exit 0
 ```
 
-In `find`, `!` binds before `-a` (also implied between tests), then `-o`.
-Quote parentheses to pass them to `find`. Tests short-circuit; each reached
-`-print` prints once. Without `-print`, matching entries print once.
-Expressions allow at most 256 nodes and 64 nested groups or negations;
-larger expressions exit 2 and name the limit.
+In `find`, `!` binds before `-a` (implied between tests), then `-o`. Quote parentheses to pass them to `find`. Tests short-circuit, and each reached `-print` prints once. Without `-print`, matching entries print once. Expressions allow at most 256 nodes and 64 nested groups or negations. Larger expressions exit 2 and name the limit.
 
-`--help` and `--json` used as a declared option value stay data:
-`find . -name --help` searches for that name. Unsupported builtin flags
-exit 2 and name `help` for the builtin's supported flags."#,
+`--help` and `--json` after an option that takes a value stay data: `find . -name --help` searches for `--help`. Unsupported builtin flags exit 2 and point to `help`."#,
     ),
     syntax_section(
         "regex",
         "Regex (grep, sed, awk)",
         r#"```sh
-# grep and sed (without -E/-r) read GNU BRE, as GNU grep and GNU sed do:
-# bare ( ) { } | + ? are literal
-grep -n 'fn consult(' src/lib.rs    # a literal paren
-sed -n '/fn consult(/p' src/lib.rs  # same rule, sed's address
+# grep and sed (without -E/-r) read GNU BRE: bare ( ) { } | + ? are literal
+grep -n 'fn consult(' src/lib.rs    # literal paren
+sed -n '/fn consult(/p' src/lib.rs  # same rule in sed address
 grep 'error\|warn' log.txt          # \| alternation; \(…\) group; \{2,5\} interval; \+ \?
 sed 's/error\|warn/X/'              # sed reads the same escapes as operators
 grep -E 'error|warn' log.txt        # -E: ERE, bare a|b (…) x+ y? z{2,5}
-grep -E -o '\d' f                   # -E reads the same escapes: \d is literal d, not a digit class
-sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # -E/-r: same ERE; \1 \2 in the REPLACEMENT either way
-grep -F 'a|b' f                     # -F: fixed string, nothing is a metachar
-grep '[0-9]\+\.\w\b' f              # \w \s \b \< \> work; \d is a literal d, as in GNU
+grep -E -o '\d' f                   # -E reads the same escapes: \d is literal d
+sed -E 's/v([0-9]+)\.[0-9]+/\1/'    # -E/-r: ERE; \1 \2 work in the replacement either way
+grep -F 'a|b' f                     # -F: fixed string, no metacharacters
+grep '[0-9]\+\.\w\b' f              # \w \s \b \< \> work; \d is literal d
 
-# awk has no BRE — it reads gawk's ERE: bare ( ) { } | + ? are operators,
-# \( \) \{n,m\} \| \+ \? are literal, the opposite of sed's default
-awk '/^(GET|POST) /' access.log     # bare (…) and | are the ERE operators
+# awk always uses ERE: bare ( ) { } | + ? are operators,
+# and \( \) \{n,m\} \| \+ \? are literal
+awk '/^(GET|POST) /' access.log     # bare (…) and | are ERE operators
 awk '/fn consult\(/ {print}'        # \( is a literal paren
 awk '{gsub(/a\|b/, "X")}'           # \| is a literal pipe, not alternation
 
-sed 's/[|]/,/g' f                   # a literal | anywhere: bracket class, or \| in sed's BRE
-sed 's/\(a\)\1/x/'                  # ERROR — no back-reference in the pattern; grep refuses \1 too
+sed 's/[|]/,/g' f                   # literal | anywhere: bracket class, or \| in sed BRE
+sed 's/\(a\)\1/x/'                  # error — back-references not supported in patterns (use \1 in replacement only)
 ```"#,
     ),
     syntax_section(
@@ -821,8 +762,8 @@ sed 's/\(a\)\1/x/'                  # ERROR — no back-reference in the pattern
         "Shell Options",
         r#"```sh
 set -e                    # exit on first error
-set -o pipefail           # a pipeline reports its rightmost failing stage
-set -o trash              # move rm'd / overwritten files to Trash
+set -o pipefail           # pipeline reports its rightmost failing stage
+set -o trash              # move removed or overwritten files to Trash
 set -o glob               # enable bare glob expansion (on by default)
 set -o crossmounts        # recursive walks descend into other mounts
 set +o trash              # disable trash
@@ -830,60 +771,25 @@ set +o glob               # disable bare glob expansion
 set -o                    # report every option and its state
 ```
 
-Recursive walks (`grep -r`, `find`, `ls -R`, `tree`, `glob`, `**`) stay in the
-mount they start in: `grep -r x /` lists `/v` and `/dev` but does not search
-them. Name a mount to walk it (`grep -r x /v`); a walk inside a mount also
-walks the mounts nested in it. `--cross-mounts` on one command, or
-`set -o crossmounts`, crosses every mount. A walk that skipped mounts names
-them once on stderr and keeps its exit status.
+Recursive walks (`grep -r`, `find`, `ls -R`, `tree`, `glob`, `**`) stay in their starting mount. `grep -r x /` lists `/v` and `/dev` without searching them. Pass a mount path (`grep -r x /v`) to walk that mount and mounts nested inside it. Pass `--cross-mounts` or set `set -o crossmounts` to cross every mount. When a walk skips mounts, it names them once on stderr and keeps its exit code.
 
-`cat missing | wc -l` exits **0** without pipefail — the status is the LAST
-stage's. With `set -o pipefail` it exits **1**. `${PIPESTATUS[0]}` reports
-each stage either way: after `false | true`, `${PIPESTATUS[0]}` is `1` and
-`${PIPESTATUS[1]}` is `0`. `PIPESTATUS` is a list, so `${#PIPESTATUS}` counts
-the stages and `$(values $PIPESTATUS)` iterates them. Reading it runs a
-command, and that command replaces it — capture it before asking twice.
+Without `pipefail`, `cat missing | wc -l` exits **0** from the last stage. With `set -o pipefail`, it exits **1**. `PIPESTATUS` is a list holding every stage's exit code. After `false | true`, `${PIPESTATUS[0]}` is `1` and `${PIPESTATUS[1]}` is `0`. `${#PIPESTATUS}` counts stages and `$(values $PIPESTATUS)` iterates them. Copy `PIPESTATUS` before running another command, because each command overwrites it.
 
 ```sh
 set -e
-! true                     # flips to exit 1 — does not abort the script
+! true                     # flips exit code to 1, does not abort
 echo reached               # still runs
 ```
 
-`!` negates a pipeline's exit status, and the negated statement never trips
-`set -e`, whatever that flipped status is. This is a hazard for a common
-idiom: `! grep -q secret f` used as an assertion does not stop a `set -e`
-script — it exits 1 when `secret` IS in `f` and 0 when it is absent, but
-`set -e` never sees either code. Write the check the other way instead —
-`grep -q secret f && exit 1`.
+`!` negates a pipeline's exit code and never triggers `set -e`. `! grep -q secret f` exits 1 when `secret` matches, yet `set -e` ignores it. Write `grep -q secret f && exit 1` to fail on a match.
 
-Env var: `KAISH_TRASH=1` enables trash at startup.
+Set `KAISH_TRASH=1` to enable trash at startup.
 
-`set -o NAME` / `set +o NAME` on a name kaish doesn't implement exits **2**
-and names the valid set (`crossmounts`, `glob`, `output-limit[=SIZE]`, `pipefail`,
-`trash`) — it never
-silently no-ops. The name is argv the caller can fix, so this is a usage
-error, not an operational 1.
-`set -o approvals` and `set -o latch` — retired spellings from the removed
-approval subsystem and the confirmation latch — fail the same way; they
-turn nothing on. A bare unrecognized short flag (`-u`, `-x`) is still
-silently ignored — there's no fixed set to check it against.
+Unknown names in `set -o NAME` or `set +o NAME` exit **2** and list valid options (`crossmounts`, `glob`, `output-limit[=SIZE]`, `pipefail`, `trash`). kaish ignores unknown short flags such as `-u` or `-x`.
 
-**Trash:** `rm` and an overwrite (`cp`, `dd`, `edit`, `mv`, `patch`,
-`sed -i`, `tee`, `write`) snapshot the prior content under `set -o trash`
-before they run, so the mistake is recoverable from Trash; `tee -a` append,
-new files, and `patch --dry-run` have no prior content to snapshot. Files
-<= 10MB and directories always trash; `/tmp`, `/v/*` are excluded. A
-**symlink** is the exception: `rm` unlinks the link itself rather than
-trashing its target, which is trivially recreatable while the target may
-not be. If trash fails, the op errors — no silent fallthrough to a
-destructive delete/overwrite. Configure threshold: `kaish-trash config
-max-size <bytes>`.
+**Trash:** With `set -o trash`, `rm` and overwrites (`cp`, `dd`, `edit`, `mv`, `patch`, `sed -i`, `tee`, `write`) snapshot prior content. `tee -a`, new files, and `patch --dry-run` have no prior content to snapshot. Files <= 10 MB and directories move to Trash, excluding `/tmp` and `/v/*`. `rm` unlinks symlinks directly without trashing their targets. If trashing fails, the command errors without deleting or overwriting. Set the size limit with `kaish-trash config max-size <bytes>`.
 
-`kaish-trash empty --confirm` is the one operation that always asks — it
-discards the recovery net itself. A bare `kaish-trash empty` refuses and
-names the flag; the flag carries no token, records nothing, and no session
-setting disables the ask."#,
+`kaish-trash empty` refuses and names `--confirm`. Run `kaish-trash empty --confirm` to discard all Trash contents. `--confirm` is a plain boolean flag, and no session option disables it."#,
     ),
     syntax_section(
         "error-handling",
