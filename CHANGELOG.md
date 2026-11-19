@@ -10,6 +10,10 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject unsupported parameter expansions before making a plan or running the program. Diagnostics name prefix removal, suffix removal, or pattern replacement and show a `sed` example instead of treating the expansion as a variable name.
+
 ## [0.19.0] - 2026-11-10
 
 ### Changed

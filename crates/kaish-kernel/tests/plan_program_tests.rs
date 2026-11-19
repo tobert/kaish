@@ -43,6 +43,31 @@ fn plan_program_needs_no_kernel() {
     );
 }
 
+#[rstest::rstest]
+#[case("${var#prefix}", "s/^prefix//")]
+#[case("${var##prefix}", "s/^prefix//")]
+#[case("${var%suffix}", "s/suffix$//")]
+#[case("${var%%suffix}", "s/suffix$//")]
+#[case("${f##*/}", r#"basename "$f""#)]
+#[case("${f%/*}", r#"dirname "$f""#)]
+#[case("${f%.*}", r#"basename "$f" .txt"#)]
+#[case("${var/a/b}", "s/a/b/")]
+#[case("${var//a/b}", "s/a/b/g")]
+#[case("${var:+word}", "if")]
+fn unsupported_expansions_name_the_construct_and_fix(#[case] expansion: &str, #[case] fix: &str) {
+    for source in [
+        format!("echo {expansion}"),
+        format!("echo \"{expansion}\""),
+        format!("echo $(echo {expansion})"),
+        format!("echo ${{unset:-{expansion}}}"),
+        format!("cat <<EOF\n{expansion}\nEOF\n"),
+    ] {
+        let error = plan_program(&source).unwrap_err();
+        let diagnostic = error[0].format(&source);
+        assert!(error[0].message.contains(expansion) && error[0].message.contains(fix), "{diagnostic}");
+    }
+}
+
 /// Nothing executes during planning: the statement that would delete the
 /// file is planned, and the file is still there.
 #[tokio::test]
