@@ -108,17 +108,18 @@ pub const FRAGMENTS: &[Fragment] = &[
     ),
     en(
         Concept::Foundations,
-        "quote-to-join",
+        "quote-by-default",
         Variant::Rule,
         Depth::Summary,
         None,
-        "`\"$dir/file.txt\"` is one path. Unquoted `$dir/file.txt` is a parse \
-         error. Quote the whole word to join text with `$VAR`, `$(cmd)`, or a glob.",
+        "**Quote by default.** Quoting is strict, as in JSON. `\"$dir/file.txt\"` \
+         is one path. Unquoted `$dir/file.txt` is a parse error. Quote any word \
+         that joins text with `$VAR`, `$(cmd)`, or a glob.",
     )
     .ranked(1),
     en(
         Concept::Foundations,
-        "quote-to-join",
+        "quote-by-default",
         Variant::Contrast,
         Depth::Reference,
         None,
