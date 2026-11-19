@@ -1,25 +1,25 @@
 # Ignore File Configuration
 
-Controls which files are filtered by file-walking tools (glob, tree, ls -R, grep -r, find).
+Ignore rules filter files during recursive walks in `glob`, `tree`, `ls -R`, `grep -r`, and `find`.
 
 ## Modes
 
 | Mode | Scope | Defaults | Auto-gitignore | Effect |
 |------|-------|----------|----------------|--------|
-| REPL | Advisory | on | on | Polite tools filter (.gitignore + defaults); `find` unrestricted. Recover per call with `--no-ignore`, per session with `kaish-ignore clear`. |
-| Agent | Enforced | on | on | All tools filter. Prevents context flooding. |
-| Embedded | Advisory | off | off | No filtering unless the embedder configures it. |
+| REPL | Advisory | on | on | `glob`, `tree`, `ls`, and `grep` filter `.gitignore` and defaults. `find` walks everything. |
+| Agent | Enforced | on | on | All file-walking tools filter, including `find`. |
+| Embedded | Advisory | off | off | No filtering runs unless the embedder configures it. |
 
 ## Scope
 
-- **Advisory** — polite tools (glob, tree, grep, ls) respect config. `find` ignores it (POSIX tradition).
-- **Enforced** — all tools respect config, including `find`. Default for agent (embedded) mode.
+- **Advisory:** `glob`, `tree`, `ls`, and `grep` apply ignore rules. `find` walks all paths.
+- **Enforced:** Every file-walking tool applies ignore rules, including `find`.
 
-Per-tool `--no-ignore` flags override for that invocation.
+Pass `--no-ignore` to `glob` or `tree` to bypass filtering for one call. Run `kaish-ignore clear` for a session-wide bypass.
 
 ## Default Ignore List
 
-When defaults are on, these are always filtered: `.git`, `node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `dist`, `build`, `.next`.
+When defaults are on, tools always skip these directories: `.git`, `node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `dist`, `build`, and `.next`.
 
 ## kaish-ignore Builtin
 
@@ -35,11 +35,15 @@ kaish-ignore scope advisory|enforced  # change scope
 
 ## REPL Opt-Out
 
-Interactive mode filters by default. To see everything, add to
-`~/.config/kaish/init.kai` (or run ad hoc):
+Interactive mode filters files by default.
+Run `kaish-ignore clear` in your session or add it to `~/.config/kaish/init.kai` to disable filtering:
 
 ```sh
-kaish-ignore clear      # this session: no filtering at all
+kaish-ignore clear      # disable filtering for this session
 ```
 
-or reach past the filter per call: `glob '**/*' --no-ignore`.
+Pass `--no-ignore` to bypass filtering on a single command:
+
+```sh
+glob '**/*' --no-ignore
+```

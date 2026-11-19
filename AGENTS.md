@@ -12,130 +12,185 @@ reference REPL. It is stable; changes before 1.0 are limited to ergonomics and c
 
 ## Writing style
 
-Write this way by default: commit messages, PR bodies, code comments, help, docs,
-error messages, and `///` on builtin arguments.
+Use this style for runtime help, `///` parameter docs, error
+messages, and code comments. Narrative design docs keep their own voice. `CHANGELOG.md`
+follows its own bullet rule below.
 
-kaish keeps a small, predictable subset of `sh`, so existing shell skills transfer. This
-guide keeps a small, predictable subset of English for the same reason.
+kaish keeps a small, predictable subset of `sh`. This guide keeps a small, predictable
+subset of English so both small and frontier models read rules clearly.
+
+| Surface | Source | Rules |
+|---|---|---|
+| Always-on spine | `crates/kaish-help/src/fragments.rs` (`Model`, `Foundations`, `Depth::Summary`) | Terse rule and at most one contrast; 3,500-char `BUDGET` |
+| Reference syntax | `fragments.rs` (`syntax_section`) → `syntax.md` | Full examples in complete constructs; run `regen_syntax` |
+| Topic docs | `crates/kaish-help/content/en/*.md` (except `syntax.md`) | Behavior, defaults, tables; no design history |
+| Published builtin text | `crates/kaish-kernel/src/tools/builtin/*.rs` | `///` on fields, `about =` on struct, imperative example labels |
+| Language reference | `docs/LANGUAGE.md` | Deeper human reference; keep the eight headings `compose.rs` pins |
+
+Never edit `crates/kaish-help/content/en/syntax.md` by hand. Edit `fragments.rs` and
+run `cargo run -p kaish-help --example regen_syntax`.
+
+### Sentence and layout
+
+- **One idea per sentence.** Target 20 words or fewer.
+- **Use imperative mood for steps.** Start a procedure with a verb like *Run*, *Quote*,
+  or *Pass*.
+- **Use active voice for descriptions.** Give every description a clear subject, verb,
+  and object.
+- **Avoid semicolons and stacked em-dashes.** Split compound thoughts into separate
+  short sentences.
+- **Prefer tables or bullet lists for three or more variants.** Use a fenced code block
+  when runnable syntax teaches better.
+
+### Structural elements
+
+- **H1 headings:** Write a noun phrase, such as `# Overlay VFS Mode`.
+- **Code fences:** Tag shell blocks with `sh`. Leave raw text untagged or tag data
+  blocks with `jsonl`.
+- **Placeholders:** Use the single character `…`, never `...`. In kaish, `...` parses
+  as a real string argument.
+- **Error markers:** Mark invalid lines with `# error — <fix>`. Quote real shipped error
+  messages when practical, or keep paraphrases exact.
+- **Restriction tables:** Include a `Use instead` column when listing unsupported flags
+  or features.
 
 ### Vocabulary choices
 
-Keep the vocabulary small. This limits the number of distinct words, not the length of the
-text. Using familiar words may require a longer sentence.
+Keep the vocabulary small and plain. Avoid figures of speech and idioms. Make the
+meaning clear even under truncation or second-language reads.
 
-Use plain words instead of figures of speech. Make the intended meaning available from the
-words themselves, including in second-language or partial-context use.
+Keep standard Unix and JSON terms (`stdin`, `stdout`, `stderr`, `exit code`, `glob`,
+`symlink`, `subshell`, `parse error`). Write plain English around them.
 
-Use an established technical term when kaish gives it one meaning. For example:
-
-| Write | Meaning |
-|---|---|
-| affordance | A cue for the next available action. An error that names its fix affords that fix. |
-| familiar syntax | Existing `sh` skill transfers because kaish preserves familiar syntax. |
-
-`hazard` and `override` belong to this vocabulary too; they carry guarantees, so their
-definitions live in the Terms table below, with every other term that carries a
-behavioral guarantee.
-
-Use American spellings.
+Use American spellings. Terms with fixed kaish meanings live in the Terms table below.
 
 ### One term, one meaning
 
-Pick one word for each concept and keep it. Do not vary a word for style.
+Pick one word for each concept and keep it. Do not vary words for style.
 
-Example labels are imperative. Write "Send STOP by name," not "Named shorthand." The
-label sits next to a command, so it should read like one.
+Write imperative labels on `ToolSchema` examples. Write `"Send STOP by name"`, not
+`"Named shorthand"`.
 
-Cross-references take one form per target: ``see `help <topic>` `` for a help topic, and
-`docs/LANGUAGE.md`, "Section name" for the language reference. Link instead of
-re-explaining.
+Cross-references take one form per target:
 
-This section keeps one term for each concept because one term, one meaning applies to the
-guide itself.
+- ``see `help <topic>` `` for a top-level topic (`list_topics()` in `topic.rs` is
+  canonical)
+- ``see `help syntax` → Section`` or ``see `help <section>` `` for a syntax section
+- `docs/LANGUAGE.md`, "Section name" for the language reference
 
 ### Provide specific values
 
-Whenever it's practical, provide the public exit code, size, flag, default, and condition.
-This saves round trips to get more information and gives agents clear observations for
-updating their model of the world.
+State the public exit code, byte limit, flag, default, and condition. This saves tool
+calls and prevents guessing.
 
 > Before: Oversize output fails.
 >
 > After: Oversize output spills to a file and exits 3.
 
-State the default and condition too, for example: "reads stdin when no files are given"
-and "off by default; applies to `-r` only."
+State defaults and scope too. Examples: `"reads stdin when no files are given"` and
+`"off by default, applies to -r only"`.
 
 ### Fast and informative failures
 
-Make errors, warnings, and failures informative and, where possible, instructive.
-Lead with consequences, name conditions, and suggest next steps when they are known.
+Lead error messages with the consequence. Name the condition and the fix.
 
-Errors that face users, agents, and models must not leak internals. Internal code names
-and references will be unresolvable and should only be exposed for assertions and errors
-that indicate a real problem in kaish.
+Never leak internal symbol names or module paths in user-facing errors. Keep internal
+names in assertions only.
 
-An error is feedback, not a problem. A model that reads `` write `10#$m` `` gets it right
-next turn; a silent coercion teaches nothing. When the choice is between degrading quietly
-and refusing with the fix named, refuse. Keep the text clinical: the value, the rule in
-a few words, the fix.
+Refuse with the fix named instead of coercing silently. Write `` write `10#$m` ``
+instead of guessing octal or zero.
+
+Follow the three-part error shape: the bad value, the rule in a few words, and the fix.
 
 ### Published builtin text
 
-A `///` comment on a builtin argument is published to agents. `params_from_clap` copies
-it into `ParamSchema.description`, and the kernel exposes it through
-`Kernel::tool_schemas()`. Describe the argument's behavior there. Put implementation
-notes in `//` comments.
+Always set `#[command(about = "…")]` on a clap struct. Without `about =`, clap
+publishes the struct's `///` comment.
 
-A `///` comment on the clap struct is not published; `schema_from_clap` reads
-`cmd.get_about()` instead. Struct docs and `//` comments are safe places for mechanism.
+Put behavior in each argument's first `///` paragraph. `params_from_clap` publishes
+`get_help()` through `Kernel::tool_schemas()`, falling back to `get_long_help()` if the
+first paragraph is empty.
 
-A blank `///` line splits clap short help from long help. Everything before the blank
-line is published; everything after it is not. Use the split when an implementation note
-belongs next to the field.
+Put implementation notes after a blank `///` line or in `//` comments.
 
-Do not infer the published text by grepping the source. Read `Kernel::tool_schemas()` or
-run the published-prose test. When modifying builtins, audit every `///` on its clap
-struct to ensure code and documentation stay synchronized.
+Read `Kernel::tool_schemas()` or run `cargo test -p kaish-kernel --test
+published_prose_tests` after modifying a builtin.
 
-### Write for model context
+### Tiering and model context
 
-Use the same prose in human and model contexts. Assume the context may be truncated and
-lead with the most important information. Teach syntax with examples. Repeat important
-rules.
+Use the same prose for humans and models. Assume truncation and put the highest-impact
+rules first.
+
+- **Always-on spine (`Model`, `Foundations`, `Depth::Summary`):** Keep rules terse with
+  at most one inline contrast. Insert new rules by `ranked(n)` order and stay within the
+  3,500-char `BUDGET` in `compose.rs`.
+- **One canonical help location per detail:** Keep each detail in one topic
+  (`fragments.rs` for syntax, `content/en/*.md` for topics). Link from `overview.md` and
+  `limits.md` instead of copying paragraphs. `docs/LANGUAGE.md` stays the longer human
+  reference.
+- **Behavior over history in runtime help:** Keep runtime behavior (such as `$$` session
+  IDs), defaults, limits, and exit codes. Put design rationale, internal names, and
+  retired flags in commit messages or `docs/`.
+- **Keep `list_topics()`, `HelpTopic::description()`, and `overview.md` in sync.**
 
 ### The example is the rule
 
-Show the correct example before explaining it. Continue the correct pattern when the
-surrounding prose is missing. Make the example carry the rule by itself.
+Show the working example before explaining it. Make the example teach the rule on its
+own.
 
 > Before: **Quote to join.** `$VAR`, `$(cmd)`, and globs are each a separate word unless
 > quoted — kaish never pastes adjacent unquoted tokens.
 >
-> After: `"$dir/file.txt"` — one path. kaish keeps `$VAR`, `$(cmd)`, and globs as
-> separate words; quote the whole word to join text with interpolation.
+> After: `"$dir/file.txt"` is one path. kaish keeps `$VAR`, `$(cmd)`, and globs as
+> separate words. Quote the whole word to join text with an expansion.
 
-Avoid incorrect examples. When one is necessary, put the correct form first and the
-clearly marked error next to it:
-`echo "$dir/file.txt"`; `echo $dir/file.txt # error — quote the whole path`.
+- **Show complete constructs in reference examples.** Wrap tests inside a full statement
+  (`if [[ k in $r ]]; then …; fi`). Never show bare `[[ k in $r ]]` alone. Short inline
+  loop heads in the spine (`for x in $(values $c)`) are exempt.
+- **Teach the plain form and every variant.** Show `!=` alongside `in`, `xs=[]`, and
+  `${u["a key"]}` side by side.
+- **Anchor novel forms to known ones.** For example, state that `push` takes a variable
+  name like `read` or `unset`.
+- **Use positive rules for instructions.** Write *"Quote the whole path"* instead of
+  *"Do not leave expansions unquoted."* Keep `never` for guarantees, such as *"kaish
+  never splits words."*
+- **Break priors with paired contrasts.** Put the valid line first and `# error — <fix>`
+  immediately below it. `limits.md` is the one page that leads with missing features and
+  their replacements.
+
+```sh
+echo "$dir/file.txt"
+echo $dir/file.txt     # error — quote the whole path
+```
+
+### Verification after help changes
+
+- Run `cargo run -p kaish-help --example regen_syntax` after editing `fragments.rs`.
+- Run `cargo test -p kaish-help` to check the 3,500-char `BUDGET`,
+  `syntax_md_matches_fragments`, and phrase-pinned tests in `compose.rs`.
+- Run `cargo test -p kaish-kernel --test builtin_unknown_flag_tests` after editing
+  `limits.md`.
+- Re-run the LLM panel from `docs/designing-syntax-with-llms.md` before release when
+  `Foundations` or `collections` changes.
 
 ### Terms
 
-These are the terms that carry a stable definition. **This table is the source.**
-The list grows when a collision appears in real prose, not in advance.
+These terms carry a fixed definition. **This table is the source.** Add a term when a
+collision appears in real prose, not in advance.
 
 | Term | Part of speech | Meaning |
 |---|---|---|
-| hazard | noun | A condition with a predictable failure. Prose names the hazard and the fix kaish ships for it; neither leads. |
-| override | noun | A documented, supported way past a restriction kaish enforces — `-E` out of GNU BRE, `--lines` out of JSONL rows. An override is designed and documented intentionally. |
-| fail loudly | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
 | builtin | noun | An embedded Unix-like tool that runs inside the kernel process. |
-| external command | noun | A program the kernel runs on the underlying system via execve(2) family, often via `$PATH`. |
+| external command | noun | A program the kernel runs via the `execve(2)` family, often through `$PATH`. |
+| fail loud | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
+| familiar syntax | noun phrase | Existing `sh` skill transfers because kaish preserves familiar syntax. |
+| hazard | noun | A condition with a predictable failure. State behavior first, then the hazard, then the fix. |
 | kernel | noun | The kaish execution core. Not the OS kernel. |
 | mount | noun, verb | A path prefix bound to a filesystem, or the act of binding one. |
-| typed | adjective | A value keeps its JSON type through substitution. It is not stringified. |
+| override | noun | A documented escape hatch past a restriction (`-E`, `--lines`), or a flag that takes precedence over another flag (`-d` over `-R`). |
 | overlay | noun, adjective | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
 | spill | verb, noun | To write oversize output to a file, or the file that results. |
+| typed | adjective | A value keeps its JSON type through substitution. It is not stringified. |
 
 ## Crate structure
 
@@ -198,8 +253,8 @@ in another base and does checked 64-bit integer arithmetic.
 - Base spellings are bash's: `0xff` and `base#digits` (base 2 to 36). `0b101` and
   `0o17` are errors that name `2#101` and `8#17`. Add a spelling only after a model
   panel shows models writing it.
-- A leading zero is text (`007`, `0644`). Where kaish needs a number — `$(( ))`,
-  `[[ -eq ]]`, `test`, a loop count, a list index — it is an error naming `8#10`,
+- A leading zero is text (`007`, `0644`). Where kaish needs a number (`$(( ))`,
+  `[[ -eq ]]`, `test`, a loop count, or a list index), it is an error naming `8#10`,
   `10`, or `10#$x`. kaish never answers octal or a third number.
 - An integer literal must fit in 64 bits; overflow, division by zero, an unset
   variable, an empty `$(( ))`, and assignment inside `$(( ))` are errors, never
@@ -211,12 +266,10 @@ in another base and does checked 64-bit integer arithmetic.
 ### Code style
 
 - Comments are short and direct. Narrative goes in the commit message.
-- **`///` on a builtin argument is published to agents.** `params_from_clap` copies it
-  into `ParamSchema.description`. Describe the flag's behavior in simple English;
-  implementation notes go in `//`. See "Published builtin text" below.
+- **Audit published `///` text on builtin arguments.** See "Published builtin text" above.
 - New modules use `src/module_name.rs`, not `mod.rs`.
 - Full words for names; avoid abbreviations.
-- Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`.
+- Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| …)`.
 - Tests use **rstest** for parameterized cases and **insta** for snapshots. Kernel
   tests live in `crates/kaish-kernel/tests/`.
 

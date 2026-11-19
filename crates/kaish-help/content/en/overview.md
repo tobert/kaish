@@ -1,59 +1,65 @@
 # kaish (会sh)
 
-Bourne-like shell for AI agents. Familiar syntax, typed values, structured output.
-Validates before execution. Builtins run in-process; external commands via PATH.
-An embedder can also register a *wrapped command* — one external program with a
-declared grammar, which runs where a PATH command does not. It appears in
-`help builtins`, and `help <name>` lists the verbs and flags it accepts;
-anything else fails before it spawns, naming the allowed set.
+`kaish` fuses Bourne shell syntax with typed JSON values and structured output.
+The kernel validates every script before execution.
+Builtins run inside the kernel process.
+External commands run through `PATH`.
+An embedder can also register a wrapped command.
+A wrapped command pairs an external program with a declared grammar and runs even when `PATH` lookup is off.
+It appears in `help builtins`, and `help <name>` lists its allowed verbs and flags.
+Any other verb or flag fails before spawning and names the allowed set.
 
 ## Topics
 
 ```
-help syntax     Variables, quoting, pipes, control flow
-help collections  Lists & records: literals, access, iteration, lvalues
-help builtins   List of all builtins
-help vfs        Virtual filesystem mounts
-help scatter    Parallel processing (散/集)
-help ignore     Ignore file configuration
+help syntax        Variables, quoting, pipes, control flow
+help collections   Lists & records: literals, access, iteration, lvalues
+help builtins      List of available builtins
+help vfs           Virtual filesystem mounts and paths
+help overlay       Copy-on-write overlay mode and kaish-vfs
+help scatter       Parallel processing (散/集)
+help ignore        Ignore file configuration
 help output-limit  Output size limit configuration
-help limits     Known limitations
-help <tool>     Detailed tool help (e.g., help grep)
+help limits        Known limitations
+help <tool>        Help for one tool, such as help grep
 ```
 
 ## Output Formats
 
-Builtins return structured data. Use `--json` for machine-readable output:
+Builtins return structured data.
+Pass `--json` for machine-readable output:
 
 ```sh
 ls --json                # JSON array of file nodes
 kaish-vars --json        # JSON array of {NAME, VALUE} objects
 ps --json                # JSON array of process info
-ls --json=$WANT_JSON     # switch it from a variable
+ls --json=$WANT_JSON     # toggle JSON output from a variable
 ```
 
-`--json=VALUE` is off for `0`, `false`, and an empty value; on for anything
-else. Every builtin reads it the same way.
+`--json=VALUE` is off for `0`, `false`, and an empty value.
+Any other value turns `--json` on.
+Every builtin reads this flag the same way.
 
 ```sh
 echo hi --json                 # "hi\n"
 grep --json nomatch file       # {"code":1,"error":""}
 ```
 
-Success keeps its JSON value unwrapped; an empty success prints nothing.
-A nonzero formatted result is `{"code":N,"error":"..."}`, even when
-the command answered a question and wrote no error. Partial structured
-results stay under `data`; plain text stays under `output`. Check the exit
-code first. `diff --json` with different files exits 1 and puts its answer
-under `data`.
+A zero exit code prints the JSON value directly, or prints nothing when empty.
+A nonzero exit code prints `{"code":N,"error":"…"}`, even when the command wrote no error.
+Partial structured results appear under `data`, and plain text appears under `output`.
+Check the exit code first.
+For example, `diff --json` on differing files exits 1 and places its diff under `data`.
 
-Only the final builtin stage is formatted; earlier stages feed the next
-stage as streams. External commands receive the flag literally. Refusals
-before builtin dispatch do not use this formatter. A spill still exits 3
-with a truncated preview and spill metadata; the preview may be incomplete
-JSON. See `help limits`.
+Only the final builtin stage formats output as JSON.
+Earlier pipeline stages pass streams to the next stage.
+External commands receive `--json` as a literal argument.
+Refusals before builtin dispatch bypass this formatter.
+Oversize output spills to a file and exits 3 with a truncated preview and spill metadata.
+That preview may contain incomplete JSON.
+See `help limits`.
 
-A row that came from a line of a file carries `line`, a 1-based integer:
+A row read from a file line carries a 1-based integer `line` field:
 
 ```sh
 grep -n fn main.rs --json | jq '.[].line'
@@ -61,29 +67,29 @@ head -n 3 main.rs --json                  # [{"TEXT":"…","line":1,"hash":"d246
 cat -n main.rs --json | jq 'map(select(.line > 40))'
 ```
 
-`grep` sets it whether or not `-n` is given — `-n` controls the text, not
-whether the anchor exists. `tail` reports the line's position in the file, not
-its position among the rows `tail` printed. A row with no line to point at (a
-file listing, a process) has no `line` key at all, so `has("line")` is a real
-question to ask.
+`grep` always sets `line`, even without `-n`.
+The `-n` flag changes text formatting, not the JSON anchor.
+`tail` reports each line's 1-based position in the file, not its row index in the output.
+Rows from non-line data, such as file listings or processes, omit `line` completely.
+Test `has("line")` in `jq` to distinguish line rows from other rows.
 
-`--hashline` prints the same rows as `LINE:HASH:TEXT`. `LINE:HASH` is the
-anchor `edit` takes:
+Pass `--hashline` to print rows as `LINE:HASH:TEXT`.
+`edit` accepts `LINE:HASH` as a line anchor:
 
 ```sh
 cat --hashline main.rs                    # 1:d246:use std::io;
 grep --hashline TODO src/a.rs src/b.rs    # src/b.rs:12:5b0b:    // TODO: retry
 ```
 
-Anchors exist only for lines read from a named file, so `--hashline` exits 2 on
-stdin, on several files to `cat`/`head`/`tail`, and on output without anchors
-(`ls --hashline`). Under `--json` an anchored row also carries `hash`. See
-`docs/LANGUAGE.md`, "Line anchors (`--hashline`)".
+Anchors exist only for lines read from a named file.
+`--hashline` exits 2 on stdin, on multiple files passed to `cat`, `head`, or `tail`, and on unanchored output like `ls --hashline`.
+With `--json`, each anchored row also carries `hash`.
+See `docs/LANGUAGE.md`, "Line anchors (`--hashline`)".
 
 ## Quick Examples
 
 ```sh
-# Familiar syntax — globs, pipes, control flow all work
+# Familiar syntax: globs, pipes, and control flow
 ls *.txt | wc -l
 for f in src/*.rs; do grep "TODO" "$f"; done
 
@@ -91,17 +97,6 @@ for f in src/*.rs; do grep "TODO" "$f"; done
 NAME="world"
 if [[ -n $NAME ]]; then echo "Hello, ${NAME}!"; fi
 
-# Parallel execution with scatter/gather
+# Parallel execution with scatter and gather
 seq 1 100 | scatter --as N --limit 4 | process $N | gather
-
 ```
-
-## Key Differences from Bash
-
-- `$VAR` is always one value — no implicit word splitting (use `split` for whitespace/delimiter splitting)
-- `*.txt` expands to matching files — zero matches is an error, not a silent pass-through
-- No backticks — `$(cmd)` only (the lexer rejects a bare backtick with a dedicated error rather than silently accepting it)
-- `$(cmd)` returns structured data — `for i in $(seq 1 5)` iterates 5 values, not split text
-- `for x in $(cmd)` splits on newlines — multi-line stdout iterates per line; whitespace within a line is never split
-- `grep` and `sed` read GNU BRE by default, as GNU grep and GNU sed do — `grep 'fn consult('`/`sed -n '/fn consult(/p'` match a literal paren, `grep 'a\|b'`/`sed 's/a\|b/x/'` alternate, `-E`/`-r` forces strict ERE (bare `a|b`); `awk` has no BRE — it reads gawk's ERE, where the bare forms above are already the operators and `\|`/`\(…\)` are already literal
-- `true`/`false` are the boolean literals — `TRUE`, `yes`, `Yes`, `on` are ordinary strings, so `x=TRUE` is not a boolean

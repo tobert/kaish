@@ -1,129 +1,99 @@
 # Overlay VFS Mode
 
-## What is overlay mode?
+## Overview
 
-Overlay mode wraps the real filesystem in a copy-on-write layer. Every write
-goes into an in-memory upper layer; the lower layer (real disk) is never
-touched. You can inspect what changed, commit the changes, or discard them.
+Overlay mode wraps the real filesystem in a copy-on-write layer. Every write lands in an in-memory upper layer without touching the lower real disk. You can inspect, commit, or discard pending changes.
 
-Enable it once at session start — it is not a `set -o` option:
+Enable overlay mode at session start. It is not a `set -o` option.
 
-```
-kaish --overlay                        # interactive REPL
-kaish --overlay -c 'script'           # one-shot
-KernelConfig::with_overlay(true)      # embedder API
+```sh
+kaish --overlay              # interactive REPL
+kaish --overlay -c 'script'  # one-shot script
 ```
 
-## kaish-vfs subcommands
+Embedders enable overlay mode with `KernelConfig::with_overlay(true)`.
 
-`kaish-vfs status` works in any session: it reports `mode: transaction`
-inside an overlay session and `mode: direct` (plus the budget) otherwise, so
-you can always ask "what session am I in?" without an error path. The other
-subcommands require an active overlay session — without one they exit 1 with
-a clear message.
+## kaish-vfs Subcommands
 
-| Subcommand | Description |
+`kaish-vfs status` works in any session. It reports `mode: transaction` inside an overlay session and `mode: direct` with the memory budget otherwise.
+
+All other `kaish-vfs` subcommands require an active overlay session. Outside an overlay session, they fail and exit `1`.
+
+| Subcommand | Behavior |
 |---|---|
-| `kaish-vfs status` | Session mode (direct/transaction); when in transaction: dirty?, counts by kind, resident bytes, budget. |
-| `kaish-vfs diff [path...]` | Unified diff of pending changes. Exits 1 when changes exist, 0 when clean. With path args, filtered. |
-| `kaish-vfs commit` | Write all changes to the real filesystem, then reset. |
-| `kaish-vfs reset [path]` | Discard one path's edits, or all of them. |
+| `kaish-vfs status` | Report session mode, dirty flag, change counts by kind, resident bytes, and budget |
+| `kaish-vfs diff [path…]` | Show unified diff of pending changes, filtered when paths are given |
+| `kaish-vfs commit` | Write all pending changes to the lower filesystem and reset the overlay |
+| `kaish-vfs reset [path]` | Discard edits for one path, or all pending edits when omitted |
 
-## Transaction story
+`kaish-vfs diff` exits `1` when changes exist and `0` when the overlay is clean.
 
-An overlay session is a **transaction**: every write is virtual until you run
-`kaish-vfs commit`. The commit pre-flights all changes (stale-base check),
-then writes each file to the target filesystem. Each file is replaced
-atomically, so a crash leaves it whole, old or new; the commit as a whole is
-not atomic.
+## Transactions and Commits
 
-After a successful commit the overlay is clean. A failed commit reports which
-paths landed and which did not — use `kaish-vfs status` to see the remaining
-dirty set and `kaish-vfs reset` to discard it.
+- An overlay session is a transaction. Writes stay virtual until `kaish-vfs commit` runs.
+- `kaish-vfs commit` validates all changes first with a stale-base check, then writes each file to the target filesystem.
+- Each file replacement is atomic. A crash leaves each file whole as either old or new, while the multi-file commit is not atomic.
+- A successful commit leaves the overlay clean.
+- A failed commit reports which paths landed on disk and which failed.
 
-### Partial-commit recovery
+### Partial-Commit Recovery
 
-If `kaish-vfs commit` fails mid-way, the error output lists which paths were
-already written to the real tree. To recover:
+When `kaish-vfs commit` fails mid-way, follow these steps:
 
-1. For each path listed as already committed, run `kaish-vfs reset <path>` —
-   those files are now on disk; resetting just removes their overlay entry.
-2. Run `kaish-vfs status` to see what remains dirty.
-3. Resolve any conflicts in the real tree (e.g. remove a file that caused an
-   `AlreadyExists` conflict for an Added overlay entry).
-4. Retry `kaish-vfs commit`.
+1. Run `kaish-vfs reset <path>` for each path listed as already written to remove its overlay entry.
+2. Run `kaish-vfs status` to inspect the remaining dirty paths.
+3. Resolve conflicts on disk, such as removing an existing file that triggered an `AlreadyExists` error for an added entry.
+4. Run `kaish-vfs commit` again.
 
-## Per-call semantics (fresh-kernel embedders)
+## Per-Call Commit Rule
 
-When an embedder runs a fresh kernel per `execute()` call (the common agent
-pattern), each call gets a **fresh overlay transaction**. Writes are virtual for
-that call only.
+Embedders often construct a fresh kernel for each `execute()` call. Each call gets a fresh overlay transaction whose writes stay virtual for that call only.
 
-**The commit must run in the same call as the writes.** If you write in one
-`execute()` call and commit in the next, the transaction from the first call
-was already discarded when its kernel was dropped.
+Run `kaish-vfs commit` in the same `execute()` call as the writes. Writes from an earlier call are discarded when that kernel drops.
 
-## Overrides (writes that bypass the overlay)
+## Overrides
 
-Under Sandboxed+overlay, the following mounts are **real LocalFs** and escape
-the transaction:
+Under `Sandboxed` mode with overlay enabled, these mounts use real `LocalFs` and bypass the transaction:
 
-- `/tmp` — process interop (mktemp output goes to real `/tmp`)
-- XDG runtime dir (e.g. `/run/user/1000`) — socket and spill files
+- `/tmp` handles process interop, so `mktemp` writes to real `/tmp`.
+- The XDG runtime directory, such as `/run/user/1000`, holds sockets and spill files.
 
-Under Passthrough+overlay, everything routes through the overlay including
-`/tmp` — mktemp output is virtual and lands on real `/tmp` only on commit.
+Under `Passthrough` mode with overlay enabled, every path including `/tmp` routes through the overlay. `mktemp` writes stay virtual until `kaish-vfs commit` runs.
 
-External commands (those resolved via PATH) are **unavailable** while cwd is
-inside an overlay mount. `OverlayFs::real_path` returns `None` by design —
-returning the lower's real path would hand tools a host path that bypasses
-the overlay (git and friends write through real paths). The kernel cannot
-spawn a child process with nowhere real to run it, so external commands fail
-with exit 127 from inside an overlay mount — the message names the actual
-cause (no real filesystem location for the cwd) and suggests a fix (a kaish
-builtin, `cd` to a real path, or `kaish-vfs commit`), rather than the plain
-"command not found" a missing command gets.
+## External Commands
 
-Under Sandboxed+overlay, `cd /tmp` moves cwd to a real LocalFs mount — from
-there, external commands work and see (and write) the real filesystem directly.
-That is the intended override for running compilers; be aware that writes
-in `/tmp` are not part of the overlay transaction.
+- External commands resolved via `$PATH` fail with exit `127` when `$PWD` is inside an overlay mount.
+- Overlay mounts have no real host path because exposing one lets external binaries bypass the overlay.
+- The error message names the missing real cwd and suggests using a builtin, changing to a real path, or committing.
+- Under `Sandboxed` mode with overlay enabled, run `cd /tmp` to move `$PWD` to a real `LocalFs` mount.
+- From `/tmp`, external commands such as compilers run and write directly to the real filesystem outside the overlay transaction.
 
-## Structured diff output (`--json`)
+## Structured Diff Output
 
-`kaish-vfs diff --json` emits a JSON array of change objects. Each entry has:
+`kaish-vfs diff --json` emits a JSON array of change objects.
 
 | Field | Type | Description |
 |---|---|---|
 | `path` | string | VFS-absolute path of the changed file |
 | `kind` | string | `"added"`, `"modified"`, or `"removed"` |
-| `base_bytes` | number | Byte size of the lower-layer content (0 for Added) |
-| `current_bytes` | number | Byte size of the upper-layer content (0 for Removed) |
+| `base_bytes` | number | Byte size of lower-layer content, or `0` for added files |
+| `current_bytes` | number | Byte size of upper-layer content, or `0` for removed files |
 
-Raw file content is omitted from the JSON output; use `cat <path>` or `kaish-vfs diff <path>`
-to inspect individual file contents.
+`--json` omits raw file content. Run `cat` or `kaish-vfs diff` on a path to inspect file content.
 
-Exit codes follow POSIX diff convention: **exit 1** when changes exist, **exit 0** when
-the overlay is clean (no changes). This applies to both text and `--json` output.
+Both text and `--json` output exit `1` when changes exist and `0` when clean.
 
-## Overlay resident vs. budget
+## Overlay Resident Bytes and Budget
 
-`kaish-vfs status` shows two counters:
+`kaish-vfs status` reports two separate memory counters:
 
-- **overlay-resident**: base snapshots + upper layer content (this overlay's RAM)
-- **budget**: the kernel-wide `vfs-memory` pool used/limit
+- **overlay-resident:** Base snapshots plus upper-layer content for this overlay.
+- **budget:** Used and total bytes across the kernel-wide `vfs-memory` pool, covering all `MemoryFs` mounts plus overlay storage.
 
-These are different: the budget covers all MemoryFs mounts plus the overlay
-upper and bases; overlay-resident is only this overlay's share.
+## NoLocal Mode with Overlay
 
-## NoLocal + overlay
+Combining `VfsMountMode::NoLocal` with `overlay: true` fails at kernel construction. There is no real lower layer to wrap because every mount is already virtual.
 
-`VfsMountMode::NoLocal` (minimal builds, WASI) combined with `overlay: true`
-fails at kernel construction — everything is already virtual, there is no real
-lower layer to wrap. The error message says so.
+## JobFs and Byte Counting
 
-## JobFs and byte counting
-
-JobFs (at `/v/jobs`) is synthesized — each read projects small status and
-command strings from the job table. JobFs byte counting is not included in
-overlay resident bytes or the vfs-memory budget.
+`JobFs` at `/v/jobs` synthesizes status and command strings on read from the job table. `JobFs` bytes do not count toward `overlay-resident` or the `vfs-memory` budget.
