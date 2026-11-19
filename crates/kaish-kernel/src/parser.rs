@@ -184,6 +184,10 @@ fn parse_var_expr(raw: &str) -> Result<Expr, String> {
         return Ok(Expr::CurrentPid);
     }
 
+    if let Some(message) = parameter_expansion_hint(&raw[2..raw.len() - 1]) {
+        return Err(message);
+    }
+
     // Check for default value syntax: ${VAR:-default}
     // Need to find :- that's not inside a nested ${...}
     if let Some(colon_idx) = find_default_separator(raw) {
@@ -198,6 +202,45 @@ fn parse_var_expr(raw: &str) -> Result<Expr, String> {
 
     // Regular variable path
     Ok(Expr::VarRef(parse_varpath(raw)))
+}
+
+/// Diagnose shell operators that are not kaish variable paths.
+fn parameter_expansion_hint(content: &str) -> Option<String> {
+    if content.starts_with('!') {
+        return Some(format!(
+            "${{{content}}}: indirect expansion is not supported. Store values in a record and read a key with `${{record[$key]}}`."
+        ));
+    }
+    let mut depth = 0usize;
+    for (index, ch) in content.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth != 0 || index == 0 => {},
+            '#' | '%' | '/' | ':' => {
+                let rest = &content[index..];
+                let example = match ch {
+                    '#' => "For a literal prefix, write `printf '%s' \"$var\" | sed 's/^prefix//'`.",
+                    '%' => "For a literal suffix, write `printf '%s' \"$var\" | sed 's/suffix$//'`.",
+                    '/' if rest.starts_with("//") => "For all matches on each line, write `printf '%s' \"$var\" | sed 's/a/b/g'`.",
+                    '/' => "For the first match on each line, write `printf '%s' \"$var\" | sed 's/a/b/'`.",
+                    ':' if rest.starts_with(":+") || rest.starts_with(":?") || rest.starts_with(":=") =>
+                        "Use an `if` statement with `test -n \"$var\"` to choose a value, report an error, or assign a default.",
+                    ':' => return None,
+                    _ => unreachable!(),
+                };
+                let operation = match ch {
+                    '#' => "prefix removal",
+                    '%' => "suffix removal",
+                    '/' => "pattern replacement",
+                    _ => "this parameter expansion",
+                };
+                return Some(format!("${{{content}}}: {operation} is not supported. {example}"));
+            }
+            _ => {},
+        }
+    }
+    None
 }
 
 /// Detect bash's `${VAR:offset:length}` substring form and explain the kaish
@@ -845,6 +888,8 @@ fn parse_interpolated_string_spanned(
                         .and_then(|s| s.strip_suffix("__"))
                         .unwrap_or("");
                     StringPart::Arithmetic(expr.to_string())
+                } else if let Some(message) = parameter_expansion_hint(&var_content) {
+                    return Err(message);
                 } else if let Some(colon_idx) = find_default_separator_in_content(&var_content) {
                     let path = parse_varpath(&format!("${{{}}}", &var_content[..colon_idx]));
                     let default_str = &var_content[colon_idx + 2..];
@@ -1086,6 +1131,9 @@ fn parse_interpolated_string(s: &str) -> Result<Vec<StringPart>, String> {
                     }
                 }
 
+                if let Some(message) = parameter_expansion_hint(&var_content) {
+                    return Err(message);
+                }
                 // Parse the content for special syntax
                 let part = if let Some(name) = var_content.strip_prefix('#') {
                     // Variable length: ${#VAR} / ${#path[sub]}
@@ -1311,6 +1359,11 @@ pub fn parse(source: &str) -> Result<Program, Vec<ParseError>> {
     // for the same reason: the message has to name a character the reader
     // cannot see, so it must not lose to a competing alternative's.
     for (i, (tok, span)) in tokens.iter().enumerate() {
+        if let Token::VarRef(raw) = tok
+            && let Some(message) = parameter_expansion_hint(&raw[2..raw.len() - 1])
+        {
+            return Err(vec![ParseError { span: *span, message }]);
+        }
         let prev = i.checked_sub(1).and_then(|j| tokens.get(j)).map(|(t, _)| t);
         if let Some((name, is_target)) =
             name_in_token_kind(tok, prev, tokens.get(i + 1).map(|(t, _)| t))
@@ -4218,13 +4271,18 @@ fn validate_interpolated_strings(tokens: &[(Token, Span)]) -> Result<(), Vec<Par
             // `${x:-WORD}`'s default word fails in `var_expr_parser`'s
             // `try_map`, which is inside the same `choice` bookkeeping — so its
             // message needs surfacing here for the same reason a string's does.
-            Token::VarRef(raw) => match find_default_separator(raw) {
-                Some(colon) if raw.len() > colon + 3 => {
-                    owned = unquote_default_word(&raw[colon + 2..raw.len() - 1]);
-                    Some(owned.as_str())
+            Token::VarRef(raw) => {
+                if let Some(message) = parameter_expansion_hint(&raw[2..raw.len() - 1]) {
+                    return Err(vec![ParseError { span: *span, message }]);
                 }
-                _ => None,
-            },
+                match find_default_separator(raw) {
+                    Some(colon) if raw.len() > colon + 3 => {
+                        owned = unquote_default_word(&raw[colon + 2..raw.len() - 1]);
+                        Some(owned.as_str())
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
         if let Some(body) = body

@@ -124,6 +124,19 @@ echo $#                         # arg count
 echo $?                         # exit code of last command (0-255)
 ```
 
+Remove a literal prefix or suffix, or replace text in each line:
+
+```sh
+printf '%s' "$var" | sed 's/^prefix//'
+printf '%s' "$var" | sed 's/suffix$//'
+printf '%s' "$var" | sed 's/a/b/g'
+```
+
+kaish does not support `${var#prefix}`, `${var%suffix}`, or `${var/a/b}`
+(and their doubled forms). These `sed` examples use regular expressions,
+not shell patterns. Use `if` with `test -n "$var"` when you need to choose
+between values, report an error, or assign a default explicitly.
+
 ## Collections (Lists & Records)
 
 Values can be structured JSON — a **list** or a **record** — not only strings.
