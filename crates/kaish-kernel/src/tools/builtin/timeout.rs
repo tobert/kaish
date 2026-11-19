@@ -33,13 +33,19 @@ pub struct Timeout;
 /// after the duration (flags included) in `positional`, and clap only sees
 /// them behind the `--` that `to_argv` writes.
 #[derive(Parser, Debug)]
-#[command(name = "timeout", about = "Run a command with a time limit; kills the child on elapsed")]
+#[command(name = "timeout", about = "Run a command with a time limit. Exits 124 when the limit expires.")]
 struct TimeoutArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Duration (`5`, `5s`, `2m`), then the command and its arguments, passed
-    /// on as written: `timeout 5 sh -c 'exit 3'`. Options go before the duration.
+    /// Duration, then the command and its arguments, passed on as written:
+    /// `timeout 5 sh -c 'exit 3'`. Write the duration as `30`, `30s`, `500ms`,
+    /// `5m`, or `1h`. Seconds take decimals (`1.5`). Options go before the
+    /// duration. A command that finishes in time keeps its own exit code. On
+    /// expiry, external children get SIGTERM, then SIGKILL after 2 seconds.
+    ///
+    /// The 2 seconds is `KernelConfig::kill_grace`'s default. The signals go to
+    /// the child's whole process group.
     duration_and_command: Vec<String>,
 }
 
@@ -53,12 +59,12 @@ impl Tool for Timeout {
         schema_from_clap(
             &TimeoutArgs::command(),
             "timeout",
-            "Run a command with a time limit; kills the child on elapsed",
+            "Run a command with a time limit. Exits 124 when the limit expires.",
             [
-                ("With seconds", "timeout 5 sleep 10"),
-                ("With duration suffix", "timeout 500ms curl example.com"),
-                ("Minutes", "timeout 2m cargo build"),
-                ("Flags belong to the command", "timeout 10 python3 -c 'print(1)'"),
+                ("Stop a command after 5 seconds", "timeout 5 sleep 10"),
+                ("Bound a network call to 500 ms", "timeout 500ms curl example.com"),
+                ("Bound a build to 2 minutes", "timeout 2m cargo build"),
+                ("Pass flags after the command name", "timeout 10 python3 -c 'print(1)'"),
             ],
         )
         .with_options_end_at_operand()
@@ -112,7 +118,10 @@ impl Timeout {
             other => {
                 return ExecResult::failure(
                     2,
-                    format!("timeout: invalid duration: {:?}", other),
+                    format!(
+                        "timeout: the duration is a {}, not a time — write 30, 5s, 500ms, 2m, or 1h",
+                        super::type_of::type_name(other)
+                    ),
                 )
             }
         };
@@ -130,12 +139,23 @@ impl Timeout {
             }
         };
 
+        // `true`, `false`, and numerals bind as typed values. As a command
+        // name they mean the word as written, so `timeout 5 true` runs `true`.
         let cmd_name = match &positional[command_index] {
             Value::String(s) => s.clone(),
+            Value::Bool(_) | Value::Int(_) | Value::Float(_) => {
+                match args.positional_text(command_index) {
+                    Some(text) => text,
+                    None => unreachable!("positional {command_index} exists: checked against len above"),
+                }
+            }
             other => {
                 return ExecResult::failure(
                     2,
-                    format!("timeout: invalid command: {:?}", other),
+                    format!(
+                        "timeout: the command name is a {}, not a word — pass a command, as in `timeout 5 sleep 1`",
+                        super::type_of::type_name(other)
+                    ),
                 )
             }
         };
@@ -325,6 +345,39 @@ mod tests {
             .expect("kernel execute errored");
         assert!(result.ok(), "code={} err={:?}", result.code, result.err);
         assert!(result.text_out().contains("works"));
+    }
+
+    /// `true` and `false` bind as booleans. As a command name they run the
+    /// builtin of that name, and its exit code passes through.
+    #[tokio::test]
+    async fn boolean_command_word_runs_that_command() {
+        let kernel = make_kernel().await;
+        let ok = kernel.execute("timeout 5 true").await.unwrap();
+        assert_eq!(ok.code, 0, "err={:?}", ok.err);
+        let no = kernel.execute("timeout 5 false").await.unwrap();
+        assert_eq!(no.code, 1, "err={:?}", no.err);
+        let via_var = kernel.execute("x=true; timeout 5 $x").await.unwrap();
+        assert_eq!(via_var.code, 0, "err={:?}", via_var.err);
+    }
+
+    /// A list cannot name a command. The refusal names the type and the fix,
+    /// never a Rust debug rendering.
+    #[tokio::test]
+    async fn collection_command_word_is_refused_by_type() {
+        let kernel = make_kernel().await;
+        let result = kernel.execute("xs=[a b]; timeout 5 $xs").await.unwrap();
+        assert_eq!(result.code, 2);
+        assert!(result.err.contains("is a list"), "err={:?}", result.err);
+        assert!(!result.err.contains("Json("), "err={:?}", result.err);
+    }
+
+    #[tokio::test]
+    async fn boolean_duration_is_refused_by_type() {
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout true sleep 1").await.unwrap();
+        assert_eq!(result.code, 2);
+        assert!(result.err.contains("duration is a bool"), "err={:?}", result.err);
+        assert!(!result.err.contains("Bool("), "err={:?}", result.err);
     }
 
     #[tokio::test]
