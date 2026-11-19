@@ -85,13 +85,12 @@ Any other unknown flag exits 2 and points to `help NAME` for supported flags.
 - **Merged streams join stdout then stderr.** Redirects like `2>&1`, `1>&2`, and shared files write captured stdout followed by stderr without interleaving. When stderr already wrote to a background job stream, `1>&2` appends stdout after published stderr. See `docs/LANGUAGE.md`, "Pipes & Redirects".
 - **Reading and writing the same file is refused.** Commands like `sort < f > f` and `cat < f >> f` exit 1. Write to a temporary file first, then `mv` or append it.
 - **Recursion depth is capped at 48.** Nested `$(…)`, recursive functions, and sourced `.kai` scripts stop with `maximum recursion depth exceeded` at depth 48.
-- **The preprocessor runs before parsing.** It expands `$(( ))` and here-doc markers before the parser sees the token stream.
 
 ## External Commands
 
 | Constraint | Use instead |
 |-----------|------------|
-| No PTY allocated | Inherited TTYs work, but kaish allocates no PTY |
+| No PTY allocated | Run interactive programs from a real terminal. Inherited TTYs work. |
 | Non-pipeline output buffered | Redirect to a file or run in a pipeline |
 | Virtual working directory fails | Run `cd` to a real directory first |
 | External commands bypass VFS sandbox | Set `allow_unwrapped_commands=false` to block `PATH` lookup, `exec`, `spawn`, and `env CMD` |

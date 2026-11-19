@@ -112,8 +112,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Rule,
         Depth::Summary,
         None,
-        "`\"$dir/file.txt\"` is one path. kaish keeps `$VAR`, `$(cmd)`, and globs \
-         as separate words. Quote the whole word to join text with an expansion.",
+        "`\"$dir/file.txt\"` is one path. Unquoted `$dir/file.txt` is a parse \
+         error. Quote the whole word to join text with `$VAR`, `$(cmd)`, or a glob.",
     )
     .ranked(1),
     en(
@@ -177,7 +177,7 @@ pub const FRAGMENTS: &[Fragment] = &[
         None,
         "`$(cmd)` carries structured data. `for i in $(seq 1 5)` iterates five \
          values. Enumerate a collection with `for x in $(values $c)` for values \
-         or `for k in $(keys $c)` for keys. Bare `for x in $c` is an error. Wrap \
+         or `for k in $(keys $c)` for list indices or record keys. Bare `for x in $c` is an error. Wrap \
          the collection in `$(values $c)` or `$(keys $c)`.",
     )
     .ranked(4),
@@ -280,8 +280,8 @@ pub const FRAGMENTS: &[Fragment] = &[
          - `kaish-vfs diff`: show unified diff.\n\
          - `kaish-vfs commit`: write changes to disk.\n\
          - `kaish-vfs reset [path]`: discard edits.\n\n\
-         Each fresh kernel starts a new overlay transaction. Run `kaish-vfs commit` \
-         in the same call as the writes, or the transaction is lost.",
+         If your embedder starts a fresh kernel per call, run `kaish-vfs commit` \
+         in the same call as the writes. A later call cannot see them.",
     ),
     // ---- Syntax reference (single source for content/en/syntax.md) -----------
     syntax_section(
@@ -307,7 +307,7 @@ break 7         # loop count is a number
 break 007       # error — leading zero is a string, write 7
 ```
 
-`007`, `010`, and `00` are strings. `-0`, `0.10`, and `1.0` are numbers. Bare words keep their typed spelling in command arguments. Through a variable, arithmetic, or `--json`, they normalize to plain numbers: `x=-0; echo $x` prints `0`. Quote a number to force a string.
+`007`, `010`, and `00` are strings. `-0`, `0.10`, and `1.0` are numbers. A bare numeral passes to a command exactly as written (`echo 0.10` prints `0.10`). Through a variable, arithmetic, or `--json`, they normalize to plain numbers: `x=-0; echo $x` prints `0`. Quote a number to force a string.
 
 Leading zeros error where kaish expects a number. This covers `break` and `continue` counts, arithmetic, numeric tests, and list indices. kaish does not read leading-zero octal, so `$((010 + 1))` errors and names `8#10` or `10`. Record keys are text, so `${r[007]}` reads key `"007"`.
 
@@ -355,7 +355,7 @@ xs=$(fromjson '[10,20,30]')
 # Arguments pass as JSON text; restore typed values inside a function with fromjson:
 f() { local d=$(fromjson "$1"); typeof $d; }
 cfg={a: 1}; f $cfg        # record ($cfg passes as JSON text; fromjson restores it)
-f [x y]                   # error — bind xs=[x y] first; literals are assignment-only
+f [x y]                   # error — literals are assignment-only, bind xs=[x y] and pass $xs
 
 # READ ACCESS — brackets only, never dots.
 ${u[name]}                # record key (bareword = literal key)
@@ -458,7 +458,7 @@ echo "/tmp/$(id -u).sock" # one argument
 echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
 cmd > "$dir/out.txt"      # one redirect target
 cmd > $dir/out.txt        # error — quote "$dir/out.txt"
-"out-$(date +%s).log"     # one filename (text + command substitution)
+touch "out-$(date +%s).log"  # one filename (text + command substitution)
 
 # Literal words keep their complete spelling without quotes:
 echo HEAD^2 HEAD~1 f.txt~ 9-  # ^, mid-word ~, and 9- stay literal
@@ -563,7 +563,7 @@ f() { ! cmd; }; f &       # negate inside a function, then background the call
         r#"```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
 #   -L (symlink, alias -h) — matches dangling symlinks too, unlike -e
-# String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
+# String: -z (empty) -n (non-empty) == != =~ (regex, quoted or not) !~ (not regex)
 # Type: -list -record — false for other types; errors on unset $var (use with typeof)
 # Numeric: -gt -lt -ge -le
 # Logic: && || !
@@ -754,7 +754,7 @@ awk '/fn consult\(/ {print}'        # \( is a literal paren
 awk '{gsub(/a\|b/, "X")}'           # \| is a literal pipe, not alternation
 
 sed 's/[|]/,/g' f                   # literal | anywhere: bracket class, or \| in sed BRE
-sed 's/\(a\)\1/x/'                  # error — back-references not supported in patterns (use \1 in replacement only)
+sed 's/\(a\)\1/x/'                  # error — no back-references in patterns (grep refuses \1 too); use \1 in the replacement
 ```"#,
     ),
     syntax_section(
@@ -787,9 +787,9 @@ Set `KAISH_TRASH=1` to enable trash at startup.
 
 Unknown names in `set -o NAME` or `set +o NAME` exit **2** and list valid options (`crossmounts`, `glob`, `output-limit[=SIZE]`, `pipefail`, `trash`). kaish ignores unknown short flags such as `-u` or `-x`.
 
-**Trash:** With `set -o trash`, `rm` and overwrites (`cp`, `dd`, `edit`, `mv`, `patch`, `sed -i`, `tee`, `write`) snapshot prior content. `tee -a`, new files, and `patch --dry-run` have no prior content to snapshot. Files <= 10 MB and directories move to Trash, excluding `/tmp` and `/v/*`. `rm` unlinks symlinks directly without trashing their targets. If trashing fails, the command errors without deleting or overwriting. Set the size limit with `kaish-trash config max-size <bytes>`.
+**Trash:** With `set -o trash`, `rm` and overwrites (`cp`, `dd`, `edit`, `mv`, `patch`, `sed -i`, `tee`, `write`) snapshot prior content. `tee -a`, new files, and `patch --dry-run` have no prior content to snapshot. Files <= 10 MB and directories move to Trash, excluding `/tmp` and `/v/*`. `rm` deletes larger files permanently, without Trash. `rm` unlinks symlinks directly without trashing their targets. If trashing fails, the command errors without deleting or overwriting. Set the size limit with `kaish-trash config max-size <bytes>`.
 
-`kaish-trash empty` refuses and names `--confirm`. Run `kaish-trash empty --confirm` to discard all Trash contents. `--confirm` is a plain boolean flag, and no session option disables it."#,
+`kaish-trash empty` refuses and names `--confirm`. Run `kaish-trash empty --confirm` to discard all Trash contents. `--confirm` is a plain boolean flag. No session option skips this check."#,
     ),
     syntax_section(
         "error-handling",

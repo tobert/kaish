@@ -97,9 +97,8 @@ dd if=/dev/urandom bs=8 count=1               # 8 random bytes as a Bytes result
 ```
 
 - `/dev/zero`, `/dev/urandom`, and `/dev/random` are endless streams.
-- kaish reads whole files into memory and has no infinite streams.
 - Read a fixed byte count with `head -c N` or `dd … count=N`.
-- Running `cat /dev/urandom` fails loudly instead of hanging.
+- In sandboxed and memory-only modes, `cat /dev/urandom` fails and names `head -c`.
 - Move raw random bytes with binary-aware `dd` instead of a text pipe.
 - Running `dd` without `of=` returns a binary result.
 - Binary results render as a hex dump in the REPL or a base64 envelope under `--json`.
@@ -110,7 +109,7 @@ dd if=/dev/urandom bs=8 count=1               # 8 random bytes as a Bytes result
 ```sh
 mkdir -p /tmp/out
 cmd > /tmp/out/log.txt   # a redirect never creates a directory
-cmd > /v/jobs/x          # error — read-only mount, exits 1 before cmd runs
+cmd > /v/jobs/x          # error — read-only mount, redirect under /tmp
 ```
 
 - Targets resolve against `$PWD` and open through their owning mount before the command runs.

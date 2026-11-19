@@ -66,7 +66,6 @@ cat results.jsonl | fromjsonl | scatter | retry "${ITEM[item][host]}" | gather
 | `0` | Every worker succeeded, or input was empty |
 | `123` | At least one worker failed, or `--lines` saw a failure |
 | `2` | Usage error |
-| `124` | Worker `code` field when `--timeout` expires |
 
 A pipeline returns its last command's exit code. An aggregate `123` means at least one row has `ok:false`. Each row's `code` holds that worker's own exit code.
 

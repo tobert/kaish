@@ -1,6 +1,6 @@
 # Output Size Limits
 
-Output limits cap captured command output. Output over the cap spills to a file and returns a head preview, a tail preview, and the spill path. See Tail-Only Spills for outputs exceeding 10MB.
+Output limits cap captured command output. Output over the cap spills to a file and returns a head preview, a tail preview, and the spill path. External command `stdout` over 10MB keeps only its tail. See Tail-Only Spills.
 
 ## Modes
 
@@ -38,7 +38,7 @@ Spill files live in `$XDG_RUNTIME_DIR/kaish/spill/`, typically `/run/user/$UID/k
 - Cleared automatically on reboot.
 - Scoped to the current user without shared permissions.
 
-When configured for in-memory truncation (including `NoLocal` builds), kaish writes no spill file and appends `[output truncated in memory: … — no spill file]`.
+When configured for in-memory truncation, as in memory-only mode, kaish writes no spill file. The output ends with a marker that starts `[output truncated in memory:` and ends `no spill file]`.
 
 ## kaish-output-limit Builtin
 
