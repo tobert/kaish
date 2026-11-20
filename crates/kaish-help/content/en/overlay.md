@@ -42,7 +42,7 @@ When `kaish-vfs commit` fails mid-way, follow these steps:
 
 1. Run `kaish-vfs reset <path>` for each path listed as already written to remove its overlay entry.
 2. Run `kaish-vfs status` to inspect the remaining dirty paths.
-3. Resolve conflicts on disk, such as removing an existing file that triggered an `AlreadyExists` error for an added entry.
+3. Resolve conflicts on disk, such as removing an existing file that caused an `already exists` error for an added entry.
 4. Run `kaish-vfs commit` again.
 
 ## Per-Call Commit Rule
@@ -53,19 +53,19 @@ Run `kaish-vfs commit` in the same `execute()` call as the writes. Writes from a
 
 ## Overrides
 
-Under `Sandboxed` mode with overlay enabled, these mounts use real `LocalFs` and bypass the transaction:
+In sandboxed mode with overlay enabled, these mounts use the real disk and bypass the transaction:
 
 - `/tmp` handles process interop, so `mktemp` writes to real `/tmp`.
 - The XDG runtime directory, such as `/run/user/1000`, holds sockets and spill files.
 
-Under `Passthrough` mode with overlay enabled, every path including `/tmp` routes through the overlay. `mktemp` writes stay virtual until `kaish-vfs commit` runs.
+In passthrough mode with overlay enabled, every path including `/tmp` routes through the overlay. `mktemp` writes stay virtual until `kaish-vfs commit` runs.
 
 ## External Commands
 
 - External commands resolved via `$PATH` fail with exit `127` when `$PWD` is inside an overlay mount.
 - Overlay mounts have no real host path because exposing one lets external binaries bypass the overlay.
 - The error message names the missing real cwd and suggests using a builtin, changing to a real path, or committing.
-- Under `Sandboxed` mode with overlay enabled, run `cd /tmp` to move `$PWD` to a real `LocalFs` mount.
+- In sandboxed mode with overlay enabled, run `cd /tmp` to move `$PWD` to a real-disk mount.
 - From `/tmp`, external commands such as compilers run and write directly to the real filesystem outside the overlay transaction.
 
 ## Structured Diff Output
@@ -88,12 +88,12 @@ Both text and `--json` output exit `1` when changes exist and `0` when clean.
 `kaish-vfs status` reports two separate memory counters:
 
 - **overlay-resident:** Base snapshots plus upper-layer content for this overlay.
-- **budget:** Used and total bytes across the kernel-wide `vfs-memory` pool, covering all `MemoryFs` mounts plus overlay storage.
+- **budget:** Used and total bytes across the kernel-wide `vfs-memory` pool, covering all memory mounts plus overlay storage.
 
-## NoLocal Mode with Overlay
+## Overlay in NoLocal Mode
 
-Combining `VfsMountMode::NoLocal` with `overlay: true` fails at kernel construction. There is no real lower layer to wrap because every mount is already virtual.
+Enabling overlay in NoLocal mode fails at kernel construction. Every NoLocal mount is already virtual, so no real lower layer exists to wrap.
 
-## JobFs and Byte Counting
+## /v/jobs and Byte Counting
 
-`JobFs` at `/v/jobs` synthesizes status and command strings on read from the job table. `JobFs` bytes do not count toward `overlay-resident` or the `vfs-memory` budget.
+`/v/jobs` builds its status and command text from the job table on each read. Those bytes do not count toward `overlay-resident` or the `vfs-memory` budget.

@@ -12,7 +12,6 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::builtin::get_path_string;
@@ -176,7 +175,12 @@ struct AwkArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// AWK program body followed by optional input file paths.
+    /// The program, then input files read in order. Reads stdin when no file
+    /// is given, unless the program has only BEGIN rules. `FILENAME` and `FNR`
+    /// follow each file. These fail and name a replacement: `getline`, output
+    /// redirection and pipes, user functions, `a[i,j]`, `ENVIRON`, `ARGV`,
+    /// `ARGC`, `SUBSEP`, `CONVFMT`, `OFMT`, and math functions other than `int`
+    /// and `sqrt`.
     program_and_paths: Vec<String>,
 }
 
@@ -192,15 +196,16 @@ impl Tool for Awk {
             "awk",
             "Pattern scanning and text processing language",
             [
-                ("Print a field", "awk '{print $2}' file.txt"),
-                ("Field separator", "awk -F: '{print $1}' /etc/passwd"),
-                ("Filter on a numeric field", "awk '$3 > 100 {print $1, $3}' data.txt"),
-                ("Match a regex", "awk '/error/ {print}' log.txt"),
-                ("Sum, grouped by a key", "awk '{sum[$1] += $2} END {for (k in sum) print k, sum[k]}' data.txt"),
-                ("Substitute text", "awk '{gsub(/foo/, \"bar\"); print}' notes.txt"),
-                ("Split into an array", "awk '{n = split($0, a, \",\"); print a[1], n}' file.csv"),
-                ("BEGIN/END", "awk 'BEGIN {print \"head\"} {print} END {print NR}'"),
-                ("Range of lines", "awk '/start/,/stop/' file.txt"),
+                ("Print the second field", "awk '{print $2}' file.txt"),
+                ("Split fields on a colon", "awk -F: '{print $1}' /etc/passwd"),
+                ("Filter rows on a numeric field", "awk '$3 > 100 {print $1, $3}' data.txt"),
+                ("Print lines that match a regex", "awk '/error/ {print}' log.txt"),
+                ("Sum a column by key", "awk '{sum[$1] += $2} END {for (k in sum) print k, sum[k]}' data.txt"),
+                ("Replace text on every line", "awk '{gsub(/foo/, \"bar\"); print}' notes.txt"),
+                ("Split a line into an array", "awk '{n = split($0, a, \",\"); print a[1], n}' file.csv"),
+                ("Print a header and a line count", "awk 'BEGIN {print \"head\"} {print} END {print NR}'"),
+                ("Print a range of lines", "awk '/start/,/stop/' file.txt"),
+                ("Print the first line of each file", "awk 'FNR == 1 {print FILENAME}' a.txt b.txt"),
             ],
         )
     }
@@ -248,26 +253,67 @@ impl Tool for Awk {
         // Get input. A binary `path` operand goes loud rather than silently
         // falling through to the "no operand" branch (which reads stdin instead
         // of the file the user actually named).
-        let file_pos = 1;
-        let input = match get_path_string(&args, "path", file_pos) {
-            Ok(Some(path)) => {
-                let resolved = ctx.resolve_path(&path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            return ExecResult::failure(1, format!("awk: {}: invalid UTF-8", path))
-                        }
-                    },
-                    Err(e) => return ExecResult::failure(1, format!("awk: {}: {}", path, e)),
-                }
+        // Every operand after the program is an input file, read in order.
+        // FILENAME and FNR follow the file; NR counts across all of them.
+        // A named `path` (an embedder calling with a key) is the one input.
+        let operand_paths: Vec<String> = if args.named.contains_key("path") {
+            match get_path_string(&args, "path", usize::MAX) {
+                Ok(Some(path)) => vec![path],
+                Ok(None) => return ExecResult::failure(2, "awk: path is not text — pass a file path"),
+                Err(e) => return ExecResult::failure(1, format!("awk: {e}")),
             }
-            Ok(None) => match ctx.read_stdin_to_text().await {
-                Ok(s) => s.unwrap_or_default(),
-                Err(e) => return ExecResult::failure(2, format!("awk: {e}")),
-            },
-            Err(e) => return ExecResult::failure(1, format!("awk: {e}")),
+        } else {
+            let mut paths = Vec::new();
+            for (index, value) in args.positional.iter().enumerate().skip(1) {
+                let path = match value {
+                    Value::Bytes(_) => match crate::interpreter::value_to_text_sink_named(value, "a path") {
+                        Ok(s) => s,
+                        Err(e) => return ExecResult::failure(1, format!("awk: {e}")),
+                    },
+                    Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
+                        match args.positional_text(index) {
+                            Some(text) => text,
+                            None => unreachable!("positional {index} exists: enumerated above"),
+                        }
+                    }
+                    other => {
+                        return ExecResult::failure(
+                            2,
+                            format!(
+                                "awk: file operand {index} is a {}, not a path — pass file paths",
+                                super::type_of::type_name(other)
+                            ),
+                        )
+                    }
+                };
+                paths.push(path);
+            }
+            paths
         };
+        let mut inputs: Vec<AwkInput> = Vec::new();
+        for path in operand_paths {
+            let resolved = ctx.resolve_path(&path);
+            let text = match ctx.backend.read(Path::new(&resolved), None).await {
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return ExecResult::failure(1, format!("awk: {}: invalid UTF-8", path))
+                    }
+                },
+                Err(e) => return ExecResult::failure(1, format!("awk: {}: {}", path, e)),
+            };
+            inputs.push(AwkInput { filename: path, text });
+        }
+        // A program of only BEGIN rules reads no input, as in gawk. Reading
+        // stdin there would block on an open pipe that never closes.
+        let begin_only = ast.rules.iter().all(|rule| matches!(rule.pattern, Pattern::Begin));
+        if inputs.is_empty() && !begin_only {
+            // No file operand: read stdin. FILENAME stays empty, as in gawk.
+            match ctx.read_stdin_to_text().await {
+                Ok(s) => inputs.push(AwkInput { filename: String::new(), text: s.unwrap_or_default() }),
+                Err(e) => return ExecResult::failure(2, format!("awk: {e}")),
+            }
+        }
 
         // Build runtime with initial variables
         let mut runtime = AwkRuntime::new();
@@ -302,7 +348,7 @@ impl Tool for Awk {
         }
 
         // Execute
-        match runtime.execute(&ast, &input, ctx).await {
+        match runtime.execute(&ast, &inputs, ctx).await {
             Ok((output, exit_code)) => {
                 let result = ExecResult::with_output(OutputData::text(output));
                 // `exit N` sets the builtin's exit code; output + END still ran.
@@ -786,6 +832,24 @@ impl AwkLexer {
             "printf" => Token::Printf,
             "function" => Token::Function,
             "return" => Token::Return,
+            // POSIX built-ins kaish awk does not implement. Read as plain
+            // variables they would be silently empty, so refuse them by name.
+            "ENVIRON" | "ARGV" | "ARGC" => {
+                return Err(format!(
+                    "{s} is not supported (kaish awk runs hermetic); pass values with -v NAME=VALUE"
+                ));
+            }
+            "SUBSEP" => {
+                return Err(
+                    "SUBSEP is not supported (no multi-dimensional arrays); build a string key like a[i \",\" j]"
+                        .to_string(),
+                );
+            }
+            "CONVFMT" | "OFMT" => {
+                return Err(format!(
+                    "{s} is not supported (numbers print with %.6g); format with printf or sprintf"
+                ));
+            }
             _ => Token::Ident(s),
         };
         // An identifier/keyword is a value (or precedes one), so a following `/`
@@ -900,7 +964,11 @@ impl AwkLexer {
                     self.advance();
                     Token::Or
                 } else {
-                    return Err("expected || but found single |".to_string());
+                    return Err(
+                        "pipes (print | \"cmd\", \"cmd\" | getline) are not supported; \
+                         pipe kaish's output instead: awk '…' | cmd"
+                            .to_string(),
+                    );
                 }
             }
             '?' => Token::Question,
@@ -1322,6 +1390,15 @@ impl AwkParser {
         self.advance(); // print
         let mut args = Vec::new();
 
+        // Bare `print > "f"` or `print >> "f"`: redirection with no argument.
+        if self.peek() == &Token::Gt {
+            return Err(
+                "output redirection (> >> |) is not supported; \
+                 pipe kaish's output downstream instead"
+                    .to_string(),
+            );
+        }
+
         if !matches!(
             self.peek(),
             Token::Newline | Token::Semicolon | Token::RBrace | Token::Eof
@@ -1719,7 +1796,7 @@ impl AwkParser {
                 if name == "getline" {
                     return Err(
                         "getline is not supported; pipe input into awk instead \
-                         (e.g. cat f | awk '...')"
+                         (e.g. cat f | awk '…')"
                             .to_string(),
                     );
                 }
@@ -1987,6 +2064,12 @@ impl From<String> for AwkOutcome {
     }
 }
 
+/// One awk input: a named file, or stdin with an empty name.
+struct AwkInput {
+    filename: String,
+    text: String,
+}
+
 struct AwkRuntime {
     vars: HashMap<String, AwkValue>,
     arrays: HashMap<String, HashMap<String, AwkValue>>,
@@ -2010,6 +2093,7 @@ impl AwkRuntime {
         vars.insert("ORS".to_string(), AwkValue::String("\n".to_string()));
         vars.insert("NR".to_string(), AwkValue::Number(0.0));
         vars.insert("NF".to_string(), AwkValue::Number(0.0));
+        vars.insert("FNR".to_string(), AwkValue::Number(0.0));
         vars.insert("FILENAME".to_string(), AwkValue::String(String::new()));
 
         Self {
@@ -2101,7 +2185,7 @@ impl AwkRuntime {
     async fn execute(
         &mut self,
         program: &AwkProgram,
-        input: &str,
+        inputs: &[AwkInput],
         ctx: &mut ExecContext,
     ) -> Result<(String, Option<i32>), AwkOutcome> {
         // Size range_active to the number of rules; non-range rules never touch it.
@@ -2124,46 +2208,55 @@ impl AwkRuntime {
             }
         }
 
-        // Process records
-        let rs = self.get_var("RS").to_string();
-        let records: Vec<&str> = if rs == "\n" {
-            input.lines().collect()
-        } else if rs.is_empty() {
-            // Paragraph mode
-            input.split("\n\n").collect()
-        } else {
-            input.split(&rs).collect()
-        };
+        // Process records, file by file. FNR restarts per file; NR does not.
+        'files: for input in inputs {
+            self.set_var("FILENAME", AwkValue::String(input.filename.clone()));
+            let mut fnr: i64 = 0;
+            // Reset now: an empty file has no record to set it, and END reads it.
+            self.set_var("FNR", AwkValue::Number(0.0));
+            // RS is read per file, so a change in an earlier file applies to the next.
+            let rs = self.get_var("RS").to_string();
+            let records: Vec<&str> = if rs == "\n" {
+                input.text.lines().collect()
+            } else if rs.is_empty() {
+                // Paragraph mode
+                input.text.split("\n\n").collect()
+            } else {
+                input.text.split(&rs).collect()
+            };
 
-        'records: for record in records {
-            if ctx.checkpoint().await.is_err() {
-                return Err(AwkOutcome::Interrupted);
-            }
-            self.nr += 1;
-            self.set_var("NR", AwkValue::Number(self.nr as f64));
-            self.split_record(record)?;
-
-            for (rule_idx, rule) in program.rules.iter().enumerate() {
-                if matches!(rule.pattern, Pattern::Begin | Pattern::End) {
-                    continue;
+            'records: for record in records {
+                if ctx.checkpoint().await.is_err() {
+                    return Err(AwkOutcome::Interrupted);
                 }
+                self.nr += 1;
+                fnr += 1;
+                self.set_var("NR", AwkValue::Number(self.nr as f64));
+                self.set_var("FNR", AwkValue::Number(fnr as f64));
+                self.split_record(record)?;
 
-                if self.pattern_matches(rule_idx, &rule.pattern)? {
-                    match self.execute_block(&rule.action, ctx).await? {
-                        ControlFlow::Next => continue 'records,
-                        ControlFlow::Exit(code) => {
-                            // Bare `exit` (None) keeps the current code.
-                            if let Some(c) = code {
-                                exit_code = Some(c);
+                for (rule_idx, rule) in program.rules.iter().enumerate() {
+                    if matches!(rule.pattern, Pattern::Begin | Pattern::End) {
+                        continue;
+                    }
+
+                    if self.pattern_matches(rule_idx, &rule.pattern)? {
+                        match self.execute_block(&rule.action, ctx).await? {
+                            ControlFlow::Next => continue 'records,
+                            ControlFlow::Exit(code) => {
+                                // Bare `exit` (None) keeps the current code.
+                                if let Some(c) = code {
+                                    exit_code = Some(c);
+                                }
+                                break 'files;
                             }
-                            break 'records;
+                            ControlFlow::Break | ControlFlow::Continue => {
+                                return Err(AwkOutcome::Error(
+                                    "break/continue outside loop".to_string(),
+                                ))
+                            }
+                            ControlFlow::Normal => {}
                         }
-                        ControlFlow::Break | ControlFlow::Continue => {
-                            return Err(AwkOutcome::Error(
-                                "break/continue outside loop".to_string(),
-                            ))
-                        }
-                        ControlFlow::Normal => {}
                     }
                 }
             }
@@ -3056,7 +3149,11 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("current-thread runtime")
-            .block_on(rt.execute(program, input, &mut ctx))
+            .block_on(rt.execute(
+                program,
+                &[AwkInput { filename: String::new(), text: input.to_string() }],
+                &mut ctx,
+            ))
             .map_err(|e| match e {
                 AwkOutcome::Error(msg) => msg,
                 AwkOutcome::Interrupted => {
@@ -4659,5 +4756,119 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let mut rt = AwkRuntime::new();
         let result = run_program(&mut rt, &prog, "").unwrap().0;
         assert_eq!(result, "+inf\n", "2^1024 must print '+inf\\n'");
+    }
+
+    // === Multiple inputs, FILENAME, FNR ===
+
+    fn awk_args(words: &[&str]) -> ToolArgs {
+        let mut args = ToolArgs::new();
+        for word in words {
+            args.positional.push(Value::String((*word).into()));
+        }
+        args
+    }
+
+    /// Every file operand is read in order. Before this, awk read only the
+    /// first file and silently ignored the rest.
+    #[tokio::test]
+    async fn every_file_operand_is_read_with_filename_and_fnr() {
+        let mut ctx = make_ctx().await;
+        let args = awk_args(&["{print FILENAME, FNR, NR}", "data.txt", "passwd.txt"]);
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "err={}", result.err);
+        assert_eq!(
+            result.text_out(),
+            "data.txt 1 1\ndata.txt 2 2\ndata.txt 3 3\npasswd.txt 1 4\npasswd.txt 2 5\n"
+        );
+    }
+
+    /// gawk: `awk 'END{print FNR, NR}' one.txt empty.txt` prints `0 1`.
+    #[tokio::test]
+    async fn an_empty_later_file_resets_fnr() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .write(Path::new("/empty.txt"), b"", kaish_types::WriteMode::CreateNew)
+            .await
+            .expect("write empty.txt");
+        let args = awk_args(&["END {print FILENAME, FNR, NR}", "data.txt", "empty.txt"]);
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "err={}", result.err);
+        assert_eq!(result.text_out(), "empty.txt 0 3\n");
+    }
+
+    #[tokio::test]
+    async fn exit_stops_every_remaining_file() {
+        let mut ctx = make_ctx().await;
+        let args = awk_args(&["NR == 2 {exit 4} {print}", "data.txt", "passwd.txt"]);
+        let result = Awk.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 4);
+        assert_eq!(result.text_out(), "alice 25\n");
+    }
+
+    #[tokio::test]
+    async fn a_missing_later_file_fails_before_any_output() {
+        let mut ctx = make_ctx().await;
+        let args = awk_args(&["{print}", "data.txt", "missing.txt"]);
+        let result = Awk.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 1);
+        assert!(result.err.contains("missing.txt"), "err={}", result.err);
+    }
+
+    #[tokio::test]
+    async fn stdin_input_has_an_empty_filename() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x\ny".to_string());
+        let result = Awk.execute(awk_args(&["{print \"[\" FILENAME \"]\", FNR}"]), &mut ctx).await;
+        assert!(result.ok(), "err={}", result.err);
+        assert_eq!(result.text_out(), "[] 1\n[] 2\n");
+    }
+
+    /// A BEGIN-only program reads no input, so an open stdin cannot block it.
+    #[tokio::test]
+    async fn begin_only_program_ignores_stdin() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("unread".to_string());
+        let result = Awk.execute(awk_args(&["BEGIN {print NR}"]), &mut ctx).await;
+        assert!(result.ok(), "err={}", result.err);
+        assert_eq!(result.text_out(), "0\n");
+    }
+
+    // === Unimplemented built-ins refuse by name instead of reading empty ===
+
+    #[rstest::rstest]
+    #[case::environ("BEGIN {print ENVIRON[\"HOME\"]}", "ENVIRON", "-v NAME=VALUE")]
+    #[case::argv("BEGIN {print ARGV[0]}", "ARGV", "-v NAME=VALUE")]
+    #[case::argc("BEGIN {print ARGC}", "ARGC", "-v NAME=VALUE")]
+    #[case::subsep("BEGIN {print SUBSEP}", "SUBSEP", "a[i \",\" j]")]
+    #[case::ofmt("BEGIN {OFMT = \"%.2f\"; print 3.14159}", "OFMT", "printf")]
+    #[case::convfmt("BEGIN {CONVFMT = \"%.2f\"}", "CONVFMT", "printf")]
+    #[tokio::test]
+    async fn unimplemented_builtin_variable_is_refused(
+        #[case] program: &str,
+        #[case] name: &str,
+        #[case] fix: &str,
+    ) {
+        let mut ctx = make_ctx().await;
+        let result = Awk.execute(awk_args(&[program]), &mut ctx).await;
+        assert_eq!(result.code, 1, "out={:?}", result.text_out());
+        assert!(result.err.contains(name), "err={}", result.err);
+        assert!(result.err.contains(fix), "err={}", result.err);
+    }
+
+    // === Redirection and pipes name the replacement ===
+
+    #[rstest::rstest]
+    #[case::bare_gt("{print > \"f\"}", "redirection")]
+    #[case::bare_append("{print >> \"f\"}", "redirection")]
+    #[case::pipe_out("{print $1 | \"cat\"}", "pipes")]
+    #[case::pipe_getline("{\"date\" | getline d}", "pipes")]
+    #[tokio::test]
+    async fn redirection_is_refused_with_a_hint(#[case] program: &str, #[case] hint: &str) {
+        let mut ctx = make_ctx().await;
+        let result = Awk.execute(awk_args(&[program, "data.txt"]), &mut ctx).await;
+        assert_eq!(result.code, 1);
+        assert!(result.err.contains(hint), "err={}", result.err);
+        assert!(!result.err.contains("Gt"), "leaked a token name: {}", result.err);
+        assert!(!result.err.contains("found single"), "err={}", result.err);
     }
 }

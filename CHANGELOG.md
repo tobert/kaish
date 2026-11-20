@@ -13,6 +13,9 @@ breaking entries are marked **BREAKING**.
 ### Fixed
 
 - Reject unsupported parameter expansions before making a plan or running the program. Diagnostics name prefix removal, suffix removal, or pattern replacement and show a `sed` example instead of treating the expansion as a variable name.
+- **`awk` reads every file operand.** It read only the first and silently ignored the rest. `FILENAME` and `FNR` now follow each file, `NR` counts across files, and a program of only `BEGIN` rules no longer waits on stdin.
+- **`awk` refuses `ENVIRON`, `ARGV`, `ARGC`, `SUBSEP`, `CONVFMT`, and `OFMT` by name.** They read as empty and exited 0. Bare `print > f` and `print | cmd` now name the replacement instead of printing a token name.
+- **`timeout 5 true` runs `true`.** A command word that binds as a boolean or number exited 2 with `invalid command: Bool(true)`. A list or record names its type and the fix.
 
 ## [0.19.0] - 2026-11-10
 

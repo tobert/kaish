@@ -109,5 +109,5 @@ done
 - **Worker exit code:** Each row's `code` comes from the last command in that worker's pipeline segment.
 - **Complete execution:** `gather` runs every worker to completion and collects every result even when earlier workers fail.
 - **Nested scatter:** Pass `--as` explicitly in inner `scatter` stages so an inner `ITEM` does not shadow the outer binding.
-- **Cascading cancellation:** Parent timeouts, `Kernel::cancel`, and Ctrl-C send `SIGTERM`, wait for `kill_grace`, and send `SIGKILL` to every worker.
+- **Cascading cancellation:** Parent timeouts, embedder cancellation, and Ctrl-C send `SIGTERM` to every worker. After 2 seconds by default, they send `SIGKILL`.
 - **Empty input:** Empty input emits no rows and exits `0`.
