@@ -2212,6 +2212,8 @@ impl AwkRuntime {
         'files: for input in inputs {
             self.set_var("FILENAME", AwkValue::String(input.filename.clone()));
             let mut fnr: i64 = 0;
+            // Reset now: an empty file has no record to set it, and END reads it.
+            self.set_var("FNR", AwkValue::Number(0.0));
             // RS is read per file, so a change in an earlier file applies to the next.
             let rs = self.get_var("RS").to_string();
             let records: Vec<&str> = if rs == "\n" {
@@ -4778,6 +4780,20 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
             result.text_out(),
             "data.txt 1 1\ndata.txt 2 2\ndata.txt 3 3\npasswd.txt 1 4\npasswd.txt 2 5\n"
         );
+    }
+
+    /// gawk: `awk 'END{print FNR, NR}' one.txt empty.txt` prints `0 1`.
+    #[tokio::test]
+    async fn an_empty_later_file_resets_fnr() {
+        let mut ctx = make_ctx().await;
+        ctx.backend
+            .write(Path::new("/empty.txt"), b"", kaish_types::WriteMode::CreateNew)
+            .await
+            .expect("write empty.txt");
+        let args = awk_args(&["END {print FILENAME, FNR, NR}", "data.txt", "empty.txt"]);
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "err={}", result.err);
+        assert_eq!(result.text_out(), "empty.txt 0 3\n");
     }
 
     #[tokio::test]
