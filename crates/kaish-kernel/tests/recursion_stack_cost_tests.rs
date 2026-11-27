@@ -105,7 +105,7 @@ fn per_level_native_stack_cost() {
                 .expect("build kernel")
                 .into_arc();
 
-                // Stay well under MAX_RECURSION_DEPTH (32); each `$()` is one level.
+                // Stay well under MAX_RECURSION_DEPTH (48); each `$()` is one level.
                 let depth = 24;
                 let result = kernel.execute(&nested_script(depth)).await.expect("execute");
                 assert_eq!(result.code, 0, "probe script failed: {}", result.err);
@@ -139,13 +139,63 @@ fn per_level_native_stack_cost() {
         max,
     );
 
-    // Catastrophic-regression guard only — the real number is the eprintln
-    // above. Generous enough to hold in unoptimized debug (~hundreds of KB),
-    // tight enough to catch a runaway (e.g. an un-boxed multi-MB frame). If this
-    // trips, a hot future grew a large by-value field across an await.
+    // Regression guard: per-level native stack in the default dev profile
+    // (`opt-level = 1`) is ~26 KiB after splitting/boxing the execute path;
+    // 64 KiB leaves headroom for minor codegen variance while catching any
+    // un-boxed hot future.
     assert!(
-        med < 1024 * 1024,
-        "per-level native stack {med} bytes exceeds 1 MiB — a hot recursive future \
+        med < 64 * 1024,
+        "per-level native stack {med} bytes exceeds 64 KiB — a hot recursive future \
          likely grew a large by-value field; investigate before relaxing this bound"
     );
+}
+
+/// Nested execution (`$()` up to `MAX_RECURSION_DEPTH - 1`, recursive
+/// functions, and `if`/`for`/`source`) must fit on Rust's default 2 MiB
+/// thread stack so embedder test suites do not need `RUST_MIN_STACK=16777216`.
+#[test]
+fn nested_execution_fits_on_default_2mb_stack() {
+    let handle = std::thread::Builder::new()
+        .name("default-2mb-stack-test".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+
+                // Nested `$()` up to the full recursion cap (`MAX_RECURSION_DEPTH - 1`).
+                let mut cmd = String::from("echo ok");
+                for _ in 0..(kaish_kernel::MAX_RECURSION_DEPTH - 1) {
+                    cmd = format!("echo $({cmd})");
+                }
+                let r = kernel.execute(&cmd).await.expect("nested cmdsubst");
+                assert_eq!(r.code, 0, "nested cmdsubst failed: {}", r.err);
+                assert_eq!(r.text_out().trim(), "ok");
+
+                // 24 levels of recursive function calling through `if` and `$(( ))`.
+                let r = kernel
+                    .execute("down() { if [[ $1 -le 0 ]]; then echo done; else down $(($1 - 1)); fi; }; down 24")
+                    .await
+                    .expect("recursive function");
+                assert_eq!(r.code, 0, "recursive function failed: {}", r.err);
+                assert_eq!(r.text_out().trim(), "done");
+
+                // `if` -> `source` -> `for` -> `$()` chain.
+                kernel
+                    .execute("echo 'for i in 1 2; do x=$(echo $i); done; echo $x' > /v/chain.kai")
+                    .await
+                    .expect("seed script");
+                let r = kernel
+                    .execute("if true; then source /v/chain.kai; fi")
+                    .await
+                    .expect("if-source-for chain");
+                assert_eq!(r.code, 0, "chain failed: {}", r.err);
+                assert_eq!(r.text_out().trim(), "2");
+            });
+        })
+        .unwrap();
+    handle.join().unwrap();
 }

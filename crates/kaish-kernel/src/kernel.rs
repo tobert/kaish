@@ -51,11 +51,11 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// alias re-entry cap (10) and the lexer's `MAX_PAREN_DEPTH` (256): a runaway
 /// or mutually recursive script hits a catchable ceiling, not a signal.
 ///
-/// Each level stacks the dispatch chain between re-entries. After the GH #48
-/// allocation pass this measures ~50 KB (release) / ~57 KB (debug at the default
-/// `opt-level = 1` dev profile — see the root `Cargo.toml`) / ~193 KB (a fully
-/// unoptimized debug build) of native stack per level, down from ~80 / ~380 KB
-/// before; the `recursion_stack_cost_tests` probe reports the live figure.
+/// Each level stacks the dispatch chain between re-entries. After splitting and
+/// boxing the hot execute-path futures, this measures ~26 KiB per level in the
+/// default `opt-level = 1` dev profile (down from ~63 KiB before this pass and
+/// ~380 KiB pre-#48); `recursion_stack_cost_tests` reports the live figure and
+/// guards against regressions.
 ///
 /// This cap and [`RECOMMENDED_STACK_SIZE`] are a **matched pair**: the cap must
 /// trip *before* `cap × (worst-case per-level stack)` can exceed the floor, so a
@@ -2801,145 +2801,142 @@ impl Kernel {
 
     /// Execute a statement without publishing its own stderr: for an `&&`/`||`
     /// left operand, whose fault becomes an error rendered and published later.
+    ///
+    /// Dispatches the hottest statement kinds (`Command`, `Pipeline`, `Assignment`)
+    /// into their own boxed async helpers so their poll stack frames do not carry
+    /// the locals of every compound statement arm (`For`, `While`, `If`, `Case`,
+    /// `Redirected`, `EnvScoped`, `AndChain`, `OrChain`, `Not`).
     fn execute_stmt_flow_dispatch<'a>(
         &'a self,
         stmt: &'a Stmt,
         ctx: &'a mut ExecContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + Send + 'a>> {
-        // No per-statement span here: `execute_stmt_flow` is the largest future
-        // on the recursion ring, and wrapping it in `Instrumented<Span>` carries
-        // the span's state through every `.await` at every level, costing native
-        // stack per level (GH #48). Coarser spans on the outer execute entries
-        // remain. See item 3 of the #48 burndown.
-        Box::pin(async move {
         match stmt {
-            Stmt::Assignment(assign) => {
-                // An assignment with no command name takes the exit status of
-                // the last command substitution in its value, or 0 if there
-                // was none (bash's rule, re-probed). Clear the note first so
-                // a substitution from an earlier statement cannot leak in —
-                // `false; x=5` must be 0, not stale.
-                {
-                    let mut scope = self.scope.write().await;
-                    scope.clear_cmdsubst_code();
-                }
-                // Use async evaluator to support command substitution
-                // Name the target. A fault inside `$(...)` passes through this
-                // same line twice — once for the inner assignment, once for
-                // the outer — and an unnamed context rendered as "failed to
-                // evaluate assignment: failed to evaluate assignment: …",
-                // two frames that said nothing about which was which.
-                let value = self.eval_expr_async(&assign.value, ctx).await
-                    .with_context(|| format!("failed to evaluate assignment to {}", assign.name()))?;
-                let mut scope = self.scope.write().await;
-                if assign.path.segments.len() == 1 {
-                    // Plain `NAME=value` — no subscript, so `local` applies.
-                    if assign.local {
-                        // local: set in innermost (current function) frame
-                        scope.set(assign.name(), value.clone());
-                    } else {
-                        // non-local: update existing or create in root frame
-                        scope.set_global(assign.name(), value.clone());
-                    }
-                } else {
-                    // Subscripted lvalue (`xs[0]=v`, `user[email]=v`, …): always
-                    // mutates the existing root wherever it lives, so `local`
-                    // has nothing to declare. See docs/LANGUAGE.md,
-                    // "Assignment — bracket-path lvalues".
-                    scope.walk_write(&assign.path, value.clone()).map_err(|e| match e {
-                        PathError::UndefinedRoot(name) => anyhow::anyhow!(
-                            "{name}: undefined — create it first, e.g. `{name}={{}}` or `{name}=[]`"
-                        ),
-                        PathError::Absence(msg) | PathError::Shape(msg) => anyhow::anyhow!(msg),
-                    })?;
-                }
-                drop(scope);
+            Stmt::Command(cmd) => Box::pin(self.execute_stmt_command(cmd, ctx)),
+            Stmt::Pipeline(pipeline) => Box::pin(self.execute_stmt_pipeline(pipeline, ctx)),
+            Stmt::Assignment(assign) => Box::pin(self.execute_stmt_assignment(assign, ctx)),
+            Stmt::Empty => Box::pin(std::future::ready(Ok(ControlFlow::ok(ExecResult::success(""))))),
+            other => Box::pin(self.execute_stmt_compound(other, ctx)),
+        }
+    }
 
-                // Assignments don't produce output (like sh), but they are a
-                // command: they write `$?` and honor `set -e` (bash: `set -e;
-                // x=$(false)` exits). The code is the last substitution's, or
-                // 0 — this is what lets `x="$(cmd)" || x="FALLBACK"` fire.
-                let subst_code = {
-                    let mut scope = self.scope.write().await;
-                    scope.take_cmdsubst_code()
-                };
-                let result = match subst_code {
-                    None | Some(0) => ExecResult::success(""),
-                    Some(code) => ExecResult::failure(code, ""),
-                };
+    async fn execute_stmt_command(&self, cmd: &crate::ast::Command, ctx: &mut ExecContext) -> Result<ControlFlow> {
+        // Route single commands through execute_pipeline for a unified path.
+        // This ensures all commands go through the dispatcher chain.
+        let pipeline = crate::ast::Pipeline {
+            stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
+            background: false,
+        };
+        let flow = Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await?;
+        self.finish_pipeline_stmt(flow).await
+    }
+
+    async fn execute_stmt_pipeline(&self, pipeline: &crate::ast::Pipeline, ctx: &mut ExecContext) -> Result<ControlFlow> {
+        let flow = Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await?;
+        self.finish_pipeline_stmt(flow).await
+    }
+
+    async fn finish_pipeline_stmt(&self, flow: ControlFlow) -> Result<ControlFlow> {
+        let result = match flow {
+            ControlFlow::Exit { code, result } => {
+                // A function or `source` ran `exit`: end the statement
+                // list, keeping the output written before it.
                 self.update_last_result(&result).await;
-                if !result.ok() {
-                    let scope = self.scope.read().await;
-                    if scope.error_exit_enabled() {
-                        // `-e` aborts the statement list, but the reason the
-                        // command died must survive with it — carry `result`
-                        // (its `out`/`err`/`data`) into the Exit signal instead
-                        // of `ControlFlow::exit_code`'s empty placeholder.
-                        let code = result.code;
-                        return Ok(ControlFlow::Exit { code, result });
-                    }
-                }
-                Ok(ControlFlow::ok(result))
+                return Ok(ControlFlow::Exit { code, result });
             }
-            Stmt::Command(cmd) => {
-                // Route single commands through execute_pipeline for a unified path.
-                // This ensures all commands go through the dispatcher chain.
-                let pipeline = crate::ast::Pipeline {
-                    stages: vec![crate::ast::PipelineStage::Command(cmd.clone())],
-                    background: false,
-                };
-                let result = match Box::pin(self.execute_pipeline(&pipeline, &mut *ctx)).await? {
-                    ControlFlow::Exit { code, result } => {
-                        // A function or `source` ran `exit`: end the statement
-                        // list, keeping the output written before it.
-                        self.update_last_result(&result).await;
-                        return Ok(ControlFlow::Exit { code, result });
-                    }
-                    flow => flow.into_absorbed_result(),
-                };
-                self.update_last_result(&result).await;
+            flow => flow.into_absorbed_result(),
+        };
+        self.update_last_result(&result).await;
 
-                // Check for error exit mode (set -e)
-                if !result.ok() {
-                    let scope = self.scope.read().await;
-                    if scope.error_exit_enabled() {
-                        // `-e` aborts the statement list, but the reason the
-                        // command died must survive with it — carry `result`
-                        // (its `out`/`err`/`data`) into the Exit signal instead
-                        // of `ControlFlow::exit_code`'s empty placeholder.
-                        let code = result.code;
-                        return Ok(ControlFlow::Exit { code, result });
-                    }
-                }
-
-                Ok(ControlFlow::ok(result))
+        // Check for error exit mode (set -e)
+        if !result.ok() {
+            let scope = self.scope.read().await;
+            if scope.error_exit_enabled() {
+                // `-e` aborts the statement list, but the reason the
+                // command died must survive with it — carry `result`
+                // (its `out`/`err`/`data`) into the Exit signal instead
+                // of `ControlFlow::exit_code`'s empty placeholder.
+                let code = result.code;
+                return Ok(ControlFlow::Exit { code, result });
             }
-            Stmt::Pipeline(pipeline) => {
-                let result = match Box::pin(self.execute_pipeline(pipeline, &mut *ctx)).await? {
-                    ControlFlow::Exit { code, result } => {
-                        // A function or `source` ran `exit`: end the statement
-                        // list, keeping the output written before it.
-                        self.update_last_result(&result).await;
-                        return Ok(ControlFlow::Exit { code, result });
-                    }
-                    flow => flow.into_absorbed_result(),
-                };
-                self.update_last_result(&result).await;
+        }
 
-                // Check for error exit mode (set -e)
-                if !result.ok() {
-                    let scope = self.scope.read().await;
-                    if scope.error_exit_enabled() {
-                        // `-e` aborts the statement list, but the reason the
-                        // command died must survive with it — carry `result`
-                        // (its `out`/`err`/`data`) into the Exit signal instead
-                        // of `ControlFlow::exit_code`'s empty placeholder.
-                        let code = result.code;
-                        return Ok(ControlFlow::Exit { code, result });
-                    }
-                }
+        Ok(ControlFlow::ok(result))
+    }
 
-                Ok(ControlFlow::ok(result))
+    async fn execute_stmt_assignment(&self, assign: &crate::ast::Assignment, ctx: &mut ExecContext) -> Result<ControlFlow> {
+        // An assignment with no command name takes the exit status of
+        // the last command substitution in its value, or 0 if there
+        // was none (bash's rule, re-probed). Clear the note first so
+        // a substitution from an earlier statement cannot leak in —
+        // `false; x=5` must be 0, not stale.
+        {
+            let mut scope = self.scope.write().await;
+            scope.clear_cmdsubst_code();
+        }
+        // Use async evaluator to support command substitution
+        // Name the target. A fault inside `$(...)` passes through this
+        // same line twice — once for the inner assignment, once for
+        // the outer — and an unnamed context rendered as "failed to
+        // evaluate assignment: failed to evaluate assignment: …",
+        // two frames that said nothing about which was which.
+        let value = self.eval_expr_async(&assign.value, ctx).await
+            .with_context(|| format!("failed to evaluate assignment to {}", assign.name()))?;
+        let mut scope = self.scope.write().await;
+        if assign.path.segments.len() == 1 {
+            // Plain `NAME=value` — no subscript, so `local` applies.
+            if assign.local {
+                // local: set in innermost (current function) frame
+                scope.set(assign.name(), value.clone());
+            } else {
+                // non-local: update existing or create in root frame
+                scope.set_global(assign.name(), value.clone());
+            }
+        } else {
+            // Subscripted lvalue (`xs[0]=v`, `user[email]=v`, …): always
+            // mutates the existing root wherever it lives, so `local`
+            // has nothing to declare. See docs/LANGUAGE.md,
+            // "Assignment — bracket-path lvalues".
+            scope.walk_write(&assign.path, value.clone()).map_err(|e| match e {
+                PathError::UndefinedRoot(name) => anyhow::anyhow!(
+                    "{name}: undefined — create it first, e.g. `{name}={{}}` or `{name}=[]`"
+                ),
+                PathError::Absence(msg) | PathError::Shape(msg) => anyhow::anyhow!(msg),
+            })?;
+        }
+        drop(scope);
+
+        // Assignments don't produce output (like sh), but they are a
+        // command: they write `$?` and honor `set -e` (bash: `set -e;
+        // x=$(false)` exits). The code is the last substitution's, or
+        // 0 — this is what lets `x="$(cmd)" || x="FALLBACK"` fire.
+        let subst_code = {
+            let mut scope = self.scope.write().await;
+            scope.take_cmdsubst_code()
+        };
+        let result = match subst_code {
+            None | Some(0) => ExecResult::success(""),
+            Some(code) => ExecResult::failure(code, ""),
+        };
+        self.update_last_result(&result).await;
+        if !result.ok() {
+            let scope = self.scope.read().await;
+            if scope.error_exit_enabled() {
+                // `-e` aborts the statement list, but the reason the
+                // command died must survive with it — carry `result`
+                // (its `out`/`err`/`data`) into the Exit signal instead
+                // of `ControlFlow::exit_code`'s empty placeholder.
+                let code = result.code;
+                return Ok(ControlFlow::Exit { code, result });
+            }
+        }
+        Ok(ControlFlow::ok(result))
+    }
+
+    async fn execute_stmt_compound(&self, stmt: &Stmt, ctx: &mut ExecContext) -> Result<ControlFlow> {
+        match stmt {
+            Stmt::Assignment(_) | Stmt::Command(_) | Stmt::Pipeline(_) | Stmt::Empty => {
+                unreachable!("dispatched in execute_stmt_flow_dispatch")
             }
             Stmt::If(if_stmt) => {
                 // The statement's result is built BEFORE the condition runs,
@@ -3857,9 +3854,7 @@ impl Kernel {
                     }
                 }
             }
-            Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
-        })
     }
 
     /// Build a boxed per-command `ExecContext` snapshot from the persistent
@@ -3934,7 +3929,7 @@ impl Kernel {
         // Handle background execution (`&` operator). A job is its own
         // subshell: an `exit` in it ends the job, not the script.
         if pipeline.background {
-            return Ok(ControlFlow::Normal(self.execute_background(pipeline, caller).await?));
+            return Ok(ControlFlow::Normal(Box::pin(self.execute_background(pipeline, caller)).await?));
         }
 
         // All commands go through the runner with the Kernel as dispatcher.
@@ -3982,7 +3977,7 @@ impl Kernel {
         ctx.pipe_stdout = caller.pipe_stdout.take();
         ctx.stdin_data_rx = caller.stdin_data_rx.take();
 
-        let mut flow = self.runner.run_flow(&pipeline.stages, &mut ctx, self).await;
+        let mut flow = Box::pin(self.runner.run_flow(&pipeline.stages, &mut ctx, self)).await;
         let result = flow.result_mut();
 
         // `set -o pipefail`: the pipeline answers with the RIGHTMOST non-zero
@@ -4008,7 +4003,7 @@ impl Kernel {
         // flipped `did_spill` even when the limit itself is disabled, GH
         // #191). This is the shared contract every execution surface must
         // apply — see `apply_spill_contract`'s doc comment (GH #212).
-        crate::output_limit::apply_spill_contract(result, &ctx.output_limit).await;
+        Box::pin(crate::output_limit::apply_spill_contract(result, &ctx.output_limit)).await;
         // An exit's code is the finished result's: the spill remap to 3 may have changed it.
         if let ControlFlow::Exit { code, result } = &mut flow {
             *code = result.code;
@@ -4198,6 +4193,157 @@ impl Kernel {
         self.execute_command_depth(name, args, 0, ctx).await
     }
 
+    async fn execute_bool_special_form(
+        &self,
+        form: crate::validator::SpecialForm,
+        args: &[Arg],
+        ctx: &mut ExecContext,
+    ) -> Result<ControlFlow> {
+        // Boolean forms ignore other argv; only global JSON needs binding.
+        let format_args: Vec<Arg> = args.iter()
+            .take_while(|arg| !matches!(arg, Arg::DoubleDash))
+            .filter(|arg| matches!(arg,
+                Arg::LongFlag(name) if name == "json"
+            ) || matches!(arg, Arg::Named { key, .. } if key == "json"))
+            .cloned().collect();
+        let bound = self.build_args_async(&format_args, None, ctx).await?;
+        let format = bound.has_flag("json").then_some(crate::interpreter::OutputFormat::Json);
+        let result = if matches!(form, crate::validator::SpecialForm::True) {
+            ExecResult::success("")
+        } else {
+            ExecResult::failure(1, "")
+        };
+        Ok(ControlFlow::Normal(finalize_output(result, format, false)))
+    }
+
+    async fn execute_non_builtin(
+        &self,
+        name: &str,
+        args: &[Arg],
+        ctx: &mut ExecContext,
+    ) -> Result<ControlFlow> {
+        // Try executing as .kai script from PATH
+        // A `.kai` script is its own program: its `exit` ends the script, not the caller.
+        if let Some(result) = Box::pin(self.try_execute_script(name, args, ctx)).await? {
+            return Ok(ControlFlow::Normal(result));
+        }
+        // Try executing as external command from PATH — boxed because its
+        // future is the heaviest branch here (holds a `tokio::process::Command`,
+        // argv, the child's stdio streams, and kill/reap drop guards); leaving
+        // it inline fattens every `execute_command_depth` frame on the recursion
+        // ring even when the command is a builtin.
+        //
+        // A refusal (compiled without `subprocess`, or configured off)
+        // does NOT return here — a backend-registered tool of the same
+        // name is a separate capability and still gets a chance below.
+        // `unavailable` carries the reason forward so the final "nothing
+        // claimed this name" message can name it, instead of the
+        // fallthrough re-deriving the wrong "command not found".
+        let mut unavailable = None;
+        match Box::pin(self.try_execute_external(name, args, &mut *ctx)).await? {
+            ExternalCommandOutcome::Ran(result) => return Ok(ControlFlow::Normal(*result)),
+            ExternalCommandOutcome::NotFound => {}
+            ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
+        }
+
+        // Try backend-registered tools (embedder engines, etc.)
+        // Look up tool schema for positional→named mapping.
+        // Clone backend and drop read lock before awaiting (may involve network I/O).
+        // Backend tools expect named JSON params, so enable positional mapping.
+        let backend = self.exec_ctx.read().await.backend.clone();
+        let tool_schema = backend
+            .get_tool(name)
+            .await
+            .unwrap_or_else(|e| {
+                // Schema lookup failing just means positionals won't
+                // get name-mapped below — `call_tool` is still
+                // attempted. Trace it so the degradation is visible
+                // rather than silently swallowed.
+                tracing::debug!("backend get_tool error for {name}: {e}");
+                None
+            })
+            .map(|t| {
+                let mut s = t.schema;
+                // Flat backend/MCP tools expect named JSON params, so map
+                // bare positionals onto named params. Subcommand-aware tools
+                // route positionals through the subcommand path and declare
+                // map_positionals per leaf (kj keeps it false so it re-parses
+                // the argv with its own clap) — don't blanket-override them.
+                if s.subcommands.is_empty() {
+                    s.map_positionals = true;
+                }
+                s
+            });
+        let tool_args = self.build_args_async(args, tool_schema.as_ref(), &mut *ctx).await?;
+        // The embedder tool runs on the CALLER's context, like a
+        // builtin. Its stdin, pipe ends, cwd, pipeline position and
+        // background flags are facts about this dispatch; the kernel's
+        // slot holds the session as of the last top-level statement and
+        // no longer carries the stdin family at all, so running the tool
+        // on it handed `printf hi | embedder_tool` an empty stdin.
+        //
+        // Nothing holds the slot lock across `call_tool` either. An
+        // embedder whose tool re-enters the kernel would deadlock on it,
+        // which is the hazard the builtin arm below spells out.
+        {
+            let scope = self.scope.read().await;
+            ctx.scope = scope.clone();
+        }
+        let backend = ctx.backend.clone();
+        let call = backend.call_tool(name, tool_args, &mut *ctx).await;
+        // Whatever the tool did to the scope stands, whether it
+        // returned a result or an error. A builtin cannot return an
+        // error at all — `tool.execute` hands back an `ExecResult` —
+        // so its copy-back is unconditional, and an embedder tool that
+        // set a variable and then failed used to lose the variable.
+        {
+            let mut scope = self.scope.write().await;
+            *scope = ctx.scope.clone();
+        }
+        match call {
+            Ok(tool_result) => {
+                // Preserve every field (data/content_type/baggage,
+                // not just stdout text) — this is the embedder seam:
+                // `x=$(embedder_tool)` and structured iteration over
+                // its result depend on `.data` surviving the crossing
+                // back into the kernel.
+                let mut result = ExecResult::from(tool_result);
+                // The same rule the builtin dispatch applies, applied
+                // here too — this seam returns before it. Without this
+                // an embedder tool that hands back a value got its
+                // `$(…)` capture stringified, which is precisely what
+                // the comment above promises does not happen.
+                let data_is_only_output = result.data.is_some()
+                    && !result.has_output()
+                    && result.text_out().is_empty();
+                result.data_is_value |= data_is_only_output
+                    || tool_schema
+                        .as_ref()
+                        .is_some_and(|s| s.typed_substitution);
+                // No builtin or external command produced this output,
+                // so nothing else publishes it to a background job.
+                ctx.publish_job_stdout(&result).await;
+                return Ok(ControlFlow::Normal(result));
+            }
+            Err(BackendError::ToolNotFound(_)) => {
+                // The backend confirms no such tool exists — fall
+                // through to "command not found" below.
+            }
+            Err(e) => {
+                // The tool was found (dispatch reached real
+                // execution) but running it failed — a genuine
+                // execution error, not "command not found". Surface
+                // it loudly instead of masking it as exit-127.
+                return Ok(ControlFlow::Normal(ExecResult::failure(1, format!("{}: {}", name, e))));
+            }
+        }
+
+        Ok(ControlFlow::Normal(match unavailable {
+            Some(reason) => external_commands_unavailable_error(name, reason),
+            None => ExecResult::failure(127, format!("command not found: {}", name)),
+        }))
+    }
+
     async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8, ctx: &mut ExecContext) -> Result<ControlFlow> {
         // Dispatch breadcrumb instead of an `#[instrument]` span: this is the
         // most-recursed function on the ring, so wrapping its future in
@@ -4214,21 +4360,7 @@ impl Kernel {
         if let Some(form) = crate::validator::SpecialForm::from_name(name) {
             return match form {
                 crate::validator::SpecialForm::True | crate::validator::SpecialForm::False => {
-                    // Boolean forms ignore other argv; only global JSON needs binding.
-                    let format_args: Vec<Arg> = args.iter()
-                        .take_while(|arg| !matches!(arg, Arg::DoubleDash))
-                        .filter(|arg| matches!(arg,
-                            Arg::LongFlag(name) if name == "json"
-                        ) || matches!(arg, Arg::Named { key, .. } if key == "json"))
-                        .cloned().collect();
-                    let bound = self.build_args_async(&format_args, None, ctx).await?;
-                    let format = bound.has_flag("json").then_some(crate::interpreter::OutputFormat::Json);
-                    let result = if matches!(form, crate::validator::SpecialForm::True) {
-                        ExecResult::success("")
-                    } else {
-                        ExecResult::failure(1, "")
-                    };
-                    Ok(ControlFlow::Normal(finalize_output(result, format, false)))
+                    Box::pin(self.execute_bool_special_form(form, args, ctx)).await
                 }
                 crate::validator::SpecialForm::Source => Box::pin(self.execute_source(args, ctx)).await,
             };
@@ -4272,128 +4404,7 @@ impl Kernel {
         // Look up builtin tool
         let tool = match self.tools.get(name) {
             Some(t) => t,
-            None => {
-                // Try executing as .kai script from PATH
-                // A `.kai` script is its own program: its `exit` ends the script, not the caller.
-                if let Some(result) = Box::pin(self.try_execute_script(name, args, ctx)).await? {
-                    return Ok(ControlFlow::Normal(result));
-                }
-                // Try executing as external command from PATH — boxed because its
-                // future is the heaviest branch here (holds a `tokio::process::Command`,
-                // argv, the child's stdio streams, and kill/reap drop guards); leaving
-                // it inline fattens every `execute_command_depth` frame on the recursion
-                // ring even when the command is a builtin.
-                //
-                // A refusal (compiled without `subprocess`, or configured off)
-                // does NOT return here — a backend-registered tool of the same
-                // name is a separate capability and still gets a chance below.
-                // `unavailable` carries the reason forward so the final "nothing
-                // claimed this name" message can name it, instead of the
-                // fallthrough re-deriving the wrong "command not found".
-                let mut unavailable = None;
-                match Box::pin(self.try_execute_external(name, args, &mut *ctx)).await? {
-                    ExternalCommandOutcome::Ran(result) => return Ok(ControlFlow::Normal(*result)),
-                    ExternalCommandOutcome::NotFound => {}
-                    ExternalCommandOutcome::Unavailable(reason) => unavailable = Some(reason),
-                }
-
-                // Try backend-registered tools (embedder engines, etc.)
-                // Look up tool schema for positional→named mapping.
-                // Clone backend and drop read lock before awaiting (may involve network I/O).
-                // Backend tools expect named JSON params, so enable positional mapping.
-                let backend = self.exec_ctx.read().await.backend.clone();
-                let tool_schema = backend
-                    .get_tool(name)
-                    .await
-                    .unwrap_or_else(|e| {
-                        // Schema lookup failing just means positionals won't
-                        // get name-mapped below — `call_tool` is still
-                        // attempted. Trace it so the degradation is visible
-                        // rather than silently swallowed.
-                        tracing::debug!("backend get_tool error for {name}: {e}");
-                        None
-                    })
-                    .map(|t| {
-                    let mut s = t.schema;
-                    // Flat backend/MCP tools expect named JSON params, so map
-                    // bare positionals onto named params. Subcommand-aware tools
-                    // route positionals through the subcommand path and declare
-                    // map_positionals per leaf (kj keeps it false so it re-parses
-                    // the argv with its own clap) — don't blanket-override them.
-                    if s.subcommands.is_empty() {
-                        s.map_positionals = true;
-                    }
-                    s
-                });
-                let tool_args = self.build_args_async(args, tool_schema.as_ref(), &mut *ctx).await?;
-                // The embedder tool runs on the CALLER's context, like a
-                // builtin. Its stdin, pipe ends, cwd, pipeline position and
-                // background flags are facts about this dispatch; the kernel's
-                // slot holds the session as of the last top-level statement and
-                // no longer carries the stdin family at all, so running the tool
-                // on it handed `printf hi | embedder_tool` an empty stdin.
-                //
-                // Nothing holds the slot lock across `call_tool` either. An
-                // embedder whose tool re-enters the kernel would deadlock on it,
-                // which is the hazard the builtin arm below spells out.
-                {
-                    let scope = self.scope.read().await;
-                    ctx.scope = scope.clone();
-                }
-                let backend = ctx.backend.clone();
-                let call = backend.call_tool(name, tool_args, &mut *ctx).await;
-                // Whatever the tool did to the scope stands, whether it
-                // returned a result or an error. A builtin cannot return an
-                // error at all — `tool.execute` hands back an `ExecResult` —
-                // so its copy-back is unconditional, and an embedder tool that
-                // set a variable and then failed used to lose the variable.
-                {
-                    let mut scope = self.scope.write().await;
-                    *scope = ctx.scope.clone();
-                }
-                match call {
-                    Ok(tool_result) => {
-                        // Preserve every field (data/content_type/baggage,
-                        // not just stdout text) — this is the embedder seam:
-                        // `x=$(embedder_tool)` and structured iteration over
-                        // its result depend on `.data` surviving the crossing
-                        // back into the kernel.
-                        let mut result = ExecResult::from(tool_result);
-                        // The same rule the builtin dispatch applies, applied
-                        // here too — this seam returns before it. Without this
-                        // an embedder tool that hands back a value got its
-                        // `$(…)` capture stringified, which is precisely what
-                        // the comment above promises does not happen.
-                        let data_is_only_output = result.data.is_some()
-                            && !result.has_output()
-                            && result.text_out().is_empty();
-                        result.data_is_value |= data_is_only_output
-                            || tool_schema
-                                .as_ref()
-                                .is_some_and(|s| s.typed_substitution);
-                        // No builtin or external command produced this output,
-                        // so nothing else publishes it to a background job.
-                        ctx.publish_job_stdout(&result).await;
-                        return Ok(ControlFlow::Normal(result));
-                    }
-                    Err(BackendError::ToolNotFound(_)) => {
-                        // The backend confirms no such tool exists — fall
-                        // through to "command not found" below.
-                    }
-                    Err(e) => {
-                        // The tool was found (dispatch reached real
-                        // execution) but running it failed — a genuine
-                        // execution error, not "command not found". Surface
-                        // it loudly instead of masking it as exit-127.
-                        return Ok(ControlFlow::Normal(ExecResult::failure(1, format!("{}: {}", name, e))));
-                    }
-                }
-
-                return Ok(ControlFlow::Normal(match unavailable {
-                    Some(reason) => external_commands_unavailable_error(name, reason),
-                    None => ExecResult::failure(127, format!("command not found: {}", name)),
-                }));
-            }
+            None => return Box::pin(self.execute_non_builtin(name, args, ctx)).await,
         };
 
         // Build arguments (async to support command substitution, schema-aware
@@ -4644,7 +4655,7 @@ impl Kernel {
     /// only in which `ArgValueSource` they hand it.
     async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>, ctx: &mut ExecContext) -> Result<ToolArgs> {
         let source = KernelArgSource { kernel: self, ctx: tokio::sync::Mutex::new(ctx) };
-        bind_tool_args(args, schema, &source).await
+        Box::pin(bind_tool_args(args, schema, &source)).await
     }
 
     /// Build arguments as flat string list for external commands.
@@ -4797,7 +4808,7 @@ impl Kernel {
         Box::pin(async move {
             match expr {
                 Expr::Command(cmd) => {
-                    let flow = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                    let flow = Box::pin(self.execute_command(&cmd.name, &cmd.args, ctx)).await?;
                     let exited = matches!(flow, ControlFlow::Exit { .. });
                     let mut result = flow.into_absorbed_result();
                     // Truthiness comes from the command's OWN code, read before
@@ -4867,8 +4878,66 @@ impl Kernel {
     }
 
     fn eval_expr_async<'a>(&'a self, expr: &'a Expr, ctx: &'a mut ExecContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
-        Box::pin(async move {
         match expr {
+            Expr::CommandSubst(stmts) => Box::pin(self.eval_expr_command_subst(stmts, ctx)),
+            other => Box::pin(self.eval_expr_other(other, ctx)),
+        }
+    }
+
+    async fn eval_expr_command_subst(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<Value> {
+        // Snapshot session state before running (`run_substitution_isolated`) —
+        // only output escapes, not side effects like `cd`, variable
+        // assignments, function definitions, or config mutations (`kaish-ignore`,
+        // `kaish-output-limit`, `alias`/`unalias`) — matching how
+        // every other execution context (background forks, scatter
+        // workers) already isolates mutations (GH #139).
+        let run_result = Box::pin(self.run_substitution_isolated(stmts, &mut *ctx)).await;
+
+        // A substitution's stderr belongs to the enclosing statement,
+        // never to its value. Emit it before the value is built.
+        if let Ok(ref r) = run_result {
+            self.emit_cmdsubst_stderr(r, ctx).await;
+        }
+
+        // Now propagate the error
+        let result = run_result?;
+
+        // A binary result is preserved as bytes — never lossy-decoded to
+        // a string. No trailing-newline trim (every byte is significant).
+        if let Some(bytes) = result.out_bytes() {
+            Ok(Value::Bytes(bytes.to_vec()))
+        // Prefer structured data (enables `for i in $(cmd)` iteration)
+        } else if let Some(data) = &result.data {
+            Ok(data.clone())
+        } else if let Some(output) = result.output() {
+            // Flat non-text node lists (glob, ls, tree) → iterable array
+            if output.is_flat() && !output.is_simple_text() && !output.root.is_empty() {
+                let items: Vec<serde_json::Value> = output.root.iter()
+                    .map(|n| serde_json::Value::String(n.display_name().to_string()))
+                    .collect();
+                Ok(Value::Json(serde_json::Value::Array(items)))
+            } else {
+                // Strip trailing newlines only (POSIX command-subst),
+                // not all trailing whitespace — spaces/tabs are
+                // significant. Use the exact same trim as the quoted
+                // `"$(…)"` interpolation path (`StringPart::CommandSubst`,
+                // `trim_end_matches('\n')`) so bare and quoted command
+                // substitution agree.
+                Ok(Value::String(
+                    result.text_out().trim_end_matches('\n').to_string(),
+                ))
+            }
+        } else {
+            // Otherwise return stdout as single string (NO implicit splitting)
+            Ok(Value::String(
+                result.text_out().trim_end_matches('\n').to_string(),
+            ))
+        }
+    }
+
+    async fn eval_expr_other(&self, expr: &Expr, ctx: &mut ExecContext) -> Result<Value> {
+        match expr {
+            Expr::CommandSubst(_) => unreachable!("dispatched in eval_expr_async"),
             Expr::Not(inner) => {
                 let value = self.eval_expr_async(inner, ctx).await?;
                 Ok(Value::Bool(!is_truthy(&value)))
@@ -4936,62 +5005,6 @@ impl Kernel {
                     self.eval_expr_async(right, ctx).await
                 }
             },
-            Expr::CommandSubst(stmts) => {
-                // Snapshot session state before running (`run_substitution_isolated`) —
-                // only output escapes, not side effects like `cd`, variable
-                // assignments, function definitions, or config mutations (`kaish-ignore`,
-                // `kaish-output-limit`, `alias`/`unalias`) — matching how
-                // every other execution context (background forks, scatter
-                // workers) already isolates mutations (GH #139).
-                let run_result = self.run_substitution_isolated(stmts, &mut *ctx).await;
-
-                // A substitution's stderr belongs to the enclosing statement,
-                // never to its value. Emit it before the value is built.
-                if let Ok(ref r) = run_result {
-                    self.emit_cmdsubst_stderr(r, ctx).await;
-                }
-
-                // Now propagate the error
-                let result = run_result?;
-
-                // A held body stops the enclosing statement before its
-                // missing output is used (spec §I.5) — the request rides up
-                // as a typed error the statement loop converts back into a
-                // held result, and is stashed for the boundary in case an
-                // intermediate catch stringifies the error.
-
-                // A binary result is preserved as bytes — never lossy-decoded to
-                // a string. No trailing-newline trim (every byte is significant).
-                if let Some(bytes) = result.out_bytes() {
-                    Ok(Value::Bytes(bytes.to_vec()))
-                // Prefer structured data (enables `for i in $(cmd)` iteration)
-                } else if let Some(data) = &result.data {
-                    Ok(data.clone())
-                } else if let Some(output) = result.output() {
-                    // Flat non-text node lists (glob, ls, tree) → iterable array
-                    if output.is_flat() && !output.is_simple_text() && !output.root.is_empty() {
-                        let items: Vec<serde_json::Value> = output.root.iter()
-                            .map(|n| serde_json::Value::String(n.display_name().to_string()))
-                            .collect();
-                        Ok(Value::Json(serde_json::Value::Array(items)))
-                    } else {
-                        // Strip trailing newlines only (POSIX command-subst),
-                        // not all trailing whitespace — spaces/tabs are
-                        // significant. Use the exact same trim as the quoted
-                        // `"$(…)"` interpolation path (`StringPart::CommandSubst`,
-                        // `trim_end_matches('\n')`) so bare and quoted command
-                        // substitution agree.
-                        Ok(Value::String(
-                            result.text_out().trim_end_matches('\n').to_string(),
-                        ))
-                    }
-                } else {
-                    // Otherwise return stdout as single string (NO implicit splitting)
-                    Ok(Value::String(
-                        result.text_out().trim_end_matches('\n').to_string(),
-                    ))
-                }
-            }
             Expr::Test(test_expr) => {
                 Ok(Value::Bool(self.eval_test_async(test_expr, ctx).await?))
             }
@@ -5052,7 +5065,7 @@ impl Kernel {
                 // a substitution's stderr. Dropping the `ExecResult` here made
                 // `if cat /nonexistent; then …` print nothing at all, so every
                 // condition that failed for a reason failed silently.
-                let flow = self.execute_command(&cmd.name, &cmd.args, ctx).await?;
+                let flow = Box::pin(self.execute_command(&cmd.name, &cmd.args, ctx)).await?;
                 // The parser makes `Expr::Command` only as a condition, and
                 // conditions run through `eval_condition_async`, which raises
                 // an `exit`. A value cannot carry one, so refuse rather than
@@ -5124,7 +5137,6 @@ impl Kernel {
                 Ok(Value::Json(serde_json::Value::Object(map)))
             }
         }
-        })
     }
 
     /// Async helper to evaluate multiple StringParts into a single string.
@@ -5363,7 +5375,7 @@ impl Kernel {
                 // ignore config) — matching how every other execution
                 // context (background forks, scatter workers) already
                 // isolates mutations (GH #139).
-                let run_result = self.run_substitution_isolated(stmts, &mut *ctx).await;
+                let run_result = Box::pin(self.run_substitution_isolated(stmts, &mut *ctx)).await;
 
                 // A substitution's stderr belongs to the enclosing statement,
                 // never to its value. Emit it before the value is built.
@@ -5696,16 +5708,17 @@ impl Kernel {
         let saved_scope = Box::new(self.scope.read().await.clone());
         let saved_user_tools = Box::new(self.user_tools.read().await.clone());
         // The run's truth lives on the threaded ctx; the slot is only
-        // written when the statement finishes.
-        let saved_ec = (
+        // written when the statement finishes. Boxed alongside `saved_scope`
+        // so it does not sit inline in the future across nested `$(...)`.
+        let saved_ec = Box::new((
             ctx.cwd.clone(),
             ctx.prev_cwd.clone(),
             ctx.aliases.clone(),
             ctx.ignore_config.clone(),
             ctx.output_limit.clone(),
-        );
+        ));
 
-        let run_result = self.execute_block_capturing(stmts, ctx).await;
+        let run_result = Box::pin(self.execute_block_capturing(stmts, ctx)).await;
 
         {
             let mut scope = self.scope.write().await;
@@ -5717,7 +5730,7 @@ impl Kernel {
         }
         *self.user_tools.write().await = *saved_user_tools;
         {
-            let (cwd, prev_cwd, aliases, ignore_config, output_limit) = saved_ec;
+            let (cwd, prev_cwd, aliases, ignore_config, output_limit) = *saved_ec;
             ctx.cwd = cwd;
             ctx.prev_cwd = prev_cwd;
             ctx.aliases = aliases;
