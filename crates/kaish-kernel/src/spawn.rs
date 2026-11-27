@@ -401,7 +401,7 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
     let job_streams = match (
         &spawn_ctx.job_manager,
         spawn_ctx.background_job,
-        spawn_ctx.background_stream_output,
+        spawn_ctx.background_stream_output || spawn_ctx.background_stream_stderr,
     ) {
         (Some(jobs), Some(job_id), true) => jobs.streams(job_id).await,
         _ => None,
@@ -604,10 +604,11 @@ pub(crate) async fn spawn_process(request: SpawnRequest, spawn_ctx: &SpawnContex
         // real output. stderr tees wherever this command streams, unless
         // its job writes stderr per statement.
         let stdout_tee = job_streams.as_ref().and_then(|s| {
-            matches!(
-                spawn_ctx.pipeline_position,
-                PipelinePosition::Only | PipelinePosition::Last
-            )
+            (spawn_ctx.background_stream_output
+                && matches!(
+                    spawn_ctx.pipeline_position,
+                    PipelinePosition::Only | PipelinePosition::Last
+                ))
             .then(|| s.stdout.clone())
         });
         let stderr_tee = job_streams

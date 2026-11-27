@@ -99,12 +99,12 @@ impl Tool for Sort {
                 Err(e) => return ExecResult::failure(2, format!("sort: {e}")),
             }
         } else {
+            let paths = match ctx.positional_paths(&args) {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("sort: {e}")),
+            };
             let mut acc = String::new();
-            for value in &args.positional {
-                let path = match crate::interpreter::value_to_text_sink_named(value, "a path") {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("sort: {e}")),
-                };
+            for path in paths {
                 let resolved = ctx.resolve_path(&path);
                 match ctx
                     .backend
@@ -112,7 +112,12 @@ impl Tool for Sort {
                     .await
                 {
                     Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => acc.push_str(&s),
+                        Ok(s) => {
+                            if !acc.is_empty() && !acc.ends_with('\n') && !s.is_empty() {
+                                acc.push('\n');
+                            }
+                            acc.push_str(&s);
+                        }
                         Err(_) => return ExecResult::failure(2, format!("sort: {}: invalid UTF-8", path)),
                     },
                     Err(e) => return ExecResult::failure(2, format!("sort: {}: {}", path, e)),

@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::ast::Value;
-use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{exec_context, note_skipped_mounts, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use crate::vfs::DirEntry;
@@ -108,7 +107,18 @@ impl Tool for Ls {
         // convert to the `one` flag before clap sees the argv.
         let had_dash_one = args.positional.iter().any(|v| matches!(v, Value::Int(-1)));
         if had_dash_one {
-            args.positional.retain(|v| !matches!(v, Value::Int(-1)));
+            let old_pos = std::mem::take(&mut args.positional);
+            let old_raw = std::mem::take(&mut args.positional_raw);
+            for (old_idx, v) in old_pos.into_iter().enumerate() {
+                if matches!(v, Value::Int(-1)) {
+                    continue;
+                }
+                let new_idx = args.positional.len();
+                if let Some(raw) = old_raw.get(&old_idx) {
+                    args.positional_raw.insert(new_idx, raw.clone());
+                }
+                args.positional.push(v);
+            }
             args.flags.insert("1".to_string());
         }
 
@@ -162,11 +172,10 @@ impl Tool for Ls {
         // into one positional per match, so a multi-element list is the norm
         // for `ls *.rs` / `ls a b c`. The old `get_string("path", 0)` read
         // only the first and silently dropped the rest.
-        let mut paths: Vec<String> =
-            match crate::interpreter::values_to_text_sink_named(&args.positional, "a path") {
-                Ok(p) => p,
-                Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
-            };
+        let mut paths: Vec<String> = match ctx.positional_paths(&args) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
+        };
         if paths.is_empty() {
             paths.push(".".to_string());
         }
@@ -313,24 +322,9 @@ impl Ls {
         }
     }
 
-    /// List files matching a glob pattern.
-    async fn list_glob(
-        &self,
-        ctx: &mut ExecContext,
-        pattern: &str,
-        opts: &ListOptions,
-    ) -> ExecResult {
-        let patterns = [Value::String(pattern.to_string())];
-        let names = match ctx.expand_paths(&patterns).await {
-            Ok(n) => n,
-            Err(e) => return ExecResult::failure(1, format!("ls: {}", e)),
-        };
-        // Glob matches were just walked; a stat race is benign → skip, don't error.
-        self.render_names(ctx, names, opts, false).await
-    }
-
-    /// Single-target listing: glob expansion, a file shown as its own name,
-    /// directory contents, or a recursive walk.
+    /// Single-target listing: a file shown as its own name, directory
+    /// contents, or a recursive walk. Unquoted globs are already expanded by
+    /// the kernel before dispatch; quoted operands stay literal.
     async fn list_one(
         &self,
         ctx: &mut ExecContext,
@@ -338,9 +332,6 @@ impl Ls {
         opts: &ListOptions,
         recursive: bool,
     ) -> ExecResult {
-        if contains_glob(path) {
-            return self.list_glob(ctx, path, opts).await;
-        }
         let resolved = ctx.resolve_path(path);
         // lstat the operand: a link to a directory is listed as the
         // directory; any other link renders as the link itself.
@@ -368,27 +359,14 @@ impl Ls {
     }
 
     /// One node per operand, a directory shown by name and not expanded.
-    /// Any glob that reached here unexpanded (e.g. globbing disabled) is
-    /// still expanded.
     async fn list_names_as_given(
         &self,
         ctx: &mut ExecContext,
         operands: &[String],
         opts: &ListOptions,
     ) -> ExecResult {
-        let mut names: Vec<String> = Vec::new();
-        for path in operands {
-            if contains_glob(path) {
-                match ctx.expand_paths(&[Value::String(path.clone())]).await {
-                    Ok(expanded) => names.extend(expanded),
-                    Err(e) => return ExecResult::failure(1, format!("ls: {e}")),
-                }
-            } else {
-                names.push(path.clone());
-            }
-        }
         // Explicit operands: an inaccessible one is reported, not dropped.
-        self.render_names(ctx, names, opts, true).await
+        self.render_names(ctx, operands.to_vec(), opts, true).await
     }
 
     /// Stat each named path, sort, and render one node per name. Shared by
@@ -1297,53 +1275,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ls_glob_txt() {
+    async fn test_ls_does_not_reglob_literal_operands() {
         let mut ctx = make_ctx().await;
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("*.txt".into()));
-
-        let result = Ls.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("file1.txt"));
-        assert!(result.text_out().contains("file2.txt"));
-        assert!(!result.text_out().contains("subdir"));
-    }
-
-    #[tokio::test]
-    async fn test_ls_glob_scoped_subdir() {
-        let mut ctx = make_ctx_with_subdirs().await;
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("src/*.rs".into()));
-
-        let result = Ls.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("main.rs"));
-        assert!(!result.text_out().contains("README.md"));
-    }
-
-    #[tokio::test]
-    async fn test_ls_glob_long_format() {
-        let mut ctx = make_ctx().await;
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("*.txt".into()));
-        args.named.insert("long".to_string(), Value::Bool(true));
-
-        let result = Ls.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().contains("file1.txt"));
-        assert!(result.has_output());
-        let output = result.output().cloned().unwrap();
-        assert!(output.headers.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_ls_glob_no_matches() {
-        let mut ctx = make_ctx().await;
-        let mut args = ToolArgs::new();
-        args.positional.push(Value::String("*.nonexistent".into()));
-
-        let result = Ls.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        assert!(result.text_out().is_empty());
+        for pattern in ["*.txt", "*.nonexistent"] {
+            let mut args = ToolArgs::new();
+            args.positional.push(Value::String(pattern.into()));
+            let result = Ls.execute(args, &mut ctx).await;
+            assert!(!result.ok(), "ls must not re-glob literal operand {pattern:?}");
+        }
     }
 }

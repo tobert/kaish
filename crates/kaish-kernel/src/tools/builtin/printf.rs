@@ -306,15 +306,24 @@ impl Tool for Printf {
             },
         };
 
-        let format_args: Vec<&Value> = args.positional.iter().skip(1).collect();
         // printf is a text sink: a binary (non-UTF-8) operand is loud, never a
         // silent `[binary: N bytes]` placeholder (kept in sync with `echo` and
         // the interpolation/argv sinks). Valid-UTF-8 bytes coerce below.
-        for &v in &format_args {
+        for v in args.positional.iter().skip(1) {
             if let Err(e) = crate::interpreter::value_to_text_sink(v) {
                 return ExecResult::failure(1, format!("printf: {e}"));
             }
         }
+        // Carry `positional_raw` alongside each `Value` so `%s` preserves exact
+        // numeric literal spellings (`printf %s -0` -> "-0", `printf %s 0.10`
+        // -> "0.10") while numeric conversions (`%d`, `%f`) still read the value.
+        let format_args: Vec<PrintfArg<'_>> = args
+            .positional
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, v)| PrintfArg(v, args.positional_raw.get(&i).map(String::as_str)))
+            .collect();
         // POSIX printf reuses the format until all operands are consumed.
         // A numeric conversion that cannot read its operand refuses here
         // rather than printing 0 — nothing partial is emitted, so a caller
@@ -326,6 +335,21 @@ impl Tool for Printf {
 
         ExecResult::with_output(OutputData::text(output))
     }
+}
+
+/// Operand paired with its optional raw numeric-literal source spelling.
+struct PrintfArg<'a>(&'a Value, Option<&'a str>);
+
+impl FormatArg for PrintfArg<'_> {
+    fn as_format_string(&self) -> String {
+        match self.1 {
+            Some(raw) => raw.to_string(),
+            None => self.0.as_format_string(),
+        }
+    }
+    fn as_format_int(&self) -> Result<i64, String> { self.0.as_format_int() }
+    fn as_format_float(&self) -> Result<f64, String> { self.0.as_format_float() }
+    fn as_format_char(&self) -> Result<Option<char>, String> { self.0.as_format_char() }
 }
 
 /// FormatArg impl for references (used by printf which collects &Value)

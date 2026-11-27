@@ -189,7 +189,7 @@ impl Tool for Cat {
             return ExecResult::success_text_or_bytes(stdin);
         }
         // Collect paths, expanding any glob patterns
-        let paths = match ctx.expand_paths(&args.positional).await {
+        let paths = match ctx.positional_paths(&args) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("cat: {}", e)),
         };
@@ -359,7 +359,7 @@ async fn show_stream(
             Err(e) => return ExecResult::failure(1, format!("cat: {e}")),
         }
     } else {
-        let paths = match ctx.expand_paths(&args.positional).await {
+        let paths = match ctx.positional_paths(args) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("cat: {e}")),
         };
@@ -695,16 +695,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cat_glob() {
+    async fn test_cat_does_not_reglob_literal_operand() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("*.txt".into()));
 
         let result = Cat.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // Should include content from test.txt, lines.txt, other.txt
-        assert!(result.text_out().contains("hello world"));
-        assert!(result.text_out().contains("other content"));
+        // Builtins do not re-glob: unquoted globs expand in the kernel,
+        // so a literal `"*.txt"` reaching `cat` opens that literal name.
+        assert!(!result.ok());
     }
 
     #[tokio::test]

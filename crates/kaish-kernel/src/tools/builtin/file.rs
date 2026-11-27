@@ -87,7 +87,7 @@ impl Tool for File {
             );
         }
 
-        let paths = match ctx.expand_paths(&args.positional).await {
+        let paths = match ctx.positional_paths(&args) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("file: {}", e)),
         };

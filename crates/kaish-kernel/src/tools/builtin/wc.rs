@@ -78,7 +78,7 @@ impl Tool for Wc {
         let show_all = !lines_only && !words_only && !chars_only && !bytes_only;
 
         // Collect all file paths from positional arguments, expanding globs
-        let paths = match ctx.expand_paths(&args.positional).await {
+        let paths = match ctx.positional_paths(&args) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("wc: {}", e)),
         };
@@ -780,15 +780,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wc_glob() {
+    async fn test_wc_does_not_reglob_literal_operand() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("*.txt".into()));
         args.flags.insert("l".to_string());
 
         let result = Wc.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // Should show counts for multiple files and a total
-        assert!(result.text_out().contains("total"));
+        assert!(!result.ok());
     }
 }
