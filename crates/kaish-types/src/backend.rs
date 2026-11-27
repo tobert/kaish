@@ -104,13 +104,13 @@ pub struct ConflictError {
 /// If `expected` is Some, the operation fails with ConflictError if the
 /// current content at that position doesn't match.
 ///
-/// # Line Ending Normalization
+/// # Line Endings and Trailing Newlines
 ///
-/// Line-based operations (`InsertLine`, `DeleteLine`, `ReplaceLine`) normalize
-/// line endings to Unix-style (`\n`). Files with `\r\n` (Windows) line endings
-/// will be converted to `\n` after a line-based patch. This is intentional for
-/// kaish's Unix-first design. Use byte-based operations (`Insert`, `Delete`,
-/// `Replace`) to preserve original line endings.
+/// Line-based operations (`InsertLine`, `DeleteLine`, `ReplaceLine`) preserve
+/// the file's detected line ending (`\r\n` if present, otherwise `\n`) and
+/// whether the file ended with a trailing newline. CAS `expected` strings
+/// compare against each line with its line ending stripped. Use byte-based
+/// operations (`Insert`, `Delete`, `Replace`) for mixed line endings.
 #[derive(Debug, Clone)]
 pub enum PatchOp {
     /// Insert content at byte offset. The offset must land on a character
