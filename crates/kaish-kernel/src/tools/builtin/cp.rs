@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::{Path, PathBuf};
 
-use crate::backend::{BackendError, KernelBackend, WriteMode};
+use crate::backend::{BackendError, KernelBackend};
 use crate::interpreter::ExecResult;
 use crate::operation::KernelOperation;
 use crate::tools::{exec_context, cas_overwrite, schema_from_clap, ToolCtx, GlobalFlags, RefusedFlag, Tool, ToolArgs, ToolSchema};
@@ -154,45 +154,43 @@ impl Tool for Cp {
             }
         }
 
-        // Under trash, a direct file clobber (`cp SRC EXISTING_FILE`)
-        // snapshots the prior destination. Copying *into* a directory or a
-        // recursive directory merge is not a single-file truncation, so it
-        // is not snapshotted (documented write-model residual). Only the
-        // named destination is covered here.
-        let mut expected_dst: Option<crate::tools::OverwriteExpectation> = None;
-        if sources.len() == 1 {
-            let dst_is_existing_file = ctx
+        // Under trash (and without `-n`), snapshot every existing regular file
+        // that will be overwritten — direct clobbers, into-directory clobbers
+        // (`cp SRC DIR/`), and recursive directory merges (`cp -r SRC/ DST/`).
+        let mut snapshots = if !no_clobber && ctx.scope.trash_enabled() {
+            let mut targets: Vec<(String, bool)> = Vec::new();
+            let dst_is_dir = ctx
                 .backend
                 .stat(Path::new(&dst_path))
                 .await
-                .map(|info| !info.is_dir())
+                .map(|info| info.is_dir())
                 .unwrap_or(false);
-            let src_display = &sources[0];
-            let src_resolved = ctx.resolve_path(src_display);
-            // Same policy copy_path applies: a source link that is copied as a
-            // link is not a directory here either.
-            let src_is_dir = if link_mode.follows_top_level(recursive) {
-                ctx.backend.stat(Path::new(&src_resolved)).await
-            } else {
-                ctx.backend.lstat(Path::new(&src_resolved)).await
+            let mut active_ancestors = std::collections::HashSet::new();
+            for source in &sources {
+                let src_resolved = ctx.resolve_path(source);
+                collect_cp_clobbers(
+                    &*ctx.backend,
+                    &src_resolved,
+                    &dst_path,
+                    dst_is_dir,
+                    recursive,
+                    link_mode,
+                    &mut active_ancestors,
+                    &mut targets,
+                )
+                .await;
             }
-            .map(|info| info.is_dir())
-            .unwrap_or(false);
-            // Only a file→existing-file copy is a truncating overwrite. A dir
-            // source onto a file errors at mkdir anyway, so gating it would just
-            // take a spurious trash snapshot of a file that's never overwritten.
-            if dst_is_existing_file && !src_is_dir {
-                let snapshots = match ctx
-                    .snapshot_overwrites("cp",
-                        &[(dest.clone(), false)])
-                    .await
-                {
+            if targets.is_empty() {
+                crate::tools::GateExpectations::new()
+            } else {
+                match ctx.snapshot_overwrites("cp", &targets).await {
                     Ok(s) => s,
                     Err(blocked) => return blocked,
-                };
-                expected_dst = snapshots.get(&dst_path).cloned();
+                }
             }
-        }
+        } else {
+            crate::tools::GateExpectations::new()
+        };
 
         let mut last_err: Option<String> = None;
         for source in &sources {
@@ -203,7 +201,7 @@ impl Tool for Cp {
                 &dst_path,
                 recursive,
                 no_clobber,
-                expected_dst.as_ref(),
+                &mut snapshots,
                 link_mode,
             )
             .await
@@ -280,6 +278,110 @@ fn name_error(path: &Path, err: BackendError) -> BackendError {
     }
 }
 
+/// Enumerate existing destination regular files that `copy_path` will
+/// overwrite so `set -o trash` can snapshot every clobbered target up front.
+/// `active_ancestors` tracks canonical source directories currently on the
+/// recursion stack so `-rL` symlink cycles stop while DAG links still visit
+/// each destination branch.
+#[allow(clippy::too_many_arguments)]
+fn collect_cp_clobbers<'a>(
+    backend: &'a dyn KernelBackend,
+    src: &'a Path,
+    dst: &'a Path,
+    dst_is_dir: bool,
+    recursive: bool,
+    link_mode: LinkMode,
+    active_ancestors: &'a mut std::collections::HashSet<PathBuf>,
+    out: &'a mut Vec<(String, bool)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let src_info = if link_mode.follows_top_level(recursive) {
+            backend.stat(src).await
+        } else {
+            backend.lstat(src).await
+        };
+        let Ok(src_info) = src_info else {
+            return;
+        };
+        if src_info.is_dir() {
+            if !recursive || !dst_is_dir {
+                return;
+            }
+            let canon = backend
+                .canonicalize(src, false)
+                .await
+                .unwrap_or_else(|_| src.to_path_buf());
+            if !active_ancestors.insert(canon.clone()) {
+                return;
+            }
+            if let Ok(entries) = backend.list(src).await {
+                for entry in entries {
+                    let src_child = src.join(&entry.name);
+                    let dst_child = dst.join(&entry.name);
+                    let child_is_dir = if entry.is_symlink() {
+                        if link_mode == LinkMode::Dereference {
+                            backend
+                                .stat(&src_child)
+                                .await
+                                .map(|i| i.is_dir())
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    } else {
+                        entry.is_dir()
+                    };
+                    if child_is_dir {
+                        let dst_child_is_dir = backend
+                            .stat(&dst_child)
+                            .await
+                            .map(|i| i.is_dir())
+                            .unwrap_or(false);
+                        if dst_child_is_dir {
+                            collect_cp_clobbers(
+                                backend,
+                                &src_child,
+                                &dst_child,
+                                true,
+                                true,
+                                link_mode,
+                                active_ancestors,
+                                out,
+                            )
+                            .await;
+                        }
+                    } else if backend
+                        .lstat(&dst_child)
+                        .await
+                        .map(|i| !i.is_dir() && !i.is_symlink())
+                        .unwrap_or(false)
+                    {
+                        out.push((dst_child.to_string_lossy().into_owned(), false));
+                    }
+                }
+            }
+            active_ancestors.remove(&canon);
+        } else {
+            let final_dst = if dst_is_dir {
+                let Some(filename) = src.file_name() else {
+                    return;
+                };
+                dst.join(filename)
+            } else {
+                dst.to_path_buf()
+            };
+            if backend
+                .lstat(&final_dst)
+                .await
+                .map(|i| !i.is_dir() && !i.is_symlink())
+                .unwrap_or(false)
+            {
+                out.push((final_dst.to_string_lossy().into_owned(), false));
+            }
+        }
+    })
+}
+
 /// Copy a path to destination, optionally recursively.
 async fn copy_path(
     backend: &dyn KernelBackend,
@@ -287,7 +389,7 @@ async fn copy_path(
     dst: &Path,
     recursive: bool,
     no_clobber: bool,
-    expected: Option<&crate::tools::OverwriteExpectation>,
+    snapshots: &mut crate::tools::GateExpectations,
     link_mode: LinkMode,
 ) -> Result<(), BackendError> {
     let info = if link_mode.follows_top_level(recursive) {
@@ -309,7 +411,17 @@ async fn copy_path(
                 src.display()
             )));
         }
-        copy_dir_recursive(backend, src, dst, no_clobber, link_mode).await
+        let mut active_ancestors = std::collections::HashSet::new();
+        copy_dir_recursive(
+            backend,
+            src,
+            dst,
+            no_clobber,
+            snapshots,
+            link_mode,
+            &mut active_ancestors,
+        )
+        .await
     } else {
         // Check if destination is a directory
         let final_dst = match backend.stat(dst).await {
@@ -332,10 +444,17 @@ async fn copy_path(
         let data = backend
             .read_with_purpose(src, None, crate::backend::ReadPurpose::Edit)
             .await?;
-        // CAS against the gate snapshot (`expected`) when this is a gated direct
-        // file clobber — a concurrent change is a loud conflict, not a silent
-        // clobber. `expected` is `None` for a new file or an ungated path.
-        cas_overwrite(backend, &final_dst, &data, expected).await
+        // CAS against the gate snapshot when this target was snapshotted, then
+        // update the expected bytes so a repeated destination in the same `cp`
+        // (`cp d1/x d2/x dst/`) does not trip a false concurrent-change error.
+        cas_overwrite(backend, &final_dst, &data, snapshots.get(&final_dst)).await?;
+        if snapshots.contains_key(&final_dst) {
+            snapshots.insert(
+                final_dst,
+                crate::tools::OverwriteExpectation::Bytes(data),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -390,57 +509,99 @@ fn copy_dir_recursive<'a>(
     src: &'a Path,
     dst: &'a Path,
     no_clobber: bool,
+    snapshots: &'a mut crate::tools::GateExpectations,
     link_mode: LinkMode,
+    active_ancestors: &'a mut std::collections::HashSet<PathBuf>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BackendError>> + Send + 'a>> {
     Box::pin(async move {
+        let canon = if link_mode == LinkMode::Dereference {
+            let c = backend
+                .canonicalize(src, false)
+                .await
+                .unwrap_or_else(|_| src.to_path_buf());
+            if !active_ancestors.insert(c.clone()) {
+                return Err(BackendError::InvalidOperation(format!(
+                    "{}: symlink cycle detected",
+                    src.display()
+                )));
+            }
+            Some(c)
+        } else {
+            None
+        };
+
         // Create destination directory
-        backend.mkdir(dst).await?;
+        let result: Result<(), BackendError> = async {
+            backend.mkdir(dst).await?;
 
-        let entries = backend.list(src).await?;
+            let entries = backend.list(src).await?;
 
-        for entry in entries {
-            let src_child: PathBuf = src.join(&entry.name);
-            let dst_child: PathBuf = dst.join(&entry.name);
+            for entry in entries {
+                let src_child: PathBuf = src.join(&entry.name);
+                let dst_child: PathBuf = dst.join(&entry.name);
 
-            // `list()` lstats, so a link child is a link; only -L follows it.
-            // Recreating it is also what keeps a link cycle from looping.
-            if entry.is_symlink() && link_mode != LinkMode::Dereference {
-                recreate_symlink(backend, &src_child, &dst_child, no_clobber).await?;
-                continue;
-            }
-
-            let is_dir = if entry.is_symlink() {
-                // -L: a dangling link is an error that names the link.
-                backend
-                    .stat(&src_child)
-                    .await
-                    .map_err(|e| name_error(&src_child, e))?
-                    .is_dir()
-            } else {
-                entry.is_dir()
-            };
-
-            if is_dir {
-                copy_dir_recursive(backend, &src_child, &dst_child, no_clobber, link_mode).await?;
-            } else {
-                // lstat, as above: a dangling link at `dst_child` holds its name.
-                if no_clobber && backend.lstat(&dst_child).await.is_ok() {
-                    continue; // Skip existing files
+                // `list()` lstats, so a link child is a link; only -L follows it.
+                // Recreating it is also what keeps a link cycle from looping.
+                if entry.is_symlink() && link_mode != LinkMode::Dereference {
+                    recreate_symlink(backend, &src_child, &dst_child, no_clobber).await?;
+                    continue;
                 }
-                let data = backend
-                    .read_with_purpose(&src_child, None, crate::backend::ReadPurpose::Edit)
-                    .await?;
-                backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
-            }
-        }
 
-        Ok(())
+                let is_dir = if entry.is_symlink() {
+                    // -L: a dangling link is an error that names the link.
+                    backend
+                        .stat(&src_child)
+                        .await
+                        .map_err(|e| name_error(&src_child, e))?
+                        .is_dir()
+                } else {
+                    entry.is_dir()
+                };
+
+                if is_dir {
+                    copy_dir_recursive(
+                        backend,
+                        &src_child,
+                        &dst_child,
+                        no_clobber,
+                        snapshots,
+                        link_mode,
+                        active_ancestors,
+                    )
+                    .await?;
+                } else {
+                    // lstat, as above: a dangling link at `dst_child` holds its name.
+                    if no_clobber && backend.lstat(&dst_child).await.is_ok() {
+                        continue; // Skip existing files
+                    }
+                    let data = backend
+                        .read_with_purpose(&src_child, None, crate::backend::ReadPurpose::Edit)
+                        .await?;
+                    cas_overwrite(backend, &dst_child, &data, snapshots.get(&dst_child)).await?;
+                    if snapshots.contains_key(&dst_child) {
+                        snapshots.insert(
+                            dst_child,
+                            crate::tools::OverwriteExpectation::Bytes(data),
+                        );
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        .await;
+
+        if let Some(c) = canon {
+            active_ancestors.remove(&c);
+        }
+        result
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::WriteMode;
     use crate::tools::ExecContext;
     use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};

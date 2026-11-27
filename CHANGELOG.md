@@ -22,6 +22,7 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **`cp` and `mv` now snapshot into-directory and recursive overwrites under `set -o trash`.** `cp SRC DIR/`, `cp -r SRC/ DST/`, and `mv SRC DIR/` enumerate and snapshot every clobbered destination file (with CAS on `cp` children), while `-n` skips snapshotting untouched targets.
 - **Empty shell assignments, CRLF-safe `PatchOp` line edits, and lossless relative VFS routing.** `VAR=`, `local VAR=`, and `export VAR=` now assign empty strings, `PatchOp::{InsertLine, DeleteLine, ReplaceLine}` preserve CRLF and missing trailing newlines, and `VfsRouter::mount_of` preserves non-UTF-8 relative paths below mounts.
 - **Builtin fidelity improvements across `ls`, `head`, `tail`, `sort`, `sed`, and `date`.** End-of-options `--` now protects negative filenames like `-1`, `sort` supports multiple `-k` keys, `.C` char offsets, `-k2,1`, and `b`/`f`/`V` modifiers, `sed` preserves non-quiet auto-print on `p`/`s///p` and empty `//` regex reuse, and `date -d` accepts spaced `±` operators.
 - **Merged redirects preserve recorded write order.** `2>&1`, `1>&2`, and `&>` now interleave captured stdout and stderr in `StreamOrder`, matching bash on loops, functions, and external commands while falling back after spills or overflow.
