@@ -71,6 +71,7 @@ impl Tool for Exec {
             ],
         )
         .with_options_end_at_operand()
+            .with_effect(crate::tools::ToolEffect::Delegate)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

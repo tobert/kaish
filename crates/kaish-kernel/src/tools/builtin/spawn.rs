@@ -100,6 +100,7 @@ impl Tool for Spawn {
             ],
         )
         .with_options_end_at_operand()
+            .with_effect(crate::tools::ToolEffect::Delegate)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

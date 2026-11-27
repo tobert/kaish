@@ -73,6 +73,7 @@ impl Tool for Scatter {
         // itself, and the kernel-wide --json flag must REACH the tool (it
         // selects the array view) instead of being consumed upstream.
         .with_owned_output()
+            .with_effect(crate::tools::ToolEffect::Delegate)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

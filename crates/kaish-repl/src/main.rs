@@ -5,6 +5,8 @@
 //!   kaish -c `<command>`       # Execute command and exit
 //!   kaish --plan `<command>`   # Print what it would run, as JSON
 //!   kaish --plan-file `<path>` # Same, reading the source from a file
+//!   kaish --validate `<path>`  # Validate a script file (or `-` for stdin)
+//!   kaish --validate -e `<cmd>`# Validate inline code
 //!   kaish script.kai           # Run a script
 
 use std::env;
@@ -156,6 +158,15 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode> {
     let args: Vec<String> = env::args().collect();
 
+    // Handle `--validate` before the global `--overlay` filter so an `-e`
+    // expression or filename literally equal to `--overlay` is never stripped.
+    // Validation runs no commands and touches only the host file passed to it,
+    // so `--overlay` is irrelevant here.
+    if args.get(1).map(String::as_str) == Some("--validate") {
+        let validate_args: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
+        return Ok(run_validate(&validate_args));
+    }
+
     // Skip argv[0]: every arm below matches on the first real argument.
     // Extract --overlay (can appear anywhere before positionals).
     let overlay = args.iter().skip(1).any(|a| a == "--overlay");
@@ -217,6 +228,8 @@ fn run() -> Result<ExitCode> {
                 ),
             })
         }
+
+        Some("--validate") => Ok(run_validate(&rest[1..])),
 
         Some(path) if !path.starts_with('-') => {
             // Treat as script file
@@ -392,6 +405,165 @@ fn read_plan_source(path: &str) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
+/// Blank out a leading `#!` shebang line while preserving 1-based line numbers.
+fn strip_shebang(source: String) -> String {
+    if source.starts_with("#!") {
+        match source.find('\n') {
+            Some(idx) => format!("\n{}", &source[idx + 1..]),
+            None => String::new(),
+        }
+    } else {
+        source
+    }
+}
+
+/// Validate a host script file, stdin (`-`), or `-e <expr>` without executing.
+///
+/// Exits `0` when valid, `1` on validation errors, and `2` on parse, usage,
+/// or file-read errors (matching `--plan-file` for CLI rejections).
+fn run_validate(args: &[&str]) -> ExitCode {
+    use kaish_kernel::validator::Severity;
+
+    let mut quiet = false;
+    let mut show_warnings = false;
+    let mut expr: Option<&str> = None;
+    let mut path: Option<&str> = None;
+    let mut past_options = false;
+
+    let mut idx = 0;
+    while idx < args.len() {
+        let arg = args[idx];
+        if !past_options {
+            match arg {
+                "--" => {
+                    past_options = true;
+                    idx += 1;
+                    continue;
+                }
+                "-q" | "--quiet" => {
+                    quiet = true;
+                    idx += 1;
+                    continue;
+                }
+                "-w" | "--warnings" => {
+                    show_warnings = true;
+                    idx += 1;
+                    continue;
+                }
+                "-e" | "--expr" => {
+                    if expr.is_some() {
+                        if !quiet {
+                            eprintln!("kaish --validate: -e may only be passed once");
+                        }
+                        return ExitCode::from(REJECTED);
+                    }
+                    idx += 1;
+                    match args.get(idx).copied() {
+                        Some(value) => expr = Some(value),
+                        None => {
+                            if !quiet {
+                                eprintln!("kaish --validate: -e requires an expression");
+                            }
+                            return ExitCode::from(REJECTED);
+                        }
+                    }
+                    idx += 1;
+                    continue;
+                }
+                other if other.starts_with('-') && other != "-" => {
+                    if !quiet {
+                        eprintln!("kaish --validate: unknown option: {other}");
+                    }
+                    return ExitCode::from(REJECTED);
+                }
+                _ => {}
+            }
+        }
+        if path.is_some() {
+            if !quiet {
+                eprintln!("kaish --validate: expected one path, got extra operand: {arg}");
+            }
+            return ExitCode::from(REJECTED);
+        }
+        path = Some(arg);
+        idx += 1;
+    }
+
+    let (source, label) = match (expr, path) {
+        (Some(code), None) => (code.to_string(), "<expr>".to_string()),
+        (None, Some(file_path)) => match read_plan_source(file_path) {
+            Ok(raw) => (
+                strip_shebang(raw),
+                if file_path == "-" {
+                    "<stdin>".to_string()
+                } else {
+                    file_path.to_string()
+                },
+            ),
+            Err(e) => {
+                if !quiet {
+                    eprintln!("kaish --validate: {file_path}: {e}");
+                }
+                return ExitCode::from(REJECTED);
+            }
+        },
+        (Some(_), Some(_)) => {
+            if !quiet {
+                eprintln!("kaish --validate: pass either a path or -e <expr>, not both");
+            }
+            return ExitCode::from(REJECTED);
+        }
+        (None, None) => {
+            if !quiet {
+                eprintln!("kaish --validate: missing input (pass <path>, -, or -e '<command>')");
+            }
+            return ExitCode::from(REJECTED);
+        }
+    };
+
+    let issues = match kaish_kernel::validator::validate_program(&source) {
+        Ok(issues) => issues,
+        Err(errors) => {
+            if !quiet {
+                for error in &errors {
+                    eprintln!("{label}: parse error: {error}");
+                }
+            }
+            return ExitCode::from(REJECTED);
+        }
+    };
+
+    let (errors, warnings): (Vec<_>, Vec<_>) = issues
+        .into_iter()
+        .partition(|issue| issue.severity == Severity::Error);
+
+    if quiet {
+        return if errors.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+
+    for error in &errors {
+        eprintln!("{label}: {}", error.format(&source));
+    }
+    if show_warnings {
+        for warning in &warnings {
+            println!("{label}: {}", warning.format(&source));
+        }
+    }
+
+    if errors.is_empty() {
+        if warnings.is_empty() || !show_warnings {
+            println!("{label}: valid");
+        }
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn print_help() {
     println!(r#"会sh — kaish v{}
 
@@ -400,6 +572,8 @@ Usage:
   kaish -c <command>           Execute command and exit
   kaish --plan <command>       Print what it would run, as JSON, and exit
   kaish --plan-file <path>     Same, reading the source from a file or -
+  kaish --validate <path>      Validate a script file (or - for stdin)
+  kaish --validate -e <cmd>    Validate inline code without running it
   kaish <script.kai>           Run a script file
 
 Options:
@@ -427,6 +601,10 @@ Options:
                                a separate kaish --version call.
   --plan-file <path>           Plan the source in <path>, or stdin for -. Keeps
                                a whole script out of argv, which is capped.
+  --validate [-q] [-w] <path>  Validate a script without executing it. Pass -
+                               for stdin or -e <command> for inline code.
+                               Exits 0 when valid, 1 on validation errors,
+                               2 on parse, usage, or file-read errors.
   -h, --help                   Show this help
   -V, --version                Show version
 
@@ -438,6 +616,8 @@ Examples:
   kaish deploy.kai             # Run a deployment script
   kaish --plan 'rm -r build'   # See what it would run, without running it
   kaish --plan-file deploy.kai # Plan a script without running it
+  kaish --validate deploy.kai  # Validate a script without running it
+  kaish --validate -e 'break'  # Validate inline code
 "#, env!("CARGO_PKG_VERSION"));
 }
 
@@ -450,17 +630,7 @@ fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read script: {path}"))?;
 
-    // Blank out the shebang line (rather than removing it) so every
-    // subsequent line keeps its original 1-based line number for error
-    // reporting (GH #127).
-    let source = if source.starts_with("#!") {
-        match source.find('\n') {
-            Some(idx) => format!("\n{}", &source[idx + 1..]),
-            None => String::new(), // whole file is a single shebang line
-        }
-    } else {
-        source
-    };
+    let source = strip_shebang(source);
 
     // A parse/lexer failure means nothing in the script would have run —
     // print its diagnostic directly and stop, before a kernel even exists,

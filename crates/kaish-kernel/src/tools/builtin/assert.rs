@@ -37,6 +37,7 @@ impl Tool for Assert {
                 ("Assert with custom message", "assert $OK \"deploy failed\""),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

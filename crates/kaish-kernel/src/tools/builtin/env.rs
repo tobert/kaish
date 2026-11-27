@@ -83,6 +83,7 @@ impl Tool for Env {
             ],
         )
         .with_options_end_at_operand()
+            .with_effect(crate::tools::ToolEffect::Delegate)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

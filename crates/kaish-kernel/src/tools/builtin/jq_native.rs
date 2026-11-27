@@ -469,6 +469,7 @@ impl Tool for JqNative {
         );
         schema
         .with_typed_substitution()
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

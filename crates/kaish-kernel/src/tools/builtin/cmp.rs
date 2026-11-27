@@ -48,6 +48,7 @@ impl Tool for Cmp {
                 ("Compare stdin to a file", "dd if=/dev/urandom bs=16 count=1 | cmp - saved.bin"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

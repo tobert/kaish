@@ -44,6 +44,7 @@ impl Tool for Tee {
             ],
         )
         .with_operations([KernelOperation::FsOverwrite.as_str()])
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -47,6 +47,7 @@ impl Tool for Seq {
                 ("Zero-padded", "seq -w 1 100"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

@@ -42,6 +42,7 @@ impl Tool for Wait {
                 ("Wait for specific job", "wait 1"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

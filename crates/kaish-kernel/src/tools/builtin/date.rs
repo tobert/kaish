@@ -305,6 +305,7 @@ impl Tool for Date {
                 ("Decode an epoch", "date -d \"@1700000000\""),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

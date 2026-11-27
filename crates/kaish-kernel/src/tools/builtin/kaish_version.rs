@@ -36,6 +36,7 @@ impl Tool for KaishVersion {
             "Print kaish version",
             [("Show version", "kaish-version")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

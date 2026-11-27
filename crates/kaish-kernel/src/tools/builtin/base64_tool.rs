@@ -49,6 +49,7 @@ impl Tool for Base64Tool {
                 ("Encode without wrapping", "base64 -w 0 file.bin"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -93,6 +93,7 @@ impl Tool for Ls {
                 ("Recursive listing", "ls -R src/"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

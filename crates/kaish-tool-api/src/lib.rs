@@ -45,5 +45,5 @@ pub use tool::{is_global_output_flag, validate_against_schema, RefusedFlag, Tool
 // depend on just `kaish-tool-api` for the common case.
 pub use kaish_types::{
     global_flag_value_is_truthy, ArgBinding, ExecResult, OutputData, OutputFormat, ParamSchema,
-    ToolArgs, ToolFlow, ToolSchema, Value,
+    ToolArgs, ToolEffect, ToolFlow, ToolSchema, Value,
 };

@@ -271,6 +271,7 @@ impl Tool for Printf {
                 ("Zero-padded number", "printf \"%08d\" 42"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -54,6 +54,7 @@ impl Tool for Head {
                 ("First 100 bytes", "head -c 100 file.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

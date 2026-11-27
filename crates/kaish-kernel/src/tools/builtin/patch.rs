@@ -71,6 +71,7 @@ impl Tool for Patch {
             ],
         )
         .with_operations([KernelOperation::FsOverwrite.as_str()])
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

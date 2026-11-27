@@ -70,6 +70,7 @@ impl Tool for Test {
             ],
         )
         .with_raw_argv()
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     /// Reject `-a`/`-o`/`(`/`)` before anything runs.

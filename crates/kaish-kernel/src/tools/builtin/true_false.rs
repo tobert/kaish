@@ -57,6 +57,7 @@ impl Tool for True {
             "Exit with success (code 0)",
             [("Always succeeds", "true")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -113,6 +114,7 @@ impl Tool for Colon {
                 ("Truncate a file to zero bytes", ": > log.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -161,6 +163,7 @@ impl Tool for False {
             "Exit with failure (code 1)",
             [("Always fails", "false")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

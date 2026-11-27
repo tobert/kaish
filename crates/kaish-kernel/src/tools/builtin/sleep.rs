@@ -38,6 +38,7 @@ impl Tool for Sleep {
                 ("Sleep for half a second", "sleep 0.5"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

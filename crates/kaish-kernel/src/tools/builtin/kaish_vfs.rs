@@ -58,6 +58,7 @@ impl Tool for KaishVfs {
                 ("Discard edits to one path", "kaish-vfs reset src/main.rs"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

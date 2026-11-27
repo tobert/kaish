@@ -208,6 +208,7 @@ impl Tool for Awk {
                 ("Print the first line of each file", "awk 'FNR == 1 {print FILENAME}' a.txt b.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

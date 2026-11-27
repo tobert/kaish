@@ -12,4 +12,4 @@ pub use kaish_tool_api::{
 };
 
 // Data types re-exported from kaish-types.
-pub use kaish_types::{ArgBinding, ParamSchema, ToolArgs, ToolSchema};
+pub use kaish_types::{ArgBinding, ParamSchema, ToolArgs, ToolEffect, ToolSchema};

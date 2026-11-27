@@ -206,6 +206,7 @@ impl Tool for Tree {
                 ("Limited depth", "tree -L 2 src/"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -123,6 +123,7 @@ impl Tool for Kill {
             ],
         )
         .with_raw_argv()
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

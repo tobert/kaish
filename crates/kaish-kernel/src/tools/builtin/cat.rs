@@ -67,6 +67,7 @@ impl Tool for Cat {
                 ("Concatenate files", "cat header.txt body.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

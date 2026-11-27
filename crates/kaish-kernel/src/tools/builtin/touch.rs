@@ -39,6 +39,7 @@ impl Tool for Touch {
                 ("Update timestamp", "touch existing.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

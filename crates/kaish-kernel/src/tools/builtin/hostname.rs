@@ -44,6 +44,7 @@ impl Tool for Hostname {
             "Print the system hostname",
             [("Print hostname", "hostname")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

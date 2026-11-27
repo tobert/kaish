@@ -37,6 +37,7 @@ impl Tool for Tac {
                 ("Reverse stdin", "seq 1 5 | tac"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

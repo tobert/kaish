@@ -101,6 +101,7 @@ impl Tool for Glob {
             ],
         )
         .with_glob_passthrough()
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

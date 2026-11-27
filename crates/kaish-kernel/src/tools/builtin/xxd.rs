@@ -54,6 +54,7 @@ impl Tool for Xxd {
                 ("Reverse hex", "echo 68656c6c6f | xxd -r -p"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -75,6 +75,7 @@ impl Tool for Push {
                 ("Append to a nested list", "push services[web][tags] canary"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

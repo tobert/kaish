@@ -49,6 +49,7 @@ impl Tool for Tr {
                 ("Keep only digits (complement)", "echo 'a1b2c3' | tr -cd '[:digit:]'"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

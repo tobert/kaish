@@ -161,6 +161,7 @@ impl Tool for CommandBuiltin {
                 ("Describe a name", "command -V ls"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -226,6 +227,7 @@ impl Tool for Type {
                 ("Print the kind only", "type -t ls"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

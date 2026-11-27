@@ -12,6 +12,8 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **Builtins declare their side-effect class via `ToolSchema::effect`.** `ToolEffect` (`read_only`, `session`, `write`, `delegate`) and `ToolSchema::is_read_only()` let embedder gates derive read-only builtins from `Kernel::tool_schemas()`. Undeclared tools default to `None`.
+- **`kaish --validate` checks scripts from the CLI without executing.** Supports `<path>`, `-` for stdin, `-e`/`--expr <command>`, `-q`/`--quiet`, and `-w`/`--warnings`, exiting `0` when valid, `1` on validation errors, and `2` on parse, usage, or file-read errors.
 - **`help` overview points to `kaish-validate`.** The top-level help page now shows `kaish-validate script.kai` and `kaish-validate -e '…'` so users and agents can discover script validation without running commands.
 
 ### Fixed

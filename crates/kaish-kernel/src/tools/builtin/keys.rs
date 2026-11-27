@@ -94,6 +94,7 @@ impl Tool for Keys {
             ],
         )
         .with_typed_substitution()
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
