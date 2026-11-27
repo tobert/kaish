@@ -597,10 +597,28 @@ impl ExecContext {
     /// dispatch — the one case `publish_job_stdout` cannot see. `2>&1`
     /// merges a stage's stderr into its stdout only once the stage has
     /// finished and `apply_redirects` has run, by which point a builtin's or
+    /// Whether `publish_job_stdout_suffix` will write to a live background job
+    /// stdout stream. Used to avoid cloning stdout/stderr on foreground `2>&1`.
+    pub(crate) fn will_publish_job_stdout(&self) -> bool {
+        self.background_job.is_some()
+            && self.background_stream_output
+            && matches!(
+                self.pipeline_position,
+                PipelinePosition::Only | PipelinePosition::Last
+            )
+            && self.job_manager.is_some()
+    }
+
+    /// Publish stdout bytes added by a redirect (e.g. `2>&1`) when the
     /// external's own leaf publish already sent whatever stdout existed
     /// BEFORE the merge. `prior` is that pre-redirect stdout; only the bytes
     /// beyond it are new and need publishing.
-    pub(crate) async fn publish_job_stdout_suffix(&self, prior: &[u8], result: &ExecResult) {
+    pub(crate) async fn publish_job_stdout_suffix(
+        &self,
+        prior: &[u8],
+        merged_err: &[u8],
+        result: &ExecResult,
+    ) {
         let (Some(job_id), true, PipelinePosition::Only | PipelinePosition::Last, Some(jobs)) = (
             self.background_job,
             self.background_stream_output,
@@ -613,13 +631,19 @@ impl ExecContext {
             Some(bytes) => bytes.to_vec(),
             None => result.text_out().into_owned().into_bytes(),
         };
-        if current.len() <= prior.len() || !current.starts_with(prior) {
+        let to_write: &[u8] = if current.len() > prior.len() && current.starts_with(prior) {
+            &current[prior.len()..]
+        } else if !merged_err.is_empty() {
+            // Ordered `2>&1` interleaved stderr into stdout, so `current` no
+            // longer starts with `prior`; publish the newly merged stderr bytes.
+            merged_err
+        } else {
             return;
-        }
+        };
         let Some(streams) = jobs.streams(job_id).await else {
             return;
         };
-        streams.stdout.write(&current[prior.len()..]).await;
+        streams.stdout.write(to_write).await;
     }
 
     /// Create a new execution context with a VFS (uses LocalBackend without tools).

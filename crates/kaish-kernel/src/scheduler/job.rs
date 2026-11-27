@@ -736,6 +736,28 @@ impl JobManager {
         Some(stream.read().await)
     }
 
+    /// Read a byte range from a job's live stdout without copying the whole ring.
+    pub async fn read_stdout_range(
+        &self,
+        id: JobId,
+        offset: u64,
+        limit: Option<u64>,
+    ) -> Option<Vec<u8>> {
+        let stream = self.streams(id).await?.stdout;
+        Some(stream.read_range(offset, limit).await)
+    }
+
+    /// Read a byte range from a job's live stderr without copying the whole ring.
+    pub async fn read_stderr_range(
+        &self,
+        id: JobId,
+        offset: u64,
+        limit: Option<u64>,
+    ) -> Option<Vec<u8>> {
+        let stream = self.streams(id).await?.stderr;
+        Some(stream.read_range(offset, limit).await)
+    }
+
     /// Close a finished job's streams.
     ///
     /// Neither stream is written here. Every producer of a job's stdout or

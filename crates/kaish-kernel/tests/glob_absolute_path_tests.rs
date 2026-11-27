@@ -132,42 +132,55 @@ async fn relative_pattern_after_cd_reports_subdir_relative_names() {
 /// The same degenerate strip lived in `ExecContext::expand_paths`, which
 /// every path-taking builtin uses (`cat`, `head`, `tail`, `wc`, `ls`, `file`,
 /// `checksum`, `base64`, `tac`, `xxd`). It stripped the cwd from each match
-/// unconditionally, which is a no-op only while cwd is a real prefix — when
-/// cwd is `/` the strip removes the leading separator itself.
-///
-/// `/` is the DEFAULT cwd for an isolated kernel, so this is the ordinary
-/// case for an embedder rather than a corner. The pattern is quoted so the
-/// kernel does not expand it in argv and the builtin's own expansion runs.
+/// `ExecContext::expand_paths` is a public helper for custom tools. With
+/// `cwd = /`, stripping `cwd` unconditionally used to drop the leading `/` of
+/// an absolute pattern.
 #[tokio::test]
 async fn absolute_pattern_through_expand_paths_keeps_leading_slash() {
     let dir = tempdir().unwrap();
     touch(dir.path(), "z.txt");
-    let kernel = kernel_at(dir.path());
+    let mut vfs = kaish_kernel::vfs::VfsRouter::new();
+    vfs.mount("/", kaish_kernel::vfs::LocalFs::new(std::path::PathBuf::from("/")));
+    let mut ctx = kaish_kernel::tools::ExecContext::new(std::sync::Arc::new(vfs));
+    ctx.cwd = std::path::PathBuf::from("/");
+
     let pattern = format!("{}/*.txt", dir.path().display());
     let expected = format!("{}/z.txt", dir.path().display());
 
-    // cd / is what makes the old strip destructive.
-    let (out, code) = run(&kernel, &format!("cd /; ls '{pattern}'")).await;
-    assert_eq!(code, 0, "ls should succeed: {out:?}");
+    let expanded = ctx
+        .expand_paths(&[kaish_kernel::ast::Value::String(pattern)])
+        .await
+        .expect("expand_paths should succeed");
     assert_eq!(
-        out, expected,
-        "an absolute pattern must keep its leading slash with cwd=/: {out:?}"
+        expanded,
+        vec![expected],
+        "an absolute pattern must keep its leading slash with cwd=/: {expanded:?}"
     );
 }
 
-/// The control for the case above: with a cwd that really is a prefix, the
-/// old code produced the right answer by accident. It must still be right.
+/// The control for the case above: with a cwd that really is a prefix,
+/// `expand_paths` still returns the absolute path.
 #[tokio::test]
 async fn expand_paths_absolute_pattern_unaffected_by_cwd() {
     let dir = tempdir().unwrap();
     touch(dir.path(), "z.txt");
-    let kernel = kernel_at(dir.path());
+    let mut vfs = kaish_kernel::vfs::VfsRouter::new();
+    vfs.mount("/", kaish_kernel::vfs::LocalFs::new(std::path::PathBuf::from("/")));
+    let mut ctx = kaish_kernel::tools::ExecContext::new(std::sync::Arc::new(vfs));
+    ctx.cwd = dir.path().to_path_buf();
+
     let pattern = format!("{}/*.txt", dir.path().display());
     let expected = format!("{}/z.txt", dir.path().display());
 
-    let (out, code) = run(&kernel, &format!("ls '{pattern}'")).await;
-    assert_eq!(code, 0, "ls should succeed: {out:?}");
-    assert_eq!(out, expected, "absolute stays absolute from any cwd: {out:?}");
+    let expanded = ctx
+        .expand_paths(&[kaish_kernel::ast::Value::String(pattern)])
+        .await
+        .expect("expand_paths should succeed");
+    assert_eq!(
+        expanded,
+        vec![expected],
+        "absolute stays absolute from any cwd: {expanded:?}"
+    );
 }
 
 /// A relative pattern through the same door still reports a bare relative
@@ -176,11 +189,20 @@ async fn expand_paths_absolute_pattern_unaffected_by_cwd() {
 async fn relative_pattern_through_expand_paths_stays_relative() {
     let dir = tempdir().unwrap();
     touch(dir.path(), "z.txt");
-    let kernel = kernel_at(dir.path());
+    let mut vfs = kaish_kernel::vfs::VfsRouter::new();
+    vfs.mount("/", kaish_kernel::vfs::LocalFs::new(std::path::PathBuf::from("/")));
+    let mut ctx = kaish_kernel::tools::ExecContext::new(std::sync::Arc::new(vfs));
+    ctx.cwd = dir.path().to_path_buf();
 
-    let (out, code) = run(&kernel, "ls '*.txt'").await;
-    assert_eq!(code, 0, "ls should succeed: {out:?}");
-    assert_eq!(out, "z.txt", "relative pattern must stay relative: {out:?}");
+    let expanded = ctx
+        .expand_paths(&[kaish_kernel::ast::Value::String("*.txt".to_string())])
+        .await
+        .expect("expand_paths should succeed");
+    assert_eq!(
+        expanded,
+        vec!["z.txt".to_string()],
+        "relative pattern must stay relative: {expanded:?}"
+    );
 }
 
 // ── grep -r shares the same "an absolute operand comes back relative" defect ──

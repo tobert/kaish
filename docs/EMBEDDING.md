@@ -143,10 +143,11 @@ The order is only as exact as its producer:
 - Adjacent runs on one stream can share one span, which keeps the first
   run's number.
 
-A redirect that joins the streams (`2>&1`, `1>&2`, `&>`) still writes the
-stdout block, then the stderr block, as `docs/LANGUAGE.md`, "Pipes &
-Redirects" states. The joined result is one stream, so it has no order to
-report.
+A redirect that joins the streams (`2>&1`, `1>&2`, `&>`) interleaves captured
+stdout and stderr in the recorded `StreamOrder`, falling back to stdout then
+stderr only when spans were cleared (spill, ring overflow, or non-UTF-8 stderr),
+as `docs/LANGUAGE.md`, "Pipes & Redirects" states. The joined result is one
+stream, so it has no separate order to report.
 
 ### When exit status is a decision: errexit
 

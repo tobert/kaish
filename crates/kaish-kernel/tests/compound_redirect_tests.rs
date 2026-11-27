@@ -206,15 +206,12 @@ async fn errexit_inside_a_redirected_body_exits() {
 
 // ---- stdout and stderr ordering ---------------------------------------------
 
-/// kaish collects a compound's stdout and stderr separately, so `2>&1` puts
-/// all of stderr after all of stdout. bash interleaves them line by line
-/// (`out1 err1 out2 err2`). A known difference, shared with a function call
-/// (`f 2>&1`); this test fails if the ordering changes, so update
-/// `limits.md` with it.
+/// `2>&1` on a compound command interleaves stdout and stderr in write order,
+/// matching bash (`out1 err1 out2 err2`).
 #[tokio::test]
-async fn merged_stderr_follows_stdout() {
+async fn merged_stderr_interleaves_with_stdout() {
     let (out, code) = run("for i in 1 2; do echo \"out$i\"; echo \"err$i\" >&2; done 2>&1 | cat").await;
-    assert_eq!(out, "out1\nout2\nerr1\nerr2\n");
+    assert_eq!(out, "out1\nerr1\nout2\nerr2\n");
     assert_eq!(code, 0);
 }
 

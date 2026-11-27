@@ -1,6 +1,6 @@
 //! `ExecResult::stream_order` records the order stdout and stderr were
-//! produced, while the payloads keep their two blocks. Merges (`2>&1`,
-//! `1>&2`, `&>`) still join the blocks stdout first; see
+//! produced, while unmerged payloads keep their two blocks. Merges (`2>&1`,
+//! `1>&2`, `&>`) interleave the payloads in recorded write order; see
 //! redirect_merge_order_tests.rs.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
@@ -191,21 +191,21 @@ async fn a_background_job_records_its_order() {
     assert!(text.ends_with("x\n"), "{text:?}");
 }
 
-/// The merge is unchanged: stdout block, then stderr block. The unmerged
-/// result records the order a later merge can follow.
+/// Stream merges (`2>&1`, `1>&2`, `&>`) interleave stdout and stderr in the
+/// recorded write order.
 #[tokio::test]
-async fn a_merge_still_joins_two_blocks() {
+async fn a_merge_follows_recorded_write_order() {
     let merged = run(&format!("{BOTH}both 2>&1")).await;
-    assert_eq!(merged.text_out(), "out\nout2\nerr\nerr2\n");
+    assert_eq!(merged.text_out(), "out\nerr\nout2\nerr2\n");
     assert_eq!(merged.err, "");
-    assert_eq!(ordered(&merged), "out\nout2\nerr\nerr2\n");
+    assert_eq!(ordered(&merged), "out\nerr\nout2\nerr2\n");
 
     let merged = run(&format!("{BOTH}both 1>&2")).await;
-    assert_eq!(merged.err, "out\nout2\nerr\nerr2\n");
-    assert_eq!(ordered(&merged), "out\nout2\nerr\nerr2\n");
+    assert_eq!(merged.err, "out\nerr\nout2\nerr2\n");
+    assert_eq!(ordered(&merged), "out\nerr\nout2\nerr2\n");
 
     let merged = run("for i in 1 2; do echo \"out$i\"; echo \"err$i\" >&2; done 2>&1").await;
-    assert_eq!(ordered(&merged), "out1\nout2\nerr1\nerr2\n");
+    assert_eq!(ordered(&merged), "out1\nerr1\nout2\nerr2\n");
 }
 
 #[tokio::test]

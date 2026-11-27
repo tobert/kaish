@@ -804,11 +804,12 @@ cat <<< 'raw $VAR'              # single quotes stay literal
 > old file. The directory must be writable; when it is not, the command
 > exits 1 naming the directory, and the file keeps its content.
 >
-> **Captured merges use two blocks.** `2>&1`, `1>&2`, and a shared file
-> join captured stdout first, then stderr. kaish does not preserve the
-> command's interleaved write order. If stderr has already reached a
-> background job stream, `1>&2` keeps those bytes first and appends
-> captured stdout; each byte reaches the stream once.
+> **Captured merges follow write order.** `2>&1`, `1>&2`, and `&>` interleave
+> captured stdout and stderr in the order they were produced when `StreamOrder`
+> spans are present. When a spill, capture ring overflow, or non-UTF-8 stderr
+> clears the spans, kaish falls back to captured stdout followed by stderr. If
+> stderr has already reached a background job stream, `1>&2` keeps those bytes
+> first and appends captured stdout; each byte reaches the stream once.
 >
 > **Known differences from bash.** bash evaluates and opens each target in
 > turn; kaish evaluates all of them before opening any, so the same-file
@@ -954,7 +955,7 @@ set -e; { false && true; }; echo after
 
 Under `set -e`, a failing command inside a group follows the usual errexit rules. The group adds no check of its own: `false && true` and `! true` inside a group permit the next statement. A redirect open or write failure is a failure of the redirected statement.
 
-Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole body. Targets open left to right before the body runs, even if its condition is false. Input belongs to that body and the displaced session input returns afterward. Control-flow exits and output produced before a runtime fault still finish the opened redirects. Captured stream merges put stdout before stderr; see "Pipes & Redirects".
+Redirects after a group, `if`, `for`, `while`, or `case` apply to the whole body. Targets open left to right before the body runs, even if its condition is false. Input belongs to that body and the displaced session input returns afterward. Control-flow exits and output produced before a runtime fault still finish the opened redirects. Captured stream merges preserve recorded write order; see "Pipes & Redirects".
 
 ```sh
 : > log                           # create an empty file

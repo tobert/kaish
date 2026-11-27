@@ -22,6 +22,8 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **Merged redirects preserve recorded write order.** `2>&1`, `1>&2`, and `&>` now interleave captured stdout and stderr in `StreamOrder`, matching bash on loops, functions, and external commands while falling back after spills or overflow.
+- **VFS walker, globstar matching, and `JobFs` range reads close dormant edge cases.** `FileWalker` now descends symlinked directories with `BackendWalkerFs::canonicalize` cycle checks, `GlobPath` memoizes repeated `**` backtracking, and `JobFs::read_range` slices directly.
 - **macOS builds with `os-integration` now compile cleanly.** `SystemTrash` now gates `trash::os_limited` methods on platforms where the `trash` crate provides them, keeping `trash` and `trash_bytes` working on macOS while returning a clear error for listing and restore.
 - **Dropped `$(…)` futures, last-stage functions, and stage-0 panics preserve session state.** Command substitutions now restore `scope` and `user_tools` via a drop guard, last pipeline stages write back defined functions, and stage-0 panics rescue moved stdin.
 - **REPL background job notices print to stderr, and `LocalFs` stops doubling directory errors.** `notify_finished_jobs` now writes `[N] Status cmd` to stderr instead of stdout, and `LocalFs::replace` no longer repeats `is a directory`.

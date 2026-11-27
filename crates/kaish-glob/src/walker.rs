@@ -257,7 +257,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
         // Track visited directories for symlink cycle detection (only when following symlinks)
         let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
         if self.options.follow_symlinks {
-            visited_dirs.insert(self.root.clone());
+            visited_dirs.insert(self.fs.canonicalize(&self.root).await);
         }
 
         // Mount regions. The walk's start is its root extended by the
@@ -312,8 +312,17 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             // directories are popped first from the LIFO stack.
             let mut dirs_to_push = Vec::new();
 
-            for (entry_name, entry_is_dir, entry_is_symlink, entry_is_special) in entries {
+            for (entry_name, mut entry_is_dir, entry_is_symlink, entry_is_special) in entries {
                 let full_path = dir.join(&entry_name);
+
+                // When following symlinks, a symlink pointing to a directory
+                // reports `is_symlink() == true` and `is_dir() == false` (the
+                // two kinds are distinct). Probe `self.fs.is_dir` (which
+                // follows symlinks) so directory symlinks enter the directory
+                // branch below with cycle detection.
+                if self.options.follow_symlinks && entry_is_symlink && !entry_is_dir {
+                    entry_is_dir = self.fs.is_dir(&full_path).await;
+                }
 
                 // Hidden-file rule (bash, no `dotglob`). With a glob pattern the
                 // leading-dot decision is made per-component by `matches_pattern`

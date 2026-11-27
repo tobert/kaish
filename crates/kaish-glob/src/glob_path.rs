@@ -96,7 +96,8 @@ impl GlobPath {
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
 
-        self.match_segments(&self.segments, &components, 0, 0)
+        let mut budget = MatchBudget::new(self.segments.len(), components.len(), self.has_globstar());
+        self.match_segments(&self.segments, &components, 0, 0, &mut budget)
     }
 
     /// Get the static prefix of the pattern (directories before any wildcard).
@@ -229,7 +230,8 @@ impl GlobPath {
             .components()
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
-        self.walk_match(&components, 0, 0, dotglob, false)
+        let mut budget = MatchBudget::new(self.segments.len(), components.len(), self.has_globstar());
+        self.walk_match(&components, 0, 0, dotglob, false, &mut budget)
     }
 
     /// Whether the walker should descend into the directory at relative path
@@ -244,7 +246,8 @@ impl GlobPath {
             .components()
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
-        self.walk_match(&components, 0, 0, dotglob, true)
+        let mut budget = MatchBudget::new(self.segments.len(), components.len(), self.has_globstar());
+        self.walk_match(&components, 0, 0, dotglob, true, &mut budget)
     }
 
     /// Shared engine for [`matches_walk`] and [`could_descend`].
@@ -260,6 +263,7 @@ impl GlobPath {
         comp_idx: usize,
         dotglob: bool,
         prefix: bool,
+        budget: &mut MatchBudget,
     ) -> bool {
         if comp_idx >= components.len() {
             return if prefix {
@@ -276,17 +280,19 @@ impl GlobPath {
         if seg_idx >= self.segments.len() {
             return false;
         }
+        if budget.is_failed(seg_idx, comp_idx) || !budget.tick() {
+            return false;
+        }
 
-        match &self.segments[seg_idx] {
+        let matched = match &self.segments[seg_idx] {
             PathSegment::Globstar => {
                 // Match zero components...
-                if self.walk_match(components, seg_idx + 1, comp_idx, dotglob, prefix) {
-                    return true;
-                }
-                // ...or consume one component and stay on the globstar. Without
-                // dotglob, `**` never traverses a hidden component.
-                if dotglob || !components[comp_idx].starts_with('.') {
-                    self.walk_match(components, seg_idx, comp_idx + 1, dotglob, prefix)
+                if self.walk_match(components, seg_idx + 1, comp_idx, dotglob, prefix, budget) {
+                    true
+                } else if dotglob || !components[comp_idx].starts_with('.') {
+                    // ...or consume one component and stay on the globstar. Without
+                    // dotglob, `**` never traverses a hidden component.
+                    self.walk_match(components, seg_idx, comp_idx + 1, dotglob, prefix, budget)
                 } else {
                     false
                 }
@@ -294,7 +300,14 @@ impl GlobPath {
 
             PathSegment::Literal(lit) => {
                 if components[comp_idx] == *lit {
-                    self.walk_match(components, seg_idx + 1, comp_idx + 1, dotglob, prefix)
+                    self.walk_match(
+                        components,
+                        seg_idx + 1,
+                        comp_idx + 1,
+                        dotglob,
+                        prefix,
+                        budget,
+                    )
                 } else {
                     false
                 }
@@ -304,15 +317,26 @@ impl GlobPath {
                 let comp = components[comp_idx];
                 // A bare wildcard segment does not match a leading dot.
                 if comp.starts_with('.') && !dotglob && !pattern_leads_with_dot(pat) {
-                    return false;
-                }
-                if self.matches_component(pat, comp) {
-                    self.walk_match(components, seg_idx + 1, comp_idx + 1, dotglob, prefix)
+                    false
+                } else if self.matches_component(pat, comp) {
+                    self.walk_match(
+                        components,
+                        seg_idx + 1,
+                        comp_idx + 1,
+                        dotglob,
+                        prefix,
+                        budget,
+                    )
                 } else {
                     false
                 }
             }
+        };
+
+        if !matched {
+            budget.mark_failed(seg_idx, comp_idx);
         }
+        matched
     }
 
     /// Check if a string is a literal (no wildcards).
@@ -327,6 +351,7 @@ impl GlobPath {
         components: &[&str],
         seg_idx: usize,
         comp_idx: usize,
+        budget: &mut MatchBudget,
     ) -> bool {
         // Both exhausted - match!
         if seg_idx >= segments.len() && comp_idx >= components.len() {
@@ -339,24 +364,35 @@ impl GlobPath {
             return false;
         }
 
-        match &segments[seg_idx] {
+        if budget.is_failed(seg_idx, comp_idx) || !budget.tick() {
+            return false;
+        }
+
+        let matched = match &segments[seg_idx] {
             PathSegment::Globstar => {
                 // Globstar matches zero or more components
                 // Try matching with 0, 1, 2, ... components consumed
+                let mut found = false;
                 for skip in 0..=(components.len() - comp_idx) {
-                    if self.match_segments(segments, components, seg_idx + 1, comp_idx + skip) {
-                        return true;
+                    if self.match_segments(
+                        segments,
+                        components,
+                        seg_idx + 1,
+                        comp_idx + skip,
+                        budget,
+                    ) {
+                        found = true;
+                        break;
                     }
                 }
-                false
+                found
             }
 
             PathSegment::Literal(lit) => {
                 if comp_idx >= components.len() {
-                    return false;
-                }
-                if components[comp_idx] == lit {
-                    self.match_segments(segments, components, seg_idx + 1, comp_idx + 1)
+                    false
+                } else if components[comp_idx] == lit {
+                    self.match_segments(segments, components, seg_idx + 1, comp_idx + 1, budget)
                 } else {
                     false
                 }
@@ -364,15 +400,19 @@ impl GlobPath {
 
             PathSegment::Pattern(pat) => {
                 if comp_idx >= components.len() {
-                    return false;
-                }
-                if self.matches_component(pat, components[comp_idx]) {
-                    self.match_segments(segments, components, seg_idx + 1, comp_idx + 1)
+                    false
+                } else if self.matches_component(pat, components[comp_idx]) {
+                    self.match_segments(segments, components, seg_idx + 1, comp_idx + 1, budget)
                 } else {
                     false
                 }
             }
+        };
+
+        if !matched {
+            budget.mark_failed(seg_idx, comp_idx);
         }
+        matched
     }
 
     /// Match a single component against a pattern (with brace expansion).
@@ -390,6 +430,88 @@ fn pattern_leads_with_dot(pattern: &str) -> bool {
     crate::glob::expand_braces(pattern)
         .iter()
         .any(|alt| alt.starts_with('.'))
+}
+
+const MAX_GLOB_STEPS: usize = 100_000;
+const INLINE_MEMO_BITS: usize = 256;
+const MAX_MEMO_CELLS: usize = 65_536;
+
+enum FailedMemo {
+    None,
+    /// Inline 256-bit set on the stack so common globstar paths allocate nothing.
+    Inline([u64; 4]),
+    Heap(Vec<bool>),
+}
+
+/// Memoizes failed `(seg_idx, comp_idx)` states for globstar patterns so
+/// repeated `**` backtracking stays O(segments × components) without false
+/// negatives up to `MAX_MEMO_CELLS`. Beyond that cell table cap, `MAX_GLOB_STEPS`
+/// bounds total work so pathological inputs cannot hang.
+struct MatchBudget {
+    steps: usize,
+    stride: usize,
+    failed: FailedMemo,
+}
+
+impl MatchBudget {
+    fn new(seg_count: usize, comp_count: usize, has_globstar: bool) -> Self {
+        let cols = comp_count.saturating_add(1);
+        let failed = if !has_globstar {
+            FailedMemo::None
+        } else {
+            let cells = seg_count.saturating_add(1).saturating_mul(cols);
+            if cells <= INLINE_MEMO_BITS {
+                FailedMemo::Inline([0; 4])
+            } else if cells <= MAX_MEMO_CELLS {
+                FailedMemo::Heap(vec![false; cells])
+            } else {
+                FailedMemo::None
+            }
+        };
+        Self {
+            steps: 0,
+            stride: cols,
+            failed,
+        }
+    }
+
+    fn is_failed(&self, seg_idx: usize, comp_idx: usize) -> bool {
+        match &self.failed {
+            FailedMemo::None => false,
+            FailedMemo::Inline(bits) => {
+                let idx = seg_idx * self.stride + comp_idx;
+                let word = idx / 64;
+                word < bits.len() && (bits[word] & (1u64 << (idx % 64))) != 0
+            }
+            FailedMemo::Heap(vec) => vec.get(seg_idx * self.stride + comp_idx).copied().unwrap_or(false),
+        }
+    }
+
+    fn mark_failed(&mut self, seg_idx: usize, comp_idx: usize) {
+        match &mut self.failed {
+            FailedMemo::None => {}
+            FailedMemo::Inline(bits) => {
+                let idx = seg_idx * self.stride + comp_idx;
+                let word = idx / 64;
+                if word < bits.len() {
+                    bits[word] |= 1u64 << (idx % 64);
+                }
+            }
+            FailedMemo::Heap(vec) => {
+                if let Some(slot) = vec.get_mut(seg_idx * self.stride + comp_idx) {
+                    *slot = true;
+                }
+            }
+        }
+    }
+
+    fn tick(&mut self) -> bool {
+        if self.steps >= MAX_GLOB_STEPS {
+            return false;
+        }
+        self.steps += 1;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -612,5 +734,18 @@ mod tests {
         assert!(pat.matches(Path::new("src/main.rs")));
         assert!(pat.matches(Path::new("src/api/handler.go")));
         assert!(!pat.matches(Path::new("test/main.rs")));
+    }
+
+    #[test]
+    fn test_pathological_multi_globstar_terminates_fast() {
+        let deep = Path::new("a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z");
+        let pat = GlobPath::new("**/**/**/**/**/**/**/**/nope").unwrap();
+        assert!(!pat.matches(deep));
+        assert!(!pat.matches_walk(deep, false));
+        assert!(pat.could_descend(deep, false));
+
+        let pat_alt = GlobPath::new("**/*/**/**/*/**/**/*/**/z").unwrap();
+        assert!(pat_alt.matches(deep));
+        assert!(pat_alt.matches_walk(deep, false));
     }
 }
