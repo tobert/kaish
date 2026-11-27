@@ -511,7 +511,12 @@ fn parse_date_string<Tz: TimeZone>(
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
     let (anchor, consumed) = match parse_absolute_prefix(&tokens, tz)? {
         Some((dt, n)) => (dt, n),
-        None => (base, 0),
+        None => match tokens.first().map(|t| t.to_ascii_lowercase()).as_deref() {
+            Some("now" | "today") => (base, 1),
+            Some("yesterday") => (shift_days(base, -1).map_err(|_| overflow())?, 1),
+            Some("tomorrow") => (shift_days(base, 1).map_err(|_| overflow())?, 1),
+            _ => (base, 0),
+        },
     };
     let rest = &tokens[consumed..];
 
@@ -584,8 +589,8 @@ fn parse_absolute_prefix<Tz: TimeZone>(
     Ok(None)
 }
 
-/// Apply a sequence of `[in] N unit [N unit ...] [ago]` offset terms to `base`.
-/// Errors (rather than no-ops) on anything that isn't a clean offset.
+/// Apply a sequence of `[in] [±] N unit [[±] N unit ...] [ago]` offset terms to
+/// `base`. Errors (rather than no-ops) on anything that isn't a clean offset.
 fn apply_offset_terms<Tz: TimeZone>(
     tokens: &[String],
     base: DateTime<Tz>,
@@ -602,20 +607,37 @@ fn apply_offset_terms<Tz: TimeZone>(
         slice = &slice[..slice.len() - 1];
     }
 
-    if slice.is_empty() || slice.len() % 2 != 0 {
+    // Merge spaced unary sign operators (`- 1 day`, `+ 2 hours`) into `"-1"` / `"+2"`.
+    let mut normalized: Vec<String> = Vec::with_capacity(slice.len());
+    let mut idx = 0;
+    while idx < slice.len() {
+        if (slice[idx] == "+" || slice[idx] == "-")
+            && idx + 1 < slice.len()
+            && !slice[idx + 1].is_empty()
+            && slice[idx + 1].bytes().all(|b| b.is_ascii_digit())
+        {
+            normalized.push(format!("{}{}", slice[idx], slice[idx + 1]));
+            idx += 2;
+        } else {
+            normalized.push(slice[idx].clone());
+            idx += 1;
+        }
+    }
+
+    if normalized.is_empty() || normalized.len() % 2 != 0 {
         return Err("malformed".to_string());
     }
     // The first term must be a number for this to be an offset at all.
-    if slice[0].parse::<i64>().is_err() {
+    if normalized[0].parse::<i64>().is_err() {
         return Err("not an offset".to_string());
     }
 
     let mut dt = base;
     let mut i = 0;
-    while i < slice.len() {
-        let amount: i64 = slice[i].parse().map_err(|_| "bad number".to_string())?;
+    while i < normalized.len() {
+        let amount: i64 = normalized[i].parse().map_err(|_| "bad number".to_string())?;
         let signed = if ago { -amount } else { amount };
-        dt = apply_unit(dt, signed, &slice[i + 1]).map_err(|_| "bad unit".to_string())?;
+        dt = apply_unit(dt, signed, &normalized[i + 1]).map_err(|_| "bad unit".to_string())?;
         i += 2;
     }
     Ok(dt)

@@ -103,14 +103,21 @@ impl Tool for Ls {
         args.flagify_bool_named(&self.schema());
 
         // The kaish lexer's ShortFlag regex is `-[a-zA-Z][a-zA-Z0-9-]*`, so `-1`
-        // is tokenized as Int(-1) and lands in positionals. Intercept it here and
-        // convert to the `one` flag before clap sees the argv.
-        let had_dash_one = args.positional.iter().any(|v| matches!(v, Value::Int(-1)));
+        // is tokenized as Int(-1) and lands in positionals. Intercept it here
+        // ONLY before `--` and convert to the `one` flag before clap sees argv.
+        let option_limit = args.post_double_dash_start.unwrap_or(args.positional.len());
+        let had_dash_one = args
+            .positional
+            .iter()
+            .take(option_limit)
+            .any(|v| matches!(v, Value::Int(-1)));
         if had_dash_one {
             let old_pos = std::mem::take(&mut args.positional);
             let old_raw = std::mem::take(&mut args.positional_raw);
+            let mut removed_before_dash = 0usize;
             for (old_idx, v) in old_pos.into_iter().enumerate() {
-                if matches!(v, Value::Int(-1)) {
+                if old_idx < option_limit && matches!(v, Value::Int(-1)) {
+                    removed_before_dash += 1;
                     continue;
                 }
                 let new_idx = args.positional.len();
@@ -118,6 +125,9 @@ impl Tool for Ls {
                     args.positional_raw.insert(new_idx, raw.clone());
                 }
                 args.positional.push(v);
+            }
+            if let Some(start) = args.post_double_dash_start.as_mut() {
+                *start = start.saturating_sub(removed_before_dash);
             }
             args.flags.insert("1".to_string());
         }

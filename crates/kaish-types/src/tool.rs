@@ -633,6 +633,12 @@ pub struct ToolArgs {
     /// `words`. Only ever populated when `words` is `Some`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub words_raw: BTreeMap<usize, String>,
+    /// Index in `positional` where arguments after `--` begin, or `None` when
+    /// no `--` separator appeared. Builtins that intercept negative integer
+    /// shorthand flags (`ls -1`, `head -5`, `tail -5`) only inspect indices
+    /// strictly before this boundary so `ls -- -1` treats `-1` as a filename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_double_dash_start: Option<usize>,
 }
 
 impl ToolArgs {

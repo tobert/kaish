@@ -7746,8 +7746,12 @@ pub(crate) async fn bind_tool_args(
     while i < args.len() {
         match &args[i] {
             Arg::DoubleDash => {
-                if past_double_dash { tool_args.positional.push(Value::String("--".into())); }
-                past_double_dash = true;
+                if past_double_dash {
+                    tool_args.positional.push(Value::String("--".into()));
+                } else {
+                    tool_args.post_double_dash_start = Some(tool_args.positional.len());
+                    past_double_dash = true;
+                }
             }
             Arg::Positional(expr) => {
                 if !consumed.contains(&i) {

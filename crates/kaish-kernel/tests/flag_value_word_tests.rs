@@ -179,10 +179,14 @@ async fn comma_list_on_a_bool_flag_is_refused() {
             result.err
         );
     }
-    // A value flag before the comma owns the list: `sort -rk2,2n`.
+    // A value flag before the comma owns the list: `sort -rk2,2` (global `-r`
+    // applies when `-k` has no local ordering modifier; local `n` in `-k2,2n`
+    // overrides global `-r`, matching GNU `sort`).
     std::fs::write(tmp.path().join("d.txt"), "a 1\nb 2\n").unwrap();
-    let (out, code) = run(&kernel, "sort -rk2,2n d.txt").await;
+    let (out, code) = run(&kernel, "sort -rk2,2 d.txt").await;
     assert_eq!((out.as_str(), code), ("b 2\na 1", 0));
+    let (out, code) = run(&kernel, "sort -rk2,2n d.txt").await;
+    assert_eq!((out.as_str(), code), ("a 1\nb 2", 0));
 }
 
 /// An external command receives each flag-shaped word as one argv entry.
