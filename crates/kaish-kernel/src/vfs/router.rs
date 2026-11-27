@@ -219,56 +219,30 @@ impl VfsRouter {
     /// The mount that owns `path`: its mount point, its filesystem, and the
     /// path relative to the mount point.
     fn mount_of(&self, path: &Path) -> io::Result<(&Path, Arc<dyn Filesystem>, PathBuf)> {
-        let path_str = path.to_string_lossy();
-        let normalized = if path_str.starts_with('/') {
+        let normalized = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            PathBuf::from(format!("/{}", path_str))
+            Path::new("/").join(path)
         };
 
-        // Find longest matching mount point
-        let mut best_match: Option<(&PathBuf, &Arc<dyn Filesystem>)> = None;
+        // Find longest matching mount point using component-aware Path::strip_prefix
+        // so non-UTF-8 path bytes are preserved losslessly.
+        let mut best_match: Option<(&PathBuf, &Arc<dyn Filesystem>, PathBuf)> = None;
 
         for (mount_path, fs) in &self.mounts {
-            let mount_str = mount_path.to_string_lossy();
-
-            // Check if the path starts with this mount point
-            let is_match = if mount_str == "/" {
-                true // Root matches everything
-            } else {
-                let normalized_str = normalized.to_string_lossy();
-                normalized_str == mount_str.as_ref()
-                    || normalized_str.starts_with(&format!("{}/", mount_str))
-            };
-
-            if is_match {
-                // Keep the longest match
+            if let Ok(rel) = normalized.strip_prefix(mount_path) {
                 let dominated = best_match
                     .as_ref()
-                    .is_none_or(|(bp, _)| mount_path.as_os_str().len() > bp.as_os_str().len());
+                    .is_none_or(|(bp, _, _)| mount_path.as_os_str().len() > bp.as_os_str().len());
                 if dominated {
-                    best_match = Some((mount_path, fs));
+                    best_match = Some((mount_path, fs, rel.to_path_buf()));
                 }
             }
         }
 
         match best_match {
-            Some((mount_path, fs)) => {
-                // Calculate relative path
-                let mount_str = mount_path.to_string_lossy();
-                let normalized_str = normalized.to_string_lossy();
-
-                let relative = if mount_str == "/" {
-                    normalized_str.trim_start_matches('/').to_string()
-                } else {
-                    normalized_str
-                        .strip_prefix(mount_str.as_ref())
-                        .unwrap_or("")
-                        .trim_start_matches('/')
-                        .to_string()
-                };
-
-                Ok((mount_path.as_path(), Arc::clone(fs), PathBuf::from(relative)))
+            Some((mount_path, fs, relative)) => {
+                Ok((mount_path.as_path(), Arc::clone(fs), relative))
             }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,

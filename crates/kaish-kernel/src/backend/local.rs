@@ -164,6 +164,8 @@ impl LocalBackend {
 
             PatchOp::InsertLine { line, content: insert_content } => {
                 Self::check_line_number(*line, "insert")?;
+                let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+                let had_trailing_newline = content.ends_with('\n');
                 let lines: Vec<&str> = content.lines().collect();
                 let line_idx = line - 1; // Convert to 0-indexed
                 if line_idx > lines.len() {
@@ -175,15 +177,16 @@ impl LocalBackend {
                 }
                 let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
                 new_lines.insert(line_idx, insert_content.clone());
-                *content = new_lines.join("\n");
-                // Preserve trailing newline if original had one
-                if !content.is_empty() && !content.ends_with('\n') {
-                    content.push('\n');
+                *content = new_lines.join(eol);
+                if !new_lines.is_empty() && had_trailing_newline {
+                    content.push_str(eol);
                 }
             }
 
             PatchOp::DeleteLine { line, expected } => {
                 Self::check_line_number(*line, "delete")?;
+                let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+                let had_trailing_newline = content.ends_with('\n');
                 let lines: Vec<&str> = content.lines().collect();
                 let line_idx = line - 1; // Convert to 0-indexed
                 if line_idx >= lines.len() {
@@ -206,9 +209,9 @@ impl LocalBackend {
                 }
                 let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
                 new_lines.remove(line_idx);
-                *content = new_lines.join("\n");
-                if !content.is_empty() && !content.ends_with('\n') {
-                    content.push('\n');
+                *content = new_lines.join(eol);
+                if !new_lines.is_empty() && had_trailing_newline {
+                    content.push_str(eol);
                 }
             }
 
@@ -218,6 +221,8 @@ impl LocalBackend {
                 expected,
             } => {
                 Self::check_line_number(*line, "replace")?;
+                let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+                let had_trailing_newline = content.ends_with('\n');
                 let lines: Vec<&str> = content.lines().collect();
                 let line_idx = line - 1; // Convert to 0-indexed
                 if line_idx >= lines.len() {
@@ -240,9 +245,9 @@ impl LocalBackend {
                 }
                 let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
                 new_lines[line_idx] = replace_content.clone();
-                *content = new_lines.join("\n");
-                if !content.is_empty() && !content.ends_with('\n') {
-                    content.push('\n');
+                *content = new_lines.join(eol);
+                if !new_lines.is_empty() && had_trailing_newline {
+                    content.push_str(eol);
                 }
             }
 

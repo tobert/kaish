@@ -1957,19 +1957,51 @@ fn assignment_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // local NAME = value (with spaces around =)
+    // Empty RHS (`X=`, `local X=`) is only valid when a punctuation/EOF
+    // statement boundary immediately follows `=`. Keywords like `esac`/`done`
+    // are valid bareword values (`y=esac`) and must reach `value_expr_parser()`.
+    let empty_rhs = choice((
+        just(Token::Newline).to(()),
+        just(Token::Semi).to(()),
+        just(Token::DoubleSemi).to(()),
+        just(Token::And).to(()),
+        just(Token::Or).to(()),
+        just(Token::Pipe).to(()),
+        just(Token::Amp).to(()),
+        just(Token::RBrace).to(()),
+        just(Token::RParen).to(()),
+        end(),
+    ))
+    .rewind()
+    .to(Expr::Literal(Value::String(String::new())));
+
+    // local NAME = value (with spaces around =), or `local NAME=` (empty value)
     let local_assignment = just(Token::Local)
         .ignore_then(lvalue_path_parser())
         .then_ignore(just(Token::Eq))
-        .then(value_expr_parser())
+        .then(choice((empty_rhs.clone(), value_expr_parser())))
         .map(|(path, value)| Assignment {
             path,
             value,
             local: true,
         });
 
-    // Bash-style: NAME=value / NAME[sub]=value (no spaces around =)
-    // The lexer produces IDENT (LBRACKET ... RBRACKET)* EQ EXPR, so we parse it here
+    // Bash-style: NAME=value / NAME[sub]=value / NAME= (empty value).
+    // Empty RHS (`NAME=`) requires `=` to touch the lvalue with no space, so
+    // `echo =` stays a command with positional `=` instead of assigning `echo`.
+    let bash_empty_assignment = lvalue_path_parser()
+        .map_with(|p, e| -> (VarPath, Span) { (p, e.span()) })
+        .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
+        .then_ignore(empty_rhs)
+        .filter(|((_, path_span), eq_span)| {
+            gap_is_only_continuations(path_span.end, eq_span.start)
+        })
+        .map(|((path, _), _)| Assignment {
+            path,
+            value: Expr::Literal(Value::String(String::new())),
+            local: false,
+        });
+
     let bash_assignment = lvalue_path_parser()
         .then_ignore(just(Token::Eq))
         .then(value_expr_parser())
@@ -1979,7 +2011,7 @@ where
             local: false,
         });
 
-    choice((local_assignment, bash_assignment))
+    choice((local_assignment, bash_empty_assignment, bash_assignment))
         .labelled("assignment")
         .boxed()
 }
@@ -3038,26 +3070,51 @@ fn word_assign_arg_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    choice((
+    let key_and_eq = choice((
         select! { Token::Ident(s) => s },
         keyword_word(),
     ))
     .map_with(|s, e| -> (String, Span) { (s, e.span()) })
-    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }))
-    .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
-    .try_map(|(((key, key_span), eq_span), (value, value_span)): (((String, Span), Span), (Expr, Span)), span| {
-        // Check that key ends where = starts and = ends where value starts
-        if !gap_is_only_continuations(key_span.end, eq_span.start)
-            || !gap_is_only_continuations(eq_span.end, value_span.start)
-        {
-            Err(Rich::custom(
-                span,
-                "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
-            ))
-        } else {
-            Ok(Arg::WordAssign { key, value })
-        }
-    })
+    .then(just(Token::Eq).map_with(|_, e| -> Span { e.span() }));
+
+    // `key=value` (no spaces around `=`). Fails loudly when `key` and `=` have
+    // a space between them (e.g. `dd if = x`), and backtracks to `empty_value`
+    // only when `=` is adjacent to `key` with no immediately adjacent value
+    // (e.g. `export FOO=` or `export FOO= BAR=1`).
+    let with_value = key_and_eq
+        .clone()
+        .then(primary_expr_parser().map_with(|expr, e| -> (Expr, Span) { (expr, e.span()) }))
+        .try_map(
+            |(((key, key_span), eq_span), (value, value_span)): (
+                ((String, Span), Span),
+                (Expr, Span),
+            ),
+             span| {
+                if !gap_is_only_continuations(key_span.end, eq_span.start)
+                    || !gap_is_only_continuations(eq_span.end, value_span.start)
+                {
+                    Err(Rich::custom(
+                        span,
+                        "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
+                    ))
+                } else {
+                    Ok(Arg::WordAssign { key, value })
+                }
+            },
+        );
+
+    let empty_value = key_and_eq
+        .then(any().map_with(|_, e| -> Span { e.span() }).rewind().or_not())
+        .filter(|(((_, key_span), eq_span), next_span)| {
+            gap_is_only_continuations(key_span.end, eq_span.start)
+                && !next_span.is_some_and(|ns| gap_is_only_continuations(eq_span.end, ns.start))
+        })
+        .map(|(((key, _), _), _)| Arg::WordAssign {
+            key,
+            value: Expr::Literal(Value::String(String::new())),
+        });
+
+    choice((with_value, empty_value))
 }
 
 /// The `test`/`[` comparison and negation operators (`=`, `==`, `!=`, `!`) as
