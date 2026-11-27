@@ -1513,6 +1513,10 @@ impl Kernel {
             let mut ec = fork.exec_ctx.write().await;
             ec.background_stream_output = true;
             ec.background_stream_stderr = true;
+            // Detached from the caller's execution: nested `&` jobs inside a
+            // background job must not mutate the caller's already-returned
+            // collector.
+            ec.spawned_jobs = None;
         }
         fork
     }
@@ -1973,6 +1977,10 @@ impl Kernel {
         let (result_tx, result_rx) = oneshot::channel();
         let job_id = self.jobs.register(source.to_owned(), result_rx).await;
         self.jobs.set_cancel_token(job_id, cancel.clone()).await;
+        // Always stamp from `opts.invocation` (including `None`) so `JobManager`
+        // matches the fresh `invocation::scope` that `run_inner` installs for
+        // this job, never leaking an enclosing caller's ambient invocation.
+        self.jobs.set_invocation(job_id, opts.invocation.clone()).await;
         {
             // Stdout streams as commands produce it, like a `cmd &` job.
             // Stderr is written per statement below, so an external's stderr
@@ -2257,17 +2265,21 @@ impl Kernel {
     ) -> Result<ExecResult> {
         use opentelemetry::context::FutureExt;
 
-        // Capture the embedder's baggage before `opts` is consumed so it can be
-        // echoed back onto the result on egress (see `merge_egress_baggage`).
+        // Capture the embedder's baggage and invocation identity before `opts`
+        // is consumed. Invocation propagation is independent of tracing.
         let embedder_baggage = opts.baggage.clone();
+        let invocation = opts.invocation.clone();
 
-        let result = match crate::telemetry::extract_parent(&opts) {
-            Some(parent) => self
-                .execute_with_options_inner(input, opts, pipe_stdin, on_output)
-                .with_context(parent)
-                .await,
-            None => self.execute_with_options_inner(input, opts, pipe_stdin, on_output).await,
-        };
+        let result = crate::invocation::scope(invocation, async {
+            match crate::telemetry::extract_parent(&opts) {
+                Some(parent) => self
+                    .execute_with_options_inner(input, opts, pipe_stdin, on_output)
+                    .with_context(parent)
+                    .await,
+                None => self.execute_with_options_inner(input, opts, pipe_stdin, on_output).await,
+            }
+        })
+        .await;
 
         result.map(|mut r| {
             crate::telemetry::merge_egress_baggage(&mut r, embedder_baggage);
@@ -2538,6 +2550,33 @@ impl Kernel {
             None
         };
 
+        // Collect every `&` job spawned during this foreground call (including
+        // inside `$(…)`, non-last pipeline stages, and scatter workers). The
+        // RAII guard restores the prior slot on every exit path.
+        struct SpawnedJobsGuard<'a> {
+            kernel: &'a Kernel,
+            saved: Option<Arc<std::sync::Mutex<Vec<crate::scheduler::JobId>>>>,
+        }
+        impl Drop for SpawnedJobsGuard<'_> {
+            fn drop(&mut self) {
+                let Ok(mut ec) = self.kernel.exec_ctx.try_write() else {
+                    tracing::error!(
+                        "spawned jobs guard: exec_ctx lock unexpectedly busy; \
+                         skipping restore — stale job collector may leak to next call"
+                    );
+                    return;
+                };
+                ec.spawned_jobs = self.saved.take();
+            }
+        }
+        let spawned_jobs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _spawned_jobs_guard = {
+            let mut ec = self.exec_ctx.write().await;
+            let saved = ec.spawned_jobs.replace(spawned_jobs.clone());
+            drop(ec);
+            SpawnedJobsGuard { kernel: self, saved }
+        };
+
         // Mirror the effective cancel into self.cancel_token, which a root
         // context copies onto `ctx.cancel` for the run. We also need
         // builtins to see it via ctx.cancel — handled in execute_command.
@@ -2598,6 +2637,37 @@ impl Kernel {
         if let Some(h) = watcher_handle {
             h.abort();
         }
+
+        // Stamp every `&` job spawned during this call onto the result (or
+        // onto `FaultWithOutput` when a later statement faulted) so `$(cmd &)`,
+        // non-last pipeline stages, and scatter workers are all included.
+        let collected_jobs = spawned_jobs
+            .lock()
+            .map(|mut list| std::mem::take(&mut *list))
+            .unwrap_or_default();
+        let result = match result {
+            Ok(mut r) => {
+                if !collected_jobs.is_empty() {
+                    r.background_jobs = collected_jobs;
+                }
+                Ok(r)
+            }
+            Err(mut error) => {
+                if !collected_jobs.is_empty() {
+                    if let Some(carrier) = error.downcast_mut::<crate::error::FaultWithOutput>() {
+                        carrier.output.background_jobs = collected_jobs;
+                    } else {
+                        let mut prior = ExecResult::success("");
+                        prior.background_jobs = collected_jobs;
+                        error = anyhow::Error::new(crate::error::FaultWithOutput {
+                            output: prior,
+                            error,
+                        });
+                    }
+                }
+                Err(error)
+            }
+        };
 
         // VarsFrameGuard drops here on the success path and on early-return
         // paths above (error path included). Panic safety preserved.
@@ -3917,6 +3987,7 @@ impl Kernel {
             watchdog: ec.watchdog.clone(),
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
+            spawned_jobs: ec.spawned_jobs.clone(),
         })
     }
 
@@ -4159,8 +4230,17 @@ impl Kernel {
         // The announcement is a shell message, not command output: bash writes
         // it to stderr, and stdout stays clean so `$(cmd &)` captures no shell
         // metadata. Terminated like every kaish diagnostic (#363).
+        // Record onto the enclosing foreground execution's collector (covers
+        // `$(cmd &)`, non-last pipeline stages, and scatter workers too).
+        if let Some(ref collector) = caller.spawned_jobs
+            && let Ok(mut list) = collector.lock()
+        {
+            list.push(job_id);
+        }
+
         let mut announcement = ExecResult::success("");
         announcement.err = ExecResult::terminate_diagnostic(format!("[{job_id}]"));
+        announcement.background_jobs.push(job_id);
         Ok(announcement)
     }
 
@@ -6093,7 +6173,10 @@ impl Kernel {
         // including the session publish at the end of the statement.
         let backend = self.exec_ctx.read().await.backend.clone();
         let content = {
-            match backend.read(&full_path, None).await {
+            match backend
+                .read_with_purpose(&full_path, None, crate::backend::ReadPurpose::Script)
+                .await
+            {
                 Ok(bytes) => {
                     String::from_utf8(bytes).map_err(|e| {
                         anyhow::anyhow!("source: {}: invalid UTF-8: {}", path, e)
@@ -6211,7 +6294,10 @@ impl Kernel {
 
             // Read script content
             let content = {
-                match backend.read(&script_path, None).await {
+                match backend
+                    .read_with_purpose(&script_path, None, crate::backend::ReadPurpose::Script)
+                    .await
+                {
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(s) => s,
                         Err(e) => {
@@ -8323,6 +8409,7 @@ impl StatementAccumulator {
         prior.stderr_published_len = self.status.stderr_published_len;
         prior.did_spill = did_spill;
         prior.original_code = original_code;
+        prior.background_jobs = self.status.background_jobs;
         prior.set_stream_order(self.order);
         prior
     }
@@ -8365,6 +8452,7 @@ fn send_job_result(
         };
         // The receiver is gone only when the job was removed from the manager.
         let _ = result_tx.send(result);
+        jobs.notify_finished(job_id).await;
     });
 }
 
@@ -8499,6 +8587,7 @@ fn take_status_of(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
+    accumulated.background_jobs.extend_from_slice(&new.background_jobs);
 }
 
 /// Attach output a block produced before `error` to the error on its way up.
@@ -8514,7 +8603,12 @@ fn with_prior_output(prior: ExecResult, mut error: anyhow::Error, sequence: &Out
         return error;
     }
     // A spill is a fact about output even when none of it is left to show.
-    if prior.text_out().is_empty() && prior.err.is_empty() && prior.out_bytes().is_none() && !prior.did_spill {
+    if prior.text_out().is_empty()
+        && prior.err.is_empty()
+        && prior.out_bytes().is_none()
+        && !prior.did_spill
+        && prior.background_jobs.is_empty()
+    {
         return error;
     }
     anyhow::Error::new(crate::error::FaultWithOutput { output: prior, error })

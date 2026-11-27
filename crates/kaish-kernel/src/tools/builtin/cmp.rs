@@ -146,7 +146,11 @@ async fn cmp_lockstep(
         }
         let chunk_a = match ctx
             .backend
-            .read(path_a, Some(ReadRange::bytes(offset, chunk_size)))
+            .read_with_purpose(
+                path_a,
+                Some(ReadRange::bytes(offset, chunk_size)),
+                crate::backend::ReadPurpose::Content,
+            )
             .await
         {
             Ok(c) => c,
@@ -154,7 +158,11 @@ async fn cmp_lockstep(
         };
         let chunk_b = match ctx
             .backend
-            .read(path_b, Some(ReadRange::bytes(offset, chunk_size)))
+            .read_with_purpose(
+                path_b,
+                Some(ReadRange::bytes(offset, chunk_size)),
+                crate::backend::ReadPurpose::Content,
+            )
             .await
         {
             Ok(c) => c,
@@ -250,7 +258,7 @@ async fn read_operand(ctx: &mut ExecContext, name: &str) -> std::io::Result<Vec<
     } else {
         let resolved = ctx.resolve_path(name);
         ctx.backend
-            .read(Path::new(&resolved), None)
+            .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
             .await
             .map_err(std::io::Error::other)
     }

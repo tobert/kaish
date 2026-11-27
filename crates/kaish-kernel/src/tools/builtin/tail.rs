@@ -123,7 +123,15 @@ impl Tool for Tail {
             let data: Vec<u8> = match paths.first() {
                 Some(path) => {
                     let resolved = ctx.resolve_path(path);
-                    match ctx.backend.read(Path::new(&resolved), None).await {
+                    match ctx
+                        .backend
+                        .read_with_purpose(
+                            Path::new(&resolved),
+                            None,
+                            crate::backend::ReadPurpose::Content,
+                        )
+                        .await
+                    {
                         Ok(d) => d,
                         Err(e) => return ExecResult::failure(1, format!("tail: {}: {}", path, e)),
                     }
@@ -147,7 +155,11 @@ impl Tool for Tail {
         let input = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {
@@ -251,7 +263,15 @@ impl Tail {
         for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
 
-            match ctx.backend.read(std::path::Path::new(&resolved), None).await {
+            match ctx
+                .backend
+                .read_with_purpose(
+                    std::path::Path::new(&resolved),
+                    None,
+                    crate::backend::ReadPurpose::Content,
+                )
+                .await
+            {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if multi {

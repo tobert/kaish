@@ -48,7 +48,10 @@ impl WalkerFs for BackendWalkerFs<'_> {
     }
 
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
-        self.0.read(path, None).await.map_err(|e| WalkerError::Io(e.to_string()))
+        self.0
+            .read_with_purpose(path, None, crate::backend::ReadPurpose::Internal)
+            .await
+            .map_err(|e| WalkerError::Io(e.to_string()))
     }
 
     async fn is_dir(&self, path: &Path) -> bool {

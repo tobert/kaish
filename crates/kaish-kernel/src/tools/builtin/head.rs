@@ -165,7 +165,11 @@ impl Tool for Head {
         if let (Some(byte_count), Some(path)) = (bytes, paths.first()) {
             let resolved = ctx.resolve_path(path);
             let range = Some(ReadRange::bytes(0, byte_count as u64));
-            return match ctx.backend.read(Path::new(&resolved), range).await {
+            return match ctx
+                .backend
+                .read_with_purpose(Path::new(&resolved), range, crate::backend::ReadPurpose::Content)
+                .await
+            {
                 // -c counts bytes and may slice a multibyte boundary. Valid
                 // UTF-8 stays text; otherwise it's a Bytes result (hex dump /
                 // base64 envelope / raw through a pipe) rather than a lossy mangle.
@@ -189,7 +193,11 @@ impl Tool for Head {
         let input = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {
@@ -263,7 +271,15 @@ impl Head {
         for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
 
-            match ctx.backend.read(std::path::Path::new(&resolved), None).await {
+            match ctx
+                .backend
+                .read_with_purpose(
+                    std::path::Path::new(&resolved),
+                    None,
+                    crate::backend::ReadPurpose::Content,
+                )
+                .await
+            {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if multi {
@@ -308,7 +324,11 @@ impl Head {
             }
             let resolved = ctx.resolve_path(path);
             let range = Some(ReadRange::bytes(0, byte_count as u64));
-            match ctx.backend.read(Path::new(&resolved), range).await {
+            match ctx
+                .backend
+                .read_with_purpose(Path::new(&resolved), range, crate::backend::ReadPurpose::Content)
+                .await
+            {
                 Ok(data) => {
                     if printed_header {
                         output.push(b'\n');

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use opentelemetry::baggage::BaggageExt;
-use opentelemetry::context::{FutureExt, WithContext};
+use opentelemetry::context::FutureExt;
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -81,21 +81,21 @@ pub(crate) fn merge_egress_baggage(result: &mut ExecResult, embedder: BTreeMap<S
     }
 }
 
-/// Re-bind the current OpenTelemetry context onto a future that is about to
-/// cross a `tokio::spawn` boundary.
+/// Re-bind the current OpenTelemetry context and embedder invocation identity
+/// onto a future that is about to cross a `tokio::spawn` boundary.
 ///
-/// Spawned tasks start with an empty OTel current-context, so forked work
-/// (background jobs, scatter workers, concurrent pipeline stages) would emit
-/// spans detached from the embedder's trace. Call this at the spawn site — on
-/// the parent task, while the foreground execution span is still entered — so
-/// the spawned future re-attaches the captured context on every poll and its
-/// spans stay in the trace.
+/// Spawned tasks start with empty task-locals and an empty OTel current
+/// context, so forked work (background jobs, scatter workers, concurrent
+/// pipeline stages) would lose both trace linkage and invocation attribution.
+/// Call this at the spawn site — on the parent task, while the foreground
+/// execution span and invocation scope are active — so the spawned future
+/// preserves both on every poll.
 ///
-/// The context is captured eagerly here (synchronously at the spawn site), not
-/// inside the spawned task where it would already be empty. See
-/// [`fork_parent_context`] for *which* context is captured and why.
-pub(crate) fn bind_current_context<F: Future>(fut: F) -> WithContext<F> {
-    fut.with_context(fork_parent_context())
+/// Both are captured eagerly here (synchronously at the spawn site), not
+/// inside the spawned task where they would already be empty. Invocation
+/// propagation is independent of tracing and works with tracing disabled.
+pub(crate) fn bind_current_context<F: Future>(fut: F) -> impl Future<Output = F::Output> {
+    crate::invocation::bind_current_invocation(fut.with_context(fork_parent_context()))
 }
 
 /// The OTel context forked work should inherit.

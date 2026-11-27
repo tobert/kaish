@@ -217,7 +217,11 @@ impl Checksum {
         algo: &str,
     ) -> ExecResult {
         let resolved = ctx.resolve_path(check_path);
-        let data = match ctx.backend.read(Path::new(&resolved), None).await {
+        let data = match ctx
+            .backend
+            .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+            .await
+        {
             Ok(d) => d,
             Err(e) => {
                 return ExecResult::failure(1, format!("checksum: {}: {}", check_path, e))

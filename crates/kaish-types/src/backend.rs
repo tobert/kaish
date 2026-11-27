@@ -228,6 +228,38 @@ impl ReadRange {
     }
 }
 
+/// Why the kernel is reading a file at the `KernelBackend` boundary.
+///
+/// Backends that track file activity (recording which files a command
+/// explicitly read vs. files the kernel touched internally for CAS checks,
+/// trash snapshots, or `.gitignore` walking) can override
+/// `KernelBackend::read_with_purpose` and inspect this tag.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ReadPurpose {
+    /// Explicit content read requested by a command (`cat`, `head`, `tail`,
+    /// `grep`, `awk`, `sed`, `cut`, `diff`, `cmp`, `sort`, `uniq`, `tac`,
+    /// `wc`, `file`, `checksum`, `base64`, `xxd`, `dd`, `jq`, `kaish-validate`,
+    /// or `< file` input redirection).
+    #[default]
+    Content,
+    /// Read performed to prepare a mutation (`edit`, `patch`, `sed -i`, `cp`,
+    /// cross-mount `mv`).
+    Edit,
+    /// Script or source file read for execution (`source`, `.kai` script).
+    Script,
+    /// Kernel-internal plumbing read (trash snapshot, compare-and-swap check,
+    /// `.gitignore` discovery during directory walking).
+    Internal,
+}
+
+impl ReadPurpose {
+    /// Whether this read is an explicit content read (`ReadPurpose::Content`).
+    pub const fn is_explicit_content(self) -> bool {
+        matches!(self, Self::Content)
+    }
+}
+
 /// Write mode for file operations.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]

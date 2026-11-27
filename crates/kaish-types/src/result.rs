@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use crate::job::JobId;
 use crate::output::OutputData;
 use crate::stream_order::{OutputChunk, OutputSequence, OutputSpan, StreamKind, StreamOrder};
 use crate::value::Value;
@@ -181,6 +182,14 @@ pub struct ExecResult {
     /// keeps its merge progress and grows in amortized time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stream_order: Option<Box<StreamOrder>>,
+    /// Background jobs spawned via `&` during this execution, in spawn order.
+    ///
+    /// Empty for ordinary foreground scripts. An embedder can pass these IDs
+    /// to `JobManager::wait_jobs`, `JobManager::get`, or
+    /// `JobManager::invocation` to track delayed writes and job lifetime
+    /// without parsing `[N]` lines out of `err`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_jobs: Vec<JobId>,
 }
 
 /// How a tool's run ends: normally, or by ending the script.
@@ -243,6 +252,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 
@@ -270,6 +280,7 @@ impl ExecResult {
                 baggage: BTreeMap::new(),
                 stderr_published_len: 0,
                 stream_order: None,
+                background_jobs: Vec::new(),
             },
         }
     }
@@ -311,6 +322,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 
@@ -338,6 +350,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 
@@ -369,6 +382,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 
@@ -393,6 +407,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 
@@ -416,6 +431,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 
@@ -441,6 +457,7 @@ impl ExecResult {
             baggage: BTreeMap::new(),
             stderr_published_len: 0,
             stream_order: None,
+            background_jobs: Vec::new(),
         }
     }
 

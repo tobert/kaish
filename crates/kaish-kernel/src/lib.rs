@@ -22,6 +22,7 @@ pub mod fragment;
 pub mod help;
 pub mod ignore_config;
 pub mod interpreter;
+pub mod invocation;
 pub mod output_limit;
 pub mod kernel;
 pub mod lexer;
@@ -64,9 +65,10 @@ pub mod walker {
 }
 
 pub use backend::{
-    BackendError, BackendResult, KernelBackend, LocalBackend, PatchOp, ReadRange,
+    BackendError, BackendResult, KernelBackend, LocalBackend, PatchOp, ReadPurpose, ReadRange,
     ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
+pub use invocation::{current_invocation, current_invocation_raw, Invocation};
 pub use dispatch::{CommandDispatcher, PipelinePosition};
 pub use error::KernelError;
 pub use ignore_config::{IgnoreConfig, IgnoreScope};

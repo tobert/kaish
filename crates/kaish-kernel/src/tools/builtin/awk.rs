@@ -294,7 +294,11 @@ impl Tool for Awk {
         let mut inputs: Vec<AwkInput> = Vec::new();
         for path in operand_paths {
             let resolved = ctx.resolve_path(&path);
-            let text = match ctx.backend.read(Path::new(&resolved), None).await {
+            let text = match ctx
+                .backend
+                .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                .await
+            {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(s) => s,
                     Err(_) => {

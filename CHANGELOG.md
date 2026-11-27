@@ -12,6 +12,9 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **BREAKING:** for struct-literal `ExecuteOptions` callers, **added `ExecuteOptions::invocation` and `with_invocation`**. Propagates a typed embedder value via `kaish_kernel::current_invocation::<T>()` across foreground commands, pipelines, scatter workers, and `&` jobs without requiring tracing.
+- **`&` job lifetimes are exposed on `ExecResult` and `JobManager`.** `ExecResult::background_jobs` lists every spawned `JobId` in order. `JobManager::wait_jobs` and `JobManager::invocation::<T>` let embedders await completion and attribute delayed writes.
+- **`KernelBackend::read_with_purpose` tags file reads with `ReadPurpose`.** Backends can distinguish explicit content reads (`Content`) from mutation prep (`Edit`), script loading (`Script`), and kernel plumbing (`Internal`) while existing `read` implementations stay compatible.
 - **Builtins declare their side-effect class via `ToolSchema::effect`.** `ToolEffect` (`read_only`, `session`, `write`, `delegate`) and `ToolSchema::is_read_only()` let embedder gates derive read-only builtins from `Kernel::tool_schemas()`. Undeclared tools default to `None`.
 - **`kaish --validate` checks scripts from the CLI without executing.** Supports `<path>`, `-` for stdin, `-e`/`--expr <command>`, `-q`/`--quiet`, and `-w`/`--warnings`, exiting `0` when valid, `1` on validation errors, and `2` on parse, usage, or file-read errors.
 - **`help` overview points to `kaish-validate`.** The top-level help page now shows `kaish-validate script.kai` and `kaish-validate -e '…'` so users and agents can discover script validation without running commands.

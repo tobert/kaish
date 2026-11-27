@@ -90,7 +90,11 @@ impl Tool for Cut {
                     Err(e) => return ExecResult::failure(1, format!("cut: {e}")),
                 };
                 let resolved = ctx.resolve_path(&path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => acc.push_str(&s),
                         Err(_) => errors.push_str(&format!("cut: {}: invalid UTF-8\n", path)),

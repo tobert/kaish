@@ -66,7 +66,11 @@ impl Tool for Tac {
             let mut errors = String::new();
             for path in &paths {
                 let resolved = ctx.resolve_path(path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => {
                             // `reverse`/`join` below are each one long call
@@ -105,7 +109,11 @@ impl Tool for Tac {
         let input = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {

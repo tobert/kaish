@@ -102,7 +102,11 @@ impl Tool for File {
             // simply returns fewer bytes.
             let head = match ctx
                 .backend
-                .read(&resolved, Some(ReadRange::bytes(0, SNIFF_PREFIX_LEN as u64)))
+                .read_with_purpose(
+                    &resolved,
+                    Some(ReadRange::bytes(0, SNIFF_PREFIX_LEN as u64)),
+                    crate::backend::ReadPurpose::Content,
+                )
                 .await
             {
                 Ok(b) => b,

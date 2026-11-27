@@ -477,7 +477,11 @@ async fn run(ctx: &mut ExecContext, request: Request) -> ExecResult {
     let resolved = ctx.resolve_path(&file);
     let target = Path::new(&resolved);
 
-    let bytes = match ctx.backend.read(target, None).await {
+    let bytes = match ctx
+        .backend
+        .read_with_purpose(target, None, crate::backend::ReadPurpose::Edit)
+        .await
+    {
         Ok(bytes) => bytes,
         Err(error) => return ExecResult::failure(1, format!("edit: {file}: {error}")),
     };
