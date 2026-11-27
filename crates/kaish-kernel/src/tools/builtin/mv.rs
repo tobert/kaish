@@ -112,28 +112,33 @@ impl Tool for Mv {
             }
         }
 
-        // Under trash, a direct file clobber (`mv SRC EXISTING_FILE`)
-        // snapshots the prior destination content to trash (the recovery
-        // copy); the move itself replaces it (an atomic same-mount `rename`,
-        // or unlink+write cross-mount), so no CAS is threaded. Moving *into*
-        // a directory or a recursive merge isn't a single-file truncation
-        // and is not snapshotted (documented residual).
-        if sources.len() == 1 {
-            let dst_is_existing_file = ctx
+        // Under trash (and without `-n`), snapshot every existing file that
+        // will be overwritten — direct clobbers (`mv SRC EXISTING_FILE`),
+        // into-directory clobbers (`mv SRC DIR/`), and recursive directory
+        // merges (`mv SRC_DIR DST/`).
+        if !no_clobber && ctx.scope.trash_enabled() {
+            let mut targets: Vec<(String, bool)> = Vec::new();
+            let dst_is_dir = ctx
                 .backend
                 .stat(Path::new(&dst_path))
                 .await
-                .map(|info| !info.is_dir())
+                .map(|info| info.is_dir())
                 .unwrap_or(false);
-            if dst_is_existing_file {
-                let _src_display = &sources[0];
-                if let Err(blocked) = ctx
-                    .snapshot_overwrites("mv",
-                        &[(dest.clone(), false)])
-                    .await
-                {
-                    return blocked;
-                }
+            for source in &sources {
+                let src_resolved = ctx.resolve_path(source);
+                collect_mv_clobbers(
+                    &*ctx.backend,
+                    &src_resolved,
+                    &dst_path,
+                    dst_is_dir,
+                    &mut targets,
+                )
+                .await;
+            }
+            if !targets.is_empty()
+                && let Err(blocked) = ctx.snapshot_overwrites("mv", &targets).await
+            {
+                return blocked;
             }
         }
 
@@ -149,6 +154,47 @@ impl Tool for Mv {
             None => ExecResult::success(""),
         }
     }
+}
+
+/// Enumerate existing destination files that `move_path` will overwrite so
+/// `set -o trash` snapshots them before the move.
+fn collect_mv_clobbers<'a>(
+    backend: &'a dyn KernelBackend,
+    src: &'a Path,
+    dst: &'a Path,
+    dst_is_dir: bool,
+    out: &'a mut Vec<(String, bool)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let Ok(src_info) = backend.lstat(src).await else {
+            return;
+        };
+        let final_dst = if dst_is_dir {
+            let Some(filename) = src.file_name() else {
+                return;
+            };
+            dst.join(filename)
+        } else {
+            dst.to_path_buf()
+        };
+        let Ok(dst_info) = backend.lstat(&final_dst).await else {
+            return;
+        };
+        if src_info.is_dir() {
+            if !dst_info.is_dir() {
+                return;
+            }
+            let Ok(entries) = backend.list(src).await else {
+                return;
+            };
+            for entry in entries {
+                let src_child = src.join(&entry.name);
+                collect_mv_clobbers(backend, &src_child, &final_dst, true, out).await;
+            }
+        } else if !dst_info.is_dir() && !dst_info.is_symlink() {
+            out.push((final_dst.to_string_lossy().into_owned(), false));
+        }
+    })
 }
 
 /// Move a path to destination.
@@ -254,6 +300,10 @@ fn move_dir_recursive<'a>(
                 let data = backend
                     .read_with_purpose(&src_child, None, crate::backend::ReadPurpose::Edit)
                     .await?;
+                match backend.remove(&dst_child, false).await {
+                    Ok(()) | Err(BackendError::NotFound(_)) => {}
+                    Err(e) => return Err(e),
+                }
                 backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
             }
         }

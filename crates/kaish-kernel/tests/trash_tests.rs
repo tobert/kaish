@@ -702,3 +702,75 @@ async fn edit_under_trash_snapshots_prior_bytes() {
     assert_eq!(snaps[0].1, b"old\n", "snapshot captured the prior content");
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).expect("read"), "new\n");
 }
+
+#[tokio::test]
+async fn cp_and_mv_into_directory_and_recursive_snapshot_clobbered_files() {
+    let dir = tempdir();
+    std::fs::create_dir_all(dir.path().join("dst/sub")).expect("mkdir dst");
+    std::fs::create_dir_all(dir.path().join("src_tree/sub")).expect("mkdir src_tree");
+    std::fs::write(dir.path().join("a.txt"), "new-a\n").expect("write a");
+    std::fs::write(dir.path().join("dst/a.txt"), "old-a\n").expect("write dst/a");
+    std::fs::write(dir.path().join("src_tree/sub/x.txt"), "new-x\n").expect("write src x");
+    std::fs::write(dir.path().join("dst/sub/x.txt"), "old-x\n").expect("write dst x");
+
+    let mock = Arc::new(MockTrash::default());
+    let session = kernel_with_trash(dir.path(), &mock);
+    run(&session, "set -o trash").await;
+
+    // 1. `cp -n a.txt dst/` must NOT take a spurious snapshot.
+    let r = run(&session, "cp -n a.txt dst/").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    assert!(mock.snapshots().is_empty(), "cp -n must not snapshot untouched target");
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst/a.txt")).unwrap(), "old-a\n");
+
+    // 2. `cp a.txt dst/` snapshots `dst/a.txt` before overwriting it.
+    let r = run(&session, "cp a.txt dst/").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 1, "cp into dir must snapshot clobbered file: {snaps:?}");
+    assert_eq!(snaps[0].1, b"old-a\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst/a.txt")).unwrap(), "new-a\n");
+
+    // 3. `cp -r src_tree dst` snapshots `dst/sub/x.txt` before overwriting it.
+    let r = run(&session, "cp -r src_tree dst").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 2, "cp -r merge must snapshot clobbered child: {snaps:?}");
+    assert_eq!(snaps[1].1, b"old-x\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst/sub/x.txt")).unwrap(), "new-x\n");
+
+    // 4. `mv a.txt dst/` snapshots `dst/a.txt` (`new-a\n`) before moving over it.
+    std::fs::write(dir.path().join("a.txt"), "moved-a\n").expect("write a again");
+    let r = run(&session, "mv a.txt dst/").await;
+    assert_eq!(r.code, 0, "err: {}", r.err);
+    let snaps = mock.snapshots();
+    assert_eq!(snaps.len(), 3, "mv into dir must snapshot clobbered file: {snaps:?}");
+    assert_eq!(snaps[2].1, b"new-a\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst/a.txt")).unwrap(), "moved-a\n");
+
+    // 5. Repeated destination in one `cp` (`cp d1/a.txt d2/a.txt dst/`) must
+    //    update CAS expectations after the first write instead of failing.
+    std::fs::create_dir_all(dir.path().join("d1")).unwrap();
+    std::fs::create_dir_all(dir.path().join("d2")).unwrap();
+    std::fs::write(dir.path().join("d1/a.txt"), "from-d1\n").unwrap();
+    std::fs::write(dir.path().join("d2/a.txt"), "from-d2\n").unwrap();
+    let r = run(&session, "cp d1/a.txt d2/a.txt dst/").await;
+    assert_eq!(r.code, 0, "repeated destination in cp must succeed: {}", r.err);
+    assert_eq!(std::fs::read_to_string(dir.path().join("dst/a.txt")).unwrap(), "from-d2\n");
+
+    // 6. `mv FILE DIR/` where `DIR/FILE` is a symlink-to-directory must replace
+    //    the symlink without aborting on `IsADirectory` during trash snapshot.
+    #[cfg(unix)]
+    {
+        let target_dir = dir.path().join("some_target_dir");
+        std::fs::create_dir(&target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_dir, dir.path().join("dst/link_entry")).unwrap();
+        std::fs::write(dir.path().join("link_entry"), "plain-file\n").unwrap();
+        let r = run(&session, "mv link_entry dst/").await;
+        assert_eq!(r.code, 0, "mv over dir-symlink under trash must succeed: {}", r.err);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dst/link_entry")).unwrap(),
+            "plain-file\n"
+        );
+    }
+}
