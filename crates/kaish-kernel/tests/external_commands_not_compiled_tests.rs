@@ -6,7 +6,7 @@
 //! capability in this binary at all, a build-time fact rather than a config
 //! value, and it gets its own distinct message (see
 //! `ExternalCommandsUnavailable` in `kaish-kernel/src/tools/context.rs`).
-//! Only compiles under a build that leaves `subprocess` off — CLAUDE.md's
+//! Only compiles under a build that leaves `subprocess` off — AGENTS.md's
 //! `cargo test -p kaish-kernel --no-default-features` CI leg is the one that
 //! runs it; `cargo test --all` unifies `subprocess` in via kaish-repl's
 //! `full` feature and skips this file entirely.

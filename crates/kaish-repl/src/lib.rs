@@ -750,7 +750,7 @@ fn resolve_prompt(repl: &Repl) -> String {
 fn notify_finished_jobs(repl: &Repl) {
     let manager = repl.client.kernel().jobs();
     for info in repl.runtime.block_on(manager.reap_finished()) {
-        println!("[{}] {} {}", info.id, info.status, info.command);
+        eprintln!("[{}] {} {}", info.id, info.status, info.command);
     }
 }
 

@@ -828,7 +828,7 @@ async fn env_u_multi_occurrence_binary_is_loud_not_silently_dropped() {
 // bytes]` placeholder before a builtin's clap layer ever sees it) — named/flag
 // values now error loudly at `to_argv()` itself. Positional Value::Bytes is
 // deliberately NOT covered by that guard: a clap-reflected positional field is
-// a validation-only sink nothing ever reads (see CLAUDE.md's clap-builtin
+// a validation-only sink nothing ever reads (see AGENTS.md's clap-builtin
 // convention), so builtins that legitimately accept binary content through a
 // positional (`write`, `push`) must keep working unchanged. These two tests
 // are the load-bearing proof of that design split, at the kernel level. ──

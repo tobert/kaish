@@ -1,4 +1,4 @@
-# The correctness gates from CLAUDE.md, run on every pull request and every push to
+# The correctness gates from AGENTS.md, run on every pull request and every push to
 # main: the full workspace test suite, clippy with warnings denied (test targets
 # included), the capability-feature sandbox compile, and the WASI target build.
 # kaish releases to crates.io (no binary artifacts), and publishing is deliberately

@@ -59,7 +59,7 @@ impl Tool for Write {
         // always read as a raw typed `Value` off `args.named`/`args.positional`
         // specifically so a `Value::Bytes` payload survives untouched. That
         // makes it the same "clap sink nobody reads" case as `push`'s hidden
-        // positional (CLAUDE.md's clap-builtin convention), just on a named
+        // positional (AGENTS.md's clap-builtin convention), just on a named
         // flag instead: `to_argv()`'s loud named-Bytes guard (GH #164) exists
         // for keys a builtin *does* read via the clap-parsed field, so
         // exclude `content` from argv (GH #218's `to_argv_excluding` — a

@@ -24,7 +24,7 @@ fn job_rows_json(jobs: &[JobInfo]) -> Vec<serde_json::Value> {
     jobs.iter()
         .map(|job| {
             // JobInfo's fields are all plain scalars/strings/SystemTime —
-            // serialization cannot fail in practice. Per CLAUDE.md, an
+            // serialization cannot fail in practice. Per AGENTS.md, an
             // error that can never happen in practice may be hidden, but the
             // program must panic on the outside case rather than silently
             // dropping the row.

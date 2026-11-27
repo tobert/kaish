@@ -2,7 +2,7 @@
 //! source in kaish-kernel (`kaish_kernel::{KAISH_VERSION, KAISH_GIT_HASH,
 //! KAISH_BUILD_DATE}`) by TWO independent JSON emitters: this crate's
 //! `kaish --plan`/`--plan-file`, and kaish-kernel's in-shell `plan` builtin.
-//! Both are documented (CLAUDE.md, docs/EMBEDDING.md) to emit the same JSON.
+//! Both are documented (AGENTS.md, docs/EMBEDDING.md) to emit the same JSON.
 //!
 //! A test that checks each emitter against a hardcoded expected string does
 //! not catch the two drifting apart: if someone later changes the constant

@@ -350,7 +350,7 @@ async fn test_spilled_background_job_reports_failed_not_done() {
     let kernel = setup().await;
 
     // `setup()` builds a NoLocal (isolated) kernel, which forces in-memory
-    // spill mode automatically — no disk writes in this test (CLAUDE.md).
+    // spill mode automatically — no disk writes in this test (AGENTS.md).
     kernel.execute("set -o output-limit=64").await.unwrap();
 
     kernel.execute("seq 1 5000 &").await.unwrap();
@@ -455,7 +455,7 @@ async fn test_jobs_builtin_shows_background_job() {
 /// to report only `{"status":"Failed"}` — the audit verified the exit code
 /// was recoverable only by blocking on `wait` or string-parsing
 /// `/v/jobs/N/status`. Routed through `kernel.execute()` (not the builtin's
-/// `.execute()` directly, per CLAUDE.md) so the whole dispatch chain —
+/// `.execute()` directly, per AGENTS.md) so the whole dispatch chain —
 /// background spawn, `JobManager`, `JobInfo` serde, the `jobs` builtin's
 /// `--json` row — is exercised, not just the unit-level pieces.
 #[tokio::test]

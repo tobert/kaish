@@ -565,7 +565,7 @@ kernel in `crates/kaish-kernel/tests/wrapped_command_exec_tests.rs`.
    is itself a symlink; virtual cwd.
 4. Validation binder agrees with the execution binder. The validator's
    `ToolArgs` and the executor's `ToolArgs` produce the same verdict for the
-   same source. (See the two-binders gotcha in CLAUDE.md's lineage: validate
+   same source. (See the two-binders gotcha in AGENTS.md's lineage: validate
    from what execute reads.)
 5. Environment. A pin overrides an exported variable of the same name; an
    unexported scope variable is absent; a variable the kaish process itself

@@ -8,11 +8,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
-use crate::trash::{TrashBackend, TrashEntry, TrashError, TrashId, find_restore_match};
+use crate::trash::{TrashBackend, TrashEntry, TrashError};
+#[cfg(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+))]
+use crate::trash::{TrashId, find_restore_match};
 
 /// System trash backend using the freedesktop.org / platform trash via the `trash` crate.
 pub struct SystemTrash;
 
+#[cfg(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+))]
 impl SystemTrash {
     /// Convert a `trash::TrashItem` to our `TrashEntry`.
     fn to_entry(item: &trash::TrashItem) -> TrashEntry {
@@ -23,6 +42,22 @@ impl SystemTrash {
             deleted_at: item.time_deleted,
         }
     }
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+)))]
+fn unsupported_trash_operation() -> TrashError {
+    TrashError::Backend(
+        "system trash can be written on this platform, but listing, restoring, and emptying are unavailable; recover items from ~/.Trash or Finder"
+            .to_string(),
+    )
 }
 
 /// Run a blocking trash operation, flattening JoinError/trash::Error.
@@ -86,66 +121,161 @@ impl TrashBackend for SystemTrash {
     }
 
     async fn list(&self, filter: Option<&str>) -> Result<Vec<TrashEntry>, TrashError> {
-        let items = spawn_trash(trash::os_limited::list).await?;
-        let filter_owned = filter.map(|s| s.to_owned());
+        #[cfg(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        ))]
+        {
+            let items = spawn_trash(trash::os_limited::list).await?;
+            let filter_owned = filter.map(|s| s.to_owned());
 
-        let entries: Vec<TrashEntry> = items
-            .iter()
-            .filter(|item| {
-                if let Some(ref f) = filter_owned {
-                    item.name.to_string_lossy().contains(f.as_str())
-                } else {
-                    true
-                }
-            })
-            .map(Self::to_entry)
-            .collect();
+            let entries: Vec<TrashEntry> = items
+                .iter()
+                .filter(|item| {
+                    if let Some(ref f) = filter_owned {
+                        item.name.to_string_lossy().contains(f.as_str())
+                    } else {
+                        true
+                    }
+                })
+                .map(Self::to_entry)
+                .collect();
 
-        Ok(entries)
+            Ok(entries)
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        )))]
+        {
+            let _ = filter;
+            Err(unsupported_trash_operation())
+        }
     }
 
     async fn find_by_name(&self, name: &str) -> Result<Vec<TrashEntry>, TrashError> {
-        let items = spawn_trash(trash::os_limited::list).await?;
+        #[cfg(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        ))]
+        {
+            let items = spawn_trash(trash::os_limited::list).await?;
 
-        let named_items: Vec<(String, &trash::TrashItem)> = items
-            .iter()
-            .map(|item| (item.name.to_string_lossy().to_string(), item))
-            .collect();
+            let named_items: Vec<(String, &trash::TrashItem)> = items
+                .iter()
+                .map(|item| (item.name.to_string_lossy().to_string(), item))
+                .collect();
 
-        find_restore_match(named_items, name)
-            .map(|matched| matched.into_iter().map(Self::to_entry).collect())
-            .map_err(TrashError::Backend)
+            find_restore_match(named_items, name)
+                .map(|matched| matched.into_iter().map(Self::to_entry).collect())
+                .map_err(TrashError::Backend)
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        )))]
+        {
+            let _ = name;
+            Err(unsupported_trash_operation())
+        }
     }
 
     async fn restore(&self, entries: Vec<TrashEntry>) -> Result<(), TrashError> {
-        // Reconstruct trash::TrashItem from our TrashEntry
-        let items: Vec<trash::TrashItem> = entries
-            .into_iter()
-            .map(|entry| {
-                let crate::trash::TrashIdInner::System(id) = entry.id.0;
-                trash::TrashItem {
-                    id,
-                    name: entry.name.into(),
-                    original_parent: entry
-                        .original_path
-                        .parent()
-                        .unwrap_or(Path::new("/"))
-                        .to_path_buf(),
-                    time_deleted: entry.deleted_at,
-                }
-            })
-            .collect();
+        #[cfg(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        ))]
+        {
+            // Reconstruct trash::TrashItem from our TrashEntry
+            let items: Vec<trash::TrashItem> = entries
+                .into_iter()
+                .map(|entry| {
+                    let crate::trash::TrashIdInner::System(id) = entry.id.0;
+                    trash::TrashItem {
+                        id,
+                        name: entry.name.into(),
+                        original_parent: entry
+                            .original_path
+                            .parent()
+                            .unwrap_or(Path::new("/"))
+                            .to_path_buf(),
+                        time_deleted: entry.deleted_at,
+                    }
+                })
+                .collect();
 
-        spawn_trash(move || trash::os_limited::restore_all(items)).await
+            spawn_trash(move || trash::os_limited::restore_all(items)).await
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        )))]
+        {
+            let _ = entries;
+            Err(unsupported_trash_operation())
+        }
     }
 
     async fn purge_all(&self) -> Result<usize, TrashError> {
-        let items = spawn_trash(trash::os_limited::list).await?;
-        if items.is_empty() {
-            return Ok(0);
+        #[cfg(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        ))]
+        {
+            let items = spawn_trash(trash::os_limited::list).await?;
+            if items.is_empty() {
+                return Ok(0);
+            }
+            let count = items.len();
+            spawn_trash(move || trash::os_limited::purge_all(items)).await?;
+            Ok(count)
         }
-        let count = items.len();
-        spawn_trash(move || trash::os_limited::purge_all(items)).await?;
-        Ok(count)
+        #[cfg(not(any(
+            target_os = "windows",
+            all(
+                unix,
+                not(target_os = "macos"),
+                not(target_os = "ios"),
+                not(target_os = "android")
+            )
+        )))]
+        {
+            Err(unsupported_trash_operation())
+        }
     }
 }

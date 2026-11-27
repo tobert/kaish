@@ -7,7 +7,7 @@
 //! still works" cases; this file only checks the behavior is reachable
 //! through the real `kernel.execute()` path. `KernelConfig::isolated()`
 //! (memory-only VFS) is used throughout so the executing test never touches
-//! a real host path (per CLAUDE.md's no-hardcoded-`/tmp` rule) — the parse-
+//! a real host path (per AGENTS.md's no-hardcoded-`/tmp` rule) — the parse-
 //! error tests never reach execution at all, so the FS backing is moot for
 //! them, but using the same isolated kernel everywhere keeps the file simple.
 

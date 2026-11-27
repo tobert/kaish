@@ -10,7 +10,7 @@
 //! foreground commands get (GH #191/#209) never reached scatter workers.
 //!
 //! Driven through `kernel.execute()` (never a builtin's direct `.execute()`)
-//! per CLAUDE.md, so the real pipeline split + forked workers run.
+//! per AGENTS.md, so the real pipeline split + forked workers run.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -27,7 +27,7 @@ fn rows(text: &str) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn spilled_worker_flips_gather_to_failure() {
     // NoLocal (isolated) kernel forces in-memory spill mode automatically —
-    // no disk writes in this test (CLAUDE.md).
+    // no disk writes in this test (AGENTS.md).
     let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
     // 10, not 4: since GH #250, `pre_scatter` (here `seq 1 3`, 6 bytes: "1\n2\n3\n")
     // is itself spill-checked before scatter runs — a 4-byte limit would trip

@@ -12,7 +12,7 @@
 //! `unexpected argument '-O'` clap error instead of anything about signals.
 //!
 //! These tests exercise the real path end-to-end via `kernel.execute(...)`
-//! (never `Kill.execute()` directly — see CLAUDE.md), because the bug lived
+//! (never `Kill.execute()` directly — see AGENTS.md), because the bug lived
 //! in argv binding, not in the tool body.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.

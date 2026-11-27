@@ -29,7 +29,7 @@
 
 // Harness code: a panic on a known-good fixture IS the harness failing.
 // Examples are not `#[test]` context, so the workspace restriction lints need
-// an explicit allow (see CLAUDE.md).
+// an explicit allow (see AGENTS.md).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fmt::Write as _;

@@ -2,7 +2,7 @@
 //!
 //! All tests that touch the real filesystem are gated behind
 //! `#[cfg(feature = "localfs")]` (matching the project pattern from touch.rs
-//! regression gate and the CLAUDE.md gate list).
+//! regression gate and the AGENTS.md gate list).
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

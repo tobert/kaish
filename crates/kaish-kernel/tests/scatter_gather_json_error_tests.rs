@@ -11,7 +11,7 @@
 //! them — `--json` was silently dropped on this one path.
 //!
 //! Driven through `kernel.execute()` (never a builtin's direct `.execute()`)
-//! per CLAUDE.md, so the real pipeline split (scatter/gather detection) runs.
+//! per AGENTS.md, so the real pipeline split (scatter/gather detection) runs.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

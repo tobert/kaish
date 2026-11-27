@@ -10,7 +10,7 @@
 //! mutate at runtime, so there is one notion of "errexit is on" and `set -o`
 //! always reports the true answer regardless of which one set it.
 //!
-//! `#![allow(clippy::unwrap_used, clippy::expect_used)]` per CLAUDE.md — test
+//! `#![allow(clippy::unwrap_used, clippy::expect_used)]` per AGENTS.md — test
 //! code, not production.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -5539,7 +5539,7 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════
     // Backtick rejection
     //
-    // Backticks are an explicitly dropped feature (see CLAUDE.md,
+    // Backticks are an explicitly dropped feature (see AGENTS.md,
     // docs/LANGUAGE.md, help/limits.md, help/overview.md). We surface a
     // dedicated error rather than the generic `UnexpectedCharacter` so
     // users get a hint to use `$(cmd)`. Comments, single-quoted strings,
