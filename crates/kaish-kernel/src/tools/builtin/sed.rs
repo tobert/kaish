@@ -123,8 +123,9 @@ impl Tool for Sed {
         // `-E`/`-r` selects strict ERE; default reads GNU BRE.
         let extended =
             args.has_flag("E") || args.has_flag("r") || args.has_flag("regexp-extended");
+        let mut last_pattern: Option<LastPattern> = None;
         for expr in &exprs {
-            if let Err(msg) = parse_program_dialect(expr, extended) {
+            if let Err(msg) = parse_program_with_state(expr, extended, &mut last_pattern) {
                 issues.push(
                     ValidationIssue::error(
                         IssueCode::InvalidSedExpr,
@@ -190,8 +191,9 @@ impl Tool for Sed {
         // itself hold several `;`-separated commands, so flatten into one
         // ordered program (matching `-e A -e B` and `'A; B'` semantics).
         let mut parsed: Vec<SedExpression> = Vec::new();
+        let mut last_pattern: Option<LastPattern> = None;
         for expr in &expressions {
-            match parse_program_dialect(expr, extended) {
+            match parse_program_with_state(expr, extended, &mut last_pattern) {
                 Ok(cmds) => parsed.extend(cmds),
                 Err(e) => return ExecResult::failure(1, format!("sed: {}", e)),
             }
@@ -445,7 +447,28 @@ fn parse_program(expr: &str) -> Result<Vec<SedExpression>, String> {
 /// (default) rewrites the GNU BRE backslash-metas to ERE so `\|`/`\(…\)`/`\{N\}`
 /// behave as operators; `true` (`-E`/`-r`) is strict ERE, where those escapes
 /// match the literal character.
+#[cfg(test)]
 fn parse_program_dialect(expr: &str, extended: bool) -> Result<Vec<SedExpression>, String> {
+    let mut last_pattern = None;
+    parse_program_with_state(expr, extended, &mut last_pattern)
+}
+
+/// Last compiled pattern and its regex flags, reused by empty `//` addresses
+/// and `s//repl/` commands across `;` and `-e` expressions.
+#[derive(Clone)]
+struct LastPattern {
+    pattern: String,
+    case_insensitive: bool,
+    multiline: bool,
+}
+
+/// Parse a sed program while carrying `last_pattern` across `-e` expressions
+/// so empty `//` addresses and `s//repl/` reuse the previous regex (POSIX/GNU).
+fn parse_program_with_state(
+    expr: &str,
+    extended: bool,
+    last_pattern: &mut Option<LastPattern>,
+) -> Result<Vec<SedExpression>, String> {
     let mut out = Vec::new();
     let mut rest = expr.to_string();
 
@@ -455,7 +478,7 @@ fn parse_program_dialect(expr: &str, extended: bool) -> Result<Vec<SedExpression
             if trimmed.is_empty() {
                 break;
             }
-            let (expr, remaining) = parse_one(trimmed, extended)?;
+            let (expr, remaining) = parse_one(trimmed, extended, last_pattern)?;
             out.push(expr);
             remaining
         };
@@ -469,14 +492,22 @@ fn parse_program_dialect(expr: &str, extended: bool) -> Result<Vec<SedExpression
 }
 
 /// Parse a single address+command, returning it and the unconsumed remainder.
-fn parse_one(expr: &str, extended: bool) -> Result<(SedExpression, String), String> {
-    let (address, rest) = parse_address(expr, extended)?;
-    let (command, rest) = parse_command(rest.trim_start(), extended)?;
+fn parse_one(
+    expr: &str,
+    extended: bool,
+    last_pattern: &mut Option<LastPattern>,
+) -> Result<(SedExpression, String), String> {
+    let (address, rest) = parse_address(expr, extended, last_pattern)?;
+    let (command, rest) = parse_command(rest.trim_start(), extended, last_pattern)?;
     Ok((SedExpression { address, command }, rest))
 }
 
 /// Parse an optional address prefix, returning (Address, remaining).
-fn parse_address(expr: &str, extended: bool) -> Result<(Address, &str), String> {
+fn parse_address<'a>(
+    expr: &'a str,
+    extended: bool,
+    last_pattern: &mut Option<LastPattern>,
+) -> Result<(Address, &'a str), String> {
     let expr = expr.trim();
 
     if expr.is_empty() {
@@ -485,10 +516,10 @@ fn parse_address(expr: &str, extended: bool) -> Result<(Address, &str), String> 
 
     // Check for pattern address: /regex/
     if expr.starts_with('/') {
-        let (pattern, rest) = parse_pattern_address(expr, extended)?;
+        let (pattern, rest) = parse_pattern_address(expr, extended, last_pattern)?;
         // Check for range
         if let Some(after_comma) = rest.strip_prefix(',') {
-            let (end_addr, final_rest) = parse_address(after_comma, extended)?;
+            let (end_addr, final_rest) = parse_address(after_comma, extended, last_pattern)?;
             return Ok((
                 Address::Range(Box::new(Address::Pattern(pattern)), Box::new(end_addr)),
                 final_rest,
@@ -500,7 +531,7 @@ fn parse_address(expr: &str, extended: bool) -> Result<(Address, &str), String> 
     // Check for $ (last line)
     if let Some(rest) = expr.strip_prefix('$') {
         if let Some(after_comma) = rest.strip_prefix(',') {
-            let (end_addr, final_rest) = parse_address(after_comma, extended)?;
+            let (end_addr, final_rest) = parse_address(after_comma, extended, last_pattern)?;
             return Ok((
                 Address::Range(Box::new(Address::LastLine), Box::new(end_addr)),
                 final_rest,
@@ -521,7 +552,7 @@ fn parse_address(expr: &str, extended: bool) -> Result<(Address, &str), String> 
 
         // Check for range
         if let Some(after_comma) = rest.strip_prefix(',') {
-            let (end_addr, final_rest) = parse_address(after_comma, extended)?;
+            let (end_addr, final_rest) = parse_address(after_comma, extended, last_pattern)?;
             return Ok((
                 Address::Range(Box::new(Address::Line(num)), Box::new(end_addr)),
                 final_rest,
@@ -535,7 +566,11 @@ fn parse_address(expr: &str, extended: bool) -> Result<(Address, &str), String> 
 }
 
 /// Parse a /pattern/ address, returning the compiled regex and remaining input.
-fn parse_pattern_address(expr: &str, extended: bool) -> Result<(Regex, &str), String> {
+fn parse_pattern_address<'a>(
+    expr: &'a str,
+    extended: bool,
+    last_pattern: &mut Option<LastPattern>,
+) -> Result<(Regex, &'a str), String> {
     debug_assert!(expr.starts_with('/'));
 
     let chars: Vec<char> = expr.chars().collect();
@@ -564,7 +599,20 @@ fn parse_pattern_address(expr: &str, extended: bool) -> Result<(Regex, &str), St
         }
     }
 
-    let regex = compile_sed_pattern(&pattern, extended, false, false)?;
+    let regex = if pattern.is_empty() {
+        let prev = last_pattern
+            .as_ref()
+            .ok_or_else(|| "no previous regular expression".to_string())?;
+        compile_sed_pattern(&prev.pattern, extended, prev.case_insensitive, prev.multiline)?
+    } else {
+        let compiled = compile_sed_pattern(&pattern, extended, false, false)?;
+        *last_pattern = Some(LastPattern {
+            pattern,
+            case_insensitive: false,
+            multiline: false,
+        });
+        compiled
+    };
 
     // Calculate byte offset from char offset
     let consumed: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
@@ -574,7 +622,11 @@ fn parse_pattern_address(expr: &str, extended: bool) -> Result<(Regex, &str), St
 /// Parse a sed command and return it plus the unconsumed remainder of the
 /// program (everything after this command's text/flags, including a leading
 /// `;`/newline separator if present).
-fn parse_command(cmd: &str, extended: bool) -> Result<(Command, String), String> {
+fn parse_command(
+    cmd: &str,
+    extended: bool,
+    last_pattern: &mut Option<LastPattern>,
+) -> Result<(Command, String), String> {
     // Safe: `parse_one` trims then checks non-empty before calling us, but guard
     // anyway so a bare `;;` can't panic.
     let Some(first) = cmd.chars().next() else {
@@ -583,7 +635,7 @@ fn parse_command(cmd: &str, extended: bool) -> Result<(Command, String), String>
     let after_first = &cmd[first.len_utf8()..];
 
     match first {
-        's' => parse_substitute(after_first, extended),
+        's' => parse_substitute(after_first, extended, last_pattern),
         'y' => parse_transliterate(after_first),
         'd' => Ok((Command::Delete, after_first.to_string())),
         'p' => Ok((Command::Print, after_first.to_string())),
@@ -608,7 +660,11 @@ fn parse_text_arg(s: &str) -> String {
 /// command and the unconsumed remainder. Supported flags: `g` (global),
 /// `i`/`I` (case-insensitive), `p` (print), `m`/`M` (multiline anchors), and a
 /// numeric `N` (act on the Nth match; combine with `g` for "Nth onward").
-fn parse_substitute(expr: &str, extended: bool) -> Result<(Command, String), String> {
+fn parse_substitute(
+    expr: &str,
+    extended: bool,
+    last_pattern: &mut Option<LastPattern>,
+) -> Result<(Command, String), String> {
     let chars: Vec<char> = expr.chars().collect();
     if chars.is_empty() {
         return Err("s command requires delimiter".to_string());
@@ -651,7 +707,25 @@ fn parse_substitute(expr: &str, extended: bool) -> Result<(Command, String), Str
         n
     };
 
-    let regex = compile_sed_pattern(&pattern_str, extended, case_insensitive, multiline)?;
+    let regex = if pattern_str.is_empty() {
+        let prev = last_pattern
+            .as_ref()
+            .ok_or_else(|| "no previous regular expression".to_string())?;
+        compile_sed_pattern(
+            &prev.pattern,
+            extended,
+            case_insensitive || prev.case_insensitive,
+            multiline || prev.multiline,
+        )?
+    } else {
+        let compiled = compile_sed_pattern(&pattern_str, extended, case_insensitive, multiline)?;
+        *last_pattern = Some(LastPattern {
+            pattern: pattern_str,
+            case_insensitive,
+            multiline,
+        });
+        compiled
+    };
 
     // GNU sed refuses a replacement's `\N` before the edit ever runs, not
     // silently as an empty string once it's too late to notice — confirmed
@@ -869,7 +943,6 @@ async fn execute_sed(
 
         let mut pattern_space = line.to_string();
         let mut deleted = false;
-        let mut printed_by_p = false;
         let mut quit = false;
         // `a` text is emitted *after* the line's auto-print; collect it here so
         // multiple `a` commands queue in order.
@@ -896,16 +969,14 @@ async fn execute_sed(
                     occurrence,
                     print,
                 } => {
-                    let new_text =
+                    let (new_text, replaced) =
                         substitute(pattern, &pattern_space, replacement, *global, *occurrence);
 
-                    let changed = new_text != pattern_space;
                     pattern_space = new_text;
 
-                    if *print && changed {
+                    if *print && replaced {
                         output.push_str(&pattern_space);
                         output.push('\n');
-                        printed_by_p = true;
                     }
                 }
                 Command::Delete => {
@@ -915,7 +986,6 @@ async fn execute_sed(
                 Command::Print => {
                     output.push_str(&pattern_space);
                     output.push('\n');
-                    printed_by_p = true;
                 }
                 Command::Quit => {
                     quit = true;
@@ -949,7 +1019,9 @@ async fn execute_sed(
         }
 
         // Auto-print unless quiet or deleted, then flush any queued `a` text.
-        if !deleted && !quiet && !printed_by_p {
+        // Matching POSIX/GNU sed, explicit `p` and `s///p` do not suppress
+        // auto-print in non-quiet mode.
+        if !deleted && !quiet {
             output.push_str(&pattern_space);
             output.push('\n');
         }
@@ -1082,7 +1154,7 @@ fn substitute(
     replacement: &str,
     global: bool,
     occurrence: usize,
-) -> String {
+) -> (String, bool) {
     let skip = occurrence.saturating_sub(1);
     let mut result = String::new();
     let mut last_end = 0;
@@ -1107,7 +1179,7 @@ fn substitute(
     }
 
     result.push_str(&text[last_end..]);
-    result
+    (result, replaced)
 }
 
 /// Expand replacement string with capture groups (\1-\9, &).

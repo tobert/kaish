@@ -22,6 +22,7 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **Builtin fidelity improvements across `ls`, `head`, `tail`, `sort`, `sed`, and `date`.** End-of-options `--` now protects negative filenames like `-1`, `sort` supports multiple `-k` keys, `.C` char offsets, `-k2,1`, and `b`/`f`/`V` modifiers, `sed` preserves non-quiet auto-print on `p`/`s///p` and empty `//` regex reuse, and `date -d` accepts spaced `±` operators.
 - **Merged redirects preserve recorded write order.** `2>&1`, `1>&2`, and `&>` now interleave captured stdout and stderr in `StreamOrder`, matching bash on loops, functions, and external commands while falling back after spills or overflow.
 - **VFS walker, globstar matching, and `JobFs` range reads close dormant edge cases.** `FileWalker` now descends symlinked directories with `BackendWalkerFs::canonicalize` cycle checks, `GlobPath` memoizes repeated `**` backtracking, and `JobFs::read_range` slices directly.
 - **macOS builds with `os-integration` now compile cleanly.** `SystemTrash` now gates `trash::os_limited` methods on platforms where the `trash` crate provides them, keeping `trash` and `trash_bytes` working on macOS while returning a clear error for listing and restore.

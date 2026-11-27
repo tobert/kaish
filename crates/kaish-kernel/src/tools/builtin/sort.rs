@@ -36,9 +36,9 @@ struct SortArgs {
     #[arg(short = 'u', long = "unique")]
     unique: bool,
 
-    /// Sort by field number, 1-indexed (-k)
+    /// Sort by field key spec, 1-indexed, repeatable (-k)
     #[arg(short = 'k', long = "key")]
-    key: Option<String>,
+    key: Vec<String>,
 
     /// Field delimiter (-t)
     #[arg(short = 't', long = "delimiter")]
@@ -131,17 +131,18 @@ impl Tool for Sort {
         let reverse = parsed.reverse;
         let unique = parsed.unique;
 
-        // Read key spec from the parsed clap struct (parsed.key), not the raw
+        // Read key specs from the parsed clap struct (parsed.key), not the raw
         // ToolArgs map. The raw map cannot be trusted: glued flag values like
-        // `-k2n` land with the correct value ("2n") in the clap struct but the
-        // raw map path requires manual parsing that had been stripped earlier.
-        let key_spec: Option<KeySpec> = match parsed.key.as_deref() {
-            None => None,
-            Some(s) => match KeySpec::parse(s) {
-                Ok(ks) => Some(ks),
-                Err(e) => return ExecResult::failure(2, format!("sort: invalid key spec {s:?}: {e}")),
-            },
-        };
+        // `-k2n` land with the correct value ("2n") in the clap struct.
+        let mut key_specs: Vec<KeySpec> = Vec::with_capacity(parsed.key.len());
+        for s in &parsed.key {
+            match KeySpec::parse(s) {
+                Ok(ks) => key_specs.push(ks),
+                Err(e) => {
+                    return ExecResult::failure(2, format!("sort: invalid key spec {s:?}: {e}"))
+                }
+            }
+        }
 
         let delimiter = parsed.delimiter.clone();
 
@@ -158,28 +159,31 @@ impl Tool for Sort {
             lines.push(line);
         }
 
-        // Sort with the appropriate comparator.
+        // Sort with the appropriate comparator. When `-u` is active, skip the
+        // last-resort whole-line tiebreak so Rust's stable sort keeps the first
+        // line in input order for equal keys, matching GNU `sort -u`.
         lines.sort_by(|a, b| {
-            let cmp = compare_lines(a, b, numeric, version, key_spec.as_ref(), delimiter.as_deref());
-            if reverse {
-                cmp.reverse()
-            } else {
-                cmp
-            }
+            compare_lines(
+                a,
+                b,
+                numeric,
+                version,
+                reverse,
+                &key_specs,
+                delimiter.as_deref(),
+                !unique,
+            )
         });
 
         // Handle unique flag: GNU `sort -u` drops lines that compare EQUAL under
-        // the ACTIVE comparator (numeric/version/key aware), not by raw string.
-        // So `sort -n -u` collapses "10" and "10.0", and `-k` dedups by the key.
-        // Reusing `compare_lines` keeps -u consistent with the sort order above.
+        // the ACTIVE keys/comparator without the last-resort whole-line tiebreak.
         if unique {
             let delim = delimiter.as_deref();
             lines.dedup_by(|b, a| {
                 // `dedup_by` visits (later=b, earlier=a) pairs; keep `a` (first
-                // seen) when the two compare equal. `reverse` is irrelevant to
-                // equality, so the raw comparator suffices.
-                compare_lines(a, b, numeric, version, key_spec.as_ref(), delim)
-                    == std::cmp::Ordering::Equal
+                // seen) when the two compare equal.
+                compare_lines(a, b, numeric, version, reverse, &key_specs, delim, false)
+                    == Ordering::Equal
             });
         }
 
@@ -193,48 +197,85 @@ impl Tool for Sort {
 
 /// A parsed GNU-style `-k` key specification.
 ///
-/// Grammar (simplified): `start_field[.start_char][modifiers][,stop_field[.stop_char][modifiers]]`
+/// Grammar: `start_field[.start_char][modifiers][,stop_field[.stop_char][modifiers]]`
 ///
-/// Fields are 1-indexed. When `stop_field` is absent the key extends to the end
-/// of the line (GNU default). When `stop_field` equals `start_field` the key is
-/// exactly that one field.
+/// Fields and character offsets are 1-indexed. When `stop_field` is absent the
+/// key extends to the end of the line (GNU default). When `stop_field < start_field`
+/// the key is empty, matching GNU `sort`.
 ///
-/// Supported per-key modifiers: `n` (numeric), `r` (reverse). Others are
-/// silently accepted but ignored so common specs don't error out.
+/// Supported per-key modifiers: `n` (numeric), `V` (version), `r` (reverse),
+/// `b` (ignore leading blanks), `f` (fold lowercase to uppercase).
 #[derive(Debug, Clone)]
 struct KeySpec {
     /// 1-indexed start field.
     start_field: usize,
+    /// Optional 1-indexed start character offset within `start_field`.
+    start_char: Option<usize>,
     /// 1-indexed stop field, or `None` to mean "to end of line".
     stop_field: Option<usize>,
-    /// Numeric sort on this key (overrides the global `-n`).
+    /// Optional 1-indexed stop character offset within `stop_field` (0 = end of field).
+    stop_char: Option<usize>,
+    /// Numeric sort on this key.
     numeric: bool,
-    /// Reverse this key's comparison (per-key `-r`).
+    /// Version sort on this key.
+    version: bool,
+    /// Reverse this key's comparison.
     reverse: bool,
+    /// Ignore leading blanks (`b`) on start position.
+    start_ignore_blanks: bool,
+    /// Ignore leading blanks (`b`) on stop position.
+    stop_ignore_blanks: bool,
+    /// Case-insensitive ASCII folding (`f`).
+    ignore_case: bool,
+    /// Whether this key declared any local ordering modifiers (`n`, `V`, `r`, `f`, `b`).
+    /// Per GNU sort, a key with local ordering modifiers overrides global `-n`/`-V`/`-r`.
+    has_local_modifiers: bool,
 }
 
 impl KeySpec {
-    /// Parse a key spec string such as `"2"`, `"2n"`, `"2,2"`, `"2,2n"`, `"2nr"`.
+    /// Parse a key spec string such as `"2"`, `"2n"`, `"2,2"`, `"1.2,1.4"`, `"2nr"`.
     fn parse(s: &str) -> Result<Self, String> {
-        // Split on optional comma to get start_part and optional stop_part.
         let (start_part, stop_part) = match s.split_once(',') {
             Some((start, stop)) => (start, Some(stop)),
             None => (s, None),
         };
 
-        let (start_field, start_mods) = parse_field_and_modifiers(start_part)?;
-        let (stop_field, stop_mods) = match stop_part {
+        let (start_field, start_char, start_mods) = parse_field_and_modifiers(start_part, false)?;
+        let (stop_field, stop_char, stop_mods) = match stop_part {
             Some(p) => {
-                let (f, m) = parse_field_and_modifiers(p)?;
-                (Some(f), m)
+                let (f, c, m) = parse_field_and_modifiers(p, true)?;
+                (Some(f), c, m)
             }
-            None => (None, ModifierFlags::default()),
+            None => (None, None, ModifierFlags::default()),
         };
 
         let numeric = start_mods.numeric || stop_mods.numeric;
+        let version = start_mods.version || stop_mods.version;
         let reverse = start_mods.reverse || stop_mods.reverse;
+        let ignore_case = start_mods.ignore_case || stop_mods.ignore_case;
+        let start_ignore_blanks =
+            start_mods.ignore_leading_blanks || stop_mods.ignore_leading_blanks;
+        let stop_ignore_blanks = start_ignore_blanks;
+        let has_local_modifiers = numeric
+            || version
+            || reverse
+            || ignore_case
+            || start_ignore_blanks
+            || stop_ignore_blanks;
 
-        Ok(KeySpec { start_field, stop_field, numeric, reverse })
+        Ok(KeySpec {
+            start_field,
+            start_char,
+            stop_field,
+            stop_char,
+            numeric,
+            version,
+            reverse,
+            start_ignore_blanks,
+            stop_ignore_blanks,
+            ignore_case,
+            has_local_modifiers,
+        })
     }
 }
 
@@ -242,12 +283,17 @@ impl KeySpec {
 #[derive(Default)]
 struct ModifierFlags {
     numeric: bool,
+    version: bool,
     reverse: bool,
+    ignore_leading_blanks: bool,
+    ignore_case: bool,
 }
 
-/// Parse `"F[.C][modifiers]"` into (field_number, ModifierFlags).
-/// The `.C` (character offset within field) is accepted but ignored.
-fn parse_field_and_modifiers(s: &str) -> Result<(usize, ModifierFlags), String> {
+/// Parse `"F[.C][modifiers]"` into `(field_number, Option<char_offset>, ModifierFlags)`.
+fn parse_field_and_modifiers(
+    s: &str,
+    allow_zero_char: bool,
+) -> Result<(usize, Option<usize>, ModifierFlags), String> {
     if s.is_empty() {
         return Err("empty field spec".to_string());
     }
@@ -262,69 +308,105 @@ fn parse_field_and_modifiers(s: &str) -> Result<(usize, ModifierFlags), String> 
         return Err("field numbers are 1-indexed; 0 is not valid".to_string());
     }
 
-    // Skip optional `.C` character offset.
+    // Parse optional `.C` character offset.
     let rest = &s[digit_end..];
-    let rest = if let Some(after_dot) = rest.strip_prefix('.') {
+    let (char_offset, rest) = if let Some(after_dot) = rest.strip_prefix('.') {
         let char_digit_end = after_dot.bytes().take_while(|b| b.is_ascii_digit()).count();
-        &after_dot[char_digit_end..]
+        if char_digit_end == 0 {
+            return Err(format!("expected character offset after '.', got {after_dot:?}"));
+        }
+        let offset: usize = after_dot[..char_digit_end]
+            .parse()
+            .map_err(|e| format!("{e}"))?;
+        if offset == 0 && !allow_zero_char {
+            return Err("character offset is 1-indexed; 0 is not valid on start field".to_string());
+        }
+        (Some(offset), &after_dot[char_digit_end..])
     } else {
-        rest
+        (None, rest)
     };
 
-    // Parse modifier characters; unknown ones are silently ignored (common in
-    // real -k specs: b = ignore leading blanks, d = dictionary order, etc.).
     let mut flags = ModifierFlags::default();
     for ch in rest.chars() {
         match ch {
             'n' => flags.numeric = true,
+            'V' => flags.version = true,
             'r' => flags.reverse = true,
-            // b, d, f, i, M, h, R — silently accepted, not implemented.
+            'b' => flags.ignore_leading_blanks = true,
+            'f' => flags.ignore_case = true,
+            // d, i, M, h, R — accepted without error for compatibility.
             _ => {}
         }
     }
 
-    Ok((field, flags))
+    Ok((field, char_offset, flags))
+}
+
+/// Byte offset after advancing `char_count` Unicode characters inside `s`.
+fn char_offset_to_byte(s: &str, char_count: usize) -> usize {
+    if char_count == 0 {
+        return 0;
+    }
+    s.char_indices()
+        .nth(char_count)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
 }
 
 /// Extract the comparison key from `line` according to `spec` and `delimiter`.
-///
-/// When `stop_field` is `None`, returns the substring from `start_field` to
-/// end-of-line. When `stop_field` equals `start_field`, returns exactly that
-/// field. Otherwise returns from `start_field` through `stop_field`.
-///
-/// Returns a `String` owned value so callers can compare without lifetime issues.
 fn extract_key<'a>(line: &'a str, spec: &KeySpec, delimiter: Option<&str>) -> &'a str {
+    if let Some(stop_f) = spec.stop_field
+        && stop_f < spec.start_field
+    {
+        return "";
+    }
+
     let fields = split_fields(line, delimiter);
     let start = spec.start_field.saturating_sub(1); // 0-indexed
     if fields.is_empty() || start >= fields.len() {
         return "";
     }
-    match spec.stop_field {
-        None => {
-            // Key extends from start_field to end of line.
-            // Find the byte offset of fields[start] in the original line and
-            // return a slice to end-of-line.
-            let field_start_ptr = fields[start].as_ptr() as usize;
-            let line_start_ptr = line.as_ptr() as usize;
-            let byte_offset = field_start_ptr - line_start_ptr;
-            &line[byte_offset..]
-        }
+
+    let line_start = line.as_ptr() as usize;
+    let start_field_slice = fields[start];
+    let start_field_trimmed = if spec.start_ignore_blanks {
+        start_field_slice.trim_start_matches([' ', '\t'])
+    } else {
+        start_field_slice
+    };
+    let start_char_skip = spec.start_char.map_or(0, |c| c.saturating_sub(1));
+    let start_within = char_offset_to_byte(start_field_trimmed, start_char_skip);
+    let byte_start =
+        (start_field_trimmed.as_ptr() as usize - line_start) + start_within;
+
+    let byte_end = match spec.stop_field {
+        None => line.len(),
         Some(stop_f) => {
-            let stop = stop_f.saturating_sub(1); // 0-indexed
-            let stop_idx = stop.min(fields.len() - 1);
-            if stop_idx < start {
-                return fields[start];
+            let stop = stop_f.saturating_sub(1);
+            if stop >= fields.len() {
+                line.len()
+            } else {
+                let stop_field_slice = fields[stop];
+                let stop_field_base = if spec.stop_ignore_blanks {
+                    stop_field_slice.trim_start_matches([' ', '\t'])
+                } else {
+                    stop_field_slice
+                };
+                match spec.stop_char {
+                    Some(c) if c > 0 => {
+                        let end_within = char_offset_to_byte(stop_field_base, c);
+                        (stop_field_base.as_ptr() as usize - line_start) + end_within
+                    }
+                    _ => (stop_field_slice.as_ptr() as usize - line_start) + stop_field_slice.len(),
+                }
             }
-            // Return from fields[start] through fields[stop_idx], preserving
-            // original delimiters that sit between them in the line.
-            let field_start_ptr = fields[start].as_ptr() as usize;
-            let field_end_ptr = fields[stop_idx].as_ptr() as usize + fields[stop_idx].len();
-            let line_start = line.as_ptr() as usize;
-            let byte_start = field_start_ptr - line_start;
-            let byte_end = field_end_ptr - line_start;
-            &line[byte_start..byte_end]
         }
+    };
+
+    if byte_start >= byte_end || byte_end > line.len() {
+        return "";
     }
+    &line[byte_start..byte_end]
 }
 
 /// Split `line` into fields using the given delimiter.
@@ -346,36 +428,86 @@ fn split_fields<'a>(line: &'a str, delimiter: Option<&str>) -> Vec<&'a str> {
     }
 }
 
-/// Compare two lines for sorting.
+/// Compare two strings with ASCII case folding (`f` modifier).
+fn cmp_ignore_ascii_case(a: &str, b: &str) -> Ordering {
+    for (ca, cb) in a.bytes().zip(b.bytes()) {
+        let ord = ca.to_ascii_uppercase().cmp(&cb.to_ascii_uppercase());
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Compare two lines for sorting across zero or more `-k` key specs.
+#[allow(clippy::too_many_arguments)]
 fn compare_lines(
     a: &str,
     b: &str,
     numeric: bool,
     version: bool,
-    key_spec: Option<&KeySpec>,
+    reverse: bool,
+    key_specs: &[KeySpec],
     delimiter: Option<&str>,
+    tiebreak_whole_line: bool,
 ) -> Ordering {
-    let (val_a, val_b) = match key_spec {
-        Some(ks) => (extract_key(a, ks, delimiter), extract_key(b, ks, delimiter)),
-        None => (a, b),
-    };
+    if key_specs.is_empty() {
+        let cmp = if version {
+            compare_version(a, b)
+        } else if numeric {
+            let num_a = extract_leading_number(a);
+            let num_b = extract_leading_number(b);
+            num_a.partial_cmp(&num_b).unwrap_or(Ordering::Equal)
+        } else {
+            a.cmp(b)
+        };
+        return if reverse { cmp.reverse() } else { cmp };
+    }
 
-    // Per-key `n` modifier overrides the global `-n`.
-    let use_numeric = numeric || key_spec.map(|ks| ks.numeric).unwrap_or(false);
-    let key_reverse = key_spec.map(|ks| ks.reverse).unwrap_or(false);
+    for ks in key_specs {
+        let val_a = extract_key(a, ks, delimiter);
+        let val_b = extract_key(b, ks, delimiter);
 
-    let cmp = if version {
-        compare_version(val_a, val_b)
-    } else if use_numeric {
-        let num_a = extract_leading_number(val_a);
-        let num_b = extract_leading_number(val_b);
-        num_a.partial_cmp(&num_b).unwrap_or(Ordering::Equal)
+        let use_numeric = if ks.has_local_modifiers {
+            ks.numeric
+        } else {
+            numeric
+        };
+        let use_version = if ks.has_local_modifiers {
+            ks.version
+        } else {
+            version
+        };
+        let use_reverse = if ks.has_local_modifiers {
+            ks.reverse
+        } else {
+            reverse
+        };
+
+        let cmp = if use_version {
+            compare_version(val_a, val_b)
+        } else if use_numeric {
+            let num_a = extract_leading_number(val_a);
+            let num_b = extract_leading_number(val_b);
+            num_a.partial_cmp(&num_b).unwrap_or(Ordering::Equal)
+        } else if ks.ignore_case {
+            cmp_ignore_ascii_case(val_a, val_b)
+        } else {
+            val_a.cmp(val_b)
+        };
+
+        let cmp = if use_reverse { cmp.reverse() } else { cmp };
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
+    if tiebreak_whole_line {
+        let tb = a.cmp(b);
+        if reverse { tb.reverse() } else { tb }
     } else {
-        val_a.cmp(val_b)
-    };
-
-    // Per-key reverse modifier (applied on top of global reverse in the caller).
-    if key_reverse { cmp.reverse() } else { cmp }
+        Ordering::Equal
+    }
 }
 
 /// Compare two strings as versions (GNU `sort -V` family). The strings are

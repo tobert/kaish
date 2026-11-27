@@ -58,19 +58,24 @@ impl Tool for Tail {
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
         let ctx = exec_context(ctx);
-        // Handle POSIX shorthand: tail -3 file → tail -n 3 file
-        // Lexer tokenizes "-3" as Int(-3), which lands in positional[0].
-        if let Some(Value::Int(n)) = args.positional.first() {
-            if *n < 0 {
-                let count = n.unsigned_abs() as i64;
-                args.named.insert("lines".to_string(), Value::Int(count));
-                args.named_raw.remove("lines");
-                args.positional.remove(0);
-                let old_raw = std::mem::take(&mut args.positional_raw);
-                for (idx, raw) in old_raw {
-                    if let Some(shifted) = idx.checked_sub(1) {
-                        args.positional_raw.insert(shifted, raw);
-                    }
+        // Handle POSIX shorthand: tail -3 file → tail -n 3 file, only when
+        // `-3` appeared before `--` (`tail -- -3` names a file `-3`).
+        let before_double_dash = args.post_double_dash_start.is_none_or(|start| start > 0);
+        if before_double_dash
+            && let Some(Value::Int(n)) = args.positional.first()
+            && *n < 0
+        {
+            let count = n.unsigned_abs() as i64;
+            args.named.insert("lines".to_string(), Value::Int(count));
+            args.named_raw.remove("lines");
+            args.positional.remove(0);
+            if let Some(start) = args.post_double_dash_start.as_mut() {
+                *start = start.saturating_sub(1);
+            }
+            let old_raw = std::mem::take(&mut args.positional_raw);
+            for (idx, raw) in old_raw {
+                if let Some(shifted) = idx.checked_sub(1) {
+                    args.positional_raw.insert(shifted, raw);
                 }
             }
         }

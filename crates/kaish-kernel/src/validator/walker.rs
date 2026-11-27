@@ -1156,8 +1156,12 @@ pub fn build_tool_args_for_validation(args: &[Arg], schema: Option<&ToolSchema>)
     for i in 0..args.len() {
         match &args[i] {
             Arg::DoubleDash => {
-                if past_double_dash { tool_args.positional.push(Value::String("--".into())); }
-                past_double_dash = true;
+                if past_double_dash {
+                    tool_args.positional.push(Value::String("--".into()));
+                } else {
+                    tool_args.post_double_dash_start = Some(tool_args.positional.len());
+                    past_double_dash = true;
+                }
             },
             Arg::Positional(expr) => {
                 if !consumed.contains(&i) {
