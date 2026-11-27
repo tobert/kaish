@@ -88,13 +88,14 @@ async fn the_pipeline_sideband_is_untouched(#[case] script: &str, #[case] expect
     assert_eq!(out(script).await, expected, "`{script}`");
 }
 
-/// `--json` is how a user asks for types, so it must be unchanged for exactly
-/// the builtins whose capture just stopped being typed.
+/// `--json` is how a user asks for types, so it serializes typed `.data`
+/// (`[1,2,3]` for `seq`, `["b"]` for `cut`) even for builtins whose `$()`
+/// capture stays text.
 #[rstest]
-#[case("seq 1 3 --json", "[\"1\",\"2\",\"3\"]")]
+#[case("seq 1 3 --json", "[1,2,3]")]
 #[case("printf 'a\\tb\\n' > /tmp/kt4.tsv; cut -f2 /tmp/kt4.tsv --json", "[\"b\"]")]
 #[tokio::test]
-async fn json_output_is_unchanged(#[case] script: &str, #[case] expected: &str) {
+async fn json_output_is_typed(#[case] script: &str, #[case] expected: &str) {
     assert_eq!(out(script).await, expected, "`{script}`");
 }
 

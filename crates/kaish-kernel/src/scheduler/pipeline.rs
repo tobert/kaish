@@ -672,7 +672,7 @@ async fn run_opened_stage(
 ) -> ControlFlow {
     let redirects = stage.redirects();
     let (flow, in_effect, opened) = match opened {
-        Ok(opened) => (dispatch_redirected(stage, ctx, dispatcher).await, redirects, opened),
+        Ok(opened) => (Box::pin(dispatch_redirected(stage, ctx, dispatcher)).await, redirects, opened),
         Err(failure) => {
             let (result, in_effect, opened) = failure.into_parts(redirects);
             (ControlFlow::Normal(result), in_effect, opened)
@@ -685,7 +685,7 @@ async fn run_opened_stage(
         ControlFlow::Exit { code, .. } => Some(*code),
         _ => None,
     };
-    let mut result = finish_redirects(flow.into_absorbed_result(), in_effect, opened, ctx).await;
+    let mut result = Box::pin(finish_redirects(flow.into_absorbed_result(), in_effect, opened, ctx)).await;
     match exit_code {
         Some(code) => {
             result.code = code;
@@ -864,12 +864,12 @@ impl PipelineRunner {
                 }
             };
             return ControlFlow::Normal(
-                self.run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher)
+                Box::pin(self.run_scatter_gather(&commands, scatter_idx, gather_idx, ctx, dispatcher))
                     .await,
             );
         }
 
-        self.run_stage_sequence(stages, ctx, dispatcher).await
+        Box::pin(self.run_stage_sequence(stages, ctx, dispatcher)).await
     }
 
     /// Execute commands sequentially without scatter/gather detection.
@@ -904,7 +904,7 @@ impl PipelineRunner {
 
         if stages.len() == 1 {
             // Single stage, no piping needed
-            let mut flow = self.run_single(&stages[0], ctx, dispatcher).await;
+            let mut flow = Box::pin(self.run_single(&stages[0], ctx, dispatcher)).await;
             let result = flow.result_mut();
             // A lone command is a pipeline of one, and bash reports it:
             // `false; echo ${PIPESTATUS[0]}` is `1`. Writing it only for the
@@ -915,7 +915,7 @@ impl PipelineRunner {
         }
 
         // Multi-stage pipeline: every stage is a subshell, so an `exit` ends only its stage.
-        ControlFlow::Normal(self.run_pipeline(stages, ctx, dispatcher).await)
+        ControlFlow::Normal(Box::pin(self.run_pipeline(stages, ctx, dispatcher)).await)
     }
 
     /// Run a scatter/gather pipeline.
@@ -1035,8 +1035,8 @@ impl PipelineRunner {
         // Set pipeline position for stdio inheritance decisions
         ctx.pipeline_position = PipelinePosition::Only;
 
-        let opened = open_redirects(stage.redirects(), ctx, dispatcher).await;
-        run_opened_stage(stage, opened, ctx, dispatcher).await
+        let opened = Box::pin(open_redirects(stage.redirects(), ctx, dispatcher)).await;
+        Box::pin(run_opened_stage(stage, opened, ctx, dispatcher)).await
     }
 
     /// Run a multi-command pipeline concurrently.

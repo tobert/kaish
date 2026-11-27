@@ -2,6 +2,7 @@
 
 `kaish` fuses Bourne shell syntax with typed JSON values and structured output.
 The kernel validates every script before execution.
+Run `kaish-validate script.kai` or `kaish-validate -e '…'` to check a script without running it.
 Builtins run inside the kernel process.
 External commands run through `PATH`.
 An embedder can also register a wrapped command.

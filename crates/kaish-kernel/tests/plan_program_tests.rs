@@ -315,3 +315,13 @@ fn not_still_plans_every_command_in_a_negated_compound() {
     assert_eq!(plans[0].plan.commands[0].name, "echo");
     assert_eq!(plans[0].plan.bound_variables, vec!["x".to_string()]);
 }
+
+#[test]
+fn quoted_positional_suffix_expansion_is_diagnosed() {
+    let errors = plan_program(r#"x="${0%.kai}"; echo "[$x]""#).expect_err("must reject ${0%.kai}");
+    let joined = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(
+        joined.contains("suffix removal"),
+        "expected suffix-removal diagnostic, got: {joined}"
+    );
+}

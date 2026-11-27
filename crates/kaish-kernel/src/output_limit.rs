@@ -331,23 +331,24 @@ fn truncate_in_memory(
     if let Some(output) = result.output() {
         let estimate = output.estimated_byte_size();
         if estimate > max {
-            // Render a bounded head prefix only — no full materialization.
-            let mut buf = Vec::with_capacity(config.head_bytes + 64);
-            // write_canonical stops shortly after the budget; ignore the count.
-            let _ = output.write_canonical(&mut buf, Some(config.head_bytes));
-            let s = String::from_utf8_lossy(&buf);
-            let head = truncate_to_char_boundary(&s, config.head_bytes);
-            let truncated = format!(
-                "{}\n...\n[output truncated in memory: ~{} bytes (exceeds {} byte limit) — head only, no spill file]",
-                head, estimate, max
-            );
-            result.set_out(truncated);
-            // `.out` is now a truncation summary, not a rendering of the tree.
-            // Every renderer prefers `.output`, so leaving it would show the
-            // full listing and hide the fact that output was capped.
-            result.set_output(None);
-            result.did_spill = true;
-            return None;
+            // Only stream `OutputData` when `.out` is empty; if the command
+            // already populated formatted text (e.g. `ls -lR`, `grep`), fall
+            // through to truncate that text so cells and prefixes survive.
+            if let Some(output) = result.take_output_for_stream() {
+                // Render a bounded head prefix only — no full materialization.
+                let mut buf = Vec::with_capacity(config.head_bytes + 64);
+                // write_canonical stops shortly after the budget; ignore the count.
+                let _ = output.write_canonical(&mut buf, Some(config.head_bytes));
+                let s = String::from_utf8_lossy(&buf);
+                let head = truncate_to_char_boundary(&s, config.head_bytes);
+                let truncated = format!(
+                    "{}\n...\n[output truncated in memory: ~{} bytes (exceeds {} byte limit) — head only, no spill file]",
+                    head, estimate, max
+                );
+                result.set_out(truncated);
+                result.did_spill = true;
+                return None;
+            }
         }
         // Small enough to measure exactly, without folding the tree in.
     }
@@ -420,7 +421,13 @@ async fn spill_output_data(
     max: usize,
     ring_already_overflowed: bool,
 ) -> Option<SpillResult> {
-    let output = result.output()?;
+    // If `.out` already holds formatted text (e.g. `ls -lR` or `grep` via
+    // `with_output_and_text`), spill that text directly so cells and prefixes
+    // are not lost by `OutputData::write_canonical`.
+    let Some(output) = result.take_output_for_stream() else {
+        result.set_output(None);
+        return spill_string(result, config, max, ring_already_overflowed).await;
+    };
 
     let dir = paths::spill_dir();
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -466,6 +473,10 @@ async fn spill_output_data(
         "{}\n...\n{}\n[output truncated: {}]",
         head, tail, spill_summary(total, ring_already_overflowed, &path_str)
     ));
+    // `.out` is now a truncation summary, not a rendering of the tree.
+    // Every renderer prefers `.output`, so leaving it would show the full
+    // listing and hide the fact that output was spilled.
+    result.set_output(None);
     result.did_spill = true;
 
     Some(SpillResult {
@@ -1284,6 +1295,64 @@ mod tests {
             "NoLocal kernel must not write a host spill file: {}",
             result.text_out()
         );
+    }
+
+    #[cfg(feature = "localfs")]
+    #[tokio::test]
+    async fn spill_output_data_clears_structured_output_tree() {
+        use crate::interpreter::{OutputData, OutputNode};
+
+        let config = OutputLimitConfig {
+            max_bytes: Some(50),
+            head_bytes: 16,
+            tail_bytes: 16,
+            spill_mode: SpillMode::Disk,
+        };
+        let nodes: Vec<OutputNode> = (0..30).map(|i| OutputNode::new(format!("entry-{i:03}"))).collect();
+        let mut result = ExecResult::with_output(OutputData::nodes(nodes));
+        assert!(result.has_output());
+
+        let spill = spill_if_needed(&mut result, &config).await;
+        assert!(spill.is_some(), "oversize OutputData should spill to disk");
+        assert!(result.did_spill);
+        assert!(
+            !result.has_output(),
+            "spilled result must clear .output so renderers show the truncation summary"
+        );
+        if let Some(spill) = spill {
+            let _ = tokio::fs::remove_file(&spill.path).await;
+        }
+    }
+
+    #[cfg(feature = "localfs")]
+    #[tokio::test]
+    async fn spill_output_data_preserves_formatted_text_when_out_is_populated() {
+        use crate::interpreter::{OutputData, OutputNode};
+
+        let config = OutputLimitConfig {
+            max_bytes: Some(50),
+            head_bytes: 32,
+            tail_bytes: 16,
+            spill_mode: SpillMode::Disk,
+        };
+        let children: Vec<OutputNode> = (0..20)
+            .map(|i| OutputNode::new(format!("file-{i:02}.txt")).with_cells(vec!["-".into(), "42".into()]))
+            .collect();
+        let tree = OutputData::table(
+            vec!["NAME".into(), "TYPE".into(), "SIZE".into()],
+            vec![OutputNode::new(".").with_children(children)],
+        );
+        let formatted: String = (0..20)
+            .map(|i| format!("-rw-r--r-- 1 u g 42 Jan 1 00:00 file-{i:02}.txt\n"))
+            .collect();
+        let mut result = ExecResult::with_output_and_text(tree, formatted.clone());
+
+        let spill = spill_if_needed(&mut result, &config).await.expect("should spill");
+        assert!(result.did_spill);
+        assert!(!result.has_output());
+        let spilled = tokio::fs::read_to_string(&spill.path).await.unwrap();
+        assert_eq!(spilled, formatted, "spill file must keep formatted text, not lose cells");
+        let _ = tokio::fs::remove_file(&spill.path).await;
     }
 
 }

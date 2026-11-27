@@ -10,8 +10,15 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- **`help` overview points to `kaish-validate`.** The top-level help page now shows `kaish-validate script.kai` and `kaish-validate -e '…'` so users and agents can discover script validation without running commands.
+
 ### Fixed
 
+- **Execute-path stack usage drops by more than half.** Splitting and boxing hot execute-path futures cuts per-`$()`-level native stack from 63 KiB to 26 KiB in dev builds, letting nested execution fit on Rust's 2 MiB stack.
+- **`--json` serializes typed `.data` before `OutputData`.** `seq 1 3 --json` now emits `[1,2,3]` instead of `["1","2","3"]`, and embedder tools returning both `.output` and `.data` surface `.data`; `rich_json` still wins first.
+- **Disk-spilled `OutputData` clears `ExecResult.output` and keeps formatted text.** `spill_output_data` now drops the un-truncated tree after spilling and preserves pre-formatted `.out` text (such as `ls -lR` columns and `grep` prefixes).
 - Reject unsupported parameter expansions before making a plan or running the program. Diagnostics name prefix removal, suffix removal, or pattern replacement and show a `sed` example instead of treating the expansion as a variable name.
 - **`awk` reads every file operand.** It read only the first and silently ignored the rest. `FILENAME` and `FNR` now follow each file, `NR` counts across files, and a program of only `BEGIN` rules no longer waits on stdin.
 - **`awk` refuses `ENVIRON`, `ARGV`, `ARGC`, `SUBSEP`, `CONVFMT`, and `OFMT` by name.** They read as empty and exited 0. Bare `print > f` and `print | cmd` now name the replacement instead of printing a token name.

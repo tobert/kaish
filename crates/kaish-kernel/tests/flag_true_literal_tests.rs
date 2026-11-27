@@ -29,7 +29,7 @@ async fn seq_json_equals_true_renders_json() {
     let k = kernel();
     let r = k.execute("seq --json=true 1 3").await.expect("kernel execute");
     assert_eq!(r.code, 0, "seq --json=true must not be a clap parse error: {r:?}");
-    assert_eq!(r.text_out().trim(), r#"["1","2","3"]"#, "got: {}", r.text_out());
+    assert_eq!(r.text_out().trim(), "[1,2,3]", "got: {}", r.text_out());
 }
 
 /// `seq` never calls `flagify_bool_named` on its OWN bool flags either
@@ -58,5 +58,5 @@ async fn seq_bare_json_flag_still_works() {
     let k = kernel();
     let r = k.execute("seq --json 1 3").await.expect("kernel execute");
     assert_eq!(r.code, 0, "got: {r:?}");
-    assert_eq!(r.text_out().trim(), r#"["1","2","3"]"#);
+    assert_eq!(r.text_out().trim(), "[1,2,3]");
 }

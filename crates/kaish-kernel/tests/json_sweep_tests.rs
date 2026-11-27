@@ -388,3 +388,18 @@ async fn json_output_shapes_hold_across_the_registry() {
         failures.join("\n")
     );
 }
+
+#[tokio::test]
+async fn seq_json_emits_numbers_from_structured_data() {
+    let temp = TempDir::new().expect("tempdir");
+    let kernel = kernel_at(temp.path());
+    let result = kernel.execute("seq 1 3 --json").await.expect("execute");
+    assert_eq!(result.code, 0, "seq --json failed: {}", result.err);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.text_out()).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::json!([1, 2, 3]),
+        "seq --json must serialize typed .data numbers, not stringified OutputData nodes"
+    );
+}

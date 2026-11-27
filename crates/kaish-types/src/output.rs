@@ -600,7 +600,8 @@ impl OutputData {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
-    /// JSON serialization via OutputData::to_json()
+    /// JSON serialization: prefers `OutputData::rich_json`, then `ExecResult::data`,
+    /// then `OutputData::to_json()`, then plain text as a JSON string.
     Json,
     /// Each row as `LINE:HASH:TEXT`, behind any cells (`FILE:LINE:HASH:TEXT`
     /// for `grep`). Every row must carry a line anchor.
@@ -651,11 +652,13 @@ fn apply_hashline(mut result: ExecResult) -> ExecResult {
 
 /// Transform an ExecResult into the requested output format.
 ///
-/// Success prints the data unwrapped. Any non-zero exit prints the envelope
-/// `{"code":N,"error":"..."}` instead, including exits that are answers rather
-/// than mistakes (`grep` no-match, `diff` differs). `error` is the stderr text,
-/// empty when the command wrote none. Partial results stay under `data`
-/// (structured) or `output` (text). Apps check the exit code, then `error`.
+/// Success prints the data unwrapped, checking `OutputData::rich_json`, then
+/// `ExecResult::data`, then `OutputData::to_json()`, then plain text. Any
+/// non-zero exit prints the envelope `{"code":N,"error":"..."}` instead,
+/// including exits that are answers rather than mistakes (`grep` no-match,
+/// `diff` differs). `error` is the stderr text, empty when the command wrote
+/// none. Partial results stay under `data` (structured, using the same
+/// precedence) or `output` (text). Apps check the exit code, then `error`.
 /// An unchanged failure formatted again in-process keeps its existing envelope.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
     if format == OutputFormat::Hashline {
@@ -689,20 +692,26 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
         // `apply_output_format` sends --hashline to `apply_hashline` first.
         OutputFormat::Hashline => unreachable!("--hashline never reaches JSON formatting"),
         OutputFormat::Json => {
-            if let Some(output) = result.output() {
+            if let Some(rich) = result.output().and_then(|o| o.rich_json.as_ref()) {
+                // Builtin-supplied `--json` override wins (e.g. grep, diff, date).
+                let json_value = rich.clone();
+                result.set_out(serde_json::to_string(&json_value)
+                    .unwrap_or_else(|_| "null".to_string()));
+                result.data = Some(crate::result::json_to_value(json_value));
+            } else if let Some(data) = &result.data {
+                // Structured data already present (e.g. seq, jq, any
+                // `success_with_data` builtin): serialize that, not the
+                // OutputData string tree or rendered text. `.data` carries
+                // typed values (`[1,2,3]` for `seq`, not `["1","2","3"]`).
+                let json_out = serde_json::to_string(&crate::result::value_to_json(data))
+                    .unwrap_or_else(|_| "null".to_string());
+                result.set_out(json_out);
+            } else if let Some(output) = result.output() {
                 let json_value = output.to_json();
                 // NLL: borrow of result via output ends here (json_value is owned)
                 result.set_out(serde_json::to_string(&json_value)
                     .unwrap_or_else(|_| "null".to_string()));
                 result.data = Some(crate::result::json_to_value(json_value));
-            } else if let Some(data) = &result.data {
-                // Structured data already present (e.g. jq, any `success_with_data`
-                // builtin): serialize that, not the rendered text. Re-wrapping the
-                // text as a JSON string would double-encode it (`"1"` not `1`) and
-                // clobber the real value. `.data` is the structured truth.
-                let json_out = serde_json::to_string(&crate::result::value_to_json(data))
-                    .unwrap_or_else(|_| "null".to_string());
-                result.set_out(json_out);
             } else {
                 // Text-only: wrap as JSON string. .data mirrors the same string.
                 let text = result.text_out().into_owned();
@@ -737,10 +746,12 @@ fn failure_envelope(mut result: ExecResult, format: OutputFormat) -> ExecResult 
                     panic!("binary result must contain byte output")
                 });
                 obj["data"] = crate::bytes::bytes_to_envelope(bytes);
-            } else if let Some(output) = result.output() {
-                obj["data"] = output.to_json();
+            } else if let Some(rich) = result.output().and_then(|o| o.rich_json.as_ref()) {
+                obj["data"] = rich.clone();
             } else if let Some(data) = &result.data {
                 obj["data"] = crate::result::value_to_json(data);
+            } else if let Some(output) = result.output() {
+                obj["data"] = output.to_json();
             } else {
                 let text = result.text_out();
                 if !text.is_empty() {
@@ -1041,6 +1052,41 @@ mod tests {
     }
 
     #[test]
+    fn apply_output_format_prefers_structured_data_over_output_tree() {
+        // `seq 1 3` sets both an OutputData node list of strings and typed
+        // `.data = [1, 2, 3]`. `--json` must serialize `.data` (numbers), not
+        // stringify via `output.to_json()` (`["1","2","3"]`).
+        use crate::value::Value;
+        let nodes = OutputData::nodes(vec![
+            OutputNode::new("1"),
+            OutputNode::new("2"),
+            OutputNode::new("3"),
+        ]);
+        let mut result = ExecResult::with_output_and_text(nodes, "1\n2\n3\n");
+        result.data = Some(Value::Json(serde_json::json!([1, 2, 3])));
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(parsed, serde_json::json!([1, 2, 3]));
+        assert_eq!(formatted.data, Some(Value::Json(serde_json::json!([1, 2, 3]))));
+        assert!(!formatted.has_output());
+    }
+
+    #[test]
+    fn apply_output_format_prefers_rich_json_over_data() {
+        use crate::value::Value;
+        let output = OutputData::text("text").with_rich_json(serde_json::json!({"rich": true}));
+        let mut result = ExecResult::with_output_and_text(output, "text");
+        result.data = Some(Value::Json(serde_json::json!([1, 2])));
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&formatted.text_out()).expect("valid JSON");
+        assert_eq!(parsed, serde_json::json!({"rich": true}));
+    }
+
+    #[test]
     fn apply_output_format_compact_json() {
         let output = OutputData::nodes(vec![
             OutputNode::new("file1"),
@@ -1186,6 +1232,19 @@ mod tests {
         let formatted = apply_output_format(result, OutputFormat::Json);
         let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
         assert_eq!(json, serde_json::json!({"code": 2, "error": "bad", "data": "kept"}));
+    }
+
+    #[test]
+    fn json_failure_prefers_data_over_output_tree() {
+        use crate::value::Value;
+        let nodes = OutputData::nodes(vec![OutputNode::new("1"), OutputNode::new("2")]);
+        let mut result = ExecResult::with_output_and_text(nodes, "1\n2\n").with_code(1);
+        result.err = "partial\n".into();
+        result.data = Some(Value::Json(serde_json::json!([1, 2])));
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json: serde_json::Value = serde_json::from_str(&formatted.text_out()).unwrap();
+        assert_eq!(json, serde_json::json!({"code": 1, "error": "partial", "data": [1, 2]}));
     }
 
     #[test]

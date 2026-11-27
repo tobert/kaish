@@ -95,7 +95,7 @@ const CASES: [(&str, &str, &str); 4] = [
     ("typedprobe", PROBE_TEXT, "\"probe\""),
     ("rawprobe", PROBE_TEXT, "\"probe\""),
     ("verbprobe", PROBE_TEXT, "\"probe\""),
-    ("seq 1", "1", "[\"1\"]"),
+    ("seq 1", "1", "[1]"),
 ];
 
 /// Run `<command> <flag>` and report whether the kernel rendered JSON.
