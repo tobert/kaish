@@ -109,6 +109,7 @@ impl Tool for Rm {
             ],
         )
         .with_operations([KernelOperation::FsRemove.as_str()])
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -54,6 +54,7 @@ impl Tool for Uniq {
                 ("Count occurrences", "sort data.txt | uniq -c"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

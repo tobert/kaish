@@ -41,6 +41,7 @@ impl Tool for Cd {
                 ("Previous directory", "cd -"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -54,6 +54,7 @@ impl Tool for Read {
                 ("Read with prompt", "read -p 'Enter value: ' VAR"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

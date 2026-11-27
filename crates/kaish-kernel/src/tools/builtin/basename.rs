@@ -40,6 +40,7 @@ impl Tool for Basename {
                 ("Remove extension", "basename /path/to/file.txt .txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -36,6 +36,7 @@ impl Tool for KaishStatus {
             "Show kernel session status",
             [("Check session status", "kaish-status")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

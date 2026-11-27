@@ -57,6 +57,7 @@ impl Tool for Cut {
                 ("Extract characters 1-10", "cut -c 1-10 file.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

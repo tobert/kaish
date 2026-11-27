@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use kaish_types::Value;
 use kaish_types::{ExecResult, OutputData, OutputNode};
-use kaish_tool_api::{schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolSchema};
+use kaish_tool_api::{schema_from_clap, GlobalFlags, Tool, ToolArgs, ToolCtx, ToolEffect, ToolSchema};
 
 /// clap-derived argv layer for ps.
 #[derive(Parser, Debug)]
@@ -77,6 +77,7 @@ impl Tool for Ps {
                 ("JSON with jq", "ps -a --json | jq '.[].command'"),
             ],
         )
+        .with_effect(ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

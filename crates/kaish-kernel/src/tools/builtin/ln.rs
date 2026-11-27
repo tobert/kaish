@@ -49,6 +49,7 @@ impl Tool for Ln {
                 ("Create with force", "ln -sf target.txt link.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

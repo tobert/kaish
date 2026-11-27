@@ -38,6 +38,7 @@ impl Tool for Unset {
                 ("Remove multiple", "unset A B C"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

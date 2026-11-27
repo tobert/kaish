@@ -61,6 +61,7 @@ impl Tool for Mv {
             ],
         )
         .with_operations([KernelOperation::FsRename.as_str()])
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

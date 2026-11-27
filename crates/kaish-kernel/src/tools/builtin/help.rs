@@ -38,6 +38,7 @@ impl Tool for Help {
                 ("Help for a tool", "help cat"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

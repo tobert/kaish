@@ -1963,10 +1963,15 @@ The `kaish_kernel` crate root re-exports the embedding surface:
 - **VFS** (module `kaish_kernel::vfs`): `Filesystem`, `VfsRouter`,
   `MemoryFs`, `LocalFs`, `MountInfo`
 - **Operations** (module `kaish_kernel::operation`): `KernelOperation` — the
-  effect classes a builtin declares through `ToolSchema::with_operations`
+  destructive operation ids a builtin declares through `ToolSchema::with_operations`
+- **Tool effects**: `ToolEffect` (`ReadOnly`, `Session`, `Write`, `Delegate`) on
+  `ToolSchema::effect` (`ToolSchema::is_read_only()`). Every built-in tool
+  declares its effect class; undeclared out-of-tree tools default to `None`
+  (`is_read_only() == false`), so consent gates can derive their read-only
+  builtin set from `Kernel::tool_schemas()` instead of maintaining a manual list.
 
 Pure data types (`ExecResult`, `OutputData`, `OutputSpan`, `Value`, `ToolSchema`,
-`ToolArgs`, …) live in the leaf crate `kaish-types`; the tool author API
+`ToolEffect`, `ToolArgs`, …) live in the leaf crate `kaish-types`; the tool author API
 (`Tool`, `ToolCtx`, `KernelBackend`) in `kaish-tool-api`. Depend on those
 directly if you're writing tools without linking the whole kernel.
 

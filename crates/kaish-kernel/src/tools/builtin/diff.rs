@@ -66,6 +66,7 @@ impl Tool for Diff {
                 ("Quiet mode", "diff -q old.txt new.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

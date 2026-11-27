@@ -97,6 +97,7 @@ impl Tool for Sed {
             ],
         )
         .with_operations([KernelOperation::FsOverwrite.as_str()])
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

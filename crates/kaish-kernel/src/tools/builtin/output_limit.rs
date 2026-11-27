@@ -41,6 +41,7 @@ impl Tool for KaishOutputLimit {
                 ("Set tail preview size", "kaish-output-limit tail 1024"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -57,6 +57,7 @@ impl Tool for Export {
                 ("List exports", "export -p"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

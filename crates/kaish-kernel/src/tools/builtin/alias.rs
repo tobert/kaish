@@ -42,6 +42,7 @@ impl Tool for Alias {
                 ("Show one alias", "alias ll"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -167,6 +168,7 @@ impl Tool for Unalias {
             "Remove command aliases",
             [("Remove an alias", "unalias ll")],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

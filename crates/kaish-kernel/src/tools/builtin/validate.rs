@@ -62,6 +62,7 @@ impl Tool for Validate {
                 ("Check exit code only", "kaish-validate -q script.kai && echo 'valid'"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

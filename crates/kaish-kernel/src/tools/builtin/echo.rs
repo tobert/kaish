@@ -52,6 +52,7 @@ impl Tool for Echo {
                 ("No trailing newline", "echo -n \"prompt: \""),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

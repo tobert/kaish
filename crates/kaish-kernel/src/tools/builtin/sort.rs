@@ -74,6 +74,7 @@ impl Tool for Sort {
                 ("Unique lines only", "sort -u file.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

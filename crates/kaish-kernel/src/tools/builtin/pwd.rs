@@ -36,6 +36,7 @@ impl Tool for Pwd {
             "Print current working directory",
             [("Show current directory", "pwd")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

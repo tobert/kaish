@@ -75,6 +75,7 @@ impl Tool for Mktemp {
                 ("Custom template", "mktemp -t myapp.XXXXXX"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

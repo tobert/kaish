@@ -44,6 +44,7 @@ impl Tool for Readlink {
                 ("Canonicalize path", "readlink -f ../some/./path"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

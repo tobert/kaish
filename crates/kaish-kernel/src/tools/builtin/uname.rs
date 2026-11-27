@@ -177,6 +177,7 @@ impl Tool for Uname {
                 ("Host OS identity", "uname --host"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

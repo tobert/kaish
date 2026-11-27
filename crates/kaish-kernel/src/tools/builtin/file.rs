@@ -56,6 +56,7 @@ impl Tool for File {
                 ("Identify stdin", "cat photo | file"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -54,6 +54,7 @@ impl Tool for Mkdir {
                 ("Create nested directories", "mkdir -p src/utils/helpers"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

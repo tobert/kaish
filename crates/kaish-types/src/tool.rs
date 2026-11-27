@@ -223,6 +223,54 @@ impl ArgBinding {
     }
 }
 
+/// Declared side-effect class of a tool.
+///
+/// Published on [`ToolSchema::effect`] so an embedder gate can derive which
+/// builtins are read-only without maintaining a hand-rolled command list.
+///
+/// The safe direction of any imprecision is away from `ReadOnly`: a tool with
+/// multiple behaviors behind one schema (for example `sed` with `-i`, or
+/// `kaish-vfs` with `commit`) declares the strongest effect any of its
+/// behaviors can have, and an undeclared (`None`) tool is never read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolEffect {
+    /// Reads files, stdin, or session state and writes only to stdout/stderr.
+    /// Performs no filesystem, session-state, or process mutations, and never
+    /// dispatches another command.
+    ReadOnly,
+    /// Mutates in-process shell/session state (variables, cwd, aliases,
+    /// options, ignore/output-limit settings, job wait, screen clear) without
+    /// modifying the filesystem or spawning external processes.
+    Session,
+    /// Mutates the filesystem, VFS overlay, trash, or OS process state
+    /// (such as sending signals or resuming jobs).
+    Write,
+    /// Dispatches another command, script, or external process whose effect
+    /// depends on its arguments (`env`, `exec`, `spawn`, `timeout`, `scatter`,
+    /// `gather`).
+    Delegate,
+}
+
+impl ToolEffect {
+    /// Wire/display spelling of this effect class.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Session => "session",
+            Self::Write => "write",
+            Self::Delegate => "delegate",
+        }
+    }
+}
+
+impl std::fmt::Display for ToolEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Schema describing a tool's interface.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -317,6 +365,13 @@ pub struct ToolSchema {
     /// argv says which behavior runs. See [`ToolSchema::with_operations`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<String>,
+    /// Declared side-effect class of this tool (`read_only`, `session`,
+    /// `write`, `delegate`). `None` for out-of-tree tools that have not
+    /// declared an effect; an embedder gate must treat `None` conservatively
+    /// (not read-only). Every in-tree builtin declares this via
+    /// [`ToolSchema::with_effect`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<ToolEffect>,
 }
 
 impl ToolSchema {
@@ -337,6 +392,7 @@ impl ToolSchema {
             options_end_at_operand: false,
             typed_substitution: false,
             operations: Vec::new(),
+            effect: None,
         }
     }
 
@@ -417,6 +473,18 @@ impl ToolSchema {
     pub fn with_operations(mut self, operations: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.operations = operations.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Declare this tool's side-effect class. See [`ToolSchema::effect`].
+    pub fn with_effect(mut self, effect: ToolEffect) -> Self {
+        self.effect = Some(effect);
+        self
+    }
+
+    /// True only when this tool explicitly declares [`ToolEffect::ReadOnly`].
+    /// Undeclared (`None`) tools return `false`.
+    pub fn is_read_only(&self) -> bool {
+        self.effect == Some(ToolEffect::ReadOnly)
     }
 
     /// Enable positional->named parameter mapping for MCP/external tools.
@@ -1071,6 +1139,32 @@ mod schema_serde_tests {
         assert!(context.matches_command("ctx"));
         assert_eq!(context.subcommands.len(), 1);
         assert!(context.subcommands[0].matches_command("ls"));
+    }
+
+    #[test]
+    fn tool_effect_defaults_none_and_is_not_read_only() {
+        let schema = ToolSchema::new("custom", "out-of-tree tool");
+        assert_eq!(schema.effect, None);
+        assert!(!schema.is_read_only(), "undeclared tools must not default to read-only");
+        let json = serde_json::to_value(&schema).expect("serialize");
+        assert!(!json.as_object().unwrap().contains_key("effect"));
+    }
+
+    #[test]
+    fn tool_effect_round_trips_snake_case() {
+        for (effect, expected) in [
+            (ToolEffect::ReadOnly, "read_only"),
+            (ToolEffect::Session, "session"),
+            (ToolEffect::Write, "write"),
+            (ToolEffect::Delegate, "delegate"),
+        ] {
+            let schema = ToolSchema::new("t", "desc").with_effect(effect);
+            assert_eq!(schema.is_read_only(), effect == ToolEffect::ReadOnly);
+            let json = serde_json::to_value(&schema).expect("serialize");
+            assert_eq!(json["effect"], expected);
+            let back: ToolSchema = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(back.effect, Some(effect));
+        }
     }
 }
 

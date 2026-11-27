@@ -37,6 +37,7 @@ impl Tool for Vars {
             "List all variables in the current scope",
             [("List all variables", "kaish-vars")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

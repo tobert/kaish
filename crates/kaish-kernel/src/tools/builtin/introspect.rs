@@ -42,6 +42,7 @@ impl Tool for Tools {
                 ("Show tool detail", "kaish-tools cat"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -183,6 +184,7 @@ impl Tool for Mounts {
             "List VFS mount points",
             [("Show mount points", "kaish-mounts")],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

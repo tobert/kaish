@@ -42,6 +42,7 @@ impl Tool for KaishIgnore {
                 ("Change scope", "kaish-ignore scope enforced"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

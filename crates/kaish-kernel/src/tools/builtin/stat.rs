@@ -46,6 +46,7 @@ impl Tool for Stat {
                 ("Follow a symlink to its target", "stat -L link.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

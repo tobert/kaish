@@ -246,6 +246,7 @@ impl Tool for Grep {
                 ("Limit a recursive search by filename", "grep -rn TODO . --include='*.rs'"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

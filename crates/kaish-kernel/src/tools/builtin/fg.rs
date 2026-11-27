@@ -86,6 +86,7 @@ impl Tool for Fg {
                 ("Resume specific job", "fg 2"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

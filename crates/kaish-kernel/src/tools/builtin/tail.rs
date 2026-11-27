@@ -53,6 +53,7 @@ impl Tool for Tail {
                 ("Last 1000 bytes", "tail -c 1000 file.txt"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::ReadOnly)
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

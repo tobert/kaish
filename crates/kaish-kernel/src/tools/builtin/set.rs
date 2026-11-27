@@ -103,6 +103,7 @@ impl Tool for Set {
                 ("Disable glob expansion", "set +o glob"),
             ],
         )
+            .with_effect(crate::tools::ToolEffect::Session)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

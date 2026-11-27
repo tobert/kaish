@@ -56,6 +56,7 @@ impl Tool for KaishTrash {
         // so this names what the tool *can* post, not what every invocation
         // reaches.
         .with_operations([KernelOperation::TrashEmpty.as_str()])
+            .with_effect(crate::tools::ToolEffect::Write)
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
