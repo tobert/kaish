@@ -1603,13 +1603,10 @@ shell_compat! {
     eq: "4",
 }
 
-// kaish collects a compound's stdout and stderr separately, so `2>&1` puts
-// all of stderr after all of stdout; bash interleaves them. Same as `f 2>&1`.
 shell_compat! {
     name: loop_merged_stderr_order,
     script: "for i in 1 2; do echo \"out$i\"; echo \"err$i\" >&2; done 2>&1 | cat",
-    kaish_eq: "out1\nout2\nerr1\nerr2",
-    bash_eq: "out1\nerr1\nout2\nerr2",
+    eq: "out1\nerr1\nout2\nerr2",
 }
 
 shell_compat! {

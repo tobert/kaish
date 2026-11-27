@@ -82,7 +82,7 @@ Any other unknown flag exits 2 and points to `help NAME` for supported flags.
   - Paths outside any writable mount report a writable mount path, or say none is available.
   - Read-only mounts and read-only parent directories are refused. See `help vfs`.
 - **Compound redirects require a body command and refuse here-docs.** Invalid compound redirects exit 2. Run `: > file` to create an empty file, or pipe a here-doc into the compound. Stdin returns to the session after the body finishes.
-- **Merged streams join stdout then stderr.** Redirects like `2>&1`, `1>&2`, and shared files write captured stdout followed by stderr without interleaving. When stderr already wrote to a background job stream, `1>&2` appends stdout after published stderr. See `docs/LANGUAGE.md`, "Pipes & Redirects".
+- **Merged streams preserve recorded write order.** Redirects like `2>&1`, `1>&2`, and `&>` interleave captured stdout and stderr in write order when spans are available, falling back to stdout then stderr after a spill or overflow. When stderr already wrote to a background job stream, `1>&2` appends stdout after published stderr. See `docs/LANGUAGE.md`, "Pipes & Redirects".
 - **Reading and writing the same file is refused.** Commands like `sort < f > f` and `cat < f >> f` exit 1. Write to a temporary file first, then `mv` or append it.
 - **Recursion depth is capped at 48.** Nested `$(…)`, recursive functions, and sourced `.kai` scripts stop with `maximum recursion depth exceeded` at depth 48.
 

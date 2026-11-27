@@ -124,6 +124,22 @@ impl BoundedStream {
         inner.buffer.iter().copied().collect()
     }
 
+    /// Read a byte range `[offset, offset + limit)` from the currently retained
+    /// ring buffer without cloning the entire ring. Offsets are relative to the
+    /// retained head, matching `Filesystem::read_range` on a bounded buffer.
+    pub async fn read_range(&self, offset: u64, limit: Option<u64>) -> Vec<u8> {
+        let inner = self.inner.read().await;
+        let len = inner.buffer.len();
+        let start = usize::try_from(offset).unwrap_or(len).min(len);
+        let end = match limit {
+            Some(l) => start
+                .saturating_add(usize::try_from(l).unwrap_or(usize::MAX))
+                .min(len),
+            None => len,
+        };
+        inner.buffer.range(start..end).copied().collect()
+    }
+
     /// Read the current buffer as a string (lossy UTF-8 conversion).
     pub async fn read_string(&self) -> String {
         let data = self.read().await;

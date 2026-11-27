@@ -514,6 +514,19 @@ fn redirect_error(path: &str, error: &crate::backend::BackendError) -> String {
     format!("redirect: {path}: {reason}")
 }
 
+/// Collect stdout and stderr bytes in recorded [`ExecResult::chunks`] write
+/// order (falling back to stdout-then-stderr when no `stream_order` spans are
+/// present).
+fn merge_ordered_bytes(result: &ExecResult) -> Vec<u8> {
+    let chunks = result.chunks();
+    let total: usize = chunks.iter().map(|c| c.bytes.len()).sum();
+    let mut merged = Vec::with_capacity(total);
+    for chunk in chunks {
+        merged.extend_from_slice(&chunk.bytes);
+    }
+    merged
+}
+
 /// Apply redirects to an execution result: move stdout and stderr to the
 /// fds `redirect_sinks` resolves, then write each opened target.
 ///
@@ -535,8 +548,76 @@ pub(crate) async fn apply_redirects(
     let (stdout_sink, stderr_sink) = (sinks.stdout, sinks.stderr);
     let mut data: Vec<Vec<u8>> = vec![Vec::new(); opened.files.len()];
 
-    // stdout goes first, then stderr, wherever both land together.
-    if stdout_sink != Sink::Stdout {
+    if stdout_sink == stderr_sink {
+        // Both streams land in the same sink (`2>&1`, `1>&2`, `&> file`):
+        // join them in recorded write order via `ExecResult::chunks()` (GH #485).
+        match stdout_sink {
+            Sink::Stdout => {
+                if !result.err.is_empty() {
+                    assert_stderr_unpublished(&result);
+                    let was_bytes = result.is_bytes();
+                    let saved_data = result.data.take();
+                    let merged = merge_ordered_bytes(&result);
+                    result.clear_stdout();
+                    result.data = saved_data;
+                    result.err.clear();
+                    if was_bytes {
+                        result.set_out_bytes(merged);
+                    } else {
+                        result.set_out(String::from_utf8_lossy(&merged).into_owned());
+                    }
+                }
+            }
+            Sink::Stderr => {
+                if result.is_bytes() {
+                    // Binary stdout can't be folded into text stderr without
+                    // corruption — fail loud instead.
+                    return ExecResult::failure(
+                        1,
+                        "redirect: cannot merge binary stdout into stderr (1>&2) — \
+                         redirect it to a file or pipe through base64/xxd",
+                    );
+                }
+                if result.stderr_published_len == 0 {
+                    let merged = merge_ordered_bytes(&result);
+                    result.clear_stdout();
+                    result.err = String::from_utf8_lossy(&merged).into_owned();
+                } else {
+                    // Published stderr cannot move; stdout follows it.
+                    let text = result.text_out().into_owned();
+                    result.clear_stdout();
+                    result.err.push_str(&text);
+                }
+            }
+            Sink::File(index) => {
+                assert_stderr_unpublished(&result);
+                if result.err.is_empty()
+                    || (result.stream_order().is_none() && result.output().is_some())
+                {
+                    // Fast/streaming path when there is no interleaved stderr to
+                    // weave in: stream structured OutputData straight into bytes
+                    // without materializing a full intermediate String.
+                    if let Some(bytes) = result.out_bytes() {
+                        data[index].extend_from_slice(bytes);
+                    } else if let Some(output) = result.take_output_for_stream() {
+                        if let Err(e) = output.write_canonical(&mut data[index], None) {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
+                        }
+                    } else {
+                        data[index].extend_from_slice(result.text_out().as_bytes());
+                    }
+                    if !result.err.is_empty() {
+                        data[index].extend_from_slice(result.err.as_bytes());
+                    }
+                } else {
+                    let merged = merge_ordered_bytes(&result);
+                    data[index].extend_from_slice(&merged);
+                }
+                result.clear_stdout();
+                result.err.clear();
+            }
+        }
+    } else if stdout_sink != Sink::Stdout {
         if stdout_sink == Sink::Stderr && result.is_bytes() {
             // Binary stdout can't be folded into text stderr without
             // corruption — fail loud instead.
@@ -573,10 +654,8 @@ pub(crate) async fn apply_redirects(
             Sink::Stderr => {
                 let text = String::from_utf8_lossy(&stdout);
                 if result.stderr_published_len == 0 {
-                    // Stdout first, as `2>&1` and a shared file do.
                     result.err.insert_str(0, &text);
                 } else {
-                    // Published stderr cannot move; stdout follows it.
                     result.err.push_str(&text);
                 }
             }
@@ -592,10 +671,7 @@ pub(crate) async fn apply_redirects(
         assert_stderr_unpublished(&result);
         let stderr = std::mem::take(&mut result.err);
         match stderr_sink {
-            Sink::Stdout => {
-                result.materialize();
-                result.push_out(&stderr);
-            }
+            Sink::Stdout => unreachable!("handled by stdout_sink == stderr_sink"),
             Sink::File(index) => data[index].extend_from_slice(stderr.as_bytes()),
             Sink::Stderr => {}
         }
@@ -718,16 +794,23 @@ pub(crate) async fn finish_redirects(
     // there already reached the stream via the leaf's own live publish).
     // Stdout that went elsewhere was never published live, so none of
     // what ends up in stdout is prior.
-    let prior_out: Option<Vec<u8>> = merges_stderr_into_stdout(in_effect).then(|| match result.out_bytes() {
-        _ if redirects_stdout(in_effect) => Vec::new(),
-        Some(bytes) => bytes.to_vec(),
-        None => result.text_out().into_owned().into_bytes(),
+    let prior_out: Option<(Vec<u8>, Vec<u8>)> = (ctx.will_publish_job_stdout()
+        && merges_stderr_into_stdout(in_effect))
+    .then(|| {
+        let out = match result.out_bytes() {
+            _ if redirects_stdout(in_effect) => Vec::new(),
+            Some(bytes) => bytes.to_vec(),
+            None => result.text_out().into_owned().into_bytes(),
+        };
+        let err = result.err.as_bytes().to_vec();
+        (out, err)
     });
 
     result = apply_redirects(result, in_effect, &opened, ctx).await;
 
-    if let Some(prior_out) = prior_out {
-        ctx.publish_job_stdout_suffix(&prior_out, &result).await;
+    if let Some((prior_out, merged_err)) = prior_out {
+        ctx.publish_job_stdout_suffix(&prior_out, &merged_err, &result)
+            .await;
     }
     result
 }

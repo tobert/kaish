@@ -1,6 +1,7 @@
-//! Captured `1>&2` joins stdout and stderr as two blocks, stdout first,
-//! the order `2>&1` already uses. Already-published stderr stays first. Neither follows write order inside one
-//! command; `docs/LANGUAGE.md`, "Pipes & Redirects" states the limit.
+//! Captured `1>&2` and `2>&1` interleave stdout and stderr in recorded write
+//! order when `StreamOrder` spans are present, falling back to stdout then
+//! stderr otherwise. Already-published stderr on a background job stays first.
+//! See `docs/LANGUAGE.md`, "Pipes & Redirects".
 
 #![cfg(all(feature = "localfs", feature = "subprocess"))]
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
@@ -33,11 +34,10 @@ async fn builtin_stdout_precedes_its_stderr_under_1_to_2() {
 }
 
 #[tokio::test]
-async fn function_stdout_precedes_its_stderr_under_1_to_2() {
+async fn function_merge_preserves_write_order_under_1_to_2_and_2_to_1() {
     let (err, out) = merged("both").await;
-    // bash writes `out err out2 err2` (write order). kaish joins blocks.
-    assert_eq!(err, "out\nout2\nerr\nerr2\n");
-    assert_eq!(out, err, "`1>&2` and `2>&1` join the blocks alike");
+    assert_eq!(err, "out\nerr\nout2\nerr2\n");
+    assert_eq!(out, err, "`1>&2` and `2>&1` preserve write order alike");
 }
 
 #[tokio::test]
@@ -66,9 +66,16 @@ async fn external_job_captured_merge_reaches_stderr_once() {
     let id = kaish_kernel::scheduler::JobId(1);
     let result = kernel.jobs().wait(id).await.unwrap();
     assert_eq!(result.code, 0);
-    assert_eq!(result.err, "out\nerr\n");
+    // Two OS pipes can deliver back-to-back writes in either order; the
+    // contract here is that both lines land once and result.err matches the
+    // job's stderr stream verbatim.
+    assert!(
+        result.err == "out\nerr\n" || result.err == "err\nout\n",
+        "expected both lines once, got {:?}",
+        result.err
+    );
     let stderr = String::from_utf8(kernel.jobs().read_stderr(id).await.unwrap()).unwrap();
-    assert_eq!(stderr, "out\nerr\n");
+    assert_eq!(stderr, result.err);
     assert!(kernel.jobs().read_stdout(id).await.unwrap().is_empty());
 }
 
@@ -79,7 +86,7 @@ async fn merge_into_stderr_leaves_pipeline_stdout_empty() {
     let result = kernel.execute(&format!("{BOTH}both 1>&2 | cat")).await.unwrap();
     assert_eq!(result.code, 0);
     assert_eq!(result.text_out(), "");
-    assert_eq!(result.err, "out\nout2\nerr\nerr2\n");
+    assert_eq!(result.err, "out\nerr\nout2\nerr2\n");
 }
 
 #[tokio::test]

@@ -155,6 +155,34 @@ impl Filesystem for JobFs {
         }
     }
 
+    async fn read_range(
+        &self,
+        path: &Path,
+        range: Option<kaish_types::ReadRange>,
+    ) -> io::Result<Vec<u8>> {
+        let Some(range) = range else {
+            return self.read(path).await;
+        };
+        // Byte-range reads on `stdout` / `stderr` slice the BoundedStream ring
+        // directly (O(chunk) instead of copying the entire ring on every chunk).
+        if (range.offset.is_some() || range.limit.is_some())
+            && let Some((Some(job_id), Some(file @ ("stdout" | "stderr")))) = Self::parse_path(path)
+        {
+            if !self.jobs.exists(job_id).await {
+                return Err(io::Error::new(io::ErrorKind::NotFound, job_id.to_string()));
+            }
+            let offset = range.offset.unwrap_or(0);
+            let bytes = match file {
+                "stdout" => self.jobs.read_stdout_range(job_id, offset, range.limit).await,
+                "stderr" => self.jobs.read_stderr_range(job_id, offset, range.limit).await,
+                _ => unreachable!(),
+            };
+            return bytes.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, job_id.to_string()));
+        }
+        let data = self.read(path).await?;
+        Ok(range.apply(&data))
+    }
+
     async fn write(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::ReadOnlyFilesystem,
