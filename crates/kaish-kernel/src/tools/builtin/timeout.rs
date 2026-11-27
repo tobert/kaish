@@ -176,6 +176,12 @@ impl Timeout {
             );
         };
 
+        // Zero duration: time out immediately without spawning/racing the child,
+        // matching `ExecuteOptions::timeout == Some(Duration::ZERO)`.
+        if duration.is_zero() {
+            return ExecResult::failure(124, format!("timeout: timed out after {}", duration_str));
+        }
+
         // Derive a child cancel token from the current ctx token. The timer
         // task cancels it on elapsed; the cascade fires SIGTERM/SIGKILL on
         // any external children via wait_or_kill. Swap the child token onto

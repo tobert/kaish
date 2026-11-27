@@ -67,7 +67,14 @@ impl Tool for Head {
             if *n < 0 {
                 let count = n.unsigned_abs() as i64;
                 args.named.insert("lines".to_string(), Value::Int(count));
+                args.named_raw.remove("lines");
                 args.positional.remove(0);
+                let old_raw = std::mem::take(&mut args.positional_raw);
+                for (idx, raw) in old_raw {
+                    if let Some(shifted) = idx.checked_sub(1) {
+                        args.positional_raw.insert(shifted, raw);
+                    }
+                }
             }
         }
 
@@ -96,7 +103,7 @@ impl Tool for Head {
         let wants_anchors = parsed.global.apply_hashline(parsed.hashline, ctx);
 
         // Collect all file paths, expanding globs
-        let paths = match ctx.expand_paths(&args.positional).await {
+        let paths = match ctx.positional_paths(&args) {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(1, format!("head: {}", e)),
         };
@@ -657,22 +664,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_head_glob() {
+    async fn test_head_does_not_reglob_literal_operand() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("*.txt".into()));
         args.named.insert("lines".to_string(), Value::Int(2));
 
         let result = Head.execute(args, &mut ctx).await;
-        assert!(result.ok());
-        // Multiple files: should have headers
-        assert!(result.text_out().contains("==>"));
-        // Should contain first 2 lines from lines.txt
-        assert!(result.text_out().contains("line 1"));
-        assert!(result.text_out().contains("line 2"));
-        // Should contain first 2 lines from short.txt
-        assert!(result.text_out().contains("one"));
-        assert!(result.text_out().contains("two"));
+        assert!(!result.ok());
     }
 
     #[tokio::test]

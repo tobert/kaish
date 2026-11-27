@@ -83,12 +83,12 @@ impl Tool for Cut {
                 Err(e) => return ExecResult::failure(2, format!("cut: {e}")),
             }
         } else {
+            let paths = match ctx.positional_paths(&args) {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(1, format!("cut: {e}")),
+            };
             let mut acc = String::new();
-            for value in &args.positional {
-                let path = match crate::interpreter::value_to_text_sink_named(value, "a path") {
-                    Ok(p) => p,
-                    Err(e) => return ExecResult::failure(1, format!("cut: {e}")),
-                };
+            for path in paths {
                 let resolved = ctx.resolve_path(&path);
                 match ctx
                     .backend
@@ -96,7 +96,12 @@ impl Tool for Cut {
                     .await
                 {
                     Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => acc.push_str(&s),
+                        Ok(s) => {
+                            if !acc.is_empty() && !acc.ends_with('\n') && !s.is_empty() {
+                                acc.push('\n');
+                            }
+                            acc.push_str(&s);
+                        }
                         Err(_) => errors.push_str(&format!("cut: {}: invalid UTF-8\n", path)),
                     },
                     Err(e) => errors.push_str(&format!("cut: {}: {}\n", path, e)),

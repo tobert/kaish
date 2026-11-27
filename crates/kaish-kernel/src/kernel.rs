@@ -7176,6 +7176,7 @@ async fn consume_flag_positionals(
     tool_args: &mut ToolArgs,
 ) -> Result<()> {
     let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
+    let mut single_raw: Option<String> = None;
     for _ in 0..consumes.max(1) {
         // A `key=value` (WordAssign) token is consumable only by a
         // single-value flag (`-v a=1`). For a multi-value flag (`jq --arg
@@ -7196,6 +7197,9 @@ async fn consume_flag_positionals(
             Some(pos_idx) => match &args[pos_idx] {
                 Arg::Positional(expr) => match source.eval(expr).await? {
                     Some(value) => {
+                        if let Expr::NumericLiteral { raw, .. } = expr {
+                            single_raw = Some(raw.clone());
+                        }
                         collected.push(value);
                         consumed.insert(pos_idx);
                     }
@@ -7227,15 +7231,16 @@ async fn consume_flag_positionals(
                 // scalar value (see `positional_indices` construction).
                 Arg::WordAssign { key, value } => match source.eval(value).await? {
                     Some(val) => {
-                        // Loud on binary (GH #116): `-v a=$BIN` must not silently
-                        // reassemble the `[binary: N bytes]` placeholder into the
-                        // flag's value — same text-sink boundary as the primary
-                        // sinks fixed in #93 item 1.
-                        let val_str = crate::interpreter::value_to_text_sink_named(
-                            &val,
-                            "a key=value argument",
-                        )
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        // Preserve exact numeric-literal spelling (`-v a=0.10`),
+                        // and stay loud on binary (GH #116).
+                        let val_str = match value {
+                            Expr::NumericLiteral { raw, .. } => raw.clone(),
+                            _ => crate::interpreter::value_to_text_sink_named(
+                                &val,
+                                "a key=value argument",
+                            )
+                            .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        };
                         collected.push(Value::String(format!("{key}={val_str}")));
                         consumed.insert(pos_idx);
                     }
@@ -7273,6 +7278,11 @@ async fn consume_flag_positionals(
                 push_repeatable_value(tool_args, flag_name, canonical, 1, v)?;
             } else {
                 tool_args.named.insert(canonical.to_string(), v);
+                if let Some(raw) = single_raw {
+                    tool_args.named_raw.insert(canonical.to_string(), raw);
+                } else {
+                    tool_args.named_raw.remove(canonical);
+                }
             }
         }
         return Ok(());
@@ -7805,6 +7815,8 @@ pub(crate) async fn bind_tool_args(
                         // `ToolArgs::named_raw`.
                         if let Expr::NumericLiteral { raw, .. } = value {
                             tool_args.named_raw.insert(key.clone(), raw.clone());
+                        } else {
+                            tool_args.named_raw.remove(key);
                         }
                         tool_args.named.insert(key.clone(), val);
                     }
@@ -7827,6 +7839,8 @@ pub(crate) async fn bind_tool_args(
                     if accepts_word_assign && !past_double_dash {
                         if let Expr::NumericLiteral { raw, .. } = value {
                             tool_args.named_raw.insert(key.clone(), raw.clone());
+                        } else {
+                            tool_args.named_raw.remove(key);
                         }
                         tool_args.named.insert(key.clone(), val);
                     } else {

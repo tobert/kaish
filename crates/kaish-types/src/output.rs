@@ -168,7 +168,11 @@ impl OutputNode {
     /// Estimate brace-notation byte size without materializing.
     pub fn estimated_byte_size(&self) -> usize {
         if self.children.is_empty() {
-            self.name.len() + self.text.as_ref().map_or(0, |t| t.len())
+            if self.is_text_only() {
+                self.text.as_ref().map_or(0, |t| t.len())
+            } else {
+                self.name.len()
+            }
         } else {
             // "name/{child1,child2,...}"
             let mut size = self.name.len() + 2; // name + "/{" + "}"
@@ -185,8 +189,13 @@ impl OutputNode {
     /// Write brace-notation to a writer. Returns bytes written.
     pub fn write_canonical(&self, w: &mut dyn std::io::Write, budget: usize) -> std::io::Result<usize> {
         if self.children.is_empty() {
-            w.write_all(self.name.as_bytes())?;
-            return Ok(self.name.len());
+            let bytes = if self.is_text_only() {
+                self.text.as_deref().unwrap_or("")
+            } else {
+                self.name.as_str()
+            };
+            w.write_all(bytes.as_bytes())?;
+            return Ok(bytes.len());
         }
         let mut written = 0;
         w.write_all(self.name.as_bytes())?;

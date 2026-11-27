@@ -1424,6 +1424,44 @@ impl ExecContext {
         walker.collect().await.map_err(|e| e.to_string())
     }
 
+    /// Convert positional arguments from `ToolArgs` to path strings without
+    /// re-globbing, preserving raw numeric literal spellings (`0.10`, `-0`).
+    ///
+    /// The kernel already expands unquoted globs before tool dispatch; builtins
+    /// must not re-glob quoted operands or variable values. Applies the same
+    /// loud type checks as [`Self::expand_paths`] on binary, structured, bool,
+    /// and null operands.
+    pub fn positional_paths(&self, args: &kaish_types::ToolArgs) -> Result<Vec<String>, String> {
+        let mut paths = Vec::with_capacity(args.positional.len());
+        for (idx, arg) in args.positional.iter().enumerate() {
+            let s = match arg {
+                Value::String(s) => s.clone(),
+                Value::Int(n) => args
+                    .positional_raw
+                    .get(&idx)
+                    .cloned()
+                    .unwrap_or_else(|| n.to_string()),
+                Value::Float(f) => args
+                    .positional_raw
+                    .get(&idx)
+                    .cloned()
+                    .unwrap_or_else(|| f.to_string()),
+                Value::Bytes(_) => {
+                    crate::interpreter::value_to_text_sink_named(arg, "a path")
+                        .map_err(|e| e.to_string())?
+                }
+                Value::Json(_) => {
+                    return Err(crate::interpreter::structured_boundary_error("a path", arg)
+                        .unwrap_or_else(|| "cannot use this value as a path".to_string()));
+                }
+                Value::Bool(b) => return Err(format!("cannot use a bool ({b}) as a path")),
+                Value::Null => return Err("cannot use null as a path".to_string()),
+            };
+            paths.push(s);
+        }
+        Ok(paths)
+    }
+
     /// Expand positional arguments, resolving glob patterns to relative paths.
     ///
     /// Used by file-processing builtins (cat, head, tail, wc) that accept

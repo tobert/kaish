@@ -21,6 +21,12 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **Numeric literal fidelity holds for positional paths, `printf`, and single-value space-form flags.** `cat 0.10`, `head -3 0.10`, `ls -1 0.10`, `printf %s -0`, and `--flag 0.10` / `-v a=0.10` preserve raw source spellings without stale `named_raw` leaks.
+- **Duration parsing rejects leading zeros and `timeout 0` no longer races.** `timeout` and `scatter --timeout` refuse `010` or `010ms` with exit 2, and `timeout 0` returns exit 124 immediately without spawning the inner command.
+- **Ten read-only builtins no longer re-glob quoted operands.** `cat`, `head`, `tail`, `wc`, `ls`, `file`, `tac`, `xxd`, `base64`, and `checksum` now treat operands as literal paths, leaving unquoted glob expansion to the kernel.
+- **`OutputNode::estimated_byte_size` now matches `write_canonical` across leaves.** Text-only leaves count and write `text`, while named leaves count and write `name` so spill estimation agrees with the brace writer.
+- **Multi-file `cut` and `sort` no longer merge unterminated lines.** Both builtins now separate non-empty unterminated files with a newline boundary so the final line of file one never concatenates onto file two.
+- **External commands with redirected stdout still tee stderr to job streams.** `spawn` now fetches job streams whenever either stdout or stderr streaming is active, keeping `/v/jobs/{id}/stderr` populated when stdout is redirected.
 - **Execute-path stack usage drops by more than half.** Splitting and boxing hot execute-path futures cuts per-`$()`-level native stack from 63 KiB to 26 KiB in dev builds, letting nested execution fit on Rust's 2 MiB stack.
 - **`--json` serializes typed `.data` before `OutputData`.** `seq 1 3 --json` now emits `[1,2,3]` instead of `["1","2","3"]`, and embedder tools returning both `.output` and `.data` surface `.data`; `rich_json` still wins first.
 - **Disk-spilled `OutputData` clears `ExecResult.output` and keeps formatted text.** `spill_output_data` now drops the un-truncated tree after spilling and preserves pre-formatted `.out` text (such as `ls -lR` columns and `grep` prefixes).
