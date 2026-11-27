@@ -12,6 +12,7 @@ breaking entries are marked **BREAKING**.
 
 ### Added
 
+- **`CommandDispatcher` gains defaulted `snapshot_user_tools` and `restore_user_tools` methods.** Custom dispatchers stay source-compatible while `Kernel` uses them so function definitions in the last stage of a pipeline write back to the caller.
 - **BREAKING:** for struct-literal `ExecuteOptions` callers, **added `ExecuteOptions::invocation` and `with_invocation`**. Propagates a typed embedder value via `kaish_kernel::current_invocation::<T>()` across foreground commands, pipelines, scatter workers, and `&` jobs without requiring tracing.
 - **`&` job lifetimes are exposed on `ExecResult` and `JobManager`.** `ExecResult::background_jobs` lists every spawned `JobId` in order. `JobManager::wait_jobs` and `JobManager::invocation::<T>` let embedders await completion and attribute delayed writes.
 - **`KernelBackend::read_with_purpose` tags file reads with `ReadPurpose`.** Backends can distinguish explicit content reads (`Content`) from mutation prep (`Edit`), script loading (`Script`), and kernel plumbing (`Internal`) while existing `read` implementations stay compatible.
@@ -21,6 +22,10 @@ breaking entries are marked **BREAKING**.
 
 ### Fixed
 
+- **macOS builds with `os-integration` now compile cleanly.** `SystemTrash` now gates `trash::os_limited` methods on platforms where the `trash` crate provides them, keeping `trash` and `trash_bytes` working on macOS while returning a clear error for listing and restore.
+- **Dropped `$(…)` futures, last-stage functions, and stage-0 panics preserve session state.** Command substitutions now restore `scope` and `user_tools` via a drop guard, last pipeline stages write back defined functions, and stage-0 panics rescue moved stdin.
+- **REPL background job notices print to stderr, and `LocalFs` stops doubling directory errors.** `notify_finished_jobs` now writes `[N] Status cmd` to stderr instead of stdout, and `LocalFs::replace` no longer repeats `is a directory`.
+- **`find` emits the root directory and handles future mtimes like GNU `find`.** Directory walks now evaluate the start operand at depth 0 when `-mindepth` is 0, and future timestamps match `-mtime -N` (including `-0`) instead of age 0.
 - **Numeric literal fidelity holds for positional paths, `printf`, and single-value space-form flags.** `cat 0.10`, `head -3 0.10`, `ls -1 0.10`, `printf %s -0`, and `--flag 0.10` / `-v a=0.10` preserve raw source spellings without stale `named_raw` leaks.
 - **Duration parsing rejects leading zeros and `timeout 0` no longer races.** `timeout` and `scatter --timeout` refuse `010` or `010ms` with exit 2, and `timeout 0` returns exit 124 immediately without spawning the inner command.
 - **Ten read-only builtins no longer re-glob quoted operands.** `cat`, `head`, `tail`, `wc`, `ls`, `file`, `tac`, `xxd`, `base64`, and `checksum` now treat operands as literal paths, leaving unquoted glob expansion to the kernel.

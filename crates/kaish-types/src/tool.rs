@@ -802,7 +802,7 @@ impl ToolArgs {
     /// `[binary: N bytes]` placeholder). A **positional** `Value::Bytes` does
     /// NOT error here; see `value_to_argv_token`'s doc comment for why.
     ///
-    /// See the clap builtin pattern in CLAUDE.md (Contributor conventions).
+    /// See the clap builtin pattern in AGENTS.md (Contributor conventions).
     ///
     /// Equivalent to [`to_argv_excluding`](Self::to_argv_excluding)`(&[])` —
     /// same rendering path, nothing excluded.
@@ -832,7 +832,7 @@ impl ToolArgs {
     /// Only **named** keys are excludable — not flags or positionals, by
     /// design. A bool flag carries no value to protect, so there is nothing
     /// to exempt. A positional's clap-reflected field is already a
-    /// validation-only sink nobody reads (see CLAUDE.md's clap-builtin
+    /// validation-only sink nobody reads (see AGENTS.md's clap-builtin
     /// convention), so a positional `Value::Bytes` never needed an
     /// exemption in the first place — `value_to_argv_token` renders it as
     /// an inert placeholder rather than erroring. If a future case needs to
@@ -983,7 +983,7 @@ fn render_named_value(key: &str, value: &Value) -> Result<Vec<String>, ToolArgvE
 /// `Value::Bytes` renders as a visible placeholder rather than erroring —
 /// unlike the named-value path in [`render_named_value`]. This is safe only
 /// because a clap-reflected positional field is a validation-only sink (see
-/// CLAUDE.md's clap-builtin convention): no builtin reads a positional's
+/// AGENTS.md's clap-builtin convention): no builtin reads a positional's
 /// *value* off the parsed clap struct, every one of them reads the typed
 /// `Value` straight off `args.positional` instead (e.g. `push`'s `rest:
 /// Vec<String>` sink, or `write`'s content positional, which accepts real

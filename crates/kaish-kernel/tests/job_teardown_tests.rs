@@ -8,7 +8,7 @@
 //! - `Kernel::reset()` said nothing about background jobs surviving it.
 //!
 //! These tests drive the fix through `kernel.execute(...)` and the public
-//! `Kernel` methods, never a builtin's own `.execute()` — the CLAUDE.md
+//! `Kernel` methods, never a builtin's own `.execute()` — the AGENTS.md
 //! convention for exercising the real dispatch path.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.

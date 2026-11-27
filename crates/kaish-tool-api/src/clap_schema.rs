@@ -5,7 +5,7 @@
 //! argv surface. Description and examples remain hand-written — clap doesn't
 //! own those concepts.
 //!
-//! See the clap builtin pattern in CLAUDE.md (Contributor conventions).
+//! See the clap builtin pattern in AGENTS.md (Contributor conventions).
 
 use clap::{Arg, ArgAction, Command};
 

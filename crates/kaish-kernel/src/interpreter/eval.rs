@@ -969,7 +969,10 @@ fn expand_tilde_user(s: &str) -> String {
     // Format: username:x:uid:gid:gecos:home:shell
     let passwd = match std::fs::read_to_string("/etc/passwd") {
         Ok(content) => content,
-        Err(_) => return s.to_string(),
+        Err(err) => {
+            tracing::warn!(path = "/etc/passwd", error = %err, "failed to read /etc/passwd for tilde expansion");
+            return s.to_string();
+        }
     };
 
     for line in passwd.lines() {
@@ -1468,7 +1471,7 @@ mod tests {
     // the guarded `eval_string_part[s]_async`. These two arms only fire when an
     // embedder drives the sync `Evaluator` directly (or in these unit tests), so
     // they're exercised here rather than through `kernel.execute()` per
-    // CLAUDE.md's "test through kernel.execute()" convention — that convention is
+    // AGENTS.md's "test through kernel.execute()" convention — that convention is
     // about builtins reachable via the dispatch chain, and there is no such path
     // to these two sync-only arms.
 

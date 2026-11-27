@@ -199,25 +199,27 @@ impl Tool for Find {
                 }
             };
 
-            // A file operand, or a directory at -maxdepth 0, is the only
-            // entry; it sits at depth 0, which -mindepth 1 excludes.
-            if !start_stat.is_dir() || max_depth == Some(0) {
-                if gnu_mindepth == 0 {
-                    let entry = EntryView { display: start_path, info: Some(&start_stat) };
-                    let print_count = find_expr::print_count(&parsed, &entry);
-                    if print_count > 0 {
-                        let entry_type = if start_stat.is_symlink() {
-                            EntryType::Symlink
-                        } else if start_stat.is_dir() {
-                            EntryType::Directory
-                        } else {
-                            EntryType::File
-                        };
-                        for _ in 0..print_count {
-                            emit(start_path, entry_type);
-                        }
+            // The starting operand sits at depth 0, so GNU find evaluates it
+            // whenever `-mindepth` is 0 — for both files and directories.
+            if gnu_mindepth == 0 {
+                let entry = EntryView { display: start_path, info: Some(&start_stat) };
+                let print_count = find_expr::print_count(&parsed, &entry);
+                if print_count > 0 {
+                    let entry_type = if start_stat.is_symlink() {
+                        EntryType::Symlink
+                    } else if start_stat.is_dir() {
+                        EntryType::Directory
+                    } else {
+                        EntryType::File
+                    };
+                    for _ in 0..print_count {
+                        emit(start_path, entry_type);
                     }
                 }
+            }
+            // A file operand, or a directory at `-maxdepth 0`, has no children
+            // to walk.
+            if !start_stat.is_dir() || max_depth == Some(0) {
                 continue;
             }
 

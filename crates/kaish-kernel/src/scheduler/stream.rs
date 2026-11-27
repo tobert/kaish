@@ -246,7 +246,7 @@ impl StreamStats {
     /// Centralized here — not hand-written at each capture site — so the two
     /// external-command spawn sites that must stay in sync
     /// (`kernel.rs::try_execute_external` and the test-only twin
-    /// `dispatch.rs::BackendDispatcher::try_external`, see CLAUDE.md's "two
+    /// `dispatch.rs::BackendDispatcher::try_external`, see AGENTS.md's "two
     /// spawn sites" gotcha) can't drift in wording (GH #191).
     pub fn overflow_marker(&self, label: &str) -> String {
         let max_mb = self.max_size as f64 / (1024.0 * 1024.0);

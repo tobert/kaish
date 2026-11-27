@@ -307,7 +307,7 @@ fn replace_file(target: &Path, data: &[u8]) -> io::Result<()> {
         Ok(meta) if meta.is_dir() => {
             return Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
-                format!("{}: is a directory", target.display()),
+                target.display().to_string(),
             ));
         }
         Ok(meta) => Some(meta.permissions()),

@@ -828,7 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_spill_contract_remaps_exit_code_when_spill_if_needed_flips_did_spill() {
-        // Memory mode: no disk I/O, nothing to clean up (CLAUDE.md: no real
+        // Memory mode: no disk I/O, nothing to clean up (AGENTS.md: no real
         // system paths in tests) — the exit-code remap is identical either way.
         let config = OutputLimitConfig {
             max_bytes: Some(100),

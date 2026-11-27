@@ -56,6 +56,12 @@ impl Comparison {
             _ => actual == self.amount,
         }
     }
+
+    /// GNU `find` treats a future mtime as negative age: `-N` (including `-0`)
+    /// matches, while `N` (including `0`) and `+N` do not match.
+    fn holds_future(self) -> bool {
+        self.sign == '-'
+    }
 }
 
 /// Walk limits read from `-maxdepth` / `-mindepth`.
@@ -376,10 +382,10 @@ fn test_holds(test: &Test, entry: &EntryView<'_>) -> bool {
         }),
         // A test that needs stat data is false when the entry has none.
         Test::Mtime(cmp) => match entry.info.and_then(|i| i.modified) {
-            Some(modified) => {
-                let age_days = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0) / 86400;
-                cmp.holds(age_days)
-            }
+            Some(modified) => match modified.elapsed() {
+                Ok(elapsed) => cmp.holds(elapsed.as_secs() / 86400),
+                Err(_) => cmp.holds_future(),
+            },
             None => false,
         },
         Test::Size(cmp) => entry.info.is_some_and(|i| cmp.holds(i.size)),

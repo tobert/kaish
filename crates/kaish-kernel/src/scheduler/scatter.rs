@@ -1355,7 +1355,7 @@ mod tests {
     async fn worker_spills_over_the_shared_output_limit() {
         use crate::output_limit::{apply_spill_contract, OutputLimitConfig};
 
-        // Small in-memory limit (no disk writes in tests — CLAUDE.md).
+        // Small in-memory limit (no disk writes in tests — AGENTS.md).
         let mut cfg = OutputLimitConfig::agent().in_memory();
         cfg.set_limit(Some(64));
 

@@ -5779,16 +5779,53 @@ impl Kernel {
 
     /// Run a `$(...)` body and restore the session state it may have changed:
     /// scope, the function table, cwd, prev_cwd, aliases, ignore config, and
-    /// output limit. Restores when execution returns, including an error.
-    /// Dropping the execution future bypasses this cleanup.
+    /// output limit. Restores on normal return and on error; if the future is
+    /// dropped mid-await (for example on REPL Ctrl-C), a best-effort drop guard
+    /// restores the kernel's persistent `scope` and `user_tools`.
     async fn run_substitution_isolated(&self, stmts: &[Stmt], ctx: &mut ExecContext) -> Result<ExecResult> {
-        // Boxed: the scope snapshot is held across the nested `$(…)`
-        // recursion await below, so inlining it grows every
-        // command-substitution level's future (GH #48, item 4).
-        let saved_scope = Box::new(self.scope.read().await.clone());
-        let saved_user_tools = Box::new(self.user_tools.read().await.clone());
+        // RAII guard restoring the kernel's persistent `scope` and `user_tools`
+        // if this future is dropped before completing. Disarmed only after each
+        // async write lock is acquired so no await sits between disarm and
+        // restore. Boxed as a single tuple so neither `Scope` nor `HashMap`
+        // sits inline in the recursive `$(…)` future frame (GH #48, item 4).
+        struct SubshellRestoreGuard<'a> {
+            kernel: &'a Kernel,
+            saved: Option<Box<(Scope, HashMap<String, ToolDef>)>>,
+        }
+        impl Drop for SubshellRestoreGuard<'_> {
+            fn drop(&mut self) {
+                let Some(saved) = self.saved.take() else {
+                    return;
+                };
+                let (saved_scope, saved_tools) = *saved;
+                if let Ok(mut scope) = self.kernel.scope.try_write() {
+                    *scope = saved_scope;
+                } else {
+                    tracing::error!(
+                        "subshell restore guard: scope lock busy on drop; \
+                         skipping restore to avoid runtime deadlock"
+                    );
+                }
+                if let Ok(mut tools) = self.kernel.user_tools.try_write() {
+                    *tools = saved_tools;
+                } else {
+                    tracing::error!(
+                        "subshell restore guard: user_tools lock busy on drop; \
+                         skipping restore to avoid runtime deadlock"
+                    );
+                }
+            }
+        }
+
+        let mut restore_guard = SubshellRestoreGuard {
+            kernel: self,
+            saved: Some(Box::new((
+                self.scope.read().await.clone(),
+                self.user_tools.read().await.clone(),
+            ))),
+        };
         // The run's truth lives on the threaded ctx; the slot is only
-        // written when the statement finishes. Boxed alongside `saved_scope`
+        // written when the statement finishes. Boxed alongside `saved`
         // so it does not sit inline in the future across nested `$(...)`.
         let saved_ec = Box::new((
             ctx.cwd.clone(),
@@ -5802,13 +5839,20 @@ impl Kernel {
 
         {
             let mut scope = self.scope.write().await;
-            *scope = *saved_scope;
-            if let Ok(ref r) = run_result {
-                scope.set_last_result(r.clone());
-                scope.note_cmdsubst_code(r.code);
+            if let Some(ref mut saved) = restore_guard.saved {
+                *scope = std::mem::take(&mut saved.0);
+                if let Ok(ref r) = run_result {
+                    scope.set_last_result(r.clone());
+                    scope.note_cmdsubst_code(r.code);
+                }
             }
         }
-        *self.user_tools.write().await = *saved_user_tools;
+        {
+            let mut tools = self.user_tools.write().await;
+            if let Some(saved) = restore_guard.saved.take() {
+                *tools = saved.1;
+            }
+        }
         {
             let (cwd, prev_cwd, aliases, ignore_config, output_limit) = *saved_ec;
             ctx.cwd = cwd;
@@ -8226,6 +8270,14 @@ impl CommandDispatcher for Kernel {
     async fn fork_attached(&self) -> Arc<dyn CommandDispatcher> {
         let fork: Arc<Kernel> = Kernel::fork_attached(self).await;
         fork
+    }
+
+    async fn snapshot_user_tools(&self) -> Option<HashMap<String, ToolDef>> {
+        Some(self.user_tools.read().await.clone())
+    }
+
+    async fn restore_user_tools(&self, tools: HashMap<String, ToolDef>) {
+        *self.user_tools.write().await = tools;
     }
 }
 

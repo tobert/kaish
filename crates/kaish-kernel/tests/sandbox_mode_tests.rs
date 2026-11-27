@@ -206,7 +206,7 @@ async fn sandbox_external_commands_blocked() {
     // configured off (the default `cargo test --all`, which unifies
     // `subprocess` in via kaish-repl's `full` feature), or `subprocess` not
     // compiled in at all (`cargo test -p kaish-kernel --no-default-features`,
-    // CLAUDE.md's dedicated sandbox-mode CI leg). Both share this prefix and
+    // AGENTS.md's dedicated sandbox-mode CI leg). Both share this prefix and
     // neither is "command not found" — see `external_command_tests.rs` and
     // `external_commands_not_compiled_tests.rs` for the two exact messages
     // pinned individually.
@@ -230,7 +230,7 @@ async fn sandbox_external_commands_blocked() {
 // compiling. These two tests read only the `KernelConfig` field, not a live
 // kernel, so unlike `sandbox_external_commands_blocked` above they belong in
 // this file for a different reason: they must pass identically whether
-// `subprocess` is compiled in or not, and this is the file CLAUDE.md's
+// `subprocess` is compiled in or not, and this is the file AGENTS.md's
 // `--no-default-features` CI leg already runs.
 // ---------------------------------------------------------------------------
 

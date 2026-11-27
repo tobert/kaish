@@ -27,7 +27,9 @@ pub struct TrashId(pub(crate) TrashIdInner);
 
 pub(crate) enum TrashIdInner {
     /// System trash: wraps the `trash` crate's `OsString` ID.
+    /// Unused on platforms where `trash::os_limited` is unavailable (macOS/iOS/Android).
     #[cfg(feature = "os-integration")]
+    #[allow(dead_code)]
     System(OsString),
     /// Placeholder — TrashId is opaque and never constructed without a backend.
     #[cfg(not(feature = "os-integration"))]
@@ -37,6 +39,7 @@ pub(crate) enum TrashIdInner {
 impl TrashId {
     /// Create a TrashId wrapping a system trash item ID.
     #[cfg(feature = "os-integration")]
+    #[allow(dead_code)]
     pub(crate) fn system(id: OsString) -> Self {
         Self(TrashIdInner::System(id))
     }

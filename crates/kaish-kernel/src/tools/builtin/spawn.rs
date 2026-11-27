@@ -481,7 +481,7 @@ fn append_line(buffer: &mut String, line: &str) {
 /// run in. Shared by both external-command spawn sites
 /// (`kernel.rs::try_execute_external`, the production path, and
 /// `dispatch.rs::BackendDispatcher::try_external`, its test-only twin) so the
-/// wording can't drift between them — see CLAUDE.md's two-spawn-sites gotcha.
+/// wording can't drift between them — see AGENTS.md's two-spawn-sites gotcha.
 ///
 /// Deliberately hedges "if this is a CoW overlay" rather than asserting it:
 /// this same guard fires for any virtual cwd (a plain in-memory VFS mount

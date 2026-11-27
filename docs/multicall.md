@@ -94,7 +94,7 @@ interpolate against.
 
 Take `&[Value]`, not `&[String]`. Today an embedder with a typed argument
 round-trips through `to_argv()`, which **stringifies and loses** `Value::Bytes` /
-`Value::Json` (the lossy-`to_argv` hazard already noted in CLAUDE.md).
+`Value::Json` (the lossy-`to_argv` hazard already noted in AGENTS.md).
 `execute_argv(name, &[Value])` lets kaijutsu invoke one tool with a bytes blob or
 a JSON record **without stringifying** — it lands straight in
 `ToolArgs.positional: Vec<Value>`. A genuine capability gap closed, not just a
@@ -209,5 +209,5 @@ Author: design session 2026-06-22/23 (multicall curiosity → embeddable-modes
 design check).
 Related: [EMBEDDING.md](EMBEDDING.md), [LANGUAGE.md](LANGUAGE.md),
 [binary-data.md](binary-data.md) (the `to_argv` lossiness / typed-`Value`
-context). CLAUDE.md "Contributor conventions" for the
+context). AGENTS.md "Contributor conventions" for the
 two-layer clap arg model and `to_argv()` gotchas.

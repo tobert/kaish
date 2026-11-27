@@ -214,6 +214,22 @@ pub trait CommandDispatcher: Send + Sync {
     async fn fork_attached(&self) -> Arc<dyn CommandDispatcher> {
         self.fork().await
     }
+
+    /// Snapshot the shell's function table (`user_tools`) so the last stage of
+    /// a concurrent pipeline can write back newly defined functions to the
+    /// parent dispatcher, matching how `scope` writes back.
+    async fn snapshot_user_tools(
+        &self,
+    ) -> Option<std::collections::HashMap<String, crate::ast::ToolDef>> {
+        None
+    }
+
+    /// Replace the shell's function table with a snapshot from a child stage.
+    async fn restore_user_tools(
+        &self,
+        _tools: std::collections::HashMap<String, crate::ast::ToolDef>,
+    ) {
+    }
 }
 
 /// Minimal stateless dispatcher used by pipeline/runner unit tests.
@@ -770,7 +786,7 @@ impl CommandDispatcher for BackendDispatcher {
 mod external_process_tests {
     // Test-fixture helpers (not `#[test]` bodies themselves), so the
     // workspace's usual allow-in-tests clippy.toml carve-out doesn't cover
-    // them — see CLAUDE.md's "clap builtin gotchas" / test-code conventions.
+    // them — see AGENTS.md's "clap builtin gotchas" / test-code conventions.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::ast::{Arg, Command, Expr, Value};
@@ -782,7 +798,7 @@ mod external_process_tests {
     /// `try_external`, exactly like a real external command with no matching
     /// builtin/user tool) and PATH seeded from the test process's own OS env.
     /// Reading OS env here is fixture code, not kaish's hermetic runtime — see
-    /// CLAUDE.md and `external_command_tests.rs::repl_kernel`.
+    /// AGENTS.md and `external_command_tests.rs::repl_kernel`.
     fn real_cwd_dispatcher() -> (BackendDispatcher, ExecContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut vfs = VfsRouter::new();
@@ -843,7 +859,7 @@ mod external_process_tests {
     #[tokio::test]
     async fn output_limit_is_not_applied_inline_matching_production() {
         let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
-        // A tiny in-memory limit (no disk spill file — CLAUDE.md: no real
+        // A tiny in-memory limit (no disk spill file — AGENTS.md: no real
         // system paths in tests) — if try_external still spill-checked
         // inline (the bug), this would trigger truncation right here.
         ctx.output_limit = crate::output_limit::OutputLimitConfig::agent().in_memory();

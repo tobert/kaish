@@ -374,7 +374,7 @@ fn render_value(val: &Val, raw_output: bool, compact: bool) -> String {
 /// producer like `fromjson`), never sniffed from string content: a
 /// `Value::String("1")` is the kaish string `1`, and must stay the JSON
 /// string `"1"` here, not become the JSON number `1` (see
-/// `docs/arch_no_json_sniffing` / CLAUDE.md's ".data is opt-in, never
+/// `docs/arch_no_json_sniffing` / AGENTS.md's ".data is opt-in, never
 /// inferred from stdout text" invariant).
 fn ast_value_to_json(value: &Value) -> serde_json::Value {
     match value {

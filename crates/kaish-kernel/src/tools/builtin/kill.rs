@@ -55,7 +55,7 @@ pub struct Kill;
 /// see the module docs above): `signal` is never populated by a
 /// real parse (raw_argv keeps `flags`/`named` empty, so clap only ever sees
 /// the declared defaults), and `targets` is a validation-only sink — per
-/// CLAUDE.md's clap-builtin convention, never read directly.
+/// AGENTS.md's clap-builtin convention, never read directly.
 #[derive(Parser, Debug)]
 #[command(name = "kill", about = "Send a signal to a process or job")]
 struct KillArgs {

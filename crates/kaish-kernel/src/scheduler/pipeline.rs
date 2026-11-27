@@ -1106,6 +1106,12 @@ impl PipelineRunner {
         // below, and the `fork_attached` cancellation cascade owns the
         // teardown on the one path that skips the join.
         let mut handles: Vec<tokio::task::JoinHandle<(ExecResult, ExecContext)>> = Vec::with_capacity(stage_count);
+        let mut last_dispatcher: Option<Arc<dyn CommandDispatcher>> = None;
+        // Rescue slot for stage 0's moved stdin: if stage 0 panics mid-flight,
+        // its drop guard deposits whatever unread stdin remains here so the
+        // caller's session stdin is never silently lost.
+        let stage0_stdin_rescue: Arc<std::sync::Mutex<Option<crate::tools::StdinState>>> =
+            Arc::new(std::sync::Mutex::new(None));
         for (i, stage) in stages.iter().enumerate() {
             let mut stage_ctx = ctx.child_for_pipeline();
             let stage = stage.clone();
@@ -1115,15 +1121,24 @@ impl PipelineRunner {
             // parent (so a request timeout kills externals running in any
             // stage, not just the foreground one).
             let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
+            if i == last_idx {
+                last_dispatcher = Some(task_dispatcher.clone());
+            }
 
             // Redirect targets expand against the stage's original input.
             // open_redirects sets it aside only after the target is evaluated.
-            if i == 0 {
+            // Only arm the panic rescue slot when stage 0 has no input redirect;
+            // otherwise a panic inside the redirected stage would deposit the
+            // redirect file's bytes into the caller's session stdin.
+            let has_input_redirect = stage.redirects().iter().any(|r| is_input(&r.kind));
+            let stdin_rescue = if i == 0 {
                 stage_ctx.restore_stdin_state(ctx.take_stdin_state());
+                (!has_input_redirect).then(|| stage0_stdin_rescue.clone())
             } else {
                 stage_ctx.pipe_stdin = pipe_readers[i - 1].take();
                 stage_ctx.stdin_data_rx = data_receivers[i - 1].take();
-            }
+                None
+            };
 
             // Wire pipe_stdout: last stage writes to ExecResult, others write to pipe
             if i < last_idx {
@@ -1144,6 +1159,25 @@ impl PipelineRunner {
             // so each concurrent stage's spans stay in the same trace.
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
                 tokio::spawn(crate::telemetry::bind_current_context(async move {
+                struct Stage0StdinGuard {
+                    ctx: Option<ExecContext>,
+                    rescue: Option<Arc<std::sync::Mutex<Option<crate::tools::StdinState>>>>,
+                }
+                impl Drop for Stage0StdinGuard {
+                    fn drop(&mut self) {
+                        if let (Some(mut ctx), Some(rescue)) = (self.ctx.take(), self.rescue.take())
+                            && let Ok(mut slot) = rescue.lock()
+                        {
+                            *slot = Some(ctx.take_stdin_state());
+                        }
+                    }
+                }
+                let mut guard = Stage0StdinGuard {
+                    ctx: Some(stage_ctx),
+                    rescue: stdin_rescue,
+                };
+                #[allow(clippy::expect_used)]
+                let stage_ctx = guard.ctx.as_mut().expect("stage_ctx present until return");
                 // A consumer resolves the sideband after draining its pipe;
                 // awaiting it before dispatch could block a streaming producer.
                 // Open the stage's redirects inside its own task, after its
@@ -1151,13 +1185,13 @@ impl PipelineRunner {
                 // redirect targets in its own subshell: a target's `$(cat)`
                 // reads this stage's stdin. A failure fails only this stage,
                 // through the normal join/collection path.
-                let opened = open_redirects(stage.redirects(), &mut stage_ctx, &*task_dispatcher).await;
+                let opened = open_redirects(stage.redirects(), stage_ctx, &*task_dispatcher).await;
 
                 // The stage's own (forked) dispatcher runs it: the borrowed
                 // `dispatcher` can't cross the spawn boundary, and
                 // `stage_ctx.dispatcher` is `None` on a bare kernel (GH #90).
                 // A stage is a subshell: its `exit` ends the stage, not the script.
-                let mut result = run_opened_stage(&stage, opened, &mut stage_ctx, &*task_dispatcher)
+                let mut result = run_opened_stage(&stage, opened, stage_ctx, &*task_dispatcher)
                     .await
                     .into_absorbed_result();
 
@@ -1242,6 +1276,8 @@ impl PipelineRunner {
                     // Drop pipe_out signals EOF to next stage's reader
                 }
 
+                #[allow(clippy::expect_used)]
+                let stage_ctx = guard.ctx.take().expect("stage_ctx present on return");
                 (result, stage_ctx)
             }));
 
@@ -1279,9 +1315,20 @@ impl PipelineRunner {
                         ctx.aliases = stage_ctx.aliases;
                         ctx.ignore_config = stage_ctx.ignore_config;
                         ctx.output_limit = stage_ctx.output_limit;
+                        if let Some(ref last_disp) = last_dispatcher
+                            && let Some(tools) = last_disp.snapshot_user_tools().await
+                        {
+                            dispatcher.restore_user_tools(tools).await;
+                        }
                     }
                 }
                 Err(e) => {
+                    if i == 0
+                        && let Ok(mut slot) = stage0_stdin_rescue.lock()
+                        && let Some(stdin_state) = slot.take()
+                    {
+                        ctx.restore_stdin_state(stdin_state);
+                    }
                     panics.push(format!("stage {}: {}", i, e));
                 }
             }
