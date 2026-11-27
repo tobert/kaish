@@ -108,7 +108,15 @@ pub struct ExecuteOptions {
     ///
     /// Use this to run one call (e.g. a security/gating hook) with errexit
     /// on while the kernel's other calls keep the shell-standard default off.
+    /// Force errexit on or off for this call only. See above for precedence.
     pub errexit: Option<bool>,
+    /// Opaque embedder-defined invocation identity carried through execution.
+    ///
+    /// The kernel binds this value onto the execution task and propagates it
+    /// across concurrent pipeline stages, scatter workers, and `&` background
+    /// jobs without depending on tracing. Inside a `KernelBackend` method,
+    /// read it back with `kaish_kernel::current_invocation::<T>()`.
+    pub invocation: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl ExecuteOptions {
@@ -195,6 +203,25 @@ impl ExecuteOptions {
     /// exact precedence and restore behavior.
     pub fn with_errexit(mut self, enabled: bool) -> Self {
         self.errexit = Some(enabled);
+        self
+    }
+
+    /// Attach a typed embedder value identifying this execution.
+    ///
+    /// Carried across pipeline stages, scatter workers, and `&` background
+    /// jobs, independent of tracing. Inside a `KernelBackend` method, read it
+    /// back with `kaish_kernel::current_invocation::<T>()`.
+    pub fn with_invocation<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.invocation = Some(std::sync::Arc::new(value));
+        self
+    }
+
+    /// Attach a pre-boxed invocation identity (see [`Self::with_invocation`]).
+    pub fn with_invocation_arc(
+        mut self,
+        value: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        self.invocation = Some(value);
         self
     }
 }

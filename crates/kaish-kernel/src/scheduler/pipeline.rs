@@ -282,7 +282,11 @@ pub(crate) async fn open_redirects(
             (RedirectKind::MergeStderr | RedirectKind::MergeStdout, _) => Ok(()),
             (RedirectKind::Stdin, Some(path)) => {
                 let resolved = ctx.resolve_path(path);
-                match ctx.backend.read(&resolved, None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(&resolved, None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => {
                         redirect_stdin(ctx, &mut opened, data);
                         Ok(())

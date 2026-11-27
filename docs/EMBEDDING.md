@@ -836,6 +836,39 @@ Fields:
 - **`traceparent` / `tracestate` / `baggage`** — W3C trace context;
   kaish's execution span parents onto your trace, and baggage merges back
   out through `ExecResult.baggage`.
+- **`invocation`** — `with_invocation(value)` attaches a typed embedder value
+  identifying this execution (`Arc<dyn Any + Send + Sync>`). The kernel binds
+  it onto the task and propagates it across concurrent pipeline stages, scatter
+  workers, and `&` background jobs, independent of tracing. Inside a
+  `KernelBackend` method, read it back with
+  `kaish_kernel::current_invocation::<T>()`.
+
+### Tracking file activity and `&` job lifetimes
+
+Backends that track which files an execution read or wrote have three seams:
+
+- **Invocation identity** — Set `ExecuteOptions::with_invocation(my_id)` and
+  read `kaish_kernel::current_invocation::<MyId>()` inside `KernelBackend`
+  methods. Propagation uses a `tokio::task_local!` and does not require a
+  tracing subscriber.
+- **Explicit content reads** — Override `KernelBackend::read_with_purpose` to
+  inspect `ReadPurpose` (`Content`, `Edit`, `Script`, `Internal`). `cat`,
+  `head`, `tail`, `grep`, `wc`, `file`, `sed`, `awk`, `cut`, `diff`, `cmp`,
+  `sort`, `uniq`, `tac`, `base64`, `xxd`, `checksum`, `dd`, `jq`,
+  `kaish-validate`, and `< file` redirects pass `ReadPurpose::Content`.
+  Mutation prep (`edit`, `patch`, `sed -i`, `cp`, cross-mount `mv`) passes
+  `ReadPurpose::Edit`, `source`/`.kai` loading passes `ReadPurpose::Script`,
+  and kernel plumbing (`.gitignore` walking, trash snapshots, compare-and-swap
+  checks) passes `ReadPurpose::Internal`. The default implementation delegates
+  to `read`.
+- **`&` job lifetimes** — `ExecResult.background_jobs` lists every `JobId`
+  spawned by `&` during the call (including inside `$(…)`, non-last pipeline
+  stages, and scatter workers), in spawn order. Pass `&result.background_jobs`
+  to `JobManager::wait_jobs` to await their completion (finished jobs past
+  `finished_retention`, default 100, may be evicted before they are waited), or
+  query `JobManager::invocation::<MyId>(job_id)` and `JobManager::get(job_id)`
+  (whose `finished_at` is stamped when the job completes). Delayed backend
+  writes from `&` jobs continue to observe the originating invocation.
 
 ### Neither `timeout` nor `cancel_token` bounds a background (`&`) job
 

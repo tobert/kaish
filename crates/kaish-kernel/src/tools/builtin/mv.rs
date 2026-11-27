@@ -213,7 +213,9 @@ async fn move_path(
         backend.remove(src, true).await?;
     } else {
         // Copy file, then remove source
-        let data = backend.read(src, None).await?;
+        let data = backend
+            .read_with_purpose(src, None, crate::backend::ReadPurpose::Edit)
+            .await?;
         let _ = backend.remove(&final_dst, false).await;
         backend.write(&final_dst, &data, WriteMode::Overwrite).await?;
         backend.remove(src, false).await?;
@@ -249,7 +251,9 @@ fn move_dir_recursive<'a>(
             } else if entry.is_dir() {
                 move_dir_recursive(backend, &src_child, &dst_child).await?;
             } else {
-                let data = backend.read(&src_child, None).await?;
+                let data = backend
+                    .read_with_purpose(&src_child, None, crate::backend::ReadPurpose::Edit)
+                    .await?;
                 backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
             }
         }

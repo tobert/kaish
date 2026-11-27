@@ -280,7 +280,11 @@ impl Tool for Sed {
         let input = match get_path_string(&args, "path", file_pos) {
             Ok(Some(path)) => {
                 let resolved = ctx.resolve_path(&path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(data) => match String::from_utf8(data) {
                         Ok(s) => s,
                         Err(_) => {

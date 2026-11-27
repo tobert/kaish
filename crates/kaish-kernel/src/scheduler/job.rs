@@ -10,7 +10,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::interpreter::ExecResult;
@@ -133,6 +133,11 @@ pub struct Job {
     /// `try_poll` the moment `self.result` transitions from `None` to `Some`.
     /// Surfaced on `JobInfo.finished_at` (GH #243).
     finished_at: Option<SystemTime>,
+    /// Embedder invocation identity active when this job was started.
+    invocation: Option<crate::invocation::Invocation>,
+    /// Notified when the job's result arrives so `JobManager::wait` wakes
+    /// immediately instead of waiting out the poll interval.
+    done_notify: Arc<Notify>,
 }
 
 impl Job {
@@ -157,6 +162,8 @@ impl Job {
             pgids: Vec::new(),
             started_at: kaish_types::clock::system_now(),
             finished_at: None,
+            invocation: None,
+            done_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -181,6 +188,8 @@ impl Job {
             pgids: Vec::new(),
             started_at: kaish_types::clock::system_now(),
             finished_at: None,
+            invocation: None,
+            done_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -209,6 +218,8 @@ impl Job {
             // strict improvement over having no timestamp at all.
             started_at: kaish_types::clock::system_now(),
             finished_at: None,
+            invocation: None,
+            done_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -575,7 +586,7 @@ pub struct JobManager {
     /// make room (GH #244: nothing auto-reaped, so a long-lived embedder
     /// accumulated results, streams, and temp files without bound). Enforced
     /// at registration time — see [`Self::enforce_retention_locked`] for what
-    /// "finished" excludes (gated and stopped jobs are never evicted).
+    /// "finished" excludes (running and stopped jobs are never evicted).
     finished_retention: AtomicU64,
 }
 
@@ -628,8 +639,8 @@ impl JobManager {
     }
 
     /// Set how many finished jobs stay tracked (default 100,
-    /// `DEFAULT_FINISHED_RETENTION`). `0` keeps no finished jobs beyond the
-    /// gate-safety rule — gated and stopped jobs are never evicted regardless.
+    /// `DEFAULT_FINISHED_RETENTION`). `0` keeps no finished jobs; running and
+    /// stopped jobs are never evicted regardless.
     pub fn set_finished_retention(&self, keep: u64) {
         self.finished_retention.store(keep, Ordering::Relaxed);
     }
@@ -669,6 +680,7 @@ impl JobManager {
         let handle = tokio::spawn(crate::telemetry::bind_current_context(future));
         let mut job = Job::new(id, self.session_id, command, handle);
         job.persist_output = self.persist_output_files();
+        job.invocation = crate::invocation::current_invocation_raw();
 
         // Insert under an async lock — NOT a busy-spin on try_lock. The old
         // sync spin could livelock the executor: on a current-thread runtime it
@@ -688,6 +700,7 @@ impl JobManager {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
         let mut job = Job::from_channel(id, self.session_id, command, rx);
         job.persist_output = self.persist_output_files();
+        job.invocation = crate::invocation::current_invocation_raw();
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
@@ -751,17 +764,18 @@ impl JobManager {
 
     /// Wait for a specific job to complete.
     ///
-    /// Returns `None` when the job does not exist **or is stopped** — a stopped
-    /// job can never finish, so waiting on one would hang forever. Callers that
-    /// need to tell the two apart check [`JobManager::get`] after a `None`.
+    /// Returns `None` when the job does not exist (including when it was
+    /// already evicted by [`Self::set_finished_retention`]) **or is stopped** —
+    /// a stopped job can never finish, so waiting on one would hang forever.
+    /// Callers that need to tell the two apart check [`JobManager::get`] after
+    /// a `None`.
     ///
-    /// The job's pending awaitable (its task handle or result channel) is taken
-    /// out of the map under the lock, then the lock is **released before**
-    /// awaiting completion. Holding the `jobs` mutex across the await would
-    /// block every other job operation (spawn/register/list/status/kill) for the
-    /// whole duration of the job — so a nested `&` started under a parked
-    /// `wait %N` would deadlock. The lock is re-acquired only to finalize
-    /// (persist output, cache the result).
+    /// Polls `is_done` under the jobs lock, releases the lock before awaiting
+    /// completion (so nested `&` jobs and other manager calls never deadlock),
+    /// and wakes immediately when the kernel's job task finishes (with a 10 ms
+    /// fallback for [`Self::spawn`] jobs and races). The job's handle stays in
+    /// the map until completion so dropping a waiter mid-wait never orphans
+    /// the result.
     pub async fn wait(&self, id: JobId) -> Option<ExecResult> {
         // Poll for completion WITHOUT removing the job's `JoinHandle` from the
         // map: `Job::try_poll` (via `is_done`) consumes the handle only once it
@@ -775,7 +789,7 @@ impl JobManager {
         // Cost is up to one poll interval of latency on completion — imperceptible
         // for a job wait, and the sleep keeps idle CPU at zero.
         loop {
-            {
+            let notify = {
                 let mut jobs = self.jobs.lock().await;
                 let job = jobs.get_mut(&id)?;
                 // A stopped job can never finish: `is_done()` returns `false`
@@ -808,10 +822,79 @@ impl JobManager {
                     self.enforce_retention_locked(&mut jobs);
                     return Some(result);
                 }
-            }
+                job.done_notify.clone()
+            };
             // Lock released between polls — other job ops run freely.
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // `notify` wakes immediately when `send_job_result` finishes; the
+            // 10ms fallback covers `Job::new(handle)` jobs and any race
+            // between dropping the lock and awaiting `notified()`.
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
         }
+    }
+
+    /// Wait for a specific set of jobs to finish, returning `(JobId, ExecResult)`
+    /// for each job in `ids` that is still tracked and not stopped.
+    ///
+    /// Pass `&result.background_jobs` after `Kernel::execute_with_options` to
+    /// await `&` jobs spawned by that execution without waiting on other jobs
+    /// in the session. Finished jobs past [`Self::set_finished_retention`]
+    /// (default 100) may be evicted before `wait_jobs` reaches them; raise the
+    /// retention cap if a single script spawns more than 100 `&` jobs.
+    pub async fn wait_jobs(&self, ids: &[JobId]) -> Vec<(JobId, ExecResult)> {
+        let mut results = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Some(result) = self.wait(id).await {
+                results.push((id, result));
+            }
+        }
+        results
+    }
+
+    /// Record or replace the embedder invocation identity for a job.
+    pub(crate) async fn set_invocation(
+        &self,
+        id: JobId,
+        invocation: Option<crate::invocation::Invocation>,
+    ) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(&id) {
+            job.invocation = invocation;
+        }
+    }
+
+    /// Return the raw embedder invocation identity recorded when job `id`
+    /// started, or `None` if the job does not exist or had no invocation.
+    pub async fn invocation_raw(&self, id: JobId) -> Option<crate::invocation::Invocation> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id).and_then(|job| job.invocation.clone())
+    }
+
+    /// Return the typed embedder invocation identity recorded when job `id`
+    /// started, or `None` if the job does not exist, had no invocation, or
+    /// stored a different concrete type.
+    pub async fn invocation<T: Send + Sync + 'static>(&self, id: JobId) -> Option<Arc<T>> {
+        self.invocation_raw(id)
+            .await
+            .and_then(|arc| arc.downcast::<T>().ok())
+    }
+
+    /// Poll a job whose result was just delivered and wake any waiters.
+    ///
+    /// Stamps `finished_at` at actual completion time instead of waiting for
+    /// the next `list`/`get`/`wait` poll.
+    pub(crate) async fn notify_finished(&self, id: JobId) {
+        let notify = {
+            let mut jobs = self.jobs.lock().await;
+            let Some(job) = jobs.get_mut(&id) else {
+                return;
+            };
+            job.try_poll();
+            job.done_notify.clone()
+        };
+        notify.notify_waiters();
     }
 
     /// Wait for all jobs that can still finish, returning results in completion

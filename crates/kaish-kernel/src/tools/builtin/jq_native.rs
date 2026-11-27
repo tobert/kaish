@@ -592,7 +592,15 @@ impl Tool for JqNative {
             let text = match get_path_string(&args, "path", 1) {
                 Ok(Some(path)) if !path.is_empty() => {
                     let resolved = ctx.resolve_path(&path);
-                    match ctx.backend.read(Path::new(&resolved), None).await {
+                    match ctx
+                        .backend
+                        .read_with_purpose(
+                            Path::new(&resolved),
+                            None,
+                            crate::backend::ReadPurpose::Content,
+                        )
+                        .await
+                    {
                         Ok(bytes) => match String::from_utf8(bytes) {
                             Ok(t) => t,
                             Err(_) => {
@@ -667,7 +675,15 @@ impl Tool for JqNative {
                 Ok(Some(path)) if !path.is_empty() => {
                     // Read from backend - path takes precedence over stdin
                     let resolved = ctx.resolve_path(&path);
-                    match ctx.backend.read(Path::new(&resolved), None).await {
+                    match ctx
+                        .backend
+                        .read_with_purpose(
+                            Path::new(&resolved),
+                            None,
+                            crate::backend::ReadPurpose::Content,
+                        )
+                        .await
+                    {
                         Ok(bytes) => {
                             // Decode strictly: a non-UTF-8 file is a loud error, not
                             // a U+FFFD mangle that then fails JSON parsing confusingly.

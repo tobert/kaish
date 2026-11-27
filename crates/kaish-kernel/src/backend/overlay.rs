@@ -146,6 +146,21 @@ impl KernelBackend for VirtualOverlayBackend {
         }
     }
 
+    async fn read_with_purpose(
+        &self,
+        path: &Path,
+        range: Option<ReadRange>,
+        purpose: crate::backend::ReadPurpose,
+    ) -> BackendResult<Vec<u8>> {
+        if self.is_virtual_path(path) {
+            Ok(self.vfs.read_range(path, range).await?)
+        } else if self.is_shared_ancestor(path) {
+            Err(BackendError::IsDirectory(synth_dir_note(path)))
+        } else {
+            self.inner.read_with_purpose(path, range, purpose).await
+        }
+    }
+
     async fn write(&self, path: &Path, content: &[u8], mode: WriteMode) -> BackendResult<()> {
         if self.is_virtual_path(path) {
             match mode {

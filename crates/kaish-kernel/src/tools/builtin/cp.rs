@@ -329,7 +329,9 @@ async fn copy_path(
             return Ok(()); // Silently skip existing files
         }
 
-        let data = backend.read(src, None).await?;
+        let data = backend
+            .read_with_purpose(src, None, crate::backend::ReadPurpose::Edit)
+            .await?;
         // CAS against the gate snapshot (`expected`) when this is a gated direct
         // file clobber — a concurrent change is a loud conflict, not a silent
         // clobber. `expected` is `None` for a new file or an ungated path.
@@ -425,7 +427,9 @@ fn copy_dir_recursive<'a>(
                 if no_clobber && backend.lstat(&dst_child).await.is_ok() {
                     continue; // Skip existing files
                 }
-                let data = backend.read(&src_child, None).await?;
+                let data = backend
+                    .read_with_purpose(&src_child, None, crate::backend::ReadPurpose::Edit)
+                    .await?;
                 backend.write(&dst_child, &data, WriteMode::Overwrite).await?;
             }
         }

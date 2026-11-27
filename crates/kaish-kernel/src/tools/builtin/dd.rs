@@ -150,7 +150,15 @@ impl Tool for Dd {
         };
 
         let in_resolved = ctx.resolve_path(&input);
-        let data = match ctx.backend.read(Path::new(&in_resolved), range).await {
+        let data = match ctx
+            .backend
+            .read_with_purpose(
+                Path::new(&in_resolved),
+                range,
+                crate::backend::ReadPurpose::Content,
+            )
+            .await
+        {
             Ok(d) => d,
             Err(e) => return ExecResult::failure(1, format!("dd: {input}: {e}")),
         };

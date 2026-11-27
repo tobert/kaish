@@ -237,7 +237,11 @@ impl Tool for Cat {
             // that already yields; an in-memory one is fast enough at any
             // size this checkpoint could plausibly help with that the
             // watchdog would never get a useful head start anyway.
-            return match ctx.backend.read(Path::new(&resolved), None).await {
+            return match ctx
+                .backend
+                .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                .await
+            {
                 Ok(data) => ExecResult::success_text_or_bytes(data),
                 Err(e) => ExecResult::failure(1, format!("cat: {}: {}", paths[0], e)),
             };
@@ -259,7 +263,11 @@ impl Tool for Cat {
         for path in paths.iter() {
             let resolved = ctx.resolve_path(path);
 
-            match ctx.backend.read(Path::new(&resolved), None).await {
+            match ctx
+                .backend
+                .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                .await
+            {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(content) => {
                         if build_rows {
@@ -363,7 +371,11 @@ async fn show_stream(
                 return kaish_tool_api::Interrupted.result("cat");
             }
             let resolved = ctx.resolve_path(path);
-            match ctx.backend.read(Path::new(&resolved), None).await {
+            match ctx
+                .backend
+                .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                .await
+            {
                 Ok(bytes) => data.extend_from_slice(&bytes),
                 Err(e) => errors.push(format!("cat: {path}: {e}")),
             }
@@ -486,7 +498,11 @@ async fn stream_file_to_pipe(
         }
         let chunk = match ctx
             .backend
-            .read(path, Some(ReadRange::bytes(offset, chunk_size)))
+            .read_with_purpose(
+                path,
+                Some(ReadRange::bytes(offset, chunk_size)),
+                crate::backend::ReadPurpose::Content,
+            )
             .await
         {
             Ok(c) => c,

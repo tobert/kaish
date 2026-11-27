@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use kaish_types::backend::{
-    BackendError, BackendResult, MountInfo, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
+    BackendError, BackendResult, MountInfo, PatchOp, ReadPurpose, ReadRange, ToolInfo, ToolResult,
+    WriteMode,
 };
 use kaish_types::{DirEntry, PathAccess, ToolArgs};
 
@@ -29,6 +30,24 @@ pub trait KernelBackend: Send + Sync {
 
     /// Read file contents, optionally with a range specification.
     async fn read(&self, path: &Path, range: Option<ReadRange>) -> BackendResult<Vec<u8>>;
+
+    /// Read file contents with an explicit [`ReadPurpose`] tag.
+    ///
+    /// Kernel builtins and internal plumbing call this method so a custom
+    /// backend can distinguish explicit content reads (`cat`, `head`, `grep`,
+    /// `< file`, …) from edits, script loading, and internal checks (trash
+    /// snapshots, compare-and-swap verification, `.gitignore` walking).
+    ///
+    /// The default implementation ignores `purpose` and delegates to
+    /// [`Self::read`], so existing backends remain source-compatible.
+    async fn read_with_purpose(
+        &self,
+        path: &Path,
+        range: Option<ReadRange>,
+        _purpose: ReadPurpose,
+    ) -> BackendResult<Vec<u8>> {
+        self.read(path, range).await
+    }
 
     /// Write content to a file with the specified mode.
     async fn write(&self, path: &Path, content: &[u8], mode: WriteMode) -> BackendResult<()>;

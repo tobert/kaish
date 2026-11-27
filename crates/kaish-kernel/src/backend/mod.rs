@@ -35,8 +35,8 @@ pub use testing::MockBackend;
 
 // Data types re-exported from kaish-types.
 pub use kaish_types::backend::{
-    BackendError, BackendResult, ConflictError, MountInfo, PatchOp, ReadRange, ToolInfo,
-    ToolResult, WriteMode,
+    BackendError, BackendResult, ConflictError, MountInfo, PatchOp, ReadPurpose, ReadRange,
+    ToolInfo, ToolResult, WriteMode,
 };
 
 // The `KernelBackend` trait moved to the leaf `kaish-tool-api` crate (its

@@ -161,7 +161,11 @@ impl Tool for Diff {
 
         // Read file contents — diff is a text tool; binary is a loud error
         // (use `cmp` for byte comparison), not a lossy decode.
-        let content1 = match ctx.backend.read(Path::new(&path1), None).await {
+        let content1 = match ctx
+            .backend
+            .read_with_purpose(Path::new(&path1), None, crate::backend::ReadPurpose::Content)
+            .await
+        {
             Ok(data) => match String::from_utf8(data) {
                 Ok(s) => s,
                 Err(_) => return ExecResult::failure(2, format!("diff: {}: binary data — use cmp", file1)),
@@ -169,7 +173,11 @@ impl Tool for Diff {
             Err(e) => return ExecResult::failure(2, format!("diff: {}: {}", file1, e)),
         };
 
-        let content2 = match ctx.backend.read(Path::new(&path2), None).await {
+        let content2 = match ctx
+            .backend
+            .read_with_purpose(Path::new(&path2), None, crate::backend::ReadPurpose::Content)
+            .await
+        {
             Ok(data) => match String::from_utf8(data) {
                 Ok(s) => s,
                 Err(_) => return ExecResult::failure(2, format!("diff: {}: binary data — use cmp", file2)),

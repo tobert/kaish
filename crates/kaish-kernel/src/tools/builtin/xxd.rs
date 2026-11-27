@@ -120,7 +120,11 @@ impl Tool for Xxd {
         let data: Vec<u8> = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
-                match ctx.backend.read(Path::new(&resolved), None).await {
+                match ctx
+                    .backend
+                    .read_with_purpose(Path::new(&resolved), None, crate::backend::ReadPurpose::Content)
+                    .await
+                {
                     Ok(d) => d,
                     Err(e) => return ExecResult::failure(1, format!("xxd: {}: {}", path, e)),
                 }

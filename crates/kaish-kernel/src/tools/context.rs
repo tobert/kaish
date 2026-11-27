@@ -333,6 +333,11 @@ pub struct ExecContext {
     #[cfg(all(feature = "localfs", feature = "overlay"))]
     pub overlay_handle: Option<Arc<crate::kernel::OverlayHandle>>,
 
+    /// Shared collector for `&` background jobs spawned during the active
+    /// foreground execution (including inside `$(…)`, non-last pipeline
+    /// stages, and scatter workers). `None` inside a `&` background fork so
+    /// delayed nested `&` jobs do not mutate an already-returned result.
+    pub(crate) spawned_jobs: Option<Arc<std::sync::Mutex<Vec<crate::scheduler::JobId>>>>,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -484,7 +489,11 @@ pub(crate) async fn read_for_replace(
 ) -> Result<Vec<u8>, crate::backend::BackendError> {
     match known.get(resolved) {
         Some(OverwriteExpectation::Bytes(bytes)) => Ok(bytes.clone()),
-        None => backend.read(resolved, None).await,
+        None => {
+            backend
+                .read_with_purpose(resolved, None, crate::backend::ReadPurpose::Edit)
+                .await
+        }
     }
 }
 
@@ -501,7 +510,9 @@ async fn cas_write(
     // I/O error. A target that vanished since the gate is a change → abort.
     match expected {
         Some(OverwriteExpectation::Bytes(exp)) => {
-            let current = backend.read(resolved, None).await?;
+            let current = backend
+                .read_with_purpose(resolved, None, crate::backend::ReadPurpose::Internal)
+                .await?;
             if current != *exp {
                 return Err(concurrent_change_error(resolved));
             }
@@ -653,6 +664,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            spawned_jobs: None,
         }
     }
 
@@ -698,6 +710,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            spawned_jobs: None,
         }
     }
 
@@ -740,6 +753,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            spawned_jobs: None,
         }
     }
 
@@ -782,6 +796,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            spawned_jobs: None,
         }
     }
 
@@ -827,6 +842,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            spawned_jobs: None,
         }
     }
 
@@ -869,6 +885,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            spawned_jobs: None,
         }
     }
 
@@ -1211,6 +1228,7 @@ impl ExecContext {
             // Overlay handle is shared: pipeline stages share the same transaction.
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
+            spawned_jobs: self.spawned_jobs.clone(),
         }
     }
 
@@ -1338,7 +1356,7 @@ impl ExecContext {
             .ok_or_else(|| "trash backend not available".to_string())?;
         let bytes = self
             .backend
-            .read(resolved, None)
+            .read_with_purpose(resolved, None, crate::backend::ReadPurpose::Internal)
             .await
             .map_err(|e| format!("{display}: {e}"))?;
         trash
@@ -1508,7 +1526,11 @@ impl ExecContext {
             }
             let chunk = self
                 .backend
-                .read(path, Some(ReadRange::bytes(offset, chunk_size)))
+                .read_with_purpose(
+                    path,
+                    Some(ReadRange::bytes(offset, chunk_size)),
+                    crate::backend::ReadPurpose::Content,
+                )
                 .await?;
             if chunk.is_empty() {
                 break;
